@@ -199,8 +199,11 @@ impl Resolver {
     /// This function is cancel-safe. If the future is dropped, the underlying
     /// DNS query continues on the blocking pool but the result is discarded.
     async fn do_lookup_ip(&self, host: &str) -> Result<LookupIp, DnsError> {
-        // Validate hostname
-        if host.is_empty() || host.len() > 253 {
+        // Absolute hostnames may include a trailing root dot, which should not
+        // count against the 253-byte hostname limit for validation.
+        let validated_host = host.strip_suffix('.').unwrap_or(host);
+
+        if validated_host.is_empty() || validated_host.len() > 253 {
             return Err(DnsError::InvalidHost(host.to_string()));
         }
 
@@ -651,6 +654,93 @@ mod tests {
         crate::assert_with_log!(invalid_host, "empty hostname rejected", true, invalid_host);
 
         crate::test_complete!("resolver_invalid_host");
+    }
+
+    #[test]
+    fn resolver_allows_max_length_absolute_hostname() {
+        init_test("resolver_allows_max_length_absolute_hostname");
+
+        let absolute_host = format!(
+            "{}.{}.{}.{}.",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        crate::assert_with_log!(
+            absolute_host.len() == 254,
+            "absolute host length",
+            254,
+            absolute_host.len()
+        );
+        crate::assert_with_log!(
+            absolute_host
+                .strip_suffix('.')
+                .is_some_and(|host| host.len() == 253),
+            "validated host length",
+            253,
+            absolute_host.strip_suffix('.').map(str::len)
+        );
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        });
+        let result = future::block_on(async { resolver.lookup_ip(&absolute_host).await });
+        let timed_out = matches!(result, Err(DnsError::Timeout));
+        crate::assert_with_log!(
+            timed_out,
+            "max-length absolute hostname should pass validation and reach timeout gate",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_allows_max_length_absolute_hostname");
+    }
+
+    #[test]
+    fn resolver_rejects_absolute_hostname_that_exceeds_max_length() {
+        init_test("resolver_rejects_absolute_hostname_that_exceeds_max_length");
+
+        let absolute_host = format!(
+            "{}.{}.{}.{}.",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(62)
+        );
+        crate::assert_with_log!(
+            absolute_host.len() == 255,
+            "absolute host length",
+            255,
+            absolute_host.len()
+        );
+        crate::assert_with_log!(
+            absolute_host
+                .strip_suffix('.')
+                .is_some_and(|host| host.len() == 254),
+            "validated host length",
+            254,
+            absolute_host.strip_suffix('.').map(str::len)
+        );
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        });
+        let result = future::block_on(async { resolver.lookup_ip(&absolute_host).await });
+        let invalid =
+            matches!(result, Err(DnsError::InvalidHost(ref host)) if host == &absolute_host);
+        crate::assert_with_log!(
+            invalid,
+            "overlong absolute hostname rejected",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_rejects_absolute_hostname_that_exceeds_max_length");
     }
 
     #[test]

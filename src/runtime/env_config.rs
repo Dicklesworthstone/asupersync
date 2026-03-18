@@ -158,6 +158,8 @@ fn parse_bool(var_name: &str, val: &str) -> Result<bool, BuildError> {
 /// steal_batch_size = 16
 /// poll_budget = 128
 /// cancel_lane_max_streak = 16
+/// enable_governor = true
+/// governor_interval = 64
 /// enable_adaptive_cancel_streak = true
 /// adaptive_cancel_streak_epoch_steps = 128
 /// enable_parking = true
@@ -193,6 +195,10 @@ pub struct SchedulerToml {
     pub poll_budget: Option<u32>,
     /// Maximum consecutive cancel-lane dispatches before yielding.
     pub cancel_lane_max_streak: Option<usize>,
+    /// Enable the Lyapunov governor.
+    pub enable_governor: Option<bool>,
+    /// Scheduling steps between governor snapshots.
+    pub governor_interval: Option<u32>,
     /// Enable adaptive cancel-streak selection.
     pub enable_adaptive_cancel_streak: Option<bool>,
     /// Dispatches per adaptive cancel-streak epoch.
@@ -234,6 +240,12 @@ pub fn apply_toml_config(config: &mut RuntimeConfig, toml: &RuntimeTomlConfig) {
     }
     if let Some(v) = toml.scheduler.cancel_lane_max_streak {
         config.cancel_lane_max_streak = v;
+    }
+    if let Some(v) = toml.scheduler.enable_governor {
+        config.enable_governor = v;
+    }
+    if let Some(v) = toml.scheduler.governor_interval {
+        config.governor_interval = v;
     }
     if let Some(v) = toml.scheduler.enable_adaptive_cancel_streak {
         config.enable_adaptive_cancel_streak = v;
@@ -624,6 +636,8 @@ worker_threads = 8
 task_queue_depth = 4096
 steal_batch_size = 32
 poll_budget = 256
+enable_governor = true
+governor_interval = 48
 enable_adaptive_cancel_streak = true
 adaptive_cancel_streak_epoch_steps = 96
 enable_parking = false
@@ -639,6 +653,8 @@ max_threads = 64
         assert_eq!(parsed.scheduler.task_queue_depth, Some(4096));
         assert_eq!(parsed.scheduler.steal_batch_size, Some(32));
         assert_eq!(parsed.scheduler.poll_budget, Some(256));
+        assert_eq!(parsed.scheduler.enable_governor, Some(true));
+        assert_eq!(parsed.scheduler.governor_interval, Some(48));
         assert_eq!(parsed.scheduler.enable_adaptive_cancel_streak, Some(true));
         assert_eq!(
             parsed.scheduler.adaptive_cancel_streak_epoch_steps,
@@ -698,6 +714,8 @@ worker_threads = "not_a_number"
 [scheduler]
 worker_threads = 16
 poll_budget = 512
+enable_governor = true
+governor_interval = 80
 enable_adaptive_cancel_streak = true
 adaptive_cancel_streak_epoch_steps = 64
 
@@ -710,6 +728,8 @@ max_threads = 128
 
         assert_eq!(config.worker_threads, 16);
         assert_eq!(config.poll_budget, 512);
+        assert!(config.enable_governor);
+        assert_eq!(config.governor_interval, 80);
         assert!(config.enable_adaptive_cancel_streak);
         assert_eq!(config.adaptive_cancel_streak_epoch_steps, 64);
         assert_eq!(config.blocking.max_threads, 128);

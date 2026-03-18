@@ -33,9 +33,9 @@
 //! ```
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use crate::runtime::RuntimeSnapshot;
@@ -115,7 +115,10 @@ impl DebugServer {
             || format!("{}:{}", self.config.bind_addr, self.port),
             |a| a.to_string(),
         );
-        format!("http://{addr}/debug")
+        format!(
+            "http://{addr}/debug?refresh={}",
+            self.config.refresh_interval_secs.saturating_mul(1000)
+        )
     }
 
     /// Returns whether the server is running.
@@ -139,19 +142,24 @@ impl DebugServer {
         self.running.store(true, Ordering::Relaxed);
 
         if self.config.print_url {
-            info!(
-                url = %format!("http://{local_addr}/debug"),
-                "debug dashboard started"
-            );
+            info!(url = %self.url(), "debug dashboard started");
         }
 
         let snapshot_fn = Arc::clone(&self.snapshot_fn);
         let running = Arc::clone(&self.running);
+        let active_connections = Arc::new(AtomicUsize::new(0));
+        let max_connections = self.config.max_connections;
 
         thread::Builder::new()
             .name("asupersync-debug-server".to_string())
             .spawn(move || {
-                serve_loop(&listener, &snapshot_fn, &running);
+                serve_loop(
+                    &listener,
+                    &snapshot_fn,
+                    &running,
+                    max_connections,
+                    &active_connections,
+                );
             })?;
 
         Ok(())
@@ -173,13 +181,39 @@ impl Drop for DebugServer {
 // HTTP server loop
 // =========================================================================
 
-fn serve_loop(listener: &TcpListener, snapshot_fn: &SnapshotFn, running: &AtomicBool) {
+fn serve_loop(
+    listener: &TcpListener,
+    snapshot_fn: &SnapshotFn,
+    running: &AtomicBool,
+    max_connections: usize,
+    active_connections: &Arc<AtomicUsize>,
+) {
     while running.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok((stream, _peer)) => {
+            Ok((mut stream, _peer)) => {
+                if active_connections.load(Ordering::Relaxed) >= max_connections {
+                    let _ = write_response(&mut stream, 503, "text/plain", b"Debug server busy");
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
-                handle_connection(stream, snapshot_fn);
+
+                active_connections.fetch_add(1, Ordering::Relaxed);
+                let snapshot_fn = Arc::clone(snapshot_fn);
+                let active_connections_for_thread = Arc::clone(active_connections);
+
+                if thread::Builder::new()
+                    .name("asupersync-debug-connection".to_string())
+                    .spawn(move || {
+                        handle_connection(stream, &snapshot_fn);
+                        active_connections_for_thread.fetch_sub(1, Ordering::Relaxed);
+                    })
+                    .is_err()
+                {
+                    active_connections.fetch_sub(1, Ordering::Relaxed);
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Nonblocking accept lets stop() terminate promptly even with no traffic.
@@ -197,24 +231,35 @@ fn serve_loop(listener: &TcpListener, snapshot_fn: &SnapshotFn, running: &Atomic
 }
 
 fn handle_connection(mut stream: TcpStream, snapshot_fn: &SnapshotFn) {
-    let mut reader = BufReader::new(&stream);
+    let mut reader = if let Ok(read_half) = stream.try_clone() {
+        BufReader::new(read_half)
+    } else {
+        let _ = stream.shutdown(Shutdown::Both);
+        return;
+    };
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
+        let _ = stream.shutdown(Shutdown::Both);
         return;
     }
 
     // Parse method and path from the request line.
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
+        let _ = stream.shutdown(Shutdown::Both);
         return;
     }
     let method = parts[0];
-    let path = parts[1];
+    let request_target = parts[1];
+    let path = request_target
+        .split_once('?')
+        .map_or(request_target, |(path, _query)| path);
     let headers = read_headers(&mut reader);
 
     // Only handle GET requests.
     if method != "GET" {
         let _ = write_response(&mut stream, 405, "text/plain", b"Method Not Allowed");
+        let _ = stream.shutdown(Shutdown::Both);
         return;
     }
 
@@ -261,9 +306,11 @@ fn handle_connection(mut stream: TcpStream, snapshot_fn: &SnapshotFn) {
             let _ = write_response(&mut stream, 404, "text/plain", b"Not Found");
         }
     }
+
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
-fn read_headers(reader: &mut BufReader<&TcpStream>) -> Vec<(String, String)> {
+fn read_headers<R: BufRead>(reader: &mut R) -> Vec<(String, String)> {
     let mut headers = Vec::with_capacity(16);
     loop {
         let mut line = String::new();
@@ -379,6 +426,7 @@ fn write_response(
         404 => "Not Found",
         405 => "Method Not Allowed",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         501 => "Not Implemented",
         _ => "Unknown",
     };
@@ -486,6 +534,45 @@ mod tests {
         let addr = server.local_addr.unwrap();
         let mut stream = TcpStream::connect(addr).unwrap();
         write!(stream, "GET /debug HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        stream.flush().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(&stream);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => response.push_str(&line),
+            }
+        }
+
+        assert!(response.contains("200 OK"));
+        assert!(response.contains("Asupersync Debug Dashboard"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn server_serves_dashboard_html_with_refresh_query() {
+        let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                refresh_interval_secs: 7,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+
+        let addr = server.local_addr.unwrap();
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "GET /debug?refresh=7000 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
         stream.flush().unwrap();
 
         let mut response = String::new();
@@ -663,6 +750,71 @@ mod tests {
         assert_eq!(config.bind_addr, "127.0.0.1");
         assert_eq!(config.refresh_interval_secs, 2);
         assert_eq!(config.max_connections, 16);
+    }
+
+    #[test]
+    fn url_includes_configured_refresh_query() {
+        let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                refresh_interval_secs: 7,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+
+        let url = server.url();
+        assert!(url.contains("/debug?refresh=7000"), "url was {url}");
+
+        server.stop();
+    }
+
+    #[test]
+    fn server_rejects_connections_over_limit() {
+        let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                max_connections: 1,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+
+        let addr = server.local_addr.unwrap();
+        let first_stream = TcpStream::connect(addr).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut second_stream = TcpStream::connect(addr).unwrap();
+        write!(
+            second_stream,
+            "GET /debug HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        second_stream.flush().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(&second_stream);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => response.push_str(&line),
+            }
+        }
+
+        assert!(
+            response.contains("503 Service Unavailable"),
+            "response: {response}"
+        );
+
+        drop(first_stream);
+        server.stop();
     }
 
     #[test]

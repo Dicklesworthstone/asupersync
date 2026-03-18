@@ -119,9 +119,10 @@ fn rust_authored_wasm_consumer_path_is_feasible_not_shipped() {
     // Evidence: the semantic core compiles to wasm32 (BrowserReactor exists,
     // types are target-agnostic), but there is no public RuntimeBuilder or
     // Rust-callable API for constructing a wasm32 runtime. Startup now routes
-    // through an explicit host-services seam, but the crate still only ships
-    // the native std-thread host implementation and therefore fail-closes the
-    // public browser builder path.
+    // through an explicit host-services seam, and the crate now exposes
+    // Rust-side execution-ladder inspection helpers, but it still only ships
+    // the native std-thread host implementation and therefore does not yet
+    // expose a public wasm/browser runtime constructor.
     assert!(
         file_exists("src/runtime/reactor/browser.rs"),
         "browser reactor substrate must exist"
@@ -133,6 +134,18 @@ fn rust_authored_wasm_consumer_path_is_feasible_not_shipped() {
     assert!(
         !builder_src.contains("pub fn build_wasm") && !builder_src.contains("pub fn build_browser"),
         "RuntimeBuilder must not yet expose a public wasm32 build path"
+    );
+    assert!(
+        builder_src.contains("pub fn inspect_browser_execution_ladder("),
+        "RuntimeBuilder should expose public browser execution-ladder inspection"
+    );
+    assert!(
+        builder_src.contains("pub fn inspect_browser_execution_ladder_with_preferred_lane("),
+        "RuntimeBuilder should expose public preferred-lane diagnostics shaping"
+    );
+    assert!(
+        builder_src.contains("pub struct BrowserExecutionLadderDiagnostics"),
+        "builder should publish structured Rust-side execution-ladder diagnostics"
     );
     assert!(
         builder_src.contains("RuntimeHostServices"),

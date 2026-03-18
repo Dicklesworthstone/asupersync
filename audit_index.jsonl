@@ -1008,3 +1008,18 @@
 {"file":"src/http/h1/http_client.rs"}
 {"file":"src/web/negotiate.rs"}
 {"file":"src/tls/types.rs"}
+{"file":"src/grpc/health.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: closure to method ref refactor"}
+{"file":"src/messaging/nats.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: double find_crlf eliminated via let-else"}
+{"file":"src/messaging/mod.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: fabric feature gate + doc rewrite"}
+{"file":"src/runtime/builder.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: RuntimeHostServices extraction ~500L, clippy fixes"}
+{"file":"src/types/resource.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: pool dealloc panic guard test"}
+{"file":"src/cx/macaroon.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: preallocation DoS fix capped to remaining_bytes/3"}
+{"file":"src/http/h2/hpack.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: empty-name rejection test"}
+{"file":"src/link.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: self-link dedup in task_index"}
+{"file":"src/process.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: exponential backoff replaces busy-spin"}
+{"file":"src/runtime/reactor/lab.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: time advances to min(deadline,next_event), state-based HUP"}
+{"file":"src/time/sleep.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: ReadyWaker flag survives timer migration"}
+{"file":"src/net/dns/cache.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: negative DNS caching with configurable TTL"}
+{"file":"src/lab/snapshot_restore.rs","lines":0,"batch":389,"date":"2026-03-18","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: schema version in snapshot hash"}
+{"file":"src/web/debug.rs","lines":840,"batch":390,"date":"2026-03-18","agent":"JadeBear","verdict":"FIXED","bugs":2,"notes":"fresh-eyes audit: /debug route ignored query strings; max_connections config was unenforced"}
+{"file":"src/combinator/quorum.rs","lines":805,"batch":390,"date":"2026-03-18","agent":"JadeBear","verdict":"FIXED","bugs":1,"notes":"fresh-eyes audit: quorum_to_result violated quorum(0,N) identity by propagating loser panics"}

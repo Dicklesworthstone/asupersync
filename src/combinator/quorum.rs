@@ -375,6 +375,12 @@ pub fn quorum_to_result<T, E>(result: QuorumResult<T, E>) -> Result<Vec<T>, Quor
         });
     }
 
+    // `quorum(0, N)` is the additive identity: succeed immediately with no
+    // winners, regardless of loser outcomes.
+    if result.required == 0 {
+        return Ok(Vec::new());
+    }
+
     // Check for panics first (highest severity).
     // A panic in any branch (winner or loser) is a catastrophic failure and must propagate.
     for (_, failure) in &result.failures {
@@ -507,6 +513,19 @@ mod tests {
         assert_eq!(result.success_count(), 0);
         // All outcomes become "failures" (cancelled because quorum trivially met)
         assert_eq!(result.failure_count(), 3);
+    }
+
+    #[test]
+    fn quorum_zero_to_result_returns_empty_even_if_losers_panic() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Err("e1"),
+            Outcome::Panicked(PanicPayload::new("boom")),
+            Outcome::Cancelled(CancelReason::timeout()),
+        ];
+        let result = quorum_outcomes(0, outcomes);
+
+        let values = quorum_to_result(result).expect("quorum(0, N) should succeed");
+        assert!(values.is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@ use crate::types::DEFAULT_SYMBOL_SIZE;
 use core::fmt;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]
@@ -83,6 +84,8 @@ pub struct PoolStats {
 #[derive(Debug)]
 pub struct SymbolBuffer {
     data: Box<[u8]>,
+    checked_out: bool,
+    owner_pool_id: Option<u64>,
 }
 
 impl SymbolBuffer {
@@ -92,6 +95,8 @@ impl SymbolBuffer {
         let size = usize::from(symbol_size);
         Self {
             data: vec![0_u8; size].into_boxed_slice(),
+            checked_out: false,
+            owner_pool_id: None,
         }
     }
 
@@ -123,6 +128,16 @@ impl SymbolBuffer {
     pub fn into_boxed_slice(self) -> Box<[u8]> {
         self.data
     }
+
+    fn mark_checked_out(&mut self, owner_pool_id: u64) {
+        self.checked_out = true;
+        self.owner_pool_id = Some(owner_pool_id);
+    }
+
+    fn clear_checkout_state(&mut self) {
+        self.checked_out = false;
+        self.owner_pool_id = None;
+    }
 }
 
 /// Error returned when a pool cannot satisfy an allocation request.
@@ -142,6 +157,7 @@ impl std::error::Error for PoolExhausted {}
 pub struct SymbolPool {
     free_list: Vec<SymbolBuffer>,
     allocated: usize,
+    pool_id: u64,
     config: PoolConfig,
     stats: PoolStats,
 }
@@ -162,6 +178,7 @@ impl SymbolPool {
         Self {
             free_list,
             allocated: 0,
+            pool_id: next_symbol_pool_id(),
             config,
             stats: PoolStats::default(),
         }
@@ -205,14 +222,16 @@ impl SymbolPool {
 
     /// Attempts to allocate a symbol buffer without blocking.
     pub fn try_allocate(&mut self) -> Option<SymbolBuffer> {
-        if let Some(buffer) = self.free_list.pop() {
+        if let Some(mut buffer) = self.free_list.pop() {
+            buffer.mark_checked_out(self.pool_id);
             self.record_allocation(true);
             return Some(buffer);
         }
 
         self.stats.pool_misses = self.stats.pool_misses.saturating_add(1);
         if self.grow() {
-            if let Some(buffer) = self.free_list.pop() {
+            if let Some(mut buffer) = self.free_list.pop() {
+                buffer.mark_checked_out(self.pool_id);
                 self.record_allocation(false);
                 return Some(buffer);
             }
@@ -225,8 +244,9 @@ impl SymbolPool {
     ///
     /// # Panics
     ///
-    /// Panics if the buffer's size does not match the pool's configured symbol size.
-    pub fn deallocate(&mut self, buffer: SymbolBuffer) {
+    /// Panics if the buffer's size does not match the pool's configured symbol size,
+    /// if it was never checked out from a pool, or if it belongs to a different pool.
+    pub fn deallocate(&mut self, mut buffer: SymbolBuffer) {
         assert_eq!(
             buffer.len(),
             usize::from(self.config.symbol_size),
@@ -234,11 +254,21 @@ impl SymbolPool {
             buffer.len(),
             self.config.symbol_size
         );
+        assert!(
+            buffer.checked_out,
+            "Cannot deallocate buffer that is not currently checked out from a pool"
+        );
+        assert_eq!(
+            buffer.owner_pool_id,
+            Some(self.pool_id),
+            "Cannot deallocate buffer checked out from a different pool"
+        );
         if self.allocated > 0 {
             self.allocated -= 1;
         }
         self.stats.deallocations = self.stats.deallocations.saturating_add(1);
         self.stats.current_usage = self.allocated;
+        buffer.clear_checkout_state();
         self.free_list.push(buffer);
     }
 
@@ -291,6 +321,11 @@ impl SymbolPool {
         self.stats.current_usage = self.allocated;
         self.stats.peak_usage = self.stats.peak_usage.max(self.allocated);
     }
+}
+
+fn next_symbol_pool_id() -> u64 {
+    static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_SYMBOL_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Kinds of resource limits enforced by the tracker.
@@ -784,6 +819,32 @@ mod tests {
         assert_eq!(pool.stats().deallocations, 1);
         assert_eq!(pool.stats().current_usage, 0);
         assert_eq!(pool.free_count(), 1);
+    }
+
+    #[test]
+    fn pool_deallocate_rejects_unchecked_or_cross_pool_buffers_without_mutating_state() {
+        let config = PoolConfig::new(8, 1, 1, false, 0);
+        let mut pool = SymbolPool::new(config.clone());
+        let valid = pool.allocate().expect("alloc valid");
+        let mut other_pool = SymbolPool::new(config);
+        let foreign = other_pool.allocate().expect("foreign alloc");
+
+        for invalid in [SymbolBuffer::new(8), foreign] {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                pool.deallocate(invalid);
+            }));
+            assert!(result.is_err(), "invalid buffer return must panic");
+            assert_eq!(pool.stats().deallocations, 0);
+            assert_eq!(pool.stats().current_usage, 1);
+            assert_eq!(pool.free_count(), 0);
+        }
+
+        pool.deallocate(valid);
+        assert_eq!(pool.stats().deallocations, 1);
+        assert_eq!(pool.stats().current_usage, 0);
+        assert_eq!(pool.free_count(), 1);
+        assert_eq!(other_pool.stats().current_usage, 1);
+        assert_eq!(other_pool.free_count(), 0);
     }
 
     #[test]
