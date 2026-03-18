@@ -272,6 +272,39 @@ fn browser_src_index_exposes_no_throw_selection_helpers() {
 }
 
 #[test]
+fn browser_runtime_constructor_derives_initial_ladder_from_options_when_omitted() {
+    let content = read_source("packages/browser/src/index.ts");
+    let constructor = slice_between(
+        &content,
+        "export class BrowserRuntime {",
+        "\n\n  private currentExecutionLadder(): BrowserExecutionLadderDiagnostics {",
+    );
+
+    assert_markers_in_order(
+        constructor,
+        &[
+            "executionLadder: BrowserExecutionLadderDiagnostics | undefined = undefined,",
+            "const initialExecutionLadder =",
+            "executionLadder ??",
+            "detectBrowserExecutionLadder({",
+            "globalObject: this.globalObject,",
+            "healthPolicy: this.healthPolicy,",
+            "healthScopeKey: this.healthScopeKey,",
+            "now: this.now,",
+            "this.diagnostics = createBrowserSdkDiagnostics(",
+            "initialExecutionLadder,",
+        ],
+        "BrowserRuntime constructor must derive the initial ladder from caller options when no precomputed ladder is supplied",
+    );
+    assert!(
+        !constructor.contains(
+            "executionLadder: BrowserExecutionLadderDiagnostics = detectBrowserExecutionLadder()",
+        ),
+        "BrowserRuntime constructor must not snapshot the default global execution ladder before caller options are applied",
+    );
+}
+
+#[test]
 fn browser_src_index_pins_runtime_selection_no_throw_fail_closed_semantics() {
     let content = read_source("packages/browser/src/index.ts");
     let function = slice_between(

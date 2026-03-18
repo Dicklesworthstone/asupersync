@@ -2529,14 +2529,25 @@ export class BrowserRuntime {
   constructor(
     readonly core: CoreRuntimeHandle,
     readonly consumerVersion: AbiVersion | null = null,
-    executionLadder: BrowserExecutionLadderDiagnostics = detectBrowserExecutionLadder(),
+    executionLadder: BrowserExecutionLadderDiagnostics | undefined = undefined,
     options: BrowserLaneHealthOptions = {},
   ) {
     this.globalObject = options.globalObject;
     this.healthPolicy = options.healthPolicy;
     this.healthScopeKey = options.healthScopeKey ?? null;
     this.now = options.now ?? Date.now;
-    this.diagnostics = createBrowserSdkDiagnostics(consumerVersion, executionLadder);
+    const initialExecutionLadder =
+      executionLadder ??
+      detectBrowserExecutionLadder({
+        globalObject: this.globalObject,
+        healthPolicy: this.healthPolicy,
+        healthScopeKey: this.healthScopeKey,
+        now: this.now,
+      });
+    this.diagnostics = createBrowserSdkDiagnostics(
+      consumerVersion,
+      initialExecutionLadder,
+    );
   }
 
   private currentExecutionLadder(): BrowserExecutionLadderDiagnostics {

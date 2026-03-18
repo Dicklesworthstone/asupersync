@@ -101,6 +101,10 @@ Current rule of thumb:
 - Treat `asupersync` plus exactly one `wasm-browser-*` profile as the way to
   validate browser-safe semantic-core closure, not as a guarantee of native
   `RuntimeBuilder` parity on `wasm32`.
+- Treat `RuntimeBuilder::inspect_browser_execution_ladder(...)` as the current
+  public Rust control-plane surface for truthful lane diagnostics and preferred
+  lane inspection, not as proof that the direct browser runtime constructor has
+  already shipped.
 - Treat the remaining Rust-authored browser gap as a real runtime bootstrap
   problem, not as a naming/docs cleanup: startup now has an explicit
   `RuntimeHostServices` seam, but only the native std-thread host
@@ -130,6 +134,7 @@ lanes and avoid blending them together:
 
 | Need | Use | Live-tree evidence |
 |---|---|---|
+| Inspect the truthful browser execution ladder from Rust before deciding how to wire a browser entrypoint | `RuntimeBuilder::inspect_browser_execution_ladder()` or `RuntimeBuilder::inspect_browser_execution_ladder_with_preferred_lane(...)` | `src/runtime/builder.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
 | Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
 | Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
 | Validate the maintained browser-facing Rust example that the repository actually proves end-to-end | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `scripts/validate_rust_browser_consumer.sh`, `tests/wasm_rust_browser_example_contract.rs` |
