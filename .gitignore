@@ -135,6 +135,9 @@ ubs-output*.txt
 output.txt
 *.diff
 
+# Backup files
+*.bak
+
 # Cargo expand output
 /expanded.rs
 
