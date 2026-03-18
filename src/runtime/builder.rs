@@ -46,10 +46,11 @@
 //!
 //! Browser-safe profiles can validate semantic-core closure on `wasm32`, but
 //! this module does not yet expose a truthful public browser bootstrap path.
-//! Runtime startup still assumes `std::thread`-backed worker and
-//! deadline-monitor threads, so browser-facing guidance should stay on the
-//! repository-maintained Rust/WASM fixture and the shipped JS/TS Browser
-//! Edition packages until that startup contract is redesigned.
+//! Runtime startup now routes through an explicit `RuntimeHostServices` seam,
+//! but the builder still only ships the native std-thread host implementation.
+//! Browser-facing guidance should stay on the repository-maintained Rust/WASM
+//! fixture and the shipped JS/TS Browser Edition packages until a browser host
+//! implementation satisfies the threadless startup contract.
 //!
 //! ## With Deadline Monitoring
 //!
@@ -203,6 +204,225 @@ impl Drop for ScopedRuntimeHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeHostServicesKind {
+    NativeStdThread,
+    BrowserHost,
+}
+
+impl RuntimeHostServicesKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeStdThread => "native-std-thread",
+            Self::BrowserHost => "browser-host",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrowserHostServicesContract {
+    required_capabilities: &'static [&'static str],
+}
+
+impl BrowserHostServicesContract {
+    const V1: Self = Self {
+        required_capabilities: &[
+            "host-turn wakeups",
+            "worker bootstrap hooks",
+            "timer/deadline driving",
+            "lane-health callbacks",
+        ],
+    };
+
+    fn diagnostic_requirements(self) -> &'static str {
+        if self
+            .required_capabilities
+            .contains(&"lane-health callbacks")
+        {
+            "host-turn wakeups, worker bootstrap hooks, timer/deadline driving, and lane-health callbacks for threadless startup"
+        } else {
+            "browser host-services contract requirements"
+        }
+    }
+}
+
+struct DeadlineMonitorHostService {
+    shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DeadlineMonitorHostService {
+    const fn disabled() -> Self {
+        Self {
+            shutdown: None,
+            thread: None,
+        }
+    }
+}
+
+trait RuntimeHostServices: Send + Sync {
+    fn kind(&self) -> RuntimeHostServicesKind;
+
+    fn browser_contract(&self) -> BrowserHostServicesContract {
+        BrowserHostServicesContract::V1
+    }
+
+    fn spawn_workers(
+        &self,
+        runtime: &Arc<RuntimeInner>,
+        workers: Vec<ThreeLaneWorker>,
+    ) -> io::Result<Vec<std::thread::JoinHandle<()>>>;
+
+    fn start_deadline_monitor(
+        &self,
+        config: &RuntimeConfig,
+        state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+    ) -> DeadlineMonitorHostService;
+}
+
+#[derive(Default)]
+struct NativeThreadHostServices;
+
+impl NativeThreadHostServices {
+    const fn new() -> Self {
+        Self
+    }
+
+    fn spawn_worker_threads(
+        runtime: &Arc<RuntimeInner>,
+        workers: Vec<ThreeLaneWorker>,
+    ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
+        let mut worker_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        if runtime.config.worker_threads == 0 {
+            return Ok(worker_threads);
+        }
+
+        for worker in workers {
+            let name = {
+                let id = worker.id;
+                format!("{}-{id}", runtime.config.thread_name_prefix)
+            };
+            let runtime_handle = RuntimeHandle::weak(runtime);
+            let on_start = runtime.config.on_thread_start.clone();
+            let on_stop = runtime.config.on_thread_stop.clone();
+            let mut builder = std::thread::Builder::new().name(name);
+            if runtime.config.thread_stack_size > 0 {
+                builder = builder.stack_size(runtime.config.thread_stack_size);
+            }
+            let handle = builder
+                .spawn(move || {
+                    let _guard = ScopedRuntimeHandle::new(runtime_handle);
+                    if let Some(callback) = on_start.as_ref() {
+                        callback();
+                    }
+                    let mut worker = worker;
+                    worker.run_loop();
+                    if let Some(callback) = on_stop.as_ref() {
+                        callback();
+                    }
+                })
+                .map_err(|e| {
+                    // Signal already-running workers to exit their run loops,
+                    // then join them so they don't leak.
+                    runtime.scheduler.shutdown();
+                    while let Some(handle) = worker_threads.pop() {
+                        let _ = handle.join();
+                    }
+                    io::Error::other(format!("failed to spawn worker thread: {e}"))
+                })?;
+            worker_threads.push(handle);
+        }
+
+        Ok(worker_threads)
+    }
+
+    fn start_deadline_monitor(
+        config: &RuntimeConfig,
+        state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+    ) -> DeadlineMonitorHostService {
+        use crate::runtime::deadline_monitor::DeadlineMonitor;
+        use std::sync::atomic::AtomicBool;
+
+        let monitor_config = match config.deadline_monitor {
+            Some(ref mc) if mc.enabled => mc,
+            _ => return DeadlineMonitorHostService::disabled(),
+        };
+
+        let dm_shutdown = Arc::new(AtomicBool::new(false));
+        let dm_shutdown_clone = Arc::clone(&dm_shutdown);
+        let dm_state = Arc::clone(state);
+        let check_interval = monitor_config.check_interval;
+        let mut monitor = DeadlineMonitor::new(monitor_config.clone());
+        if let Some(ref handler) = config.deadline_warning_handler {
+            let handler = Arc::clone(handler);
+            monitor.on_warning(move |w| handler(w));
+        }
+        monitor.set_metrics_provider(Arc::clone(&config.metrics_provider));
+
+        let thread_name = format!("{}-deadline-monitor", config.thread_name_prefix);
+        let thread = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                while !dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(check_interval);
+                    if dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let guard = dm_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let now = guard.now;
+                    monitor.check(now, guard.tasks_iter().map(|(_, record)| record));
+                }
+            })
+            .ok();
+
+        DeadlineMonitorHostService {
+            shutdown: Some(dm_shutdown),
+            thread,
+        }
+    }
+}
+
+impl RuntimeHostServices for NativeThreadHostServices {
+    fn kind(&self) -> RuntimeHostServicesKind {
+        RuntimeHostServicesKind::NativeStdThread
+    }
+
+    fn spawn_workers(
+        &self,
+        runtime: &Arc<RuntimeInner>,
+        workers: Vec<ThreeLaneWorker>,
+    ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
+        Self::spawn_worker_threads(runtime, workers)
+    }
+
+    fn start_deadline_monitor(
+        &self,
+        config: &RuntimeConfig,
+        state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+    ) -> DeadlineMonitorHostService {
+        Self::start_deadline_monitor(config, state)
+    }
+}
+
+fn default_runtime_host_services() -> Arc<dyn RuntimeHostServices> {
+    Arc::new(NativeThreadHostServices::new())
+}
+
+fn unsupported_browser_bootstrap_message(host_services: &dyn RuntimeHostServices) -> String {
+    let contract = host_services.browser_contract();
+    format!(
+        "RuntimeBuilder browser bootstrap is not yet supported on wasm browser profiles; \
+         startup now routes through the RuntimeHostServices seam, but this build still only \
+         ships the {} host implementation. A future browser host must provide {}. Use the \
+         Browser Edition JS/TS bindings or the repository-maintained browser fixtures until \
+         that browser host implementation lands.",
+        host_services.kind().as_str(),
+        contract.diagnostic_requirements(),
+    )
+}
+
 /// Builder for constructing an Asupersync [`Runtime`] with custom configuration.
 ///
 /// Use the fluent API to set fields, then call [`build()`](Self::build) to
@@ -232,6 +452,7 @@ pub struct RuntimeBuilder {
     io_driver: Option<IoDriverHandle>,
     timer_driver: Option<TimerDriverHandle>,
     entropy_source: Option<Arc<dyn EntropySource>>,
+    host_services: Arc<dyn RuntimeHostServices>,
 }
 
 impl RuntimeBuilder {
@@ -244,6 +465,7 @@ impl RuntimeBuilder {
             io_driver: None,
             timer_driver: None,
             entropy_source: None,
+            host_services: default_runtime_host_services(),
         }
     }
 
@@ -611,6 +833,7 @@ impl RuntimeBuilder {
             io_driver: None,
             timer_driver: None,
             entropy_source: None,
+            host_services: default_runtime_host_services(),
         })
     }
 
@@ -645,18 +868,28 @@ impl RuntimeBuilder {
             io_driver: None,
             timer_driver: None,
             entropy_source: None,
+            host_services: default_runtime_host_services(),
         })
     }
 
     /// Build a runtime from this configuration.
     #[allow(clippy::result_large_err)]
     pub fn build(self) -> Result<Runtime, Error> {
+        let Self {
+            config,
+            reactor,
+            io_driver,
+            timer_driver,
+            entropy_source,
+            host_services,
+        } = self;
         Runtime::with_config_and_platform(
-            self.config,
-            self.reactor,
-            self.io_driver,
-            self.timer_driver,
-            self.entropy_source,
+            config,
+            reactor,
+            io_driver,
+            timer_driver,
+            entropy_source,
+            host_services.as_ref(),
         )
     }
 
@@ -924,7 +1157,8 @@ impl Runtime {
     /// Construct a runtime from the given configuration.
     #[allow(clippy::result_large_err)]
     pub fn with_config(config: RuntimeConfig) -> Result<Self, Error> {
-        Self::with_config_and_platform(config, None, None, None, None)
+        let host_services = default_runtime_host_services();
+        Self::with_config_and_platform(config, None, None, None, None, host_services.as_ref())
     }
 
     /// Construct a runtime from the given configuration and reactor.
@@ -933,10 +1167,12 @@ impl Runtime {
         config: RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
     ) -> Result<Self, Error> {
-        Self::with_config_and_platform(config, reactor, None, None, None)
+        let host_services = default_runtime_host_services();
+        Self::with_config_and_platform(config, reactor, None, None, None, host_services.as_ref())
     }
 
-    /// Construct a runtime from configuration and explicit platform seams.
+    /// Construct a runtime from configuration, explicit platform seams, and
+    /// startup host services.
     #[allow(clippy::result_large_err)]
     fn with_config_and_platform(
         mut config: RuntimeConfig,
@@ -944,27 +1180,31 @@ impl Runtime {
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
+        host_services: &dyn RuntimeHostServices,
     ) -> Result<Self, Error> {
         config.normalize();
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (reactor, io_driver, timer_driver, entropy_source);
-            Err(Error::new(crate::error::ErrorKind::ConfigError).with_message(
-                "RuntimeBuilder browser bootstrap is not yet supported on wasm32 browser profiles; \
-                 runtime startup still depends on std::thread-backed worker/deadline-monitor \
-                 services. Use the Browser Edition JS/TS bindings or the repository-maintained \
-                 browser fixtures until the host-services seam lands.",
-            ))
+            Err(Error::new(crate::error::ErrorKind::ConfigError)
+                .with_message(unsupported_browser_bootstrap_message(host_services)))
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (inner, workers) =
-                RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source);
+            let (inner, workers) = RuntimeInner::new(
+                config,
+                reactor,
+                io_driver,
+                timer_driver,
+                entropy_source,
+                host_services,
+            );
             let inner = Arc::new(inner);
-            RuntimeInner::spawn_worker_threads(&inner, workers).map_err(|e| {
+            let worker_threads = host_services.spawn_workers(&inner, workers).map_err(|e| {
                 Error::new(crate::error::ErrorKind::Internal)
                     .with_message(format!("runtime init: {e}"))
             })?;
+            *lock_state(&inner.worker_threads) = worker_threads;
             Ok(Self { inner })
         }
     }
@@ -1357,58 +1597,13 @@ impl RuntimeInner {
         root
     }
 
-    fn spawn_worker_threads(runtime: &Arc<Self>, workers: Vec<ThreeLaneWorker>) -> io::Result<()> {
-        let mut worker_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
-        if runtime.config.worker_threads == 0 {
-            return Ok(());
-        }
-
-        for worker in workers {
-            let name = {
-                let id = worker.id;
-                format!("{}-{id}", runtime.config.thread_name_prefix)
-            };
-            let runtime_handle = RuntimeHandle::weak(runtime);
-            let on_start = runtime.config.on_thread_start.clone();
-            let on_stop = runtime.config.on_thread_stop.clone();
-            let mut builder = std::thread::Builder::new().name(name);
-            if runtime.config.thread_stack_size > 0 {
-                builder = builder.stack_size(runtime.config.thread_stack_size);
-            }
-            let handle = builder
-                .spawn(move || {
-                    let _guard = ScopedRuntimeHandle::new(runtime_handle);
-                    if let Some(callback) = on_start.as_ref() {
-                        callback();
-                    }
-                    let mut worker = worker;
-                    worker.run_loop();
-                    if let Some(callback) = on_stop.as_ref() {
-                        callback();
-                    }
-                })
-                .map_err(|e| {
-                    // Signal already-running workers to exit their run loops,
-                    // then join them so they don't leak.
-                    runtime.scheduler.shutdown();
-                    while let Some(handle) = worker_threads.pop() {
-                        let _ = handle.join();
-                    }
-                    io::Error::other(format!("failed to spawn worker thread: {e}"))
-                })?;
-            worker_threads.push(handle);
-        }
-
-        *lock_state(&runtime.worker_threads) = worker_threads;
-        Ok(())
-    }
-
     fn new(
         config: RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
+        host_services: &dyn RuntimeHostServices,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // Runtime currently instantiates the unified RuntimeState path.
         // ShardedState exists behind migration work, but there is not yet a
@@ -1443,8 +1638,7 @@ impl RuntimeInner {
         );
         let workers = scheduler.take_workers();
 
-        let (deadline_monitor_shutdown, deadline_monitor_thread) =
-            Self::start_deadline_monitor(&config, &state);
+        let deadline_monitor = host_services.start_deadline_monitor(&config, &state);
 
         let blocking_pool = Self::create_blocking_pool(&config);
         if let Some(pool) = blocking_pool.as_ref() {
@@ -1462,8 +1656,8 @@ impl RuntimeInner {
                 worker_threads: Mutex::new(Vec::new()),
                 root_region,
                 blocking_pool,
-                deadline_monitor_shutdown,
-                deadline_monitor_thread,
+                deadline_monitor_shutdown: deadline_monitor.shutdown,
+                deadline_monitor_thread: deadline_monitor.thread,
             },
             workers,
         )
@@ -1488,53 +1682,6 @@ impl RuntimeInner {
             config.blocking.max_threads,
             options,
         ))
-    }
-
-    /// Starts the deadline monitor background thread if configured and enabled.
-    fn start_deadline_monitor(
-        config: &RuntimeConfig,
-        state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
-    ) -> (
-        Option<Arc<std::sync::atomic::AtomicBool>>,
-        Option<std::thread::JoinHandle<()>>,
-    ) {
-        use crate::runtime::deadline_monitor::DeadlineMonitor;
-        use std::sync::atomic::AtomicBool;
-
-        let monitor_config = match config.deadline_monitor {
-            Some(ref mc) if mc.enabled => mc,
-            _ => return (None, None),
-        };
-
-        let dm_shutdown = Arc::new(AtomicBool::new(false));
-        let dm_shutdown_clone = Arc::clone(&dm_shutdown);
-        let dm_state = Arc::clone(state);
-        let check_interval = monitor_config.check_interval;
-        let mut monitor = DeadlineMonitor::new(monitor_config.clone());
-        if let Some(ref handler) = config.deadline_warning_handler {
-            let handler = Arc::clone(handler);
-            monitor.on_warning(move |w| handler(w));
-        }
-        monitor.set_metrics_provider(Arc::clone(&config.metrics_provider));
-
-        let thread_name = format!("{}-deadline-monitor", config.thread_name_prefix);
-        let thread = std::thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || {
-                while !dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(check_interval);
-                    if dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    let guard = dm_state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let now = guard.now;
-                    monitor.check(now, guard.tasks_iter().map(|(_, record)| record));
-                }
-            })
-            .ok();
-        (Some(dm_shutdown), thread)
     }
 
     fn spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
@@ -1778,6 +1925,117 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingNativeHostServices {
+        worker_bootstrap_calls: AtomicUsize,
+        deadline_monitor_calls: AtomicUsize,
+    }
+
+    impl RuntimeHostServices for RecordingNativeHostServices {
+        fn kind(&self) -> RuntimeHostServicesKind {
+            RuntimeHostServicesKind::NativeStdThread
+        }
+
+        fn spawn_workers(
+            &self,
+            runtime: &Arc<RuntimeInner>,
+            workers: Vec<ThreeLaneWorker>,
+        ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
+            self.worker_bootstrap_calls.fetch_add(1, Ordering::SeqCst);
+            NativeThreadHostServices::spawn_worker_threads(runtime, workers)
+        }
+
+        fn start_deadline_monitor(
+            &self,
+            config: &RuntimeConfig,
+            state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        ) -> DeadlineMonitorHostService {
+            self.deadline_monitor_calls.fetch_add(1, Ordering::SeqCst);
+            NativeThreadHostServices::start_deadline_monitor(config, state)
+        }
+    }
+
+    #[test]
+    fn browser_host_services_contract_pins_threadless_startup_requirements() {
+        let contract = BrowserHostServicesContract::V1;
+        assert!(
+            contract
+                .required_capabilities
+                .contains(&"host-turn wakeups"),
+            "browser contract must require host-turn wakeups"
+        );
+        assert!(
+            contract
+                .required_capabilities
+                .contains(&"worker bootstrap hooks"),
+            "browser contract must require worker bootstrap hooks"
+        );
+        assert!(
+            contract
+                .required_capabilities
+                .contains(&"timer/deadline driving"),
+            "browser contract must require timer/deadline driving"
+        );
+        assert!(
+            contract
+                .required_capabilities
+                .contains(&"lane-health callbacks"),
+            "browser contract must require lane-health callbacks"
+        );
+        assert!(
+            contract
+                .diagnostic_requirements()
+                .contains("threadless startup"),
+            "diagnostics should explain why the browser path is threadless"
+        );
+    }
+
+    #[test]
+    fn browser_bootstrap_error_describes_host_services_requirements() {
+        let message = unsupported_browser_bootstrap_message(&NativeThreadHostServices::new());
+        assert!(
+            message.contains("RuntimeHostServices seam"),
+            "diagnostic should name the startup seam: {message}"
+        );
+        assert!(
+            message.contains("native-std-thread"),
+            "diagnostic should name the shipped native host implementation: {message}"
+        );
+        assert!(
+            message.contains("host-turn wakeups") && message.contains("lane-health callbacks"),
+            "diagnostic should enumerate the missing browser host requirements: {message}"
+        );
+        assert!(
+            message.contains("threadless startup"),
+            "diagnostic should explain the threadless browser target: {message}"
+        );
+    }
+
+    #[test]
+    fn runtime_builder_routes_native_startup_through_host_services_seam() {
+        init_test_logging();
+
+        let host_services = Arc::new(RecordingNativeHostServices::default());
+        let seam: Arc<dyn RuntimeHostServices> = host_services.clone();
+        let mut builder = RuntimeBuilder::current_thread();
+        builder.host_services = seam;
+
+        let runtime = builder.build().expect("runtime build");
+        let result = runtime.block_on(runtime.handle().spawn(async { 7u32 }));
+
+        assert_eq!(result, 7, "runtime should remain usable through the seam");
+        assert_eq!(
+            host_services.worker_bootstrap_calls.load(Ordering::SeqCst),
+            1,
+            "worker startup should route through the host-services seam"
+        );
+        assert_eq!(
+            host_services.deadline_monitor_calls.load(Ordering::SeqCst),
+            1,
+            "deadline-monitor startup should route through the host-services seam"
+        );
+    }
+
     #[test]
     fn runtime_handle_spawn_completes_via_scheduler() {
         init_test_logging();
@@ -1994,7 +2252,9 @@ mod tests {
         );
         let message = err.to_string();
         assert!(
-            message.contains("browser bootstrap") && message.contains("host-services seam"),
+            message.contains("browser bootstrap")
+                && message.contains("RuntimeHostServices seam")
+                && message.contains("threadless startup"),
             "error should explain why wasm browser bootstrap is still unsupported: {message}"
         );
     }
