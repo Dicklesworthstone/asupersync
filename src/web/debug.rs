@@ -34,6 +34,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -207,8 +208,11 @@ fn serve_loop(
                 if thread::Builder::new()
                     .name("asupersync-debug-connection".to_string())
                     .spawn(move || {
-                        handle_connection(stream, &snapshot_fn);
-                        active_connections_for_thread.fetch_sub(1, Ordering::Relaxed);
+                        let _active_connection =
+                            ActiveConnectionGuard::new(Arc::clone(&active_connections_for_thread));
+                        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                            handle_connection(stream, &snapshot_fn);
+                        }));
                     })
                     .is_err()
                 {
@@ -227,6 +231,22 @@ fn serve_loop(
                 thread::sleep(std::time::Duration::from_millis(25));
             }
         }
+    }
+}
+
+struct ActiveConnectionGuard {
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl ActiveConnectionGuard {
+    fn new(active_connections: Arc<AtomicUsize>) -> Self {
+        Self { active_connections }
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -814,6 +834,72 @@ mod tests {
         );
 
         drop(first_stream);
+        server.stop();
+    }
+
+    #[test]
+    fn panicking_snapshot_request_does_not_leak_connection_slots() {
+        let panicked_once = Arc::new(AtomicBool::new(false));
+        let panicked_once_clone = Arc::clone(&panicked_once);
+        let snapshot_fn: SnapshotFn = Arc::new(move || {
+            assert!(
+                panicked_once_clone.swap(true, Ordering::SeqCst),
+                "snapshot boom"
+            );
+            test_snapshot()
+        });
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                max_connections: 1,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+
+        let addr = server.local_addr.unwrap();
+
+        let mut first_stream = TcpStream::connect(addr).unwrap();
+        write!(
+            first_stream,
+            "GET /debug/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        first_stream.flush().unwrap();
+        let mut first_response = Vec::new();
+        let _ = first_stream.read_to_end(&mut first_response);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut second_stream = TcpStream::connect(addr).unwrap();
+        write!(
+            second_stream,
+            "GET /debug HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        second_stream.flush().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(&second_stream);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => response.push_str(&line),
+            }
+        }
+
+        assert!(
+            response.contains("200 OK"),
+            "server should recover after a panicking request; response: {response}"
+        );
+        assert!(
+            !response.contains("503 Service Unavailable"),
+            "panicking request must not leak a connection slot"
+        );
+
         server.stop();
     }
 

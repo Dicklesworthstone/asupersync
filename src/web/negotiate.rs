@@ -140,11 +140,15 @@ fn parse_accept(header: &str) -> Vec<MediaType> {
 /// The selected media type string, or `None` if no match is found.
 #[must_use]
 pub fn negotiate_media_type<'a>(accept_header: &str, supported: &[&'a str]) -> Option<&'a str> {
+    let accept_header = accept_header.trim();
     if accept_header.is_empty() {
         return supported.first().copied();
     }
 
     let accepted = parse_accept(accept_header);
+    if accepted.is_empty() {
+        return supported.first().copied();
+    }
     let mut best_match: Option<(&str, f32, usize)> = None;
 
     for &media in supported {
@@ -538,15 +542,29 @@ mod tests {
     }
 
     #[test]
-    fn negotiate_server_preference_on_tie() {
+    fn negotiate_blank_accept_uses_server_default() {
+        let result = negotiate_media_type("   \t\r\n", &["application/json", "text/html"]);
+        assert_eq!(result, Some("application/json"));
+    }
+
+    #[test]
+    fn negotiate_client_accept_order_breaks_equal_quality_tie() {
         let result = negotiate_media_type(
             "text/html, application/json",
             &["application/json", "text/html"],
         );
-        // Both have q=1.0. Client lists html first, so html matches first in quality-sorted list.
-        // But since both have same quality, the accept order is preserved.
-        // html appears first in the sorted accept list, and it matches text/html in supported.
+        // Both media types are equally acceptable, so client accept order wins.
         assert_eq!(result, Some("text/html"));
+    }
+
+    #[test]
+    fn negotiate_server_order_breaks_equal_wildcard_tie() {
+        let result = negotiate_media_type("*/*", &["application/json", "text/html"]);
+        assert_eq!(
+            result,
+            Some("application/json"),
+            "when the client offers only a wildcard, server order should be the final fallback"
+        );
     }
 
     #[test]
@@ -635,6 +653,11 @@ mod tests {
     #[test]
     fn error_format_from_accept_default_json() {
         assert_eq!(error_format_from_accept(""), ErrorFormat::Json);
+    }
+
+    #[test]
+    fn error_format_from_blank_accept_defaults_json() {
+        assert_eq!(error_format_from_accept("   \t\r\n"), ErrorFormat::Json);
     }
 
     #[test]
