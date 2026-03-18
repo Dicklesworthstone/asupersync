@@ -16,8 +16,8 @@
 //! 2. Converts error responses (4xx/5xx) using a configurable error formatter.
 //! 3. Negotiates the response format based on the `Accept` header.
 
+use std::cmp::Ordering;
 use std::panic::{self, AssertUnwindSafe};
-
 use super::extract::Request;
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
@@ -59,6 +59,21 @@ impl MediaType {
         (self.r#type == "*" || self.r#type.eq_ignore_ascii_case(r#type))
             && (self.subtype == "*" || self.subtype.eq_ignore_ascii_case(subtype))
     }
+
+    #[must_use]
+    fn specificity_for(&self, r#type: &str, subtype: &str) -> Option<u8> {
+        if !self.matches(r#type, subtype) {
+            return None;
+        }
+
+        Some(if self.r#type == "*" {
+            0
+        } else if self.subtype == "*" {
+            1
+        } else {
+            2
+        })
+    }
 }
 
 /// Parse an `Accept` header into a list of media types with quality values.
@@ -73,22 +88,28 @@ fn parse_accept(header: &str) -> Vec<MediaType> {
                 return None;
             }
 
-            let mut pieces = part.splitn(2, ';');
+            let mut pieces = part.split(';');
             let media = pieces.next()?.trim();
 
             let (r#type, subtype) = media.split_once('/')?;
 
-            let quality = pieces
-                .next()
-                .and_then(|params| {
-                    params.split(';').find_map(|p| {
-                        p.trim()
-                            .strip_prefix("q=")
-                            .or_else(|| p.trim().strip_prefix("Q="))
-                    })
-                })
-                .and_then(|q_str| q_str.trim().parse::<f32>().ok())
-                .unwrap_or(1.0);
+            let mut quality = 1.0;
+            for param in pieces {
+                let param = param.trim();
+                let Some(q_str) = param
+                    .strip_prefix("q=")
+                    .or_else(|| param.strip_prefix("Q="))
+                else {
+                    continue;
+                };
+
+                let parsed_quality = q_str.trim().parse::<f32>().ok()?;
+                if !parsed_quality.is_finite() || !(0.0..=1.0).contains(&parsed_quality) {
+                    return None;
+                }
+                quality = parsed_quality;
+                break;
+            }
 
             Some(MediaType {
                 r#type: r#type.trim().to_ascii_lowercase(),
@@ -101,9 +122,12 @@ fn parse_accept(header: &str) -> Vec<MediaType> {
 
 /// Negotiate the best media type from an `Accept` header.
 ///
-/// Returns the first supported media type that the client accepts,
-/// ordered by client quality preference (highest first), with server
-/// order as tiebreaker.
+/// Returns the best supported media type that the client accepts.
+///
+/// For a given supported media type, more specific client ranges override
+/// broader wildcards even when the wildcard has a higher `q` value. Across
+/// equally acceptable supported media types, client header order breaks ties,
+/// with server order as the final fallback.
 ///
 /// # Arguments
 ///
@@ -120,28 +144,55 @@ pub fn negotiate_media_type<'a>(accept_header: &str, supported: &[&'a str]) -> O
         return supported.first().copied();
     }
 
-    let mut accepted = parse_accept(accept_header);
-    // Sort by quality descending (stable sort preserves header order for ties).
-    accepted.sort_by(|a, b| {
-        b.quality
-            .partial_cmp(&a.quality)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let accepted = parse_accept(accept_header);
+    let mut best_match: Option<(&str, f32, usize)> = None;
 
-    for accepted_type in &accepted {
-        if accepted_type.quality <= 0.0 {
+    for &media in supported {
+        let Some((r#type, subtype)) = media.split_once('/') else {
+            continue;
+        };
+
+        let mut best_quality_for_media: Option<(u8, f32, usize)> = None;
+        for (index, accepted_type) in accepted.iter().enumerate() {
+            let Some(specificity) = accepted_type.specificity_for(r#type, subtype) else {
+                continue;
+            };
+
+            match best_quality_for_media {
+                Some((best_specificity, best_quality, best_index))
+                    if best_specificity > specificity
+                        || (best_specificity == specificity
+                            && match best_quality
+                                .partial_cmp(&accepted_type.quality)
+                                .unwrap_or(Ordering::Equal)
+                            {
+                                Ordering::Greater => true,
+                                Ordering::Equal => best_index <= index,
+                                Ordering::Less => false,
+                            }) => {}
+                _ => best_quality_for_media = Some((specificity, accepted_type.quality, index)),
+            }
+        }
+
+        let Some((_, quality, accept_index)) = best_quality_for_media else {
+            continue;
+        };
+        if quality <= 0.0 {
             continue;
         }
-        for &media in supported {
-            if let Some((t, s)) = media.split_once('/') {
-                if accepted_type.matches(t, s) {
-                    return Some(media);
-                }
-            }
+
+        match best_match {
+            Some((_, best_quality, best_index))
+                if match best_quality.partial_cmp(&quality).unwrap_or(Ordering::Equal) {
+                    Ordering::Greater => true,
+                    Ordering::Equal => best_index <= accept_index,
+                    Ordering::Less => false,
+                } => {}
+            _ => best_match = Some((media, quality, accept_index)),
         }
     }
 
-    None
+    best_match.map(|(media, _, _)| media)
 }
 
 // ─── Error Response Formatting ───────────────────────────────────────────────
@@ -495,6 +546,32 @@ mod tests {
         assert_eq!(result, Some("text/html"));
     }
 
+    #[test]
+    fn negotiate_exact_rejection_overrides_broader_wildcard_match() {
+        let result = negotiate_media_type(
+            "application/*;q=1.0, application/json;q=0, text/html;q=0.5",
+            &["application/json", "text/html"],
+        );
+        assert_eq!(
+            result,
+            Some("text/html"),
+            "an exact q=0 rejection must outrank a broader application/* wildcard"
+        );
+    }
+
+    #[test]
+    fn negotiate_invalid_quality_does_not_default_to_full_preference() {
+        let result = negotiate_media_type(
+            "application/json;q=bogus, text/plain;q=0.5",
+            &["application/json", "text/plain"],
+        );
+        assert_eq!(
+            result,
+            Some("text/plain"),
+            "invalid q values should not silently promote a media range to q=1.0"
+        );
+    }
+
     // ====================================================================
     // Error formatting tests
     // ====================================================================
@@ -555,6 +632,15 @@ mod tests {
     #[test]
     fn error_format_from_accept_default_json() {
         assert_eq!(error_format_from_accept(""), ErrorFormat::Json);
+    }
+
+    #[test]
+    fn error_format_from_accept_respects_specific_json_rejection() {
+        assert_eq!(
+            error_format_from_accept("application/*;q=1.0, application/json;q=0, text/html;q=0.5"),
+            ErrorFormat::Html,
+            "error format negotiation must not choose JSON after an exact JSON rejection"
+        );
     }
 
     // ====================================================================
