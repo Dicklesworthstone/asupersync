@@ -16,11 +16,11 @@
 //! 2. Converts error responses (4xx/5xx) using a configurable error formatter.
 //! 3. Negotiates the response format based on the `Accept` header.
 
-use std::cmp::Ordering;
-use std::panic::{self, AssertUnwindSafe};
 use super::extract::Request;
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
+use std::cmp::Ordering;
+use std::panic::{self, AssertUnwindSafe};
 
 // ─── Media Type ──────────────────────────────────────────────────────────────
 
@@ -183,7 +183,10 @@ pub fn negotiate_media_type<'a>(accept_header: &str, supported: &[&'a str]) -> O
 
         match best_match {
             Some((_, best_quality, best_index))
-                if match best_quality.partial_cmp(&quality).unwrap_or(Ordering::Equal) {
+                if match best_quality
+                    .partial_cmp(&quality)
+                    .unwrap_or(Ordering::Equal)
+                {
                     Ordering::Greater => true,
                     Ordering::Equal => best_index <= accept_index,
                     Ordering::Less => false,
