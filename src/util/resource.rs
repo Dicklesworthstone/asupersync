@@ -227,6 +227,7 @@ impl SymbolPool {
             return;
         }
 
+        buffer.as_mut_slice().fill(0);
         buffer.mark_free();
         self.free_list.push(buffer);
         self.allocated = self.allocated.saturating_sub(1);
@@ -999,6 +1000,27 @@ mod tests {
         });
         assert!(pool.try_allocate().is_some());
         assert!(pool.try_allocate().is_none());
+    }
+
+    #[test]
+    fn symbol_pool_reuses_zeroed_buffers_after_deallocate() {
+        let mut pool = SymbolPool::new(PoolConfig {
+            symbol_size: 8,
+            initial_size: 1,
+            max_size: 1,
+            allow_growth: false,
+            growth_increment: 1,
+        });
+
+        let mut buffer = pool.allocate().expect("allocate");
+        buffer.as_mut_slice().fill(0xAA);
+        pool.deallocate(buffer);
+
+        let reused = pool.allocate().expect("reallocate");
+        assert!(
+            reused.as_slice().iter().all(|byte| *byte == 0),
+            "reused buffers must not retain prior payload bytes"
+        );
     }
 
     #[test]

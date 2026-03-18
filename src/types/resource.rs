@@ -268,6 +268,7 @@ impl SymbolPool {
         }
         self.stats.deallocations = self.stats.deallocations.saturating_add(1);
         self.stats.current_usage = self.allocated;
+        buffer.as_mut_slice().fill(0);
         buffer.clear_checkout_state();
         self.free_list.push(buffer);
     }
@@ -856,6 +857,22 @@ mod tests {
         let _ = pool.allocate().expect("allocation");
         pool.shrink_to_fit();
         assert!(pool.free_count() <= 1);
+    }
+
+    #[test]
+    fn pool_reuses_zeroed_buffers_after_deallocate() {
+        let config = PoolConfig::new(8, 1, 1, false, 0);
+        let mut pool = SymbolPool::new(config);
+
+        let mut buffer = pool.allocate().expect("initial allocation");
+        buffer.as_mut_slice().fill(0xAA);
+        pool.deallocate(buffer);
+
+        let reused = pool.allocate().expect("reused allocation");
+        assert!(
+            reused.as_slice().iter().all(|byte| *byte == 0),
+            "recycled buffers must not retain prior payload bytes"
+        );
     }
 
     #[test]
