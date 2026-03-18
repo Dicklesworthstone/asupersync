@@ -330,9 +330,13 @@ impl ParsedUrl {
             )));
         };
 
-        let (authority, path) = rest
-            .find('/')
-            .map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
+        // RFC 3986: authority ends at the first '/', '?', or '#'.
+        let authority_end = rest
+            .find(['/', '?', '#'])
+            .unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        let path_and_rest = &rest[authority_end..];
+        let path = if path_and_rest.is_empty() { "/" } else { path_and_rest };
 
         // Reject userinfo (user:pass@host) per RFC 9110 Section 4.2.4.
         // Forwarding credentials in the URL to the Host header can cause
@@ -1682,10 +1686,9 @@ fn parse_proxy_endpoint(proxy_url: &str) -> Result<ProxyEndpoint, ClientError> {
         )));
     };
 
-    let authority = rest
-        .split_once('/')
-        .map_or(rest, |(authority, _)| authority)
-        .trim();
+    // RFC 3986: authority ends at the first '/', '?', or '#'.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = rest[..authority_end].trim();
     if authority.is_empty() {
         return Err(ClientError::InvalidUrl(format!(
             "proxy URL missing authority: {proxy_url}"
