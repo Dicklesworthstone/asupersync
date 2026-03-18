@@ -47,15 +47,15 @@
 //! surface:
 //!
 //! - Layer 0: connect, publish, and subscribe stay NATS-small on the packet
-//!   plane with `DeliveryClass::EphemeralInteractive` as the default.
+//!   plane with the ephemeral-interactive delivery class as the default.
 //! - Layer 1: request/reply adds bounded coordination and timeout semantics
 //!   without silently requiring durability or session contracts.
 //! - Layer 2: durable streams, consumers, and explicit acknowledgements opt
-//!   into stronger `DurableOrdered` and obligation-backed semantics.
+//!   into stronger durable-ordered and obligation-backed semantics.
 //! - Layer 3: service contracts, session protocols, and mobility-sensitive
-//!   flows opt into richer `ObligationBacked` and `MobilitySafe` behavior.
+//!   flows opt into richer obligation-backed and mobility-safe behavior.
 //! - Layer 4: replay-heavy, evidence-rich, and counterfactual tooling stays in
-//!   the explicit `ForensicReplayable` tier.
+//!   the explicit forensic-replayable tier.
 //!
 //! Lower layers must remain correct on their own terms. A Layer 0 or Layer 1
 //! caller must not need hidden Layer 2+ machinery to be safe, observable, or

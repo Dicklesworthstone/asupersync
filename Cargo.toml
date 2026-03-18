@@ -34,8 +34,9 @@ include = [
 
 [features]
 default = ["test-internals"]
-# Gate the native FABRIC messaging lane separately from the existing external
-# messaging integrations.
+# Reserve a dedicated feature name for the native FABRIC lane. The actual
+# module wiring still lives in `src/messaging/mod.rs` and is not fully gated
+# yet.
 messaging-fabric = []
 # Explicit opt-in for experimental browser-targeted builds.
 # This does not imply full wasm parity; it only enables guarded compilation paths.
