@@ -688,4 +688,587 @@ mod tests {
             FederationError::CannotActivateClosedBridge
         );
     }
+
+    // ========================================================================
+    // Comprehensive federation tests (bead 8w83i.11.3)
+    // ========================================================================
+
+    // -- MorphismConstraints validation --------------------------------------
+
+    #[test]
+    fn morphism_constraints_default_allows_derived_view_and_egress() {
+        let mc = MorphismConstraints::default();
+        assert!(mc.allowed_classes.contains(&MorphismClass::DerivedView));
+        assert!(mc.allowed_classes.contains(&MorphismClass::Egress));
+        assert_eq!(mc.allowed_classes.len(), 2);
+        assert!(mc.validate().is_ok());
+    }
+
+    #[test]
+    fn morphism_constraints_rejects_empty_allowed_classes() {
+        let mc = MorphismConstraints {
+            allowed_classes: BTreeSet::new(),
+            ..MorphismConstraints::default()
+        };
+        assert_eq!(
+            mc.validate().unwrap_err(),
+            FederationError::EmptyAllowedMorphismClasses
+        );
+    }
+
+    #[test]
+    fn morphism_constraints_rejects_zero_expansion_factor() {
+        let mc = MorphismConstraints {
+            max_expansion_factor: 0,
+            ..MorphismConstraints::default()
+        };
+        assert_eq!(
+            mc.validate().unwrap_err(),
+            FederationError::ZeroMaxExpansionFactor
+        );
+    }
+
+    #[test]
+    fn morphism_constraints_rejects_zero_fanout() {
+        let mc = MorphismConstraints {
+            max_fanout: 0,
+            ..MorphismConstraints::default()
+        };
+        assert_eq!(mc.validate().unwrap_err(), FederationError::ZeroMaxFanout);
+    }
+
+    #[test]
+    fn morphism_constraints_admits_within_bounds() {
+        let mc = MorphismConstraints::default();
+        let m = derived_view_morphism();
+        assert!(mc.admits(&m).is_ok());
+    }
+
+    #[test]
+    fn morphism_constraints_rejects_expansion_factor_exceeded() {
+        let mc = MorphismConstraints {
+            max_expansion_factor: 2,
+            ..MorphismConstraints::default()
+        };
+        let mut m = derived_view_morphism();
+        m.quota_policy.max_expansion_factor = 5;
+        match mc.admits(&m) {
+            Err(FederationError::LeafExpansionFactorExceeded { actual, max }) => {
+                assert_eq!(actual, 5);
+                assert_eq!(max, 2);
+            }
+            other => panic!("expected LeafExpansionFactorExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn morphism_constraints_rejects_fanout_exceeded() {
+        let mc = MorphismConstraints {
+            max_fanout: 3,
+            ..MorphismConstraints::default()
+        };
+        let mut m = derived_view_morphism();
+        m.quota_policy.max_fanout = 10;
+        match mc.admits(&m) {
+            Err(FederationError::LeafFanoutExceeded { actual, max }) => {
+                assert_eq!(actual, 10);
+                assert_eq!(max, 3);
+            }
+            other => panic!("expected LeafFanoutExceeded, got {other:?}"),
+        }
+    }
+
+    // -- LeafConfig validation -----------------------------------------------
+
+    #[test]
+    fn leaf_config_default_validates() {
+        let config = LeafConfig::default();
+        assert!(config.validate().is_ok());
+        assert!(config.max_reconnect_backoff > Duration::ZERO);
+        assert!(config.offline_buffer_limit > 0);
+    }
+
+    #[test]
+    fn leaf_config_rejects_zero_reconnect_backoff() {
+        let config = LeafConfig {
+            max_reconnect_backoff: Duration::ZERO,
+            ..LeafConfig::default()
+        };
+        match config.validate() {
+            Err(FederationError::ZeroDuration { field }) => {
+                assert!(field.contains("max_reconnect_backoff"));
+            }
+            other => panic!("expected ZeroDuration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leaf_config_rejects_zero_offline_buffer() {
+        let config = LeafConfig {
+            offline_buffer_limit: 0,
+            ..LeafConfig::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err(),
+            FederationError::ZeroOfflineBufferLimit
+        );
+    }
+
+    // -- GatewayConfig validation --------------------------------------------
+
+    #[test]
+    fn gateway_config_default_validates() {
+        let config = GatewayConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.interest_propagation_policy,
+            InterestPropagationPolicy::DemandDriven
+        );
+    }
+
+    #[test]
+    fn gateway_config_rejects_zero_amplification_limit() {
+        let config = GatewayConfig {
+            amplification_limit: 0,
+            ..GatewayConfig::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err(),
+            FederationError::ZeroAmplificationLimit
+        );
+    }
+
+    // -- ReplicationConfig validation ----------------------------------------
+
+    #[test]
+    fn replication_config_default_validates() {
+        let config = ReplicationConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.ordering_guarantee, OrderingGuarantee::PerSubject);
+        assert_eq!(config.catch_up_policy, CatchUpPolicy::SnapshotThenDelta);
+    }
+
+    #[test]
+    fn replication_config_rejects_zero_snapshot_interval() {
+        let config = ReplicationConfig {
+            snapshot_interval: Duration::ZERO,
+            ..ReplicationConfig::default()
+        };
+        match config.validate() {
+            Err(FederationError::ZeroDuration { field }) => {
+                assert!(field.contains("snapshot_interval"));
+            }
+            other => panic!("expected ZeroDuration, got {other:?}"),
+        }
+    }
+
+    // -- TraceRetention validation -------------------------------------------
+
+    #[test]
+    fn trace_retention_default_validates() {
+        let retention = TraceRetention::default();
+        assert!(retention.validate().is_ok());
+        assert!(matches!(
+            retention,
+            TraceRetention::LatestArtifacts { max_artifacts: 128 }
+        ));
+    }
+
+    #[test]
+    fn trace_retention_rejects_zero_artifacts() {
+        let retention = TraceRetention::LatestArtifacts { max_artifacts: 0 };
+        assert_eq!(
+            retention.validate().unwrap_err(),
+            FederationError::ZeroTraceArtifactLimit
+        );
+    }
+
+    #[test]
+    fn trace_retention_rejects_zero_duration_window() {
+        let retention = TraceRetention::DurationWindow {
+            retention: Duration::ZERO,
+        };
+        match retention.validate() {
+            Err(FederationError::ZeroDuration { .. }) => {}
+            other => panic!("expected ZeroDuration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trace_retention_until_acknowledged_validates() {
+        let retention = TraceRetention::UntilAcknowledged;
+        assert!(retention.validate().is_ok());
+    }
+
+    // -- EdgeReplayConfig validation -----------------------------------------
+
+    #[test]
+    fn edge_replay_config_default_validates() {
+        let config = EdgeReplayConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.evidence_shipping_policy,
+            EvidenceShippingPolicy::OnReconnect
+        );
+        assert!(config.reconnection_replay_depth > 0);
+    }
+
+    #[test]
+    fn edge_replay_config_rejects_zero_replay_depth() {
+        let config = EdgeReplayConfig {
+            reconnection_replay_depth: 0,
+            ..EdgeReplayConfig::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err(),
+            FederationError::ZeroReplayDepth
+        );
+    }
+
+    // -- FederationRole name and validation -----------------------------------
+
+    #[test]
+    fn all_role_names_are_distinct() {
+        let roles = [
+            FederationRole::LeafFabric(LeafConfig::default()),
+            FederationRole::GatewayFabric(GatewayConfig::default()),
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            FederationRole::EdgeReplayLink(EdgeReplayConfig::default()),
+        ];
+        let mut names: Vec<&str> = roles.iter().map(|r| r.name()).collect();
+        let orig = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), orig, "role names must be unique");
+    }
+
+    #[test]
+    fn all_default_role_configs_validate() {
+        let roles = [
+            FederationRole::LeafFabric(LeafConfig::default()),
+            FederationRole::GatewayFabric(GatewayConfig::default()),
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            FederationRole::EdgeReplayLink(EdgeReplayConfig::default()),
+        ];
+        for role in &roles {
+            assert!(
+                role.validate().is_ok(),
+                "role {} default config should validate",
+                role.name()
+            );
+        }
+    }
+
+    // -- FederationBridge construction ----------------------------------------
+
+    #[test]
+    fn bridge_rejects_empty_capability_scope() {
+        let err = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            Vec::<FabricCapability>::new(),
+        )
+        .unwrap_err();
+        assert_eq!(err, FederationError::EmptyCapabilityScope);
+    }
+
+    #[test]
+    fn bridge_rejects_empty_morphism_set() {
+        let err = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            Vec::new(),
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap_err();
+        assert_eq!(err, FederationError::EmptyMorphismSet);
+    }
+
+    #[test]
+    fn bridge_rejects_missing_capability_for_morphism() {
+        let err = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![authoritative_morphism()],
+            Vec::new(),
+            // Missing CarryAuthority
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FederationError::CapabilityScopeMissing {
+                capability: FabricCapability::CarryAuthority,
+            }
+        );
+    }
+
+    #[test]
+    fn bridge_accepts_morphisms_on_remote_side_only() {
+        let bridge = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            Vec::new(),
+            vec![derived_view_morphism()],
+            [FabricCapability::RewriteNamespace],
+        )
+        .expect("remote-only morphisms should be accepted");
+        assert!(bridge.local_morphisms.is_empty());
+        assert_eq!(bridge.remote_morphisms.len(), 1);
+    }
+
+    #[test]
+    fn bridge_accepts_morphisms_on_both_sides() {
+        let bridge = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            vec![derived_view_morphism()],
+            [FabricCapability::RewriteNamespace],
+        )
+        .expect("morphisms on both sides should be accepted");
+        assert_eq!(bridge.local_morphisms.len(), 1);
+        assert_eq!(bridge.remote_morphisms.len(), 1);
+    }
+
+    #[test]
+    fn edge_replay_bridge_succeeds_with_observe_evidence() {
+        let bridge = FederationBridge::new(
+            FederationRole::EdgeReplayLink(EdgeReplayConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [
+                FabricCapability::RewriteNamespace,
+                FabricCapability::ObserveEvidence,
+            ],
+        )
+        .expect("edge replay with ObserveEvidence should succeed");
+        assert_eq!(bridge.role.name(), "edge_replay_link");
+    }
+
+    // -- Bridge lifecycle edge cases -----------------------------------------
+
+    #[test]
+    fn bridge_starts_in_provisioning() {
+        let bridge = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        assert_eq!(bridge.state, FederationBridgeState::Provisioning);
+    }
+
+    #[test]
+    fn closed_bridge_cannot_be_degraded() {
+        let mut bridge = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        bridge.close();
+        assert_eq!(
+            bridge.mark_degraded().unwrap_err(),
+            FederationError::CannotDegradeClosedBridge
+        );
+    }
+
+    #[test]
+    fn degraded_bridge_can_be_reactivated() {
+        let mut bridge = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        bridge.mark_degraded().unwrap();
+        bridge
+            .activate()
+            .expect("degraded bridge should reactivate");
+        assert_eq!(bridge.state, FederationBridgeState::Active);
+    }
+
+    // -- Serialization round-trips -------------------------------------------
+
+    #[test]
+    fn leaf_config_json_round_trip() {
+        let config = LeafConfig::default();
+        let json = serde_json::to_string(&config).expect("serialize");
+        let roundtrip: LeafConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn gateway_config_json_round_trip() {
+        let config = GatewayConfig::default();
+        let json = serde_json::to_string(&config).expect("serialize");
+        let roundtrip: GatewayConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn replication_config_json_round_trip() {
+        let config = ReplicationConfig::default();
+        let json = serde_json::to_string(&config).expect("serialize");
+        let roundtrip: ReplicationConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn edge_replay_config_json_round_trip() {
+        let config = EdgeReplayConfig::default();
+        let json = serde_json::to_string(&config).expect("serialize");
+        let roundtrip: EdgeReplayConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn federation_role_tagged_json_round_trip() {
+        for role in [
+            FederationRole::LeafFabric(LeafConfig::default()),
+            FederationRole::GatewayFabric(GatewayConfig::default()),
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            FederationRole::EdgeReplayLink(EdgeReplayConfig::default()),
+        ] {
+            let json = serde_json::to_string(&role).expect("serialize");
+            let roundtrip: FederationRole = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(role, roundtrip);
+        }
+    }
+
+    #[test]
+    fn bridge_state_json_round_trip() {
+        for state in [
+            FederationBridgeState::Provisioning,
+            FederationBridgeState::Active,
+            FederationBridgeState::Degraded,
+            FederationBridgeState::Closed,
+        ] {
+            let json = serde_json::to_string(&state).expect("serialize");
+            let roundtrip: FederationBridgeState =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(state, roundtrip);
+        }
+    }
+
+    #[test]
+    fn interest_propagation_all_variants_json_round_trip() {
+        for policy in [
+            InterestPropagationPolicy::ExplicitSubscriptions,
+            InterestPropagationPolicy::PrefixAnnouncements,
+            InterestPropagationPolicy::DemandDriven,
+        ] {
+            let json = serde_json::to_string(&policy).expect("serialize");
+            let roundtrip: InterestPropagationPolicy =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(policy, roundtrip);
+        }
+    }
+
+    #[test]
+    fn ordering_guarantee_all_variants_json_round_trip() {
+        for guarantee in [
+            OrderingGuarantee::PerSubject,
+            OrderingGuarantee::SnapshotConsistent,
+            OrderingGuarantee::CheckpointBounded,
+        ] {
+            let json = serde_json::to_string(&guarantee).expect("serialize");
+            let roundtrip: OrderingGuarantee = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(guarantee, roundtrip);
+        }
+    }
+
+    #[test]
+    fn catch_up_policy_all_variants_json_round_trip() {
+        for policy in [
+            CatchUpPolicy::SnapshotRequired,
+            CatchUpPolicy::SnapshotThenDelta,
+            CatchUpPolicy::LogOnly,
+        ] {
+            let json = serde_json::to_string(&policy).expect("serialize");
+            let roundtrip: CatchUpPolicy = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(policy, roundtrip);
+        }
+    }
+
+    #[test]
+    fn trace_retention_all_variants_json_round_trip() {
+        for retention in [
+            TraceRetention::LatestArtifacts { max_artifacts: 42 },
+            TraceRetention::DurationWindow {
+                retention: Duration::from_secs(3600),
+            },
+            TraceRetention::UntilAcknowledged,
+        ] {
+            let json = serde_json::to_string(&retention).expect("serialize");
+            let roundtrip: TraceRetention = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(retention, roundtrip);
+        }
+    }
+
+    // -- FederationBridgeState ordering --------------------------------------
+
+    #[test]
+    fn bridge_states_have_consistent_ordering() {
+        assert!(FederationBridgeState::Provisioning < FederationBridgeState::Active);
+        assert!(FederationBridgeState::Active < FederationBridgeState::Degraded);
+        assert!(FederationBridgeState::Degraded < FederationBridgeState::Closed);
+    }
+
+    // -- Gateway amplification enforcement -----------------------------------
+
+    #[test]
+    fn gateway_bridge_accepts_morphism_within_limit() {
+        let mut morphism = derived_view_morphism();
+        morphism.quota_policy.max_fanout = 4;
+        let bridge = FederationBridge::new(
+            FederationRole::GatewayFabric(GatewayConfig {
+                amplification_limit: 4,
+                ..GatewayConfig::default()
+            }),
+            vec![morphism],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .expect("gateway should accept morphism at limit boundary");
+        assert_eq!(bridge.role.name(), "gateway_fabric");
+    }
+
+    // -- Leaf boundary morphism class enforcement ----------------------------
+
+    #[test]
+    fn leaf_accepts_egress_morphism() {
+        let mut morphism = derived_view_morphism();
+        morphism.class = MorphismClass::Egress;
+        let bridge = FederationBridge::new(
+            FederationRole::LeafFabric(LeafConfig::default()),
+            vec![morphism],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .expect("leaf should accept egress morphisms");
+        assert_eq!(bridge.role.name(), "leaf_fabric");
+    }
+
+    // -- Default enum values -------------------------------------------------
+
+    #[test]
+    fn default_enum_values_are_expected() {
+        assert_eq!(
+            InterestPropagationPolicy::default(),
+            InterestPropagationPolicy::DemandDriven
+        );
+        assert_eq!(OrderingGuarantee::default(), OrderingGuarantee::PerSubject);
+        assert_eq!(CatchUpPolicy::default(), CatchUpPolicy::SnapshotThenDelta);
+        assert_eq!(
+            EvidenceShippingPolicy::default(),
+            EvidenceShippingPolicy::OnReconnect
+        );
+        assert_eq!(
+            FederationBridgeState::default(),
+            FederationBridgeState::Provisioning
+        );
+    }
 }
