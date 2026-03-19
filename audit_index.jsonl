@@ -1079,3 +1079,19 @@
 {"file": "src/messaging/session/synthesis.rs", "lines": 8, "batch": 391, "date": "2026-03-18", "agent": "SapphireHill", "verdict": "SOUND", "bugs": 0, "notes": "Stub placeholder"}
 {"file": "src/messaging/snapshot.rs", "lines": 8, "batch": 391, "date": "2026-03-18", "agent": "SapphireHill", "verdict": "SOUND", "bugs": 0, "notes": "Stub placeholder"}
 {"file": "src/sync/notify_bug_test.rs", "lines": 36, "batch": 391, "date": "2026-03-18", "agent": "SapphireHill", "verdict": "SOUND", "bugs": 0, "notes": "Standalone spurious wakeup test for Notify"}
+{"file":"src/messaging/class.rs","lines":493,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/cut.rs","lines":839,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/federation.rs","lines":691,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/consumer.rs","lines":1248,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/control.rs","lines":0,"batch":377,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit of +820 lines control plane implementation"}
+{"file":"src/messaging/morphism.rs","lines":0,"batch":377,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit of +708 lines boundary plan compilation and cycle detection"}
+{"file":"src/messaging/service.rs","lines":0,"batch":377,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit of +717 lines ServiceObligation ledger integration"}
+{"file":"src/messaging/ir.rs","lines":0,"batch":377,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit of +194 lines cross-reference and role validation"}
+{"file":"src/lab/dual_run.rs","lines":0,"batch":377,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit of +211 lines fuzz promotion enhancements"}
+{"file":"src/lab/fuzz.rs","lines":0,"batch":377,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit of +115 lines promotion convenience methods"}
+{"file":"src/messaging/capability/routing.rs","lines":796,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/stream.rs","lines":811,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/capability/mod.rs","lines":445,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/compiler.rs","lines":147,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/explain.rs","lines":89,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
