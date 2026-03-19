@@ -582,6 +582,8 @@ enum RetryInner<F> {
     Polling(#[pin] F),
     /// Sleeping before the next attempt.
     Sleeping(#[pin] Sleep),
+    /// Finished executing.
+    Completed,
 }
 
 /// A future that executes a retry loop.
@@ -638,8 +640,10 @@ where
             let mut this = self.as_mut().project();
 
             match this.inner.as_mut().project() {
+                RetryInnerProj::Completed => panic!("retry future polled after completion"),
                 RetryInnerProj::Idle => {
                     if let Some(r) = cancel_reason {
+                        this.inner.set(RetryInner::Completed);
                         return Poll::Ready(RetryResult::Cancelled(r));
                     }
 
@@ -677,6 +681,7 @@ where
                 }
                 RetryInnerProj::Sleeping(sleep) => {
                     if let Some(r) = cancel_reason {
+                        this.inner.set(RetryInner::Completed);
                         return Poll::Ready(RetryResult::Cancelled(r));
                     }
                     match sleep.poll(cx) {
@@ -692,7 +697,10 @@ where
                     match fut.poll(cx) {
                         Poll::Ready(outcome) => {
                             match outcome {
-                                Outcome::Ok(val) => return Poll::Ready(RetryResult::Ok(val)),
+                                Outcome::Ok(val) => {
+                                    this.inner.set(RetryInner::Completed);
+                                    return Poll::Ready(RetryResult::Ok(val));
+                                }
                                 Outcome::Err(e) => {
                                     let attempt = this.state.attempt;
                                     // Check predicate
@@ -704,15 +712,18 @@ where
                                         // Loop will handle Idle -> Sleeping/Polling
                                     } else {
                                         // Final failure
+                                        this.inner.set(RetryInner::Completed);
                                         return Poll::Ready(RetryResult::Failed(
                                             this.state.clone().into_error(e),
                                         ));
                                     }
                                 }
                                 Outcome::Cancelled(r) => {
+                                    this.inner.set(RetryInner::Completed);
                                     return Poll::Ready(RetryResult::Cancelled(r));
                                 }
                                 Outcome::Panicked(p) => {
+                                    this.inner.set(RetryInner::Completed);
                                     return Poll::Ready(RetryResult::Panicked(p));
                                 }
                             }

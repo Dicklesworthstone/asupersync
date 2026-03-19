@@ -573,6 +573,7 @@ pub struct HedgeFuture<Prim, Back, F> {
     backup: Option<Back>,
     timer: Option<Sleep>,
     config: HedgeConfig,
+    completed: bool,
 }
 
 impl<Prim, Back, F> HedgeFuture<Prim, Back, F> {
@@ -593,6 +594,7 @@ impl<Prim, Back, F> HedgeFuture<Prim, Back, F> {
             backup: None,
             timer: Some(timer),
             config,
+            completed: false,
         }
     }
 }
@@ -610,10 +612,15 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
+        if this.completed {
+            panic!("hedge future polled after completion");
+        }
+
         // Poll primary if present
         if let Some(primary) = &mut this.primary {
             if let Poll::Ready(outcome) = Pin::new(primary).poll(cx) {
                 // Primary finished.
+                this.completed = true;
                 return Poll::Ready(if this.backup.is_some() {
                     // Backup was running, so this was a race.
                     // Dropping backup cancels it; loser is represented as race-loser cancellation.
@@ -646,6 +653,7 @@ where
             if let Poll::Ready(outcome) = Pin::new(backup).poll(cx) {
                 // Backup finished first.
                 // Drop primary (cancel).
+                this.completed = true;
                 return Poll::Ready(HedgeResult::backup_won(
                     outcome,
                     Outcome::Cancelled(CancelReason::race_loser()),
