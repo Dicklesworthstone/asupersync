@@ -2343,6 +2343,84 @@ impl fmt::Display for PromotedFuzzScenario {
     }
 }
 
+/// Replayable differential scenario promoted from schedule exploration output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotedExplorationScenario {
+    /// Replayable dual-run identity selected for the representative schedule.
+    pub identity: DualRunScenarioIdentity,
+    /// Representative seed chosen for replay/minimized regression coverage.
+    pub replay_seed: u64,
+    /// Canonical trace fingerprint for the promoted schedule class.
+    pub trace_fingerprint: u64,
+    /// Schedule hash for the representative run.
+    pub representative_schedule_hash: u64,
+    /// All seeds observed in the original exploration class.
+    pub original_seeds: Vec<u64>,
+    /// Seeds in the class that produced invariant violations.
+    pub violation_seeds: Vec<u64>,
+    /// Stable stringified violation summaries for this class.
+    pub violation_summaries: Vec<String>,
+    /// All schedule hashes observed in the class.
+    pub supporting_schedule_hashes: Vec<u64>,
+    /// Number of runs collapsed into this promoted class.
+    pub class_run_count: usize,
+    /// Total runs in the source exploration report.
+    pub source_total_runs: usize,
+    /// Total unique classes in the source exploration report.
+    pub source_unique_classes: usize,
+    /// Optional artifact path for the source exploration report bundle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_artifact_path: Option<String>,
+    /// Human-readable scenario meaning.
+    pub description: String,
+}
+
+impl PromotedExplorationScenario {
+    /// Default repro command for this promoted schedule scenario.
+    #[must_use]
+    pub fn repro_command(&self) -> String {
+        format!(
+            "ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
+            self.replay_seed, self.identity.scenario_id
+        )
+    }
+
+    /// Annotate the promoted scenario with the source artifact bundle path.
+    #[must_use]
+    pub fn with_source_artifact_path(mut self, path: impl Into<String>) -> Self {
+        self.source_artifact_path = Some(path.into());
+        self
+    }
+
+    /// Build lab replay metadata for the representative schedule.
+    #[must_use]
+    pub fn lab_replay_metadata(&self) -> ReplayMetadata {
+        let mut metadata = self
+            .identity
+            .lab_replay_metadata()
+            .with_repro_command(self.repro_command());
+        metadata.trace_fingerprint = Some(self.trace_fingerprint);
+        metadata.schedule_hash = Some(self.representative_schedule_hash);
+        if let Some(path) = &self.source_artifact_path {
+            metadata = metadata.with_artifact_path(path.clone());
+        }
+        metadata
+    }
+}
+
+impl fmt::Display for PromotedExplorationScenario {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PromotedExploration({}, fingerprint=0x{:X}, seed=0x{:X}, runs={})",
+            self.identity.scenario_id,
+            self.trace_fingerprint,
+            self.replay_seed,
+            self.class_run_count
+        )
+    }
+}
+
 /// Promote a `FuzzFinding` into a replayable `DualRunScenarioIdentity`.
 #[must_use]
 pub fn promote_fuzz_finding(
@@ -2447,6 +2525,122 @@ pub fn promote_regression_corpus(
             promoted.campaign_base_seed = Some(corpus.base_seed);
             promoted.campaign_iteration = Some(i);
             promoted
+        })
+        .collect()
+}
+
+/// Promote schedule-exploration classes into replayable differential scenarios.
+///
+/// The promotion rule keeps one representative run per canonical fingerprint
+/// class. When a class contains violations, the smallest violating seed is
+/// chosen so regression promotion remains focused on the failing lineage.
+#[must_use]
+pub fn promote_exploration_report(
+    report: &crate::lab::explorer::ExplorationReport,
+    surface_id: &str,
+    contract_version: &str,
+) -> Vec<PromotedExplorationScenario> {
+    #[derive(Default)]
+    struct ClassAggregate {
+        seeds: Vec<u64>,
+        schedule_hashes: Vec<u64>,
+        run_count: usize,
+        representative_schedule_hash: Option<u64>,
+        violation_seeds: Vec<u64>,
+        violation_summaries: Vec<String>,
+    }
+
+    let mut by_fingerprint: BTreeMap<u64, ClassAggregate> = BTreeMap::new();
+
+    for run in &report.runs {
+        let entry = by_fingerprint.entry(run.fingerprint).or_default();
+        entry.seeds.push(run.seed);
+        entry.schedule_hashes.push(run.certificate_hash);
+        entry.run_count += 1;
+        if entry.representative_schedule_hash.is_none() {
+            entry.representative_schedule_hash = Some(run.certificate_hash);
+        }
+    }
+
+    for violation in &report.violations {
+        let entry = by_fingerprint.entry(violation.fingerprint).or_default();
+        entry.violation_seeds.push(violation.seed);
+        entry
+            .violation_summaries
+            .extend(violation.violations.iter().map(ToString::to_string));
+    }
+
+    by_fingerprint
+        .into_iter()
+        .map(|(trace_fingerprint, mut aggregate)| {
+            aggregate.seeds.sort_unstable();
+            aggregate.seeds.dedup();
+            aggregate.schedule_hashes.sort_unstable();
+            aggregate.schedule_hashes.dedup();
+            aggregate.violation_seeds.sort_unstable();
+            aggregate.violation_seeds.dedup();
+            aggregate.violation_summaries.sort();
+            aggregate.violation_summaries.dedup();
+
+            let (replay_seed, representative_reason) =
+                if let Some(seed) = aggregate.violation_seeds.first().copied() {
+                    (seed, "lowest_violation_seed")
+                } else {
+                    (
+                        *aggregate
+                            .seeds
+                            .first()
+                            .expect("exploration class must contain at least one run"),
+                        "lowest_seed",
+                    )
+                };
+
+            let representative_schedule_hash = report
+                .runs
+                .iter()
+                .find(|run| run.fingerprint == trace_fingerprint && run.seed == replay_seed)
+                .map(|run| run.certificate_hash)
+                .or(aggregate.representative_schedule_hash)
+                .expect("exploration class must have a representative schedule hash");
+
+            let scenario_id = format!(
+                "schedule.{surface_id}.fp_{trace_fingerprint:016x}.seed_{:08x}",
+                replay_seed & 0xFFFF_FFFF
+            );
+            let description = format!(
+                "Promoted schedule exploration class 0x{trace_fingerprint:X}: {} run(s), representative seed 0x{replay_seed:X}",
+                aggregate.run_count
+            );
+
+            let identity = DualRunScenarioIdentity::phase1(
+                &scenario_id,
+                surface_id,
+                contract_version,
+                &description,
+                replay_seed,
+            )
+            .with_metadata("promoted_from", "exploration_report")
+            .with_metadata("trace_fingerprint", format!("0x{trace_fingerprint:X}"))
+            .with_metadata("class_run_count", aggregate.run_count.to_string())
+            .with_metadata("source_total_runs", report.total_runs.to_string())
+            .with_metadata("source_unique_classes", report.unique_classes.to_string())
+            .with_metadata("representative_reason", representative_reason);
+
+            PromotedExplorationScenario {
+                identity,
+                replay_seed,
+                trace_fingerprint,
+                representative_schedule_hash,
+                original_seeds: aggregate.seeds,
+                violation_seeds: aggregate.violation_seeds,
+                violation_summaries: aggregate.violation_summaries,
+                supporting_schedule_hashes: aggregate.schedule_hashes,
+                class_run_count: aggregate.run_count,
+                source_total_runs: report.total_runs,
+                source_unique_classes: report.unique_classes,
+                source_artifact_path: None,
+                description,
+            }
         })
         .collect()
 }
@@ -4326,5 +4520,143 @@ mod tests {
 
         assert!(result.passed());
         crate::test_complete!("promoted_fuzz_scenario_runs_through_harness");
+    }
+
+    fn make_test_exploration_report() -> crate::lab::explorer::ExplorationReport {
+        use crate::lab::explorer::{
+            CoverageMetrics, RunResult, SaturationMetrics, ViolationReport,
+        };
+        use crate::lab::runtime::InvariantViolation;
+
+        crate::lab::explorer::ExplorationReport {
+            total_runs: 3,
+            unique_classes: 2,
+            violations: vec![ViolationReport {
+                seed: 0x20,
+                steps: 42,
+                violations: vec![InvariantViolation::QuiescenceViolation],
+                fingerprint: 0xAAAA,
+            }],
+            coverage: CoverageMetrics {
+                equivalence_classes: 2,
+                total_runs: 3,
+                new_class_discoveries: 2,
+                class_run_counts: BTreeMap::from([(0xAAAA, 2), (0xBBBB, 1)]),
+                novelty_histogram: BTreeMap::from([(0, 1), (1, 2)]),
+                saturation: SaturationMetrics {
+                    window: 10,
+                    saturated: false,
+                    existing_class_hits: 1,
+                    runs_since_last_new_class: Some(1),
+                },
+            },
+            top_unexplored: Vec::new(),
+            runs: vec![
+                RunResult {
+                    seed: 0x10,
+                    steps: 10,
+                    fingerprint: 0xAAAA,
+                    is_new_class: true,
+                    violations: Vec::new(),
+                    certificate_hash: 0x100,
+                },
+                RunResult {
+                    seed: 0x20,
+                    steps: 42,
+                    fingerprint: 0xAAAA,
+                    is_new_class: false,
+                    violations: vec![InvariantViolation::QuiescenceViolation],
+                    certificate_hash: 0x200,
+                },
+                RunResult {
+                    seed: 0x30,
+                    steps: 11,
+                    fingerprint: 0xBBBB,
+                    is_new_class: true,
+                    violations: Vec::new(),
+                    certificate_hash: 0x300,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn promote_exploration_report_prefers_lowest_violation_seed_and_preserves_lineage() {
+        init_test("promote_exploration_report_prefers_lowest_violation_seed_and_preserves_lineage");
+        let report = make_test_exploration_report();
+        let promoted = promote_exploration_report(&report, "schedule.surface", "v1");
+        assert_eq!(promoted.len(), 2);
+
+        let promoted_class = promoted
+            .iter()
+            .find(|scenario| scenario.trace_fingerprint == 0xAAAA)
+            .expect("class 0xAAAA should be promoted");
+        assert_eq!(promoted_class.replay_seed, 0x20);
+        assert_eq!(promoted_class.original_seeds, vec![0x10, 0x20]);
+        assert_eq!(promoted_class.violation_seeds, vec![0x20]);
+        assert_eq!(
+            promoted_class.supporting_schedule_hashes,
+            vec![0x100, 0x200]
+        );
+        assert!(
+            promoted_class
+                .violation_summaries
+                .iter()
+                .any(|summary| summary.contains("region closed without quiescence"))
+        );
+        assert_eq!(
+            promoted_class.identity.metadata.get("promoted_from"),
+            Some(&"exploration_report".to_owned())
+        );
+        assert_eq!(
+            promoted_class
+                .identity
+                .metadata
+                .get("representative_reason"),
+            Some(&"lowest_violation_seed".to_owned())
+        );
+        crate::test_complete!(
+            "promote_exploration_report_prefers_lowest_violation_seed_and_preserves_lineage"
+        );
+    }
+
+    #[test]
+    fn promoted_exploration_scenario_replay_metadata_includes_artifact_and_repro() {
+        init_test("promoted_exploration_scenario_replay_metadata_includes_artifact_and_repro");
+        let report = make_test_exploration_report();
+        let promoted = promote_exploration_report(&report, "schedule.surface", "v1");
+        let promoted = promoted[0]
+            .clone()
+            .with_source_artifact_path("/tmp/dpor/report.json");
+
+        let metadata = promoted.lab_replay_metadata();
+        assert_eq!(metadata.trace_fingerprint, Some(promoted.trace_fingerprint));
+        assert_eq!(
+            metadata.schedule_hash,
+            Some(promoted.representative_schedule_hash)
+        );
+        assert_eq!(
+            metadata.artifact_path.as_deref(),
+            Some("/tmp/dpor/report.json")
+        );
+        assert_eq!(
+            metadata.repro_command.as_deref(),
+            Some(promoted.repro_command().as_str())
+        );
+        crate::test_complete!(
+            "promoted_exploration_scenario_replay_metadata_includes_artifact_and_repro"
+        );
+    }
+
+    #[test]
+    fn promote_exploration_report_serde_roundtrip() {
+        init_test("promote_exploration_report_serde_roundtrip");
+        let report = make_test_exploration_report();
+        let promoted = promote_exploration_report(&report, "schedule.surface", "v1");
+        let json = serde_json::to_string_pretty(&promoted).unwrap();
+        let parsed: Vec<PromotedExplorationScenario> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), promoted.len());
+        assert_eq!(parsed[0].trace_fingerprint, promoted[0].trace_fingerprint);
+        crate::test_complete!("promote_exploration_report_serde_roundtrip");
     }
 }
