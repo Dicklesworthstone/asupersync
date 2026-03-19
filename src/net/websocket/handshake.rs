@@ -691,13 +691,14 @@ impl HttpRequest {
     ///
     /// Returns `HandshakeError::InvalidRequest` if parsing fails.
     pub fn parse_with_trailing(data: &[u8]) -> Result<(Self, &[u8]), HandshakeError> {
-        let (header_bytes, trailing) = if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            (&data[..pos + 4], &data[pos + 4..])
-        } else if let Some(pos) = data.windows(2).position(|w| w == b"\n\n") {
-            (&data[..pos + 2], &data[pos + 2..])
-        } else {
-            (data, &[][..])
-        };
+        let (header_bytes, trailing) =
+            if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                (&data[..pos + 4], &data[pos + 4..])
+            } else if let Some(pos) = data.windows(2).position(|w| w == b"\n\n") {
+                (&data[..pos + 2], &data[pos + 2..])
+            } else {
+                (data, &[][..])
+            };
 
         let text = std::str::from_utf8(header_bytes)
             .map_err(|_| HandshakeError::InvalidRequest("invalid UTF-8".into()))?;

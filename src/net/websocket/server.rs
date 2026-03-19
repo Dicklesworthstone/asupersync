@@ -164,7 +164,8 @@ impl WebSocketAcceptor {
         stream.write_all(&response_bytes).await?;
 
         // Create server WebSocket, seeding any trailing bytes into the read buffer
-        let ws = ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response, trailing);
+        let ws =
+            ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response, trailing);
 
         Ok(ws)
     }
@@ -254,7 +255,12 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     /// Create a WebSocket from an already-upgraded I/O stream.
-    fn from_upgraded(io: IO, config: WebSocketConfig, accept: AcceptResponse, trailing: &[u8]) -> Self {
+    fn from_upgraded(
+        io: IO,
+        config: WebSocketConfig,
+        accept: AcceptResponse,
+        trailing: &[u8],
+    ) -> Self {
         let max_message_size = config.max_message_size;
         let codec = FrameCodec::server().max_payload_size(config.max_frame_size);
         let mut read_buf = BytesMut::with_capacity(8192);
@@ -879,8 +885,12 @@ mod tests {
                 protocol: None,
                 extensions: Vec::new(),
             };
-            let mut ws =
-                ServerWebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default(), accept, &[]);
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::new(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
             let cx = Cx::for_testing();
 
             assert!(ws.is_open(), "connection should start open");
@@ -913,7 +923,8 @@ mod tests {
             };
             let io = TestIo::with_read_data(encode_client_frame(Frame::close(Some(1000), None)))
                 .with_write_failure();
-            let mut ws = ServerWebSocket::from_upgraded(io, WebSocketConfig::default(), accept, &[]);
+            let mut ws =
+                ServerWebSocket::from_upgraded(io, WebSocketConfig::default(), accept, &[]);
             let cx = Cx::for_testing();
 
             let err = ws

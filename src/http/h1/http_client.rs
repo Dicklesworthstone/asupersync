@@ -331,12 +331,14 @@ impl ParsedUrl {
         };
 
         // RFC 3986: authority ends at the first '/', '?', or '#'.
-        let authority_end = rest
-            .find(['/', '?', '#'])
-            .unwrap_or(rest.len());
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let authority = &rest[..authority_end];
         let path_and_rest = &rest[authority_end..];
-        let path = if path_and_rest.is_empty() { "/" } else { path_and_rest };
+        let path = if path_and_rest.is_empty() {
+            "/"
+        } else {
+            path_and_rest
+        };
 
         // Reject userinfo (user:pass@host) per RFC 9110 Section 4.2.4.
         // Forwarding credentials in the URL to the Host header can cause
