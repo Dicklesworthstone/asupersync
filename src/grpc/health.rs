@@ -327,19 +327,38 @@ impl HealthService {
         *reporter_counts.entry(service.to_string()).or_insert(0) += 1;
     }
 
-    fn release_reporter(&self, service: &str) -> bool {
+    fn release_reporter_and_maybe_clear_status(&self, service: &str) {
+        self.release_reporter_and_maybe_clear_status_with_hook(service, || {});
+    }
+
+    fn release_reporter_and_maybe_clear_status_with_hook<F>(
+        &self,
+        service: &str,
+        before_final_clear: F,
+    ) where
+        F: FnOnce(),
+    {
         let mut reporter_counts = self.reporter_counts.write();
-        match reporter_counts.entry(service.to_string()) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if *entry.get() > 1 {
-                    *entry.get_mut() -= 1;
-                    false
-                } else {
-                    entry.remove();
-                    true
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(_) => false,
+        let std::collections::hash_map::Entry::Occupied(mut entry) =
+            reporter_counts.entry(service.to_string())
+        else {
+            return;
+        };
+
+        if *entry.get() > 1 {
+            *entry.get_mut() -= 1;
+            return;
+        }
+
+        // Hold reporter_counts across the final clear so a replacement reporter
+        // cannot slip in between count release and status removal.
+        let mut statuses = self.statuses.write();
+        before_final_clear();
+        let changed = statuses.remove(service).is_some();
+        entry.remove();
+        if changed {
+            self.bump_watch_version(service);
+            self.version.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -524,10 +543,8 @@ impl HealthReporter {
 
 impl Drop for HealthReporter {
     fn drop(&mut self) {
-        // Only the final reporter for a service clears the shared status.
-        if self.service.release_reporter(&self.service_name) {
-            self.service.clear_status(&self.service_name);
-        }
+        self.service
+            .release_reporter_and_maybe_clear_status(&self.service_name);
     }
 }
 
@@ -1038,6 +1055,51 @@ mod tests {
             service.get_status("shared.Service").is_none()
         );
         crate::test_complete!("health_reporter_only_final_drop_clears_shared_service_status");
+    }
+
+    #[test]
+    fn health_reporter_final_drop_does_not_clear_replacement_reporter_status() {
+        init_test("health_reporter_final_drop_does_not_clear_replacement_reporter_status");
+        let service = HealthService::new();
+        let reporter = HealthReporter::new(service.clone(), "race.Service");
+        reporter.set_serving();
+        let _reporter = std::mem::ManuallyDrop::new(reporter);
+
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (created_tx, created_rx) = std::sync::mpsc::channel();
+        let service_for_thread = service.clone();
+        let handle = std::thread::spawn(move || {
+            attempt_rx.recv().unwrap();
+            let replacement = HealthReporter::new(service_for_thread.clone(), "race.Service");
+            replacement.set_not_serving();
+            created_tx.send(()).unwrap();
+            replacement
+        });
+
+        service.release_reporter_and_maybe_clear_status_with_hook("race.Service", || {
+            attempt_tx.send(()).unwrap();
+            std::thread::yield_now();
+        });
+
+        created_rx.recv().unwrap();
+        crate::assert_with_log!(
+            service.get_status("race.Service") == Some(ServingStatus::NotServing),
+            "replacement reporter survives final-drop clear window",
+            Some(ServingStatus::NotServing),
+            service.get_status("race.Service")
+        );
+
+        let replacement = handle.join().unwrap();
+        drop(replacement);
+        crate::assert_with_log!(
+            service.get_status("race.Service").is_none(),
+            "replacement final drop still clears registration",
+            true,
+            service.get_status("race.Service").is_none()
+        );
+        crate::test_complete!(
+            "health_reporter_final_drop_does_not_clear_replacement_reporter_status"
+        );
     }
 
     #[test]
