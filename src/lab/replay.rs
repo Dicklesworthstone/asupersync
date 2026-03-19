@@ -931,6 +931,366 @@ impl Default for DivergenceCorpusRegistry {
     }
 }
 
+/// Schema version for the retained divergence summary payload.
+pub const DIFFERENTIAL_SUMMARY_SCHEMA_VERSION: &str = "lab-live-differential-summary-v1";
+/// Schema version for runtime/failure artifact linkage.
+pub const DIFFERENTIAL_FAILURES_SCHEMA_VERSION: &str = "lab-live-differential-failures-v1";
+/// Schema version for mismatch/deviation details.
+pub const DIFFERENTIAL_DEVIATIONS_SCHEMA_VERSION: &str = "lab-live-differential-deviations-v1";
+/// Schema version for the replay/minimization repro manifest.
+pub const DIFFERENTIAL_REPRO_MANIFEST_SCHEMA_VERSION: &str =
+    "lab-live-differential-repro-manifest-v1";
+
+/// Serializable crashpack linkage metadata for retained divergence bundles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DifferentialCrashpackReference {
+    /// Crashpack artifact path.
+    pub path: String,
+    /// Stable crashpack identifier.
+    pub id: String,
+    /// Canonical trace fingerprint associated with the crashpack.
+    pub fingerprint: u64,
+    /// One-line replay command for the crashpack.
+    pub replay_command: String,
+}
+
+impl DifferentialCrashpackReference {
+    /// Convert an existing runtime crashpack link into the retained schema.
+    #[must_use]
+    pub fn from_runtime_link(link: &CrashpackLink) -> Self {
+        Self {
+            path: link.path.clone(),
+            id: link.id.clone(),
+            fingerprint: link.fingerprint,
+            replay_command: link.replay.command_line.clone(),
+        }
+    }
+
+    /// Infer crashpack linkage from normalized provenance when the artifact path
+    /// already points at a crashpack-like artifact.
+    #[must_use]
+    pub fn from_provenance(provenance: &crate::lab::dual_run::ReplayMetadata) -> Option<Self> {
+        let path = provenance.artifact_path.as_ref()?;
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        if !file_name.contains("crashpack") {
+            return None;
+        }
+        let fingerprint = provenance.trace_fingerprint?;
+        Some(Self {
+            path: path.clone(),
+            id: format!(
+                "crashpack-{:016x}-{:016x}",
+                provenance.effective_seed, fingerprint
+            ),
+            fingerprint,
+            replay_command: provenance
+                .repro_command
+                .clone()
+                .unwrap_or_else(|| provenance.default_repro_command()),
+        })
+    }
+}
+
+/// One runtime-side artifact record inside `differential_failures.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DifferentialFailureArtifact {
+    /// Runtime side that produced the artifact.
+    pub runtime_kind: String,
+    /// Canonical normalized-record path inside the retained bundle.
+    pub normalized_record_path: String,
+    /// Optional source artifact path from the original execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    /// Replay command for rerunning this side.
+    pub repro_command: String,
+    /// Crashpack metadata when the source artifact is a crashpack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crashpack_link: Option<DifferentialCrashpackReference>,
+    /// Side-specific invariant violations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariant_violations: Vec<String>,
+}
+
+impl DifferentialFailureArtifact {
+    #[must_use]
+    fn from_observable(
+        observable: &crate::lab::dual_run::NormalizedObservable,
+        normalized_record_path: impl Into<String>,
+        invariant_violations: &[String],
+    ) -> Self {
+        let repro_command = observable
+            .provenance
+            .repro_command
+            .clone()
+            .unwrap_or_else(|| observable.provenance.default_repro_command());
+
+        Self {
+            runtime_kind: observable.runtime_kind.to_string(),
+            normalized_record_path: normalized_record_path.into(),
+            artifact_path: observable.provenance.artifact_path.clone(),
+            repro_command,
+            crashpack_link: DifferentialCrashpackReference::from_provenance(&observable.provenance),
+            invariant_violations: invariant_violations.to_vec(),
+        }
+    }
+}
+
+/// Stable contents for `differential_summary.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DifferentialSummaryDocument {
+    /// Stable schema discriminator.
+    pub schema_version: String,
+    /// Stable divergence entry identifier.
+    pub entry_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Surface identifier.
+    pub surface_id: String,
+    /// Surface contract version.
+    pub surface_contract_version: String,
+    /// Human-readable verdict summary.
+    pub verdict_summary: String,
+    /// Policy-layer summary.
+    pub policy_summary: String,
+    /// Divergence class retained for the bundle.
+    pub divergence_class: String,
+    /// Final policy class retained for the bundle.
+    pub policy_class: DifferentialPolicyClass,
+    /// Current promotion state.
+    pub regression_promotion_state: RegressionPromotionState,
+    /// Stable mismatch field names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mismatch_fields: Vec<String>,
+    /// Number of mismatch fields retained in the summary.
+    pub mismatch_count: usize,
+    /// Whether the underlying run semantically passed.
+    pub passed: bool,
+    /// Number of lab-side invariant violations.
+    pub lab_invariant_violation_count: usize,
+    /// Number of live-side invariant violations.
+    pub live_invariant_violation_count: usize,
+    /// Retained bundle strength.
+    pub bundle_level: DivergenceBundleLevel,
+    /// Stable retained bundle root.
+    pub bundle_root: String,
+}
+
+/// Stable contents for `differential_failures.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DifferentialFailuresDocument {
+    /// Stable schema discriminator.
+    pub schema_version: String,
+    /// Stable divergence entry identifier.
+    pub entry_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Surface identifier.
+    pub surface_id: String,
+    /// Runtime-side artifact linkage records.
+    pub failure_artifacts: Vec<DifferentialFailureArtifact>,
+}
+
+/// Stable contents for `differential_deviations.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DifferentialDeviationsDocument {
+    /// Stable schema discriminator.
+    pub schema_version: String,
+    /// Stable divergence entry identifier.
+    pub entry_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Surface identifier.
+    pub surface_id: String,
+    /// Policy-layer summary for the mismatch.
+    pub policy_summary: String,
+    /// Provisional divergence class.
+    pub provisional_class: String,
+    /// Suggested final divergence class when already known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_final_class: Option<String>,
+    /// Human-readable explanation for downstream reports.
+    pub explanation: String,
+    /// Stable semantic mismatches in field order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mismatches: Vec<crate::lab::dual_run::SemanticMismatch>,
+    /// Lab-side invariant violations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lab_invariant_violations: Vec<String>,
+    /// Live-side invariant violations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_invariant_violations: Vec<String>,
+}
+
+/// Stable contents for `differential_repro_manifest.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DifferentialReproManifest {
+    /// Stable schema discriminator.
+    pub schema_version: String,
+    /// Stable divergence entry identifier.
+    pub entry_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Surface identifier.
+    pub surface_id: String,
+    /// Surface contract version.
+    pub surface_contract_version: String,
+    /// Divergence class retained for the bundle.
+    pub divergence_class: String,
+    /// Final policy class retained for the bundle.
+    pub policy_class: DifferentialPolicyClass,
+    /// Current promotion state.
+    pub regression_promotion_state: RegressionPromotionState,
+    /// Automatic rerun decision from the policy layer.
+    pub rerun_decision: crate::lab::dual_run::RerunDecision,
+    /// Original first-seen run context.
+    pub first_seen: DivergenceFirstSeenContext,
+    /// Seed lineage for replay/reproduction.
+    pub seed_lineage: crate::lab::dual_run::SeedLineageRecord,
+    /// Shrinker/minimization lineage.
+    pub minimization_lineage: DivergenceMinimizationLineage,
+    /// Stable retained bundle root.
+    pub bundle_root: String,
+    /// Stable retained summary path.
+    pub summary_path: String,
+    /// Stable retained deviations path.
+    pub deviations_path: String,
+    /// Stable retained failures path.
+    pub failure_artifacts_path: String,
+    /// Stable retained lab normalized observable path.
+    pub lab_normalized_path: String,
+    /// Stable retained live normalized observable path.
+    pub live_normalized_path: String,
+    /// Stable reproduction commands across both sides.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repro_commands: Vec<String>,
+    /// Promoted regression scenario identifier when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promoted_scenario_id: Option<String>,
+}
+
+/// Complete in-memory payload set for a retained divergence bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DifferentialBundleArtifacts {
+    /// Summary payload for `differential_summary.json`.
+    pub summary: DifferentialSummaryDocument,
+    /// Artifact linkage payload for `differential_failures.json`.
+    pub failures: DifferentialFailuresDocument,
+    /// Mismatch/deviation payload for `differential_deviations.json`.
+    pub deviations: DifferentialDeviationsDocument,
+    /// Replay/minimization manifest for `differential_repro_manifest.json`.
+    pub repro_manifest: DifferentialReproManifest,
+    /// Canonical lab-side normalized observable for `lab_normalized.json`.
+    pub lab_normalized: crate::lab::dual_run::NormalizedObservable,
+    /// Canonical live-side normalized observable for `live_normalized.json`.
+    pub live_normalized: crate::lab::dual_run::NormalizedObservable,
+}
+
+impl DifferentialBundleArtifacts {
+    /// Build the full retained bundle payload set from a divergence entry and
+    /// the originating differential result.
+    #[must_use]
+    pub fn from_dual_run_result(
+        entry: &DivergenceCorpusEntry,
+        result: &crate::lab::dual_run::DualRunResult,
+    ) -> Self {
+        let failure_artifacts = vec![
+            DifferentialFailureArtifact::from_observable(
+                &result.lab,
+                entry.artifact_bundle.lab_normalized_path.clone(),
+                &result.lab_invariant_violations,
+            ),
+            DifferentialFailureArtifact::from_observable(
+                &result.live,
+                entry.artifact_bundle.live_normalized_path.clone(),
+                &result.live_invariant_violations,
+            ),
+        ];
+        let mut repro_commands: Vec<String> = failure_artifacts
+            .iter()
+            .map(|artifact| artifact.repro_command.clone())
+            .collect();
+        repro_commands.sort_unstable();
+        repro_commands.dedup();
+
+        let summary = DifferentialSummaryDocument {
+            schema_version: DIFFERENTIAL_SUMMARY_SCHEMA_VERSION.to_string(),
+            entry_id: entry.entry_id.clone(),
+            scenario_id: entry.scenario_id.clone(),
+            surface_id: entry.surface_id.clone(),
+            surface_contract_version: entry.surface_contract_version.clone(),
+            verdict_summary: result.verdict.summary(),
+            policy_summary: result.policy.summary(),
+            divergence_class: entry.divergence_class.clone(),
+            policy_class: entry.policy_class,
+            regression_promotion_state: entry.regression_promotion_state,
+            mismatch_fields: entry.mismatch_fields.clone(),
+            mismatch_count: entry.mismatch_fields.len(),
+            passed: result.passed(),
+            lab_invariant_violation_count: result.lab_invariant_violations.len(),
+            live_invariant_violation_count: result.live_invariant_violations.len(),
+            bundle_level: entry.retention.bundle_level,
+            bundle_root: entry.artifact_bundle.bundle_root.clone(),
+        };
+
+        let failures = DifferentialFailuresDocument {
+            schema_version: DIFFERENTIAL_FAILURES_SCHEMA_VERSION.to_string(),
+            entry_id: entry.entry_id.clone(),
+            scenario_id: entry.scenario_id.clone(),
+            surface_id: entry.surface_id.clone(),
+            failure_artifacts,
+        };
+
+        let deviations = DifferentialDeviationsDocument {
+            schema_version: DIFFERENTIAL_DEVIATIONS_SCHEMA_VERSION.to_string(),
+            entry_id: entry.entry_id.clone(),
+            scenario_id: entry.scenario_id.clone(),
+            surface_id: entry.surface_id.clone(),
+            policy_summary: result.policy.summary(),
+            provisional_class: result.policy.provisional_class.to_string(),
+            suggested_final_class: result
+                .policy
+                .suggested_final_class
+                .map(|class| class.to_string()),
+            explanation: result.policy.explanation.clone(),
+            mismatches: result.verdict.mismatches.clone(),
+            lab_invariant_violations: result.lab_invariant_violations.clone(),
+            live_invariant_violations: result.live_invariant_violations.clone(),
+        };
+
+        let repro_manifest = DifferentialReproManifest {
+            schema_version: DIFFERENTIAL_REPRO_MANIFEST_SCHEMA_VERSION.to_string(),
+            entry_id: entry.entry_id.clone(),
+            scenario_id: entry.scenario_id.clone(),
+            surface_id: entry.surface_id.clone(),
+            surface_contract_version: entry.surface_contract_version.clone(),
+            divergence_class: entry.divergence_class.clone(),
+            policy_class: entry.policy_class,
+            regression_promotion_state: entry.regression_promotion_state,
+            rerun_decision: result.policy.rerun_decision,
+            first_seen: entry.first_seen.clone(),
+            seed_lineage: entry.seed_lineage.clone(),
+            minimization_lineage: entry.minimization_lineage.clone(),
+            bundle_root: entry.artifact_bundle.bundle_root.clone(),
+            summary_path: entry.artifact_bundle.differential_summary_path.clone(),
+            deviations_path: entry.artifact_bundle.differential_deviations_path.clone(),
+            failure_artifacts_path: entry.artifact_bundle.differential_failures_path.clone(),
+            lab_normalized_path: entry.artifact_bundle.lab_normalized_path.clone(),
+            live_normalized_path: entry.artifact_bundle.live_normalized_path.clone(),
+            repro_commands,
+            promoted_scenario_id: entry.metadata.get("promoted_scenario_id").cloned(),
+        };
+
+        Self {
+            summary,
+            failures,
+            deviations,
+            repro_manifest,
+            lab_normalized: result.lab.clone(),
+            live_normalized: result.live.clone(),
+        }
+    }
+}
+
 fn sanitize_registry_component(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -1659,7 +2019,7 @@ mod tests {
             }
         }
 
-        DualRunHarness::phase1(
+        let mut result = DualRunHarness::phase1(
             "divergence.registry.case",
             "test.surface",
             "v1",
@@ -1679,7 +2039,21 @@ mod tests {
             };
             sem
         })
-        .run()
+        .run();
+
+        result.lab.provenance = result
+            .lab
+            .provenance
+            .clone()
+            .with_artifact_path("crashpack-divergence.registry.case.json")
+            .with_repro_command("cargo test divergence.registry.case -- --nocapture");
+        result.live.provenance = result
+            .live
+            .provenance
+            .clone()
+            .with_artifact_path("artifacts/live/divergence.registry.case.json")
+            .with_repro_command("cargo test divergence.registry.case -- --nocapture --live");
+        result
     }
 
     #[test]
@@ -1804,5 +2178,96 @@ mod tests {
         );
 
         crate::test_complete!("divergence_registry_upsert_is_deterministic");
+    }
+
+    #[test]
+    fn differential_bundle_artifacts_capture_repro_and_minimization_lineage() {
+        init_test("differential_bundle_artifacts_capture_repro_and_minimization_lineage");
+
+        let result = make_dual_run_divergence_result();
+        let entry = DivergenceCorpusEntry::from_dual_run_result(
+            &result,
+            "nightly",
+            "obligation_balance_mismatch",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+            "artifacts/differential/nightly/divergence.registry.case",
+        )
+        .with_first_seen_attempt(3, 2)
+        .with_minimization_lineage(
+            DivergenceMinimizationLineage::from_seed_lineage(&result.seed_lineage)
+                .with_minimized_seed(0x2A, "prefix_shrinker", true, true),
+        )
+        .promote_to_regression("regression.test.surface.obligation_leak.seed_2a");
+
+        let bundle = DifferentialBundleArtifacts::from_dual_run_result(&entry, &result);
+        assert_eq!(
+            bundle.summary.schema_version,
+            DIFFERENTIAL_SUMMARY_SCHEMA_VERSION
+        );
+        assert_eq!(
+            bundle.summary.bundle_root,
+            "artifacts/differential/nightly/divergence.registry.case"
+        );
+        assert_eq!(bundle.failures.failure_artifacts.len(), 2);
+        assert_eq!(
+            bundle.failures.failure_artifacts[0].runtime_kind,
+            "lab".to_string()
+        );
+        assert_eq!(
+            bundle.failures.failure_artifacts[0]
+                .crashpack_link
+                .as_ref()
+                .map(|link| link.path.as_str()),
+            Some("crashpack-divergence.registry.case.json")
+        );
+        assert_eq!(
+            bundle.repro_manifest.promoted_scenario_id.as_deref(),
+            Some("regression.test.surface.obligation_leak.seed_2a")
+        );
+        assert_eq!(
+            bundle.repro_manifest.minimization_lineage.shrink_status,
+            DivergenceShrinkStatus::PreservedSemanticClass
+        );
+        assert_eq!(
+            bundle.repro_manifest.failure_artifacts_path,
+            "artifacts/differential/nightly/divergence.registry.case/differential_failures.json"
+        );
+        assert!(
+            bundle
+                .repro_manifest
+                .repro_commands
+                .contains(&"cargo test divergence.registry.case -- --nocapture".to_string())
+        );
+        assert!(
+            bundle
+                .deviations
+                .mismatches
+                .iter()
+                .any(|mismatch| mismatch.field == "semantics.obligation_balance.balanced")
+        );
+
+        crate::test_complete!(
+            "differential_bundle_artifacts_capture_repro_and_minimization_lineage"
+        );
+    }
+
+    #[test]
+    fn inferred_crashpack_reference_requires_crashpack_like_path() {
+        init_test("inferred_crashpack_reference_requires_crashpack_like_path");
+
+        let result = make_dual_run_divergence_result();
+        let lab_link = DifferentialCrashpackReference::from_provenance(&result.lab.provenance);
+        let live_link = DifferentialCrashpackReference::from_provenance(&result.live.provenance);
+
+        assert!(
+            lab_link.is_some(),
+            "crashpack-like lab artifact should infer linkage"
+        );
+        assert!(
+            live_link.is_none(),
+            "non-crashpack live artifact should not infer crashpack linkage"
+        );
+
+        crate::test_complete!("inferred_crashpack_reference_requires_crashpack_like_path");
     }
 }
