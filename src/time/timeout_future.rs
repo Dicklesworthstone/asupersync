@@ -194,7 +194,11 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         cx: &mut Context<'_>,
         now: Time,
     ) -> Poll<Result<F::Output, Elapsed>> {
-        assert!(!self.completed, "timeout future polled after completion");
+        // Fail-closed: repoll after completion returns Elapsed instead of
+        // panicking so callers see a deterministic error.
+        if self.completed || self.timed_out {
+            return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
+        }
         // Poll the inner future first — if it's ready, return its result
         // even if the timeout has also elapsed, to avoid losing completed work.
         // SAFETY: We require F: Unpin, so this is safe
@@ -241,7 +245,12 @@ impl<F: Future> Future for TimeoutFuture<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        assert!(!*this.completed, "timeout future polled after completion");
+        // Fail-closed: repoll after completion returns Elapsed instead of
+        // panicking so callers that accidentally hold a reference see a
+        // deterministic error rather than unwinding.
+        if *this.completed || *this.timed_out {
+            return Poll::Ready(Err(Elapsed::new(this.sleep.deadline())));
+        }
 
         // Poll the inner future first — if it's ready, we should return its
         // result even if the timeout has also elapsed. This avoids losing
