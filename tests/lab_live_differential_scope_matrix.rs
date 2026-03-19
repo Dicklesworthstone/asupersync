@@ -63,14 +63,11 @@ fn doc_defines_rollout_phases_and_ordering() {
         );
     }
 
-    for token in [
-        "cancellation -> combinators -> channels -> obligations -> region close/quiescence -> sync primitives -> timers -> virtualized transport",
-    ] {
-        assert!(
-            doc.contains(token),
-            "document missing rollout order token: {token}"
-        );
-    }
+    let token = "cancellation -> combinators -> channels -> obligations -> region close/quiescence -> sync primitives -> timers -> virtualized transport";
+    assert!(
+        doc.contains(token),
+        "document missing rollout order token: {token}"
+    );
 }
 
 #[test]

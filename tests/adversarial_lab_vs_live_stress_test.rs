@@ -24,9 +24,9 @@ async fn adversarial_scenario(cx: Cx) -> String {
     let tx_clone = tx.clone();
     let cx1 = cx.clone();
     let fut1 = Box::pin(async move {
-        let _ = sleep(cx1.now(), SEND_DELAY).await;
+        sleep(cx1.now(), SEND_DELAY).await;
         if let Ok(permit) = tx_clone.reserve(&cx1).await {
-            let _ = permit.send("T1_WIN");
+            permit.send("T1_WIN");
         }
         "FUT1_DONE".to_string()
     }) as std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>;
@@ -40,7 +40,7 @@ async fn adversarial_scenario(cx: Cx) -> String {
 
         let cx2_timeout = cx2.clone();
         let timeout_fut = Box::pin(async move {
-            let _ = sleep(cx2_timeout.now(), RECV_TIMEOUT).await;
+            sleep(cx2_timeout.now(), RECV_TIMEOUT).await;
             "TIMEOUT"
         })
             as std::pin::Pin<Box<dyn std::future::Future<Output = &'static str> + Send>>;
@@ -50,7 +50,7 @@ async fn adversarial_scenario(cx: Cx) -> String {
     }) as std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>;
 
     let res = cx.race(vec![fut1, fut2]).await;
-    res.unwrap_or("JOIN_ERROR".to_string())
+    res.unwrap_or_else(|_| "JOIN_ERROR".to_string())
 }
 
 fn run_live_outcome(runtime: &asupersync::runtime::Runtime) -> String {
@@ -115,8 +115,7 @@ fn test_lab_simulates_all_live_outcomes() {
     for live_outcome in &live_outcomes {
         assert!(
             lab_outcomes.contains(live_outcome),
-            "Lab failed to simulate an outcome that occurred in live runtime: {}",
-            live_outcome
+            "Lab failed to simulate an outcome that occurred in live runtime: {live_outcome}",
         );
     }
 

@@ -93,6 +93,6 @@ fn test_acceptor_with_trailing_non_utf8_bytes() {
         Message::Binary(data) => {
             assert_eq!(data.as_ref(), &[0xFF, 0x00]);
         }
-        _ => panic!("Expected binary message, got {:?}", msg),
+        _ => panic!("Expected binary message, got {msg:?}"),
     }
 }

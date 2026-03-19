@@ -1945,6 +1945,7 @@ pub struct LiveRunResult {
 ///     });
 /// });
 /// ```
+#[must_use]
 pub fn run_live_adapter(
     identity: &DualRunScenarioIdentity,
     f: impl FnOnce(&LiveRunnerConfig, &mut LiveWitnessCollector),
@@ -2091,6 +2092,7 @@ impl CaptureManifest {
 /// Maps the four-valued `Outcome` enum to the normalized
 /// `TerminalOutcome` record. Error and cancel reason classes are
 /// derived from `Display` on the error/reason values.
+#[must_use]
 pub fn capture_terminal_outcome<T, E: fmt::Display>(
     outcome: &crate::types::outcome::Outcome<T, E>,
 ) -> TerminalOutcome {
@@ -2114,6 +2116,7 @@ pub fn capture_terminal_outcome<T, E: fmt::Display>(
 /// Capture a `TerminalOutcome` from a `Result<T, E>`.
 ///
 /// Maps `Ok` to `OutcomeClass::Ok` and `Err` to `OutcomeClass::Err`.
+#[must_use]
 pub fn capture_terminal_from_result<T, E: fmt::Display>(result: &Result<T, E>) -> TerminalOutcome {
     match result {
         Ok(_) => TerminalOutcome::ok(),
@@ -2235,6 +2238,8 @@ pub fn capture_cancellation(
 ///
 /// Returns `(NormalizedSemantics, CaptureManifest)` so callers know
 /// exactly how each field was derived.
+#[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn normalize_lab_report(
     report: &crate::lab::runtime::LabRunReport,
     surface_scope: &str,
@@ -2292,56 +2297,50 @@ pub fn normalize_lab_report(
 
     // Loser drain: check for loser_drain oracle.
     let loser_drain_entry = report.oracle_report.entry("loser_drain");
-    let loser_drain = match loser_drain_entry {
-        Some(entry) => {
-            manifest.observed("loser_drain", "oracle.loser_drain");
-            if entry.passed {
-                // Oracle passed but we don't know exact counts.
-                LoserDrainRecord {
-                    applicable: true,
-                    expected_losers: 0,
-                    drained_losers: 0,
-                    status: DrainStatus::Complete,
-                    evidence: Some("oracle.loser_drain.passed".to_string()),
-                }
-            } else {
-                LoserDrainRecord {
-                    applicable: true,
-                    expected_losers: 0,
-                    drained_losers: 0,
-                    status: DrainStatus::Incomplete,
-                    evidence: Some("oracle.loser_drain.failed".to_string()),
-                }
+    let loser_drain = if let Some(entry) = loser_drain_entry {
+        manifest.observed("loser_drain", "oracle.loser_drain");
+        if entry.passed {
+            // Oracle passed but we don't know exact counts.
+            LoserDrainRecord {
+                applicable: true,
+                expected_losers: 0,
+                drained_losers: 0,
+                status: DrainStatus::Complete,
+                evidence: Some("oracle.loser_drain.passed".to_string()),
+            }
+        } else {
+            LoserDrainRecord {
+                applicable: true,
+                expected_losers: 0,
+                drained_losers: 0,
+                status: DrainStatus::Incomplete,
+                evidence: Some("oracle.loser_drain.failed".to_string()),
             }
         }
-        None => {
-            manifest.inferred("loser_drain", "no_oracle_entry");
-            LoserDrainRecord::not_applicable()
-        }
+    } else {
+        manifest.inferred("loser_drain", "no_oracle_entry");
+        LoserDrainRecord::not_applicable()
     };
 
     // Cancellation: check for cancellation_protocol oracle.
     let cancel_entry = report.oracle_report.entry("cancellation_protocol");
-    let cancellation = match cancel_entry {
-        Some(entry) => {
-            manifest.observed("cancellation", "oracle.cancellation_protocol");
-            if entry.passed {
-                CancellationRecord::completed()
-            } else {
-                CancellationRecord {
-                    requested: true,
-                    acknowledged: false,
-                    cleanup_completed: false,
-                    finalization_completed: false,
-                    terminal_phase: CancelTerminalPhase::CancelRequested,
-                    checkpoint_observed: None,
-                }
+    let cancellation = if let Some(entry) = cancel_entry {
+        manifest.observed("cancellation", "oracle.cancellation_protocol");
+        if entry.passed {
+            CancellationRecord::completed()
+        } else {
+            CancellationRecord {
+                requested: true,
+                acknowledged: false,
+                cleanup_completed: false,
+                finalization_completed: false,
+                terminal_phase: CancelTerminalPhase::CancelRequested,
+                checkpoint_observed: None,
             }
         }
-        None => {
-            manifest.inferred("cancellation", "no_oracle_entry");
-            CancellationRecord::none()
-        }
+    } else {
+        manifest.inferred("cancellation", "no_oracle_entry");
+        CancellationRecord::none()
     };
 
     let semantics = NormalizedSemantics {
@@ -2359,6 +2358,7 @@ pub fn normalize_lab_report(
 /// Build a complete `NormalizedObservable` from a lab run.
 ///
 /// Combines `normalize_lab_report` with identity and provenance.
+#[must_use]
 pub fn normalize_lab_observable(
     identity: &DualRunScenarioIdentity,
     report: &crate::lab::runtime::LabRunReport,
@@ -2376,6 +2376,7 @@ pub fn normalize_lab_observable(
 }
 
 /// Build a complete `NormalizedObservable` from a live run result.
+#[must_use]
 pub fn normalize_live_observable(
     identity: &DualRunScenarioIdentity,
     live_result: &LiveRunResult,
@@ -2413,6 +2414,9 @@ pub struct PromotedFuzzScenario {
     pub campaign_base_seed: Option<u64>,
     /// Provenance: iteration index in the campaign.
     pub campaign_iteration: Option<usize>,
+    /// Optional artifact path for the source fuzz or regression bundle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_artifact_path: Option<String>,
 }
 
 impl PromotedFuzzScenario {
@@ -2423,6 +2427,27 @@ impl PromotedFuzzScenario {
             "ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
             self.replay_seed, self.identity.scenario_id
         )
+    }
+
+    /// Annotate the promoted scenario with the source artifact bundle path.
+    #[must_use]
+    pub fn with_source_artifact_path(mut self, path: impl Into<String>) -> Self {
+        self.source_artifact_path = Some(path.into());
+        self
+    }
+
+    /// Build lab replay metadata for this promoted fuzz scenario.
+    #[must_use]
+    pub fn lab_replay_metadata(&self) -> ReplayMetadata {
+        let mut metadata = self
+            .identity
+            .lab_replay_metadata()
+            .with_repro_command(self.repro_command());
+        metadata.trace_fingerprint = Some(self.trace_fingerprint);
+        if let Some(path) = &self.source_artifact_path {
+            metadata = metadata.with_artifact_path(path.clone());
+        }
+        metadata
     }
 }
 
@@ -2436,6 +2461,26 @@ impl fmt::Display for PromotedFuzzScenario {
             self.violation_categories.join(", ")
         )
     }
+}
+
+fn promoted_violation_categories(
+    violations: &[crate::lab::runtime::InvariantViolation],
+) -> Vec<String> {
+    use crate::lab::runtime::InvariantViolation;
+
+    let mut categories: Vec<String> = violations
+        .iter()
+        .map(|violation| match violation {
+            InvariantViolation::ObligationLeak { .. } => "obligation_leak".to_string(),
+            InvariantViolation::TaskLeak { .. } => "task_leak".to_string(),
+            InvariantViolation::ActorLeak { .. } => "actor_leak".to_string(),
+            InvariantViolation::QuiescenceViolation => "quiescence_violation".to_string(),
+            InvariantViolation::Futurelock { .. } => "futurelock".to_string(),
+        })
+        .collect();
+    categories.sort_unstable();
+    categories.dedup();
+    categories
 }
 
 /// Replayable differential scenario promoted from schedule exploration output.
@@ -2524,15 +2569,15 @@ pub fn promote_fuzz_finding(
     contract_version: &str,
 ) -> PromotedFuzzScenario {
     let replay_seed = finding.minimized_seed.unwrap_or(finding.seed);
-    let violation_cats: Vec<String> = finding
-        .violations
-        .iter()
-        .map(|v| format!("{v:?}"))
-        .collect();
+    let violation_cats = promoted_violation_categories(&finding.violations);
+    let primary_violation = violation_cats.first().map_or("unknown", String::as_str);
 
-    let scenario_id = format!("fuzz.{surface_id}.seed_{:x}", replay_seed & 0xFFFF_FFFF);
+    let scenario_id = format!(
+        "fuzz.{surface_id}.{primary_violation}.seed_{:x}",
+        replay_seed & 0xFFFF_FFFF
+    );
     let description = format!(
-        "Fuzz-discovered adversarial case: {} violation(s) at seed 0x{:X}",
+        "Fuzz-discovered {primary_violation} adversarial case: {} violation(s) at seed 0x{:X}",
         finding.violations.len(),
         finding.seed
     );
@@ -2549,7 +2594,12 @@ pub fn promote_fuzz_finding(
     .with_metadata(
         "trace_fingerprint",
         format!("0x{:X}", finding.trace_fingerprint),
-    );
+    )
+    .with_metadata(
+        "certificate_hash",
+        format!("0x{:X}", finding.certificate_hash),
+    )
+    .with_metadata("violation_categories", violation_cats.join(","));
 
     PromotedFuzzScenario {
         identity,
@@ -2561,6 +2611,7 @@ pub fn promote_fuzz_finding(
         description,
         campaign_base_seed: None,
         campaign_iteration: None,
+        source_artifact_path: None,
     }
 }
 
@@ -2571,12 +2622,16 @@ pub fn promote_regression_case(
     surface_id: &str,
     contract_version: &str,
 ) -> PromotedFuzzScenario {
+    let primary_violation = case
+        .violation_categories
+        .first()
+        .map_or("unknown", String::as_str);
     let scenario_id = format!(
-        "regression.{surface_id}.seed_{:x}",
+        "regression.{surface_id}.{primary_violation}.seed_{:x}",
         case.replay_seed & 0xFFFF_FFFF
     );
     let description = format!(
-        "Regression case: {} violation(s), replay seed 0x{:X}",
+        "Regression case ({primary_violation}): {} violation(s), replay seed 0x{:X}",
         case.violation_categories.len(),
         case.replay_seed
     );
@@ -2589,7 +2644,13 @@ pub fn promote_regression_case(
         case.replay_seed,
     )
     .with_metadata("promoted_from", "regression_case")
-    .with_metadata("original_seed", format!("0x{:X}", case.seed));
+    .with_metadata("original_seed", format!("0x{:X}", case.seed))
+    .with_metadata(
+        "trace_fingerprint",
+        format!("0x{:X}", case.trace_fingerprint),
+    )
+    .with_metadata("certificate_hash", format!("0x{:X}", case.certificate_hash))
+    .with_metadata("violation_categories", case.violation_categories.join(","));
 
     PromotedFuzzScenario {
         identity,
@@ -2601,6 +2662,7 @@ pub fn promote_regression_case(
         description,
         campaign_base_seed: None,
         campaign_iteration: None,
+        source_artifact_path: None,
     }
 }
 
@@ -2619,6 +2681,14 @@ pub fn promote_regression_corpus(
             let mut promoted = promote_regression_case(case, surface_id, contract_version);
             promoted.campaign_base_seed = Some(corpus.base_seed);
             promoted.campaign_iteration = Some(i);
+            promoted.identity.metadata.insert(
+                "campaign_base_seed".to_string(),
+                format!("0x{:X}", corpus.base_seed),
+            );
+            promoted
+                .identity
+                .metadata
+                .insert("campaign_iteration".to_string(), i.to_string());
             promoted
         })
         .collect()
@@ -3092,7 +3162,7 @@ mod tests {
         assert_eq!(seeds1, seeds2);
         assert_eq!(seeds1.len(), 5);
         // All seeds should be distinct.
-        let mut unique = seeds1.clone();
+        let mut unique = seeds1;
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), 5);
@@ -3167,7 +3237,7 @@ mod tests {
         assert_eq!(key1, key2);
         assert!(key1.contains("fam"));
         assert!(key1.contains("0xBEEF"));
-        assert!(key1.contains("3"));
+        assert!(key1.contains('3'));
         crate::test_complete!("execution_instance_key_stable");
     }
 
@@ -4046,9 +4116,9 @@ mod tests {
 
     #[test]
     fn harness_receives_correct_seeds() {
-        init_test("harness_receives_correct_seeds");
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
+        init_test("harness_receives_correct_seeds");
 
         let captured_lab_seed = Arc::new(AtomicU64::new(0));
         let captured_live_seed = Arc::new(AtomicU64::new(0));
@@ -4074,9 +4144,9 @@ mod tests {
 
     #[test]
     fn harness_with_custom_seed_plan() {
-        init_test("harness_with_custom_seed_plan");
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
+        init_test("harness_with_custom_seed_plan");
 
         let captured_lab = Arc::new(AtomicU64::new(0));
         let captured_live = Arc::new(AtomicU64::new(0));
@@ -4695,6 +4765,38 @@ mod tests {
     }
 
     #[test]
+    fn promote_fuzz_finding_stabilizes_violation_categories_and_metadata() {
+        init_test("promote_fuzz_finding_stabilizes_violation_categories_and_metadata");
+        let mut finding = make_test_fuzz_finding(0xD00D);
+        finding.violations = vec![
+            crate::lab::runtime::InvariantViolation::QuiescenceViolation,
+            crate::lab::runtime::InvariantViolation::Futurelock {
+                task: crate::types::TaskId::new_for_test(1, 0),
+                region: crate::types::RegionId::new_for_test(1, 0),
+                idle_steps: 1,
+                held: Vec::new(),
+            },
+            crate::lab::runtime::InvariantViolation::QuiescenceViolation,
+        ];
+
+        let promoted = promote_fuzz_finding(&finding, "cancellation", "v1");
+        assert_eq!(
+            promoted.violation_categories,
+            vec!["futurelock", "quiescence_violation"]
+        );
+        assert!(promoted.identity.scenario_id.contains("futurelock"));
+        assert_eq!(
+            promoted.identity.metadata.get("violation_categories"),
+            Some(&"futurelock,quiescence_violation".to_string())
+        );
+        assert_eq!(
+            promoted.identity.metadata.get("certificate_hash"),
+            Some(&"0xABCD".to_string())
+        );
+        crate::test_complete!("promote_fuzz_finding_stabilizes_violation_categories_and_metadata");
+    }
+
+    #[test]
     fn promote_fuzz_finding_repro_command() {
         init_test("promote_fuzz_finding_repro_command");
         let finding = make_test_fuzz_finding(42);
@@ -4719,12 +4821,37 @@ mod tests {
     fn promote_fuzz_finding_serde_roundtrip() {
         init_test("promote_fuzz_finding_serde_roundtrip");
         let finding = make_test_fuzz_finding(0xCAFE);
-        let promoted = promote_fuzz_finding(&finding, "test", "v1");
+        let promoted = promote_fuzz_finding(&finding, "test", "v1")
+            .with_source_artifact_path("/tmp/fuzz/report.json");
         let json = serde_json::to_string_pretty(&promoted).unwrap();
         let parsed: PromotedFuzzScenario = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.replay_seed, promoted.replay_seed);
         assert_eq!(parsed.original_seed, 0xCAFE);
+        assert_eq!(
+            parsed.source_artifact_path.as_deref(),
+            Some("/tmp/fuzz/report.json")
+        );
         crate::test_complete!("promote_fuzz_finding_serde_roundtrip");
+    }
+
+    #[test]
+    fn promoted_fuzz_scenario_replay_metadata_includes_artifact_and_repro() {
+        init_test("promoted_fuzz_scenario_replay_metadata_includes_artifact_and_repro");
+        let finding = make_test_fuzz_finding(0xCAFE);
+        let promoted = promote_fuzz_finding(&finding, "test.surface", "v1")
+            .with_source_artifact_path("/tmp/fuzz/report.json");
+
+        let metadata = promoted.lab_replay_metadata();
+        assert_eq!(metadata.trace_fingerprint, Some(promoted.trace_fingerprint));
+        assert_eq!(
+            metadata.artifact_path.as_deref(),
+            Some("/tmp/fuzz/report.json")
+        );
+        assert_eq!(
+            metadata.repro_command.as_deref(),
+            Some(promoted.repro_command().as_str())
+        );
+        crate::test_complete!("promoted_fuzz_scenario_replay_metadata_includes_artifact_and_repro");
     }
 
     #[test]
@@ -4792,6 +4919,54 @@ mod tests {
 
         assert!(result.passed());
         crate::test_complete!("promoted_fuzz_scenario_runs_through_harness");
+    }
+
+    #[test]
+    fn promoted_regression_corpus_case_runs_through_harness_with_campaign_metadata() {
+        init_test("promoted_regression_corpus_case_runs_through_harness_with_campaign_metadata");
+        let corpus = crate::lab::fuzz::FuzzRegressionCorpus {
+            schema_version: 1,
+            base_seed: 0x2A,
+            iterations: 3,
+            cases: vec![crate::lab::fuzz::FuzzRegressionCase {
+                seed: 0x10,
+                replay_seed: 0x11,
+                certificate_hash: 0x2222,
+                trace_fingerprint: 0x3333,
+                violation_categories: vec!["obligation_leak".to_string()],
+            }],
+        };
+        let promoted = promote_regression_corpus(&corpus, "test.surface", "v1");
+        let promoted = promoted[0]
+            .clone()
+            .with_source_artifact_path("/tmp/fuzz/corpus.json");
+
+        assert_eq!(promoted.campaign_base_seed, Some(0x2A));
+        assert_eq!(promoted.campaign_iteration, Some(0));
+        assert_eq!(
+            promoted.identity.metadata.get("campaign_base_seed"),
+            Some(&"0x2A".to_string())
+        );
+        assert_eq!(
+            promoted.identity.metadata.get("campaign_iteration"),
+            Some(&"0".to_string())
+        );
+
+        let metadata = promoted.lab_replay_metadata();
+        assert_eq!(metadata.trace_fingerprint, Some(0x3333));
+        assert_eq!(
+            metadata.artifact_path.as_deref(),
+            Some("/tmp/fuzz/corpus.json")
+        );
+
+        let result = DualRunHarness::from_identity(promoted.identity)
+            .lab(|_config| make_happy_semantics())
+            .live(|_seed, _entropy| make_happy_semantics())
+            .run();
+        assert!(result.passed());
+        crate::test_complete!(
+            "promoted_regression_corpus_case_runs_through_harness_with_campaign_metadata"
+        );
     }
 
     fn make_test_exploration_report() -> crate::lab::explorer::ExplorationReport {

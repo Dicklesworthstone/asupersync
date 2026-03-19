@@ -331,6 +331,7 @@ impl HealthService {
         self.release_reporter_and_maybe_clear_status_with_hook(service, || {});
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     fn release_reporter_and_maybe_clear_status_with_hook<F>(
         &self,
         service: &str,
