@@ -57,6 +57,10 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
                 let s = String::from_utf8(mem::take(&mut this.buf))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
 
+                if s.is_err() {
+                    this.completed = true;
+                }
+
                 return Poll::Ready(Some(s));
             }
 
