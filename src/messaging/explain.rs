@@ -142,8 +142,22 @@ impl PartialEq for ExplainDecisionRecord {
             && self.audit_entry.calibration_score.to_bits()
                 == other.audit_entry.calibration_score.to_bits()
             && self.audit_entry.fallback_active == other.audit_entry.fallback_active
-            && self.audit_entry.posterior_snapshot == other.audit_entry.posterior_snapshot
-            && self.audit_entry.expected_loss_by_action == other.audit_entry.expected_loss_by_action
+            && self.audit_entry.posterior_snapshot.len()
+                == other.audit_entry.posterior_snapshot.len()
+            && self
+                .audit_entry
+                .posterior_snapshot
+                .iter()
+                .zip(&other.audit_entry.posterior_snapshot)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            && self.audit_entry.expected_loss_by_action.len()
+                == other.audit_entry.expected_loss_by_action.len()
+            && self
+                .audit_entry
+                .expected_loss_by_action
+                .iter()
+                .zip(other.audit_entry.expected_loss_by_action.iter())
+                .all(|((k1, v1), (k2, v2))| k1 == k2 && v1.to_bits() == v2.to_bits())
             && self.audit_entry.ts_unix_ms == other.audit_entry.ts_unix_ms
             && self.evidence == other.evidence
     }

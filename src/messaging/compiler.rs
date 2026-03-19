@@ -746,9 +746,10 @@ fn estimate_protocol_cost(protocol: &ProtocolContract, subjects: &[SubjectSchema
     let mut cost =
         CostVector::max_dimensions(protocol_dependencies(protocol).into_iter().filter_map(
             |dependency| {
+                let dep_pattern = SubjectPattern::new(&dependency);
                 subjects
                     .iter()
-                    .find(|subject| subject.pattern.as_str() == dependency)
+                    .find(|subject| subject.pattern.overlaps(&dep_pattern))
                     .map(CostVector::estimate_subject)
             },
         ));
@@ -921,7 +922,7 @@ fn apply_evidence_policy_delta(cost: &mut CostVector, policy: &EvidencePolicy) {
     let sampled_bytes = (policy.sampling_ratio.clamp(0.0, 1.0) * 128.0).round() as u64;
     add_evidence_bytes(
         cost,
-        sampled_bytes / 2,
+        sampled_bytes.saturating_add(1) / 2,
         sampled_bytes,
         sampled_bytes.saturating_mul(2),
     );
