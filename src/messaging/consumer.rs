@@ -16,8 +16,15 @@ use crate::obligation::ledger::{LedgerStats, ObligationLedger, ObligationToken};
 use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
 use crate::remote::NodeId;
 use crate::types::{ObligationId, RegionId, TaskId, Time};
+use crate::util::DetHasher;
+use franken_decision::{
+    DecisionAuditEntry, DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior,
+    evaluate,
+};
+use franken_kernel::{DecisionId, TraceId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::panic::Location;
 use std::time::Duration;
 use thiserror::Error;
@@ -78,6 +85,17 @@ pub enum ConsumerDemandClass {
     CatchUp,
     /// Replay a historical slice.
     Replay,
+}
+
+impl ConsumerDemandClass {
+    #[must_use]
+    const fn priority_rank(self) -> u8 {
+        match self {
+            Self::Tail => 0,
+            Self::CatchUp => 1,
+            Self::Replay => 2,
+        }
+    }
 }
 
 /// Request selector captured in an attempt certificate.
@@ -802,6 +820,10 @@ pub struct FabricConsumerConfig {
     pub deliver_policy: DeliverPolicy,
     /// Whether explicit flow-control pause/resume is enabled.
     pub flow_control: bool,
+    /// Stable kernel mode or audit-backed adaptive consumer scheduling.
+    pub adaptive_kernel: AdaptiveConsumerKernel,
+    /// Bounded overflow rule applied when the pull queue is full.
+    pub overflow_policy: ConsumerOverflowPolicy,
     /// Heartbeat cadence while actively delivering.
     pub heartbeat: Option<Duration>,
     /// Heartbeat cadence while idle.
@@ -821,6 +843,8 @@ impl Default for FabricConsumerConfig {
             replay_policy: ConsumerReplayPolicy::Instant,
             deliver_policy: DeliverPolicy::All,
             flow_control: false,
+            adaptive_kernel: AdaptiveConsumerKernel::Stable,
+            overflow_policy: ConsumerOverflowPolicy::RejectNew,
             heartbeat: None,
             idle_heartbeat: None,
         }
@@ -855,6 +879,26 @@ impl FabricConsumerConfig {
         }
         Ok(())
     }
+}
+
+/// Runtime mode for consumer scheduling decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AdaptiveConsumerKernel {
+    /// Keep deterministic stable defaults without decision-audit artifacts.
+    #[default]
+    Stable,
+    /// Evaluate auditable FrankenSuite decision contracts for material choices.
+    AuditBacked,
+}
+
+/// Overflow handling when the consumer's pull queue reaches `max_waiting`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ConsumerOverflowPolicy {
+    /// Reject new requests once the queue is full.
+    #[default]
+    RejectNew,
+    /// Permit higher-priority requests to evict lower-priority queued work.
+    ReplaceLowestPriority,
 }
 
 /// Dynamic consumer-delivery policy toggles.
@@ -906,6 +950,8 @@ pub struct PullRequest {
     pub expires: Option<u64>,
     /// Whether the request should fail fast when no data is currently available.
     pub no_wait: bool,
+    /// Preferred relay/client that should serve through a temporary capability lease.
+    pub pinned_client: Option<NodeId>,
 }
 
 impl PullRequest {
@@ -923,6 +969,7 @@ impl PullRequest {
             max_bytes: None,
             expires: None,
             no_wait: false,
+            pinned_client: None,
         })
     }
 
@@ -944,6 +991,13 @@ impl PullRequest {
     #[must_use]
     pub fn with_no_wait(mut self) -> Self {
         self.no_wait = true;
+        self
+    }
+
+    /// Pin the request to a preferred leased relay/client when possible.
+    #[must_use]
+    pub fn with_pinned_client(mut self, client: NodeId) -> Self {
+        self.pinned_client = Some(client);
         self
     }
 
@@ -969,6 +1023,7 @@ impl PullRequest {
 struct QueuedPullRequest {
     request: PullRequest,
     enqueued_at_tick: u64,
+    enqueue_order: u64,
 }
 
 /// Pending acknowledgement tracked against an obligation id.
@@ -1095,6 +1150,56 @@ pub struct DeadLetterTransfer {
     pub reason: String,
 }
 
+/// Typed consumer decision surfaces that can emit FrankenSuite audit entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConsumerDecisionKind {
+    /// Ordering or lease choice for queued pull work.
+    PullScheduling,
+    /// Full-queue handling and bounded overflow policy.
+    Overflow,
+    /// Retry/delay/dead-letter choice for a failed delivery.
+    Redelivery,
+}
+
+/// Material action chosen by the redelivery policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConsumerRedeliveryAction {
+    /// Retry immediately under a fresh obligation.
+    RetryNow,
+    /// Keep the current delivery pending and defer the retry.
+    Delay,
+    /// Stop retrying and route the delivery to dead letter handling.
+    DeadLetter,
+}
+
+impl ConsumerRedeliveryAction {
+    #[must_use]
+    const fn label(self) -> &'static str {
+        match self {
+            Self::RetryNow => "retry_now",
+            Self::Delay => "delay",
+            Self::DeadLetter => "dead_letter",
+        }
+    }
+}
+
+/// Auditable record of one consumer scheduling / retry decision.
+#[derive(Debug, Clone)]
+pub struct ConsumerDecisionRecord {
+    /// Decision surface that produced this record.
+    pub kind: ConsumerDecisionKind,
+    /// Chosen action label from the underlying decision contract.
+    pub action_name: String,
+    /// Primary demand class or retry lane this decision was about.
+    pub demand_class: Option<ConsumerDemandClass>,
+    /// Pending obligation implicated by the decision, when any.
+    pub obligation_id: Option<ObligationId>,
+    /// Preferred pinned client considered by the decision, when any.
+    pub pinned_client: Option<NodeId>,
+    /// Decision audit entry convertible into the evidence ledger.
+    pub audit: DecisionAuditEntry,
+}
+
 /// High-level policy-driven consumer engine layered on top of cursor leases.
 #[derive(Debug)]
 pub struct FabricConsumer {
@@ -1105,7 +1210,9 @@ pub struct FabricConsumer {
     policy: FabricConsumerDeliveryPolicy,
     state: FabricConsumerState,
     pending_ack_tokens: BTreeMap<ObligationId, ObligationToken>,
+    decision_log: Vec<ConsumerDecisionRecord>,
     next_event_nanos: u64,
+    next_pull_enqueue_order: u64,
     waiting_pull_requests: Vec<QueuedPullRequest>,
 }
 
@@ -1133,7 +1240,9 @@ impl FabricConsumer {
             policy: FabricConsumerDeliveryPolicy::default(),
             state: FabricConsumerState::default(),
             pending_ack_tokens: BTreeMap::new(),
+            decision_log: Vec::new(),
             next_event_nanos: 0,
+            next_pull_enqueue_order: 0,
             waiting_pull_requests: Vec::new(),
         })
     }
@@ -1166,6 +1275,12 @@ impl FabricConsumer {
     #[must_use]
     pub fn obligation_stats(&self) -> LedgerStats {
         self.ledger.stats()
+    }
+
+    /// Return the in-memory decision log for audit-backed consumer kernels.
+    #[must_use]
+    pub fn decision_log(&self) -> &[ConsumerDecisionRecord] {
+        &self.decision_log
     }
 
     /// Return the number of queued pull requests still waiting for service.
@@ -1214,13 +1329,18 @@ impl FabricConsumer {
         }
         let _ = request.effective_batch_size()?;
         if self.waiting_pull_requests.len() >= self.config.max_waiting {
-            return Err(FabricConsumerError::MaxWaitingExceeded {
-                limit: self.config.max_waiting,
-            });
+            if !self.resolve_pull_overflow(&request) {
+                return Err(FabricConsumerError::MaxWaitingExceeded {
+                    limit: self.config.max_waiting,
+                });
+            }
         }
-        self.waiting_pull_requests.push(QueuedPullRequest {
+        let enqueued_at_tick = self.cursor.ticket_clock();
+        let enqueue_order = self.allocate_pull_enqueue_order();
+        self.insert_pull_request(QueuedPullRequest {
             request,
-            enqueued_at_tick: self.cursor.ticket_clock(),
+            enqueued_at_tick,
+            enqueue_order,
         });
         Ok(())
     }
@@ -1271,9 +1391,19 @@ impl FabricConsumer {
                 });
             }
             queued.enqueued_at_tick = self.cursor.ticket_clock();
-            self.waiting_pull_requests.insert(0, queued);
+            self.insert_pull_request(queued);
             return Ok(PullDispatchOutcome::Waiting(request));
         };
+        if let Some(pinned_client) = &request.pinned_client
+            && ticket
+                .as_ref()
+                .is_some_and(|provided| &provided.relay != pinned_client)
+        {
+            return Err(FabricConsumerError::PinnedClientTicketMismatch {
+                pinned_client: pinned_client.clone(),
+                ticket_relay: ticket.expect("ticket presence checked above").relay.clone(),
+            });
+        }
 
         let delivery = self.schedule_delivery(
             ScheduledConsumerRequest::Pull(request),
@@ -1362,6 +1492,26 @@ impl FabricConsumer {
         if self.policy.paused {
             return Err(FabricConsumerError::ConsumerPaused);
         }
+        let (redelivery_action, decision_record) =
+            self.decide_redelivery_action(&pending, attempt.obligation_id);
+        if let Some(record) = decision_record {
+            self.decision_log.push(record);
+        }
+        match redelivery_action {
+            ConsumerRedeliveryAction::RetryNow => {}
+            ConsumerRedeliveryAction::Delay => {
+                return Err(FabricConsumerError::RedeliveryDeferred {
+                    obligation_id: attempt.obligation_id,
+                    delivery_attempt: pending.delivery_attempt.saturating_add(1),
+                });
+            }
+            ConsumerRedeliveryAction::DeadLetter => {
+                return Err(FabricConsumerError::RedeliveryRequiresDeadLetter {
+                    obligation_id: attempt.obligation_id,
+                    delivery_attempt: pending.delivery_attempt.saturating_add(1),
+                });
+            }
+        }
 
         let removed = self
             .state
@@ -1446,6 +1596,85 @@ impl FabricConsumer {
         None
     }
 
+    fn allocate_pull_enqueue_order(&mut self) -> u64 {
+        let order = self.next_pull_enqueue_order;
+        self.next_pull_enqueue_order = self.next_pull_enqueue_order.saturating_add(1);
+        order
+    }
+
+    fn insert_pull_request(&mut self, queued: QueuedPullRequest) {
+        let insert_at = self
+            .waiting_pull_requests
+            .iter()
+            .position(|existing| {
+                queued.request.demand_class.priority_rank()
+                    < existing.request.demand_class.priority_rank()
+                    || (queued.request.demand_class.priority_rank()
+                        == existing.request.demand_class.priority_rank()
+                        && queued.enqueue_order < existing.enqueue_order)
+            })
+            .unwrap_or(self.waiting_pull_requests.len());
+        self.waiting_pull_requests.insert(insert_at, queued);
+    }
+
+    fn resolve_pull_overflow(&mut self, request: &PullRequest) -> bool {
+        let Some(worst_index) = self
+            .waiting_pull_requests
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, queued)| {
+                (
+                    queued.request.demand_class.priority_rank(),
+                    queued.enqueue_order,
+                )
+            })
+            .map(|(index, _)| index)
+        else {
+            return true;
+        };
+
+        let incoming_rank = request.demand_class.priority_rank();
+        let evicted = self.waiting_pull_requests[worst_index].clone();
+        let replaced = self.config.adaptive_kernel == AdaptiveConsumerKernel::AuditBacked
+            && self.config.overflow_policy == ConsumerOverflowPolicy::ReplaceLowestPriority
+            && incoming_rank < evicted.request.demand_class.priority_rank();
+        if replaced {
+            self.waiting_pull_requests.remove(worst_index);
+        }
+
+        if self.config.adaptive_kernel == AdaptiveConsumerKernel::AuditBacked {
+            let snapshot = ConsumerOverflowDecisionSnapshot {
+                incoming_demand: request.demand_class,
+                evicted_demand: evicted.request.demand_class,
+                replaced,
+            };
+            let action = if replaced {
+                ConsumerOverflowDecisionAction::ReplaceLowestPriority
+            } else {
+                ConsumerOverflowDecisionAction::RejectNew
+            };
+            let contract = ConsumerOverflowDecisionContract::new(action);
+            let posterior = snapshot.posterior();
+            let ctx = self.decision_context(
+                &snapshot,
+                snapshot.calibration_score(),
+                snapshot.e_process(),
+                snapshot.ci_width(),
+            );
+            let outcome = evaluate(&contract, &posterior, &ctx);
+            self.decision_log.push(ConsumerDecisionRecord {
+                kind: ConsumerDecisionKind::Overflow,
+                action_name: outcome.action_name,
+                demand_class: Some(request.demand_class),
+                obligation_id: None,
+                pinned_client: request.pinned_client.clone(),
+                audit: outcome.audit_entry,
+            });
+        }
+
+        replaced
+    }
+
     fn resolve_pull_window(
         &self,
         request: &PullRequest,
@@ -1506,6 +1735,35 @@ impl FabricConsumer {
         let now = Time::from_nanos(self.next_event_nanos);
         self.next_event_nanos = self.next_event_nanos.saturating_add(1);
         now
+    }
+
+    fn decision_context<T: Hash>(
+        &mut self,
+        seed: &T,
+        calibration_score: f64,
+        e_process: f64,
+        ci_width: f64,
+    ) -> EvalContext {
+        let when = self.next_event_time();
+        let mut hasher = DetHasher::default();
+        self.owner.holder.hash(&mut hasher);
+        self.owner.region.hash(&mut hasher);
+        self.cursor
+            .current_lease()
+            .lease_generation
+            .hash(&mut hasher);
+        self.state.pending_count.hash(&mut hasher);
+        seed.hash(&mut hasher);
+        let fingerprint = u128::from(hasher.finish());
+        let ts_unix_ms = when.as_nanos();
+        EvalContext {
+            calibration_score,
+            e_process,
+            ci_width,
+            decision_id: DecisionId::from_parts(ts_unix_ms, fingerprint),
+            trace_id: TraceId::from_parts(ts_unix_ms, fingerprint ^ 0xC0DE_C011_5EED_5100),
+            ts_unix_ms,
+        }
     }
 
     fn stale_attempt_noop(&self, obligation_id: ObligationId) -> AckResolution {
@@ -1604,6 +1862,11 @@ impl FabricConsumer {
             },
         );
         self.pending_ack_tokens.insert(obligation_id, token);
+        if let ScheduledConsumerRequest::Pull(pull_request) = &request
+            && let Some(record) = self.make_pull_decision_record(pull_request, &plan, obligation_id)
+        {
+            self.decision_log.push(record);
+        }
 
         Ok(ScheduledConsumerDelivery {
             request,
@@ -1612,6 +1875,89 @@ impl FabricConsumer {
             plan,
         })
     }
+
+    fn make_pull_decision_record(
+        &mut self,
+        request: &PullRequest,
+        plan: &DeliveryPlan,
+        obligation_id: ObligationId,
+    ) -> Option<ConsumerDecisionRecord> {
+        if self.config.adaptive_kernel != AdaptiveConsumerKernel::AuditBacked {
+            return None;
+        }
+
+        let snapshot = ConsumerPullDecisionSnapshot {
+            demand_class: request.demand_class,
+            pinned_requested: request.pinned_client.is_some(),
+            pending_ratio_permille: pending_ratio_permille(
+                self.state.pending_count,
+                self.config.max_ack_pending,
+            ),
+        };
+        let chosen_action = ConsumerPullDecisionAction::from_plan(plan, request);
+        let contract = ConsumerPullDecisionContract::new(chosen_action);
+        let posterior = snapshot.posterior();
+        let ctx = self.decision_context(
+            &snapshot,
+            snapshot.calibration_score(),
+            snapshot.e_process(),
+            snapshot.ci_width(),
+        );
+        let outcome = evaluate(&contract, &posterior, &ctx);
+        Some(ConsumerDecisionRecord {
+            kind: ConsumerDecisionKind::PullScheduling,
+            action_name: outcome.action_name,
+            demand_class: Some(request.demand_class),
+            obligation_id: Some(obligation_id),
+            pinned_client: request.pinned_client.clone(),
+            audit: outcome.audit_entry,
+        })
+    }
+
+    fn decide_redelivery_action(
+        &mut self,
+        pending: &PendingAckState,
+        obligation_id: ObligationId,
+    ) -> (ConsumerRedeliveryAction, Option<ConsumerDecisionRecord>) {
+        if self.config.adaptive_kernel != AdaptiveConsumerKernel::AuditBacked {
+            return (ConsumerRedeliveryAction::RetryNow, None);
+        }
+        let next_attempt = pending.delivery_attempt.saturating_add(1);
+        let pending_ratio =
+            pending_ratio_permille(self.state.pending_count, self.config.max_ack_pending);
+        let action = if next_attempt > u32::from(self.config.max_deliver) {
+            ConsumerRedeliveryAction::DeadLetter
+        } else if pending_ratio >= 850 && next_attempt > 1 {
+            ConsumerRedeliveryAction::Delay
+        } else {
+            ConsumerRedeliveryAction::RetryNow
+        };
+        let snapshot = ConsumerRedeliveryDecisionSnapshot {
+            next_attempt,
+            max_deliver: self.config.max_deliver,
+            pending_ratio_permille: pending_ratio,
+        };
+        let contract = ConsumerRedeliveryDecisionContract::new(action);
+        let posterior = snapshot.posterior();
+        let ctx = self.decision_context(
+            &snapshot,
+            snapshot.calibration_score(),
+            snapshot.e_process(),
+            snapshot.ci_width(),
+        );
+        let outcome = evaluate(&contract, &posterior, &ctx);
+        (
+            action,
+            Some(ConsumerDecisionRecord {
+                kind: ConsumerDecisionKind::Redelivery,
+                action_name: outcome.action_name,
+                demand_class: None,
+                obligation_id: Some(obligation_id),
+                pinned_client: None,
+                audit: outcome.audit_entry,
+            }),
+        )
+    }
 }
 
 fn window_len(window: SequenceWindow) -> u64 {
@@ -1619,6 +1965,444 @@ fn window_len(window: SequenceWindow) -> u64 {
         .end()
         .saturating_sub(window.start())
         .saturating_add(1)
+}
+
+fn pending_ratio_permille(pending_count: u64, max_ack_pending: usize) -> u16 {
+    let limit = max_ack_pending.max(1) as u64;
+    let ratio = pending_count
+        .saturating_mul(1000)
+        .checked_div(limit)
+        .unwrap_or(0)
+        .min(1000);
+    ratio as u16
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ConsumerPullDecisionAction {
+    CurrentSteward,
+    LeasedRelay,
+    Reconstructed,
+}
+
+impl ConsumerPullDecisionAction {
+    fn from_plan(plan: &DeliveryPlan, request: &PullRequest) -> Self {
+        match plan {
+            DeliveryPlan::CurrentSteward(_) => {
+                let _ = request;
+                Self::CurrentSteward
+            }
+            DeliveryPlan::LeasedRelay { .. } => Self::LeasedRelay,
+            DeliveryPlan::Reconstructed { .. } => Self::Reconstructed,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CurrentSteward => "current_steward",
+            Self::LeasedRelay => "leased_relay",
+            Self::Reconstructed => "reconstructed",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::CurrentSteward => 0,
+            Self::LeasedRelay => 1,
+            Self::Reconstructed => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ConsumerPullDecisionSnapshot {
+    demand_class: ConsumerDemandClass,
+    pinned_requested: bool,
+    pending_ratio_permille: u16,
+}
+
+impl ConsumerPullDecisionSnapshot {
+    fn posterior(self) -> Posterior {
+        let backpressure = f64::from(self.pending_ratio_permille) / 1000.0;
+        let mut weights = [0.05; 4];
+        let state_index = match self.demand_class {
+            ConsumerDemandClass::Tail => 0,
+            ConsumerDemandClass::CatchUp => 1,
+            ConsumerDemandClass::Replay => 2,
+        };
+        weights[state_index] = 0.72 - (backpressure * 0.2);
+        weights[3] = 0.08 + (backpressure * 0.55);
+        if self.pinned_requested {
+            weights[1] += 0.08;
+        }
+        normalize_posterior(weights)
+    }
+
+    fn calibration_score(self) -> f64 {
+        if self.pending_ratio_permille >= 850 {
+            0.74
+        } else {
+            0.93
+        }
+    }
+
+    fn e_process(self) -> f64 {
+        1.0 + f64::from(self.pending_ratio_permille) / 650.0
+    }
+
+    fn ci_width(self) -> f64 {
+        0.08 + f64::from(self.pending_ratio_permille) / 3000.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConsumerPullDecisionContract {
+    states: Vec<String>,
+    actions: Vec<String>,
+    losses: LossMatrix,
+    chosen_action: ConsumerPullDecisionAction,
+    fallback: FallbackPolicy,
+}
+
+impl ConsumerPullDecisionContract {
+    fn new(chosen_action: ConsumerPullDecisionAction) -> Self {
+        let states = vec![
+            "tail_priority".into(),
+            "catchup_priority".into(),
+            "replay_priority".into(),
+            "backpressured".into(),
+        ];
+        let actions = vec![
+            ConsumerPullDecisionAction::CurrentSteward.label().into(),
+            ConsumerPullDecisionAction::LeasedRelay.label().into(),
+            ConsumerPullDecisionAction::Reconstructed.label().into(),
+        ];
+        let losses = LossMatrix::new(
+            states.clone(),
+            actions.clone(),
+            vec![
+                1.0, 2.0, 7.0, // tail
+                4.0, 2.0, 5.0, // catch-up
+                6.0, 4.0, 1.0, // replay
+                8.0, 5.0, 3.0, // backpressured
+            ],
+        )
+        .expect("consumer pull decision losses should be valid");
+        Self {
+            states,
+            actions,
+            losses,
+            chosen_action,
+            fallback: FallbackPolicy::default(),
+        }
+    }
+}
+
+impl DecisionContract for ConsumerPullDecisionContract {
+    fn name(&self) -> &str {
+        "fabric_consumer_pull_scheduler"
+    }
+
+    fn state_space(&self) -> &[String] {
+        &self.states
+    }
+
+    fn action_set(&self) -> &[String] {
+        &self.actions
+    }
+
+    fn loss_matrix(&self) -> &LossMatrix {
+        &self.losses
+    }
+
+    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+        let mut likelihoods = [0.1; 4];
+        if let Some(slot) = likelihoods.get_mut(observation) {
+            *slot = 0.9;
+        }
+        posterior.bayesian_update(&likelihoods);
+    }
+
+    fn choose_action(&self, _posterior: &Posterior) -> usize {
+        self.chosen_action.index()
+    }
+
+    fn fallback_action(&self) -> usize {
+        self.chosen_action.index()
+    }
+
+    fn fallback_policy(&self) -> &FallbackPolicy {
+        &self.fallback
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ConsumerOverflowDecisionAction {
+    RejectNew,
+    ReplaceLowestPriority,
+}
+
+impl ConsumerOverflowDecisionAction {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::RejectNew => "reject_new",
+            Self::ReplaceLowestPriority => "replace_low_priority",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::RejectNew => 0,
+            Self::ReplaceLowestPriority => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ConsumerOverflowDecisionSnapshot {
+    incoming_demand: ConsumerDemandClass,
+    evicted_demand: ConsumerDemandClass,
+    replaced: bool,
+}
+
+impl ConsumerOverflowDecisionSnapshot {
+    fn posterior(self) -> Posterior {
+        let mut weights = [0.05; 4];
+        weights[self.incoming_demand.priority_rank() as usize] = 0.68;
+        weights[3] = if self.replaced { 0.12 } else { 0.34 };
+        normalize_posterior(weights)
+    }
+
+    fn calibration_score(self) -> f64 {
+        if self.replaced { 0.91 } else { 0.79 }
+    }
+
+    fn e_process(self) -> f64 {
+        1.6 + f64::from(self.evicted_demand.priority_rank())
+    }
+
+    fn ci_width(self) -> f64 {
+        if self.replaced { 0.15 } else { 0.31 }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConsumerOverflowDecisionContract {
+    states: Vec<String>,
+    actions: Vec<String>,
+    losses: LossMatrix,
+    chosen_action: ConsumerOverflowDecisionAction,
+    fallback: FallbackPolicy,
+}
+
+impl ConsumerOverflowDecisionContract {
+    fn new(chosen_action: ConsumerOverflowDecisionAction) -> Self {
+        let states = vec![
+            "tail_pressure".into(),
+            "catchup_pressure".into(),
+            "replay_pressure".into(),
+            "queue_saturated".into(),
+        ];
+        let actions = vec![
+            ConsumerOverflowDecisionAction::RejectNew.label().into(),
+            ConsumerOverflowDecisionAction::ReplaceLowestPriority
+                .label()
+                .into(),
+        ];
+        let losses = LossMatrix::new(
+            states.clone(),
+            actions.clone(),
+            vec![
+                9.0, 1.0, // tail
+                5.0, 3.0, // catch-up
+                1.0, 8.0, // replay
+                4.0, 2.0, // saturated
+            ],
+        )
+        .expect("consumer overflow decision losses should be valid");
+        Self {
+            states,
+            actions,
+            losses,
+            chosen_action,
+            fallback: FallbackPolicy::default(),
+        }
+    }
+}
+
+impl DecisionContract for ConsumerOverflowDecisionContract {
+    fn name(&self) -> &str {
+        "fabric_consumer_overflow_policy"
+    }
+
+    fn state_space(&self) -> &[String] {
+        &self.states
+    }
+
+    fn action_set(&self) -> &[String] {
+        &self.actions
+    }
+
+    fn loss_matrix(&self) -> &LossMatrix {
+        &self.losses
+    }
+
+    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+        let mut likelihoods = [0.1; 4];
+        if let Some(slot) = likelihoods.get_mut(observation) {
+            *slot = 0.9;
+        }
+        posterior.bayesian_update(&likelihoods);
+    }
+
+    fn choose_action(&self, _posterior: &Posterior) -> usize {
+        self.chosen_action.index()
+    }
+
+    fn fallback_action(&self) -> usize {
+        self.chosen_action.index()
+    }
+
+    fn fallback_policy(&self) -> &FallbackPolicy {
+        &self.fallback
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ConsumerRedeliveryDecisionSnapshot {
+    next_attempt: u32,
+    max_deliver: u16,
+    pending_ratio_permille: u16,
+}
+
+impl ConsumerRedeliveryDecisionSnapshot {
+    fn posterior(self) -> Posterior {
+        let exhausted = self.next_attempt > u32::from(self.max_deliver);
+        let pressured = self.pending_ratio_permille >= 850;
+        let weights = if exhausted {
+            [0.05, 0.1, 0.85]
+        } else if pressured {
+            [0.18, 0.67, 0.15]
+        } else {
+            [0.82, 0.12, 0.06]
+        };
+        normalize_posterior(weights)
+    }
+
+    fn calibration_score(self) -> f64 {
+        if self.next_attempt > u32::from(self.max_deliver) {
+            0.88
+        } else if self.pending_ratio_permille >= 850 {
+            0.77
+        } else {
+            0.94
+        }
+    }
+
+    fn e_process(self) -> f64 {
+        1.0 + f64::from(self.next_attempt) / 3.0 + f64::from(self.pending_ratio_permille) / 900.0
+    }
+
+    fn ci_width(self) -> f64 {
+        0.09 + f64::from(self.pending_ratio_permille) / 4000.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConsumerRedeliveryDecisionContract {
+    states: Vec<String>,
+    actions: Vec<String>,
+    losses: LossMatrix,
+    chosen_action: ConsumerRedeliveryAction,
+    fallback: FallbackPolicy,
+}
+
+impl ConsumerRedeliveryDecisionContract {
+    fn new(chosen_action: ConsumerRedeliveryAction) -> Self {
+        let states = vec![
+            "transient_failure".into(),
+            "pressure".into(),
+            "exhausted".into(),
+        ];
+        let actions = vec![
+            ConsumerRedeliveryAction::RetryNow.label().into(),
+            ConsumerRedeliveryAction::Delay.label().into(),
+            ConsumerRedeliveryAction::DeadLetter.label().into(),
+        ];
+        let losses = LossMatrix::new(
+            states.clone(),
+            actions.clone(),
+            vec![
+                1.0, 4.0, 12.0, // transient
+                7.0, 2.0, 5.0, // pressure
+                18.0, 6.0, 1.0, // exhausted
+            ],
+        )
+        .expect("consumer redelivery decision losses should be valid");
+        Self {
+            states,
+            actions,
+            losses,
+            chosen_action,
+            fallback: FallbackPolicy::default(),
+        }
+    }
+}
+
+impl DecisionContract for ConsumerRedeliveryDecisionContract {
+    fn name(&self) -> &str {
+        "fabric_consumer_redelivery_policy"
+    }
+
+    fn state_space(&self) -> &[String] {
+        &self.states
+    }
+
+    fn action_set(&self) -> &[String] {
+        &self.actions
+    }
+
+    fn loss_matrix(&self) -> &LossMatrix {
+        &self.losses
+    }
+
+    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+        let mut likelihoods = [0.1; 3];
+        if let Some(slot) = likelihoods.get_mut(observation) {
+            *slot = 0.9;
+        }
+        posterior.bayesian_update(&likelihoods);
+    }
+
+    fn choose_action(&self, _posterior: &Posterior) -> usize {
+        match self.chosen_action {
+            ConsumerRedeliveryAction::RetryNow => 0,
+            ConsumerRedeliveryAction::Delay => 1,
+            ConsumerRedeliveryAction::DeadLetter => 2,
+        }
+    }
+
+    fn fallback_action(&self) -> usize {
+        match self.chosen_action {
+            ConsumerRedeliveryAction::RetryNow => 0,
+            ConsumerRedeliveryAction::Delay => 1,
+            ConsumerRedeliveryAction::DeadLetter => 2,
+        }
+    }
+
+    fn fallback_policy(&self) -> &FallbackPolicy {
+        &self.fallback
+    }
+}
+
+fn normalize_posterior<const N: usize>(mut weights: [f64; N]) -> Posterior {
+    for weight in &mut weights {
+        if *weight <= 0.0 {
+            *weight = 0.01;
+        }
+    }
+    let total = weights.iter().sum::<f64>().max(f64::EPSILON);
+    Posterior::new(weights.into_iter().map(|weight| weight / total).collect())
+        .expect("consumer decision posterior should normalize")
 }
 
 /// High-level consumer-engine failures layered on top of cursor errors.
@@ -1690,6 +2474,16 @@ pub enum FabricConsumerError {
         /// Tail sequence visible to the consumer at dispatch time.
         available_tail: u64,
     },
+    /// A pinned-client request supplied a ticket for a different relay.
+    #[error(
+        "pinned client `{pinned_client}` does not match supplied ticket relay `{ticket_relay}`"
+    )]
+    PinnedClientTicketMismatch {
+        /// Relay requested by the pull request.
+        pinned_client: NodeId,
+        /// Relay named inside the supplied read-delegation ticket.
+        ticket_relay: NodeId,
+    },
     /// The attempt referred to an obligation that is no longer pending.
     #[error("consumer obligation `{obligation_id}` is not pending")]
     PendingAckNotFound {
@@ -1705,6 +2499,26 @@ pub enum FabricConsumerError {
     /// Dead-letter transfers must capture a non-empty reason.
     #[error("dead-letter reason must not be empty")]
     EmptyDeadLetterReason,
+    /// The adaptive redelivery policy deferred the retry instead of executing it now.
+    #[error(
+        "consumer deferred redelivery for obligation `{obligation_id}` at attempt `{delivery_attempt}`"
+    )]
+    RedeliveryDeferred {
+        /// Pending obligation that remains live.
+        obligation_id: ObligationId,
+        /// Attempt count the contract evaluated for the deferred retry.
+        delivery_attempt: u32,
+    },
+    /// The adaptive redelivery policy requires the caller to dead-letter this delivery.
+    #[error(
+        "consumer requires dead-letter handling for obligation `{obligation_id}` at attempt `{delivery_attempt}`"
+    )]
+    RedeliveryRequiresDeadLetter {
+        /// Pending obligation that has exhausted or exceeded its retry budget.
+        obligation_id: ObligationId,
+        /// Attempt count that triggered the dead-letter recommendation.
+        delivery_attempt: u32,
+    },
     /// Low-level cursor machinery rejected the operation.
     #[error(transparent)]
     Cursor(#[from] ConsumerCursorError),
@@ -2232,6 +3046,29 @@ mod tests {
     }
 
     #[test]
+    fn fabric_consumer_config_rejects_zero_heartbeat_values() {
+        let heartbeat = FabricConsumerConfig {
+            heartbeat: Some(Duration::ZERO),
+            ..FabricConsumerConfig::default()
+        };
+        assert_eq!(
+            heartbeat.validate(),
+            Err(FabricConsumerError::InvalidHeartbeat { field: "heartbeat" })
+        );
+
+        let idle_heartbeat = FabricConsumerConfig {
+            idle_heartbeat: Some(Duration::ZERO),
+            ..FabricConsumerConfig::default()
+        };
+        assert_eq!(
+            idle_heartbeat.validate(),
+            Err(FabricConsumerError::InvalidHeartbeat {
+                field: "idle_heartbeat",
+            })
+        );
+    }
+
+    #[test]
     fn fabric_consumer_mode_switching_clears_waiting_pull_requests() {
         let cell = test_cell();
         let mut consumer =
@@ -2274,6 +3111,236 @@ mod tests {
                 PullRequest::new(1, ConsumerDemandClass::Tail).expect("second request")
             ),
             Err(FabricConsumerError::MaxWaitingExceeded { limit: 1 })
+        );
+    }
+
+    #[test]
+    fn fabric_consumer_stable_kernel_rejects_priority_overflow_without_audit_log() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                max_waiting: 1,
+                overflow_policy: ConsumerOverflowPolicy::ReplaceLowestPriority,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(1, ConsumerDemandClass::Replay).expect("replay"))
+            .expect("queue replay");
+
+        assert_eq!(
+            consumer.queue_pull_request(
+                PullRequest::new(1, ConsumerDemandClass::Tail).expect("tail request")
+            ),
+            Err(FabricConsumerError::MaxWaitingExceeded { limit: 1 })
+        );
+        assert!(consumer.decision_log().is_empty());
+    }
+
+    #[test]
+    fn fabric_consumer_priority_groups_dispatch_tail_before_replay() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 20).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::Replay).expect("replay"))
+            .expect("queue replay");
+        consumer
+            .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::Tail).expect("tail"))
+            .expect("queue tail");
+
+        let first = match consumer
+            .dispatch_next_pull(20, &capsule, None)
+            .expect("dispatch first")
+        {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("tail request should schedule first"),
+        };
+        assert!(matches!(
+            &first.request,
+            ScheduledConsumerRequest::Pull(request)
+                if request.demand_class == ConsumerDemandClass::Tail
+        ));
+        assert_eq!(
+            first.window,
+            SequenceWindow::new(19, 20).expect("tail window")
+        );
+
+        let second = match consumer
+            .dispatch_next_pull(20, &capsule, None)
+            .expect("dispatch second")
+        {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("replay request should schedule second"),
+        };
+        assert!(matches!(
+            &second.request,
+            ScheduledConsumerRequest::Pull(request)
+                if request.demand_class == ConsumerDemandClass::Replay
+        ));
+        assert_eq!(
+            second.window,
+            SequenceWindow::new(1, 2).expect("replay window")
+        );
+    }
+
+    #[test]
+    fn fabric_consumer_audit_backed_overflow_replaces_replay_with_tail_and_records_evidence() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                max_waiting: 1,
+                adaptive_kernel: AdaptiveConsumerKernel::AuditBacked,
+                overflow_policy: ConsumerOverflowPolicy::ReplaceLowestPriority,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(1, ConsumerDemandClass::Replay).expect("replay"))
+            .expect("queue replay");
+        consumer
+            .queue_pull_request(PullRequest::new(1, ConsumerDemandClass::Tail).expect("tail"))
+            .expect("queue tail replacement");
+
+        assert_eq!(consumer.waiting_pull_request_count(), 1);
+        assert_eq!(consumer.decision_log().len(), 1);
+        let overflow = &consumer.decision_log()[0];
+        assert_eq!(overflow.kind, ConsumerDecisionKind::Overflow);
+        assert_eq!(overflow.action_name, "replace_low_priority");
+        assert_eq!(overflow.demand_class, Some(ConsumerDemandClass::Tail));
+    }
+
+    #[test]
+    fn fabric_consumer_pull_dispatches_audited_pinned_client_leased_delivery() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                adaptive_kernel: AdaptiveConsumerKernel::AuditBacked,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let relay = NodeId::new("relay-1");
+        let window = SequenceWindow::new(1, 2).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(relay.clone(), window);
+
+        let transfer = consumer
+            .cursor
+            .resolve_contested_transfer(&[CursorTransferProposal {
+                proposed_holder: CursorLeaseHolder::Relay(relay.clone()),
+                expected_generation: consumer.current_lease().lease_generation,
+                transfer_obligation: ObligationId::new_for_test(88, 0),
+            }]);
+        assert!(matches!(
+            transfer,
+            ContestedTransferResolution::Accepted { .. }
+        ));
+
+        let ticket = consumer
+            .cursor
+            .grant_read_ticket(
+                relay.clone(),
+                window,
+                8,
+                CacheabilityRule::Private { max_age_ticks: 4 },
+            )
+            .expect("ticket");
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(
+                PullRequest::new(2, ConsumerDemandClass::CatchUp)
+                    .expect("pull request")
+                    .with_pinned_client(relay.clone()),
+            )
+            .expect("queue pull");
+
+        let delivery = match consumer
+            .dispatch_next_pull(2, &capsule, Some(&ticket))
+            .expect("dispatch pinned")
+        {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("pinned request should schedule"),
+        };
+        assert!(matches!(
+            &delivery.plan,
+            DeliveryPlan::LeasedRelay { relay: chosen, .. } if chosen == &relay
+        ));
+        let decision = consumer.decision_log().last().expect("decision record");
+        assert_eq!(decision.kind, ConsumerDecisionKind::PullScheduling);
+        assert_eq!(decision.action_name, "leased_relay");
+        assert_eq!(decision.pinned_client.as_ref(), Some(&relay));
+        assert_eq!(decision.obligation_id, Some(delivery.attempt.obligation_id));
+    }
+
+    #[test]
+    fn fabric_consumer_rejects_pinned_client_ticket_mismatch() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                adaptive_kernel: AdaptiveConsumerKernel::AuditBacked,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let pinned = NodeId::new("relay-pinned");
+        let wrong_relay = NodeId::new("relay-wrong");
+        let window = SequenceWindow::new(1, 1).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(wrong_relay.clone(), window);
+
+        let transfer = consumer
+            .cursor
+            .resolve_contested_transfer(&[CursorTransferProposal {
+                proposed_holder: CursorLeaseHolder::Relay(wrong_relay.clone()),
+                expected_generation: consumer.current_lease().lease_generation,
+                transfer_obligation: ObligationId::new_for_test(89, 0),
+            }]);
+        assert!(matches!(
+            transfer,
+            ContestedTransferResolution::Accepted { .. }
+        ));
+
+        let wrong_ticket = consumer
+            .cursor
+            .grant_read_ticket(
+                wrong_relay.clone(),
+                window,
+                8,
+                CacheabilityRule::Private { max_age_ticks: 4 },
+            )
+            .expect("ticket");
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(
+                PullRequest::new(1, ConsumerDemandClass::CatchUp)
+                    .expect("pull request")
+                    .with_pinned_client(pinned.clone()),
+            )
+            .expect("queue pull");
+
+        assert_eq!(
+            consumer.dispatch_next_pull(1, &capsule, Some(&wrong_ticket)),
+            Err(FabricConsumerError::PinnedClientTicketMismatch {
+                pinned_client: pinned,
+                ticket_relay: wrong_relay,
+            })
         );
     }
 
@@ -2494,6 +3561,7 @@ mod tests {
             first.attempt.obligation_id,
             redelivery.attempt.obligation_id
         );
+        assert!(consumer.decision_log().is_empty());
         assert_eq!(
             redelivery.attempt.supersedes_obligation_id,
             Some(first.attempt.obligation_id)
@@ -2525,6 +3593,69 @@ mod tests {
         assert_eq!(stats.total_aborted, 1);
         assert_eq!(stats.total_committed, 1);
         assert_eq!(stats.pending, 0);
+    }
+
+    #[test]
+    fn fabric_consumer_audit_backed_redelivery_requires_dead_letter_at_retry_limit() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                adaptive_kernel: AdaptiveConsumerKernel::AuditBacked,
+                max_deliver: 1,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let window = SequenceWindow::new(12, 12).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let first = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch");
+        assert_eq!(
+            consumer.redeliver_delivery(&first.attempt, &capsule, None),
+            Err(FabricConsumerError::RedeliveryRequiresDeadLetter {
+                obligation_id: first.attempt.obligation_id,
+                delivery_attempt: 2,
+            })
+        );
+        let decision = consumer.decision_log().last().expect("redelivery decision");
+        assert_eq!(decision.kind, ConsumerDecisionKind::Redelivery);
+        assert_eq!(decision.action_name, "dead_letter");
+        assert_eq!(decision.obligation_id, Some(first.attempt.obligation_id));
+    }
+
+    #[test]
+    fn fabric_consumer_audit_backed_redelivery_defers_under_pending_pressure() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                adaptive_kernel: AdaptiveConsumerKernel::AuditBacked,
+                max_deliver: 3,
+                max_ack_pending: 1,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let window = SequenceWindow::new(13, 13).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let first = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch");
+        assert_eq!(
+            consumer.redeliver_delivery(&first.attempt, &capsule, None),
+            Err(FabricConsumerError::RedeliveryDeferred {
+                obligation_id: first.attempt.obligation_id,
+                delivery_attempt: 2,
+            })
+        );
+        let decision = consumer.decision_log().last().expect("redelivery decision");
+        assert_eq!(decision.kind, ConsumerDecisionKind::Redelivery);
+        assert_eq!(decision.action_name, "delay");
+        assert_eq!(decision.obligation_id, Some(first.attempt.obligation_id));
     }
 
     #[test]
