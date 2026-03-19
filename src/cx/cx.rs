@@ -1905,7 +1905,7 @@ impl<Caps> Cx<Caps> {
     /// This method only sets the local cancellation flag. In a real runtime,
     /// cancellation propagates through the region tree via `cancel_request()`.
     pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {
-        let (region, task) = {
+        let (region, task, waker) = {
             let mut inner = self.inner.write();
             let region = inner.region;
             let task = inner.task;
@@ -1920,9 +1920,14 @@ impl<Caps> Cx<Caps> {
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
+            let waker = inner.cancel_waker.clone();
             drop(inner);
-            (region, task)
+            (region, task, waker)
         };
+
+        if let Some(w) = waker {
+            w.wake();
+        }
 
         debug!(
             task_id = ?task,
@@ -1960,7 +1965,7 @@ impl<Caps> Cx<Caps> {
     /// assert!(cx.is_cancel_requested());
     /// ```
     pub fn cancel_fast(&self, kind: CancelKind) {
-        let region = {
+        let (region, waker) = {
             let mut inner = self.inner.write();
             let region = inner.region;
 
@@ -1972,8 +1977,13 @@ impl<Caps> Cx<Caps> {
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
-            region
+            let waker = inner.cancel_waker.clone();
+            (region, waker)
         };
+
+        if let Some(w) = waker {
+            w.wake();
+        }
 
         trace!(
             region_id = ?region,
