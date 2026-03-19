@@ -81,6 +81,8 @@ pub mod compiler;
 #[cfg(feature = "messaging-fabric")]
 pub mod consumer;
 #[cfg(feature = "messaging-fabric")]
+pub mod control;
+#[cfg(feature = "messaging-fabric")]
 pub mod cut;
 #[cfg(feature = "messaging-fabric")]
 pub mod explain;
@@ -111,6 +113,12 @@ pub use class::{
     AckKind, DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError, DeliveryCostVector,
 };
 #[cfg(feature = "messaging-fabric")]
+pub use control::{
+    AdvisoryDampingPolicy, ControlAdvisory, ControlAdvisoryType, ControlBudget, ControlHandler,
+    ControlHandlerId, ControlOutcome, ControlRegistry, ControlRegistryError,
+    ObligationTransferAction, SystemSubjectFamily,
+};
+#[cfg(feature = "messaging-fabric")]
 pub use cut::{
     CapsuleDigest, CertifiedMobility, ConsumerStateDigest, CutCertificate, CutMobilityError,
     MobilityOperation,
@@ -136,9 +144,11 @@ pub use kafka_consumer::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use morphism::{
-    AuthorityFacet, CostFacet, FabricCapability, Morphism, MorphismCertificate, MorphismClass,
-    MorphismFacetSet, MorphismValidationError, ObservabilityFacet, QuotaPolicy, ResponsePolicy,
-    ReversibilityFacet, ReversibilityRequirement, SecrecyFacet, SharingPolicy, SubjectTransform,
+    AuthorityFacet, CostFacet, ExportPlan, FabricCapability, ImportPlan, MetadataBoundarySummary,
+    Morphism, MorphismAuditNote, MorphismCertificate, MorphismClass, MorphismCompileError,
+    MorphismFacetSet, MorphismPlanDirection, MorphismPlanStep, MorphismValidationError,
+    ObservabilityFacet, QuotaPolicy, ResponsePolicy, ReversibilityFacet, ReversibilityRequirement,
+    SecrecyFacet, SemanticCycleClass, SharingPolicy, SubjectTransform, detect_semantic_cycles,
 };
 pub use nats::{Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription};
 pub use redis::{RedisClient, RedisConfig, RedisError};
