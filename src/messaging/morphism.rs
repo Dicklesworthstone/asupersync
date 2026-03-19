@@ -1599,6 +1599,23 @@ mod tests {
     }
 
     #[test]
+    fn derived_views_cannot_smuggle_authority_or_reply_rebinding() {
+        let mut derived_view = Morphism::default();
+        derived_view.capability_requirements = vec![FabricCapability::CarryAuthority];
+        assert_eq!(
+            derived_view.validate(),
+            Err(MorphismValidationError::DerivedViewCannotRequireAuthorityCapability)
+        );
+
+        derived_view.capability_requirements = vec![FabricCapability::RewriteNamespace];
+        derived_view.response_policy = ResponsePolicy::ReplyAuthoritative;
+        assert_eq!(
+            derived_view.validate(),
+            Err(MorphismValidationError::DerivedViewCannotOriginateReplyAuthority)
+        );
+    }
+
+    #[test]
     fn wildcard_capture_and_compose_apply_deterministically() {
         let tokens = vec![
             String::from("tenant"),
