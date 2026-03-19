@@ -18,13 +18,15 @@
 //! - A minimal break-glass recovery surface is available even when ordinary
 //!   fabric connectivity is degraded.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
 use franken_decision::{DecisionAuditEntry, DecisionOutcome};
 use franken_evidence::EvidenceLedger;
 use franken_kernel::{DecisionId, TraceId};
+
+use crate::remote::NodeId;
 
 use super::class::{AckKind, DeliveryClass};
 use super::ir::{
@@ -273,6 +275,1045 @@ impl AdvisoryDampingPolicy {
             max_events_per_window: 100,
             requires_operator_intent: false,
             stratification_tier: Some(0),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Delta-CRDT metadata for non-authoritative control surfaces
+// ---------------------------------------------------------------------------
+
+/// Join-semilattice interface for control-plane delta CRDTs.
+///
+/// These types are explicitly reserved for non-authoritative metadata such as
+/// aggregated interest, coarse checkpoints, membership hints, load sketches,
+/// and advisory summaries. Authoritative state still belongs in fenced control
+/// capsules and obligation-backed protocols.
+pub trait JoinSemilattice: Clone + PartialEq {
+    /// Sparse delta type that can be merged into a full state.
+    type Delta: Clone + PartialEq + Default;
+
+    /// Join another replica into `self`.
+    fn merge(&mut self, other: &Self);
+
+    /// Produce the sparse delta needed to advance `baseline` to `self`.
+    fn delta(&self, baseline: &Self) -> Self::Delta;
+
+    /// Apply a sparse delta produced by [`Self::delta`].
+    fn apply_delta(&mut self, delta: &Self::Delta);
+}
+
+/// Version vector tracking the highest converged CRDT version per replica.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReplicaVersionVector {
+    versions: BTreeMap<NodeId, u64>,
+}
+
+impl ReplicaVersionVector {
+    /// Return the current converged version for `replica`.
+    #[must_use]
+    pub fn version(&self, replica: &NodeId) -> u64 {
+        self.versions.get(replica).copied().unwrap_or(0)
+    }
+
+    /// Advance the local version for `replica` and return the new value.
+    pub fn advance(&mut self, replica: &NodeId) -> u64 {
+        let entry = self.versions.entry(replica.clone()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    /// Observe a remote version for `replica`.
+    pub fn observe(&mut self, replica: &NodeId, version: u64) {
+        let entry = self.versions.entry(replica.clone()).or_insert(0);
+        *entry = (*entry).max(version);
+    }
+
+    /// Join another version vector into `self`.
+    pub fn merge(&mut self, other: &Self) {
+        for (replica, version) in &other.versions {
+            self.observe(replica, *version);
+        }
+    }
+
+    fn same_except(&self, other: &Self, except: &NodeId) -> bool {
+        self.all_replicas(other)
+            .into_iter()
+            .filter(|replica| replica != except)
+            .all(|replica| self.version(&replica) == other.version(&replica))
+    }
+
+    fn dominates_except(&self, other: &Self, except: &NodeId) -> bool {
+        self.all_replicas(other)
+            .into_iter()
+            .filter(|replica| replica != except)
+            .all(|replica| self.version(&replica) >= other.version(&replica))
+    }
+
+    fn dominates(&self, other: &Self) -> bool {
+        self.all_replicas(other)
+            .into_iter()
+            .all(|replica| self.version(&replica) >= other.version(&replica))
+    }
+
+    fn all_replicas(&self, other: &Self) -> BTreeSet<NodeId> {
+        self.versions
+            .keys()
+            .chain(other.versions.keys())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Digest exchanged during anti-entropy to detect CRDT frontier divergence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntiEntropyDigest {
+    steward: NodeId,
+    frontier: ReplicaVersionVector,
+}
+
+impl AntiEntropyDigest {
+    /// Steward that emitted this digest.
+    #[must_use]
+    pub fn steward(&self) -> &NodeId {
+        &self.steward
+    }
+
+    /// Converged replica frontier advertised by the digest.
+    #[must_use]
+    pub fn frontier(&self) -> &ReplicaVersionVector {
+        &self.frontier
+    }
+}
+
+/// Propagation mode used for CRDT control metadata exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropagationMode {
+    /// Peer is only one local step behind, so a narrow incremental delta is
+    /// sufficient.
+    Incremental,
+    /// Peer is missing history or reconnecting after a partition, so send a
+    /// full anti-entropy snapshot encoded as a CRDT delta from the empty state.
+    AntiEntropy,
+}
+
+/// Delta envelope exchanged between stewards and relays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropagationEnvelope<D> {
+    steward: NodeId,
+    frontier: ReplicaVersionVector,
+    mode: PropagationMode,
+    delta: D,
+}
+
+impl<D> PropagationEnvelope<D> {
+    /// Steward that emitted this envelope.
+    #[must_use]
+    pub fn steward(&self) -> &NodeId {
+        &self.steward
+    }
+
+    /// Replica frontier carried by this envelope.
+    #[must_use]
+    pub fn frontier(&self) -> &ReplicaVersionVector {
+        &self.frontier
+    }
+
+    /// Propagation mode for this envelope.
+    #[must_use]
+    pub const fn mode(&self) -> PropagationMode {
+        self.mode
+    }
+
+    /// Delta payload carried by this envelope.
+    #[must_use]
+    pub fn delta(&self) -> &D {
+        &self.delta
+    }
+}
+
+/// Result of applying a propagation envelope to a local replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropagationApply {
+    /// Envelope advanced local convergence state.
+    Applied,
+    /// Envelope was already covered by local state.
+    AlreadySatisfied,
+    /// Envelope could not be applied incrementally and anti-entropy repair is
+    /// now required.
+    NeedsAntiEntropy,
+}
+
+/// Deterministic propagation helper for non-authoritative control CRDTs.
+///
+/// The propagation path stays optimistic when a peer is only one local version
+/// behind the current steward. If a relay gap or partition is detected, the
+/// replica switches to anti-entropy mode and emits a compressed snapshot delta
+/// from the empty state to restore convergence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrdtPropagationReplica<T: JoinSemilattice + Default> {
+    steward: NodeId,
+    state: T,
+    frontier: ReplicaVersionVector,
+    last_local_update: Option<(u64, T::Delta)>,
+    repair_needed: BTreeMap<NodeId, u64>,
+}
+
+impl<T> CrdtPropagationReplica<T>
+where
+    T: JoinSemilattice + Default,
+{
+    /// Create a new empty propagation replica for `steward`.
+    #[must_use]
+    pub fn new(steward: NodeId) -> Self {
+        Self {
+            steward,
+            state: T::default(),
+            frontier: ReplicaVersionVector::default(),
+            last_local_update: None,
+            repair_needed: BTreeMap::new(),
+        }
+    }
+
+    /// Steward identity for this replica.
+    #[must_use]
+    pub fn steward(&self) -> &NodeId {
+        &self.steward
+    }
+
+    /// Current converged CRDT state.
+    #[must_use]
+    pub fn state(&self) -> &T {
+        &self.state
+    }
+
+    /// Current replica frontier.
+    #[must_use]
+    pub fn frontier(&self) -> &ReplicaVersionVector {
+        &self.frontier
+    }
+
+    /// Return the current anti-entropy digest.
+    #[must_use]
+    pub fn digest(&self) -> AntiEntropyDigest {
+        AntiEntropyDigest {
+            steward: self.steward.clone(),
+            frontier: self.frontier.clone(),
+        }
+    }
+
+    /// Whether a remote origin has been marked for anti-entropy repair.
+    #[must_use]
+    pub fn needs_anti_entropy(&self) -> bool {
+        !self.repair_needed.is_empty()
+    }
+
+    /// Record a local mutation and produce an incremental propagation envelope.
+    pub fn mutate<F>(&mut self, mutate: F) -> Option<PropagationEnvelope<T::Delta>>
+    where
+        F: FnOnce(&mut T),
+    {
+        let mut updated = self.state.clone();
+        mutate(&mut updated);
+        self.record_local_state(updated)
+    }
+
+    /// Record a new local CRDT state and produce an incremental envelope.
+    pub fn record_local_state(&mut self, updated: T) -> Option<PropagationEnvelope<T::Delta>> {
+        let delta = updated.delta(&self.state);
+        if delta == T::Delta::default() {
+            return None;
+        }
+
+        self.state = updated;
+        let version = self.frontier.advance(&self.steward);
+        self.last_local_update = Some((version, delta.clone()));
+
+        Some(PropagationEnvelope {
+            steward: self.steward.clone(),
+            frontier: self.frontier.clone(),
+            mode: PropagationMode::Incremental,
+            delta,
+        })
+    }
+
+    /// Prepare the best envelope for a peer with `digest`.
+    #[must_use]
+    pub fn prepare_for(&self, digest: &AntiEntropyDigest) -> Option<PropagationEnvelope<T::Delta>> {
+        if self.frontier == digest.frontier {
+            return None;
+        }
+
+        if self.can_send_incremental(digest) {
+            let (_, delta) = self.last_local_update.as_ref()?;
+            return Some(PropagationEnvelope {
+                steward: self.steward.clone(),
+                frontier: self.frontier.clone(),
+                mode: PropagationMode::Incremental,
+                delta: delta.clone(),
+            });
+        }
+
+        self.snapshot_envelope()
+    }
+
+    /// Encode the full current state as an anti-entropy snapshot envelope.
+    #[must_use]
+    pub fn snapshot_envelope(&self) -> Option<PropagationEnvelope<T::Delta>> {
+        let delta = self.state.delta(&T::default());
+        if delta == T::Delta::default() {
+            return None;
+        }
+
+        Some(PropagationEnvelope {
+            steward: self.steward.clone(),
+            frontier: self.frontier.clone(),
+            mode: PropagationMode::AntiEntropy,
+            delta,
+        })
+    }
+
+    /// Apply a remote propagation envelope.
+    pub fn apply(&mut self, envelope: &PropagationEnvelope<T::Delta>) -> PropagationApply {
+        match envelope.mode {
+            PropagationMode::Incremental => self.apply_incremental(envelope),
+            PropagationMode::AntiEntropy => self.apply_snapshot(envelope),
+        }
+    }
+
+    fn apply_incremental(&mut self, envelope: &PropagationEnvelope<T::Delta>) -> PropagationApply {
+        let remote_version = envelope.frontier.version(&envelope.steward);
+        let local_version = self.frontier.version(&envelope.steward);
+
+        if remote_version <= local_version && self.frontier.dominates(&envelope.frontier) {
+            return PropagationApply::AlreadySatisfied;
+        }
+
+        let expected_next = local_version.saturating_add(1);
+        if remote_version != expected_next
+            || !self
+                .frontier
+                .dominates_except(&envelope.frontier, &envelope.steward)
+        {
+            self.repair_needed
+                .insert(envelope.steward.clone(), remote_version);
+            return PropagationApply::NeedsAntiEntropy;
+        }
+
+        self.state.apply_delta(&envelope.delta);
+        self.frontier.merge(&envelope.frontier);
+        self.repair_needed.remove(&envelope.steward);
+        PropagationApply::Applied
+    }
+
+    fn apply_snapshot(&mut self, envelope: &PropagationEnvelope<T::Delta>) -> PropagationApply {
+        if self.frontier.dominates(&envelope.frontier) {
+            return PropagationApply::AlreadySatisfied;
+        }
+
+        self.state.apply_delta(&envelope.delta);
+        self.frontier.merge(&envelope.frontier);
+        for replica in envelope.frontier.versions.keys() {
+            self.repair_needed.remove(replica);
+        }
+        PropagationApply::Applied
+    }
+
+    fn can_send_incremental(&self, digest: &AntiEntropyDigest) -> bool {
+        let (version, _) = match &self.last_local_update {
+            Some(last) => last,
+            None => return false,
+        };
+
+        digest.frontier.version(&self.steward).saturating_add(1) == *version
+            && self.frontier.same_except(&digest.frontier, &self.steward)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ReplicaCounter {
+    positive: BTreeMap<NodeId, u64>,
+    negative: BTreeMap<NodeId, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ReplicaCounterDelta {
+    positive: BTreeMap<NodeId, u64>,
+    negative: BTreeMap<NodeId, u64>,
+}
+
+impl ReplicaCounter {
+    fn increment(&mut self, replica: &NodeId, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let entry = self.positive.entry(replica.clone()).or_insert(0);
+        *entry = (*entry).saturating_add(amount);
+    }
+
+    fn decrement(&mut self, replica: &NodeId, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+        let entry = self.negative.entry(replica.clone()).or_insert(0);
+        *entry = (*entry).saturating_add(amount);
+    }
+
+    fn value(&self) -> u64 {
+        let positive = self
+            .positive
+            .values()
+            .fold(0_u64, |total, value| total.saturating_add(*value));
+        let negative = self
+            .negative
+            .values()
+            .fold(0_u64, |total, value| total.saturating_add(*value));
+        positive.saturating_sub(negative)
+    }
+
+    fn merge_map(target: &mut BTreeMap<NodeId, u64>, source: &BTreeMap<NodeId, u64>) {
+        for (replica, value) in source {
+            let entry = target.entry(replica.clone()).or_insert(0);
+            *entry = (*entry).max(*value);
+        }
+    }
+
+    fn delta_map(
+        current: &BTreeMap<NodeId, u64>,
+        baseline: &BTreeMap<NodeId, u64>,
+    ) -> BTreeMap<NodeId, u64> {
+        current
+            .iter()
+            .filter_map(|(replica, value)| {
+                let baseline_value = baseline.get(replica).copied().unwrap_or(0);
+                (*value > baseline_value).then_some((replica.clone(), *value))
+            })
+            .collect()
+    }
+
+    fn apply_map(target: &mut BTreeMap<NodeId, u64>, delta: &BTreeMap<NodeId, u64>) {
+        Self::merge_map(target, delta);
+    }
+}
+
+impl JoinSemilattice for ReplicaCounter {
+    type Delta = ReplicaCounterDelta;
+
+    fn merge(&mut self, other: &Self) {
+        Self::merge_map(&mut self.positive, &other.positive);
+        Self::merge_map(&mut self.negative, &other.negative);
+    }
+
+    fn delta(&self, baseline: &Self) -> Self::Delta {
+        ReplicaCounterDelta {
+            positive: Self::delta_map(&self.positive, &baseline.positive),
+            negative: Self::delta_map(&self.negative, &baseline.negative),
+        }
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) {
+        Self::apply_map(&mut self.positive, &delta.positive);
+        Self::apply_map(&mut self.negative, &delta.negative);
+    }
+}
+
+/// Delta-CRDT summary of subscriber interest counts by subject pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InterestSummary {
+    counts: BTreeMap<SubjectPattern, ReplicaCounter>,
+}
+
+/// Sparse delta for [`InterestSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InterestSummaryDelta {
+    counts: BTreeMap<SubjectPattern, ReplicaCounterDelta>,
+}
+
+impl InterestSummary {
+    /// Register one subscriber interest for `pattern` on `replica`.
+    pub fn subscribe(&mut self, replica: &NodeId, pattern: SubjectPattern) {
+        self.counts
+            .entry(pattern)
+            .or_default()
+            .increment(replica, 1);
+    }
+
+    /// Remove one subscriber interest for `pattern` on `replica`.
+    pub fn unsubscribe(&mut self, replica: &NodeId, pattern: &SubjectPattern) {
+        self.counts
+            .entry(pattern.clone())
+            .or_default()
+            .decrement(replica, 1);
+    }
+
+    /// Current converged subscriber count for `pattern`.
+    #[must_use]
+    pub fn interest_count(&self, pattern: &SubjectPattern) -> u64 {
+        self.counts.get(pattern).map_or(0, ReplicaCounter::value)
+    }
+}
+
+impl JoinSemilattice for InterestSummary {
+    type Delta = InterestSummaryDelta;
+
+    fn merge(&mut self, other: &Self) {
+        for (pattern, counter) in &other.counts {
+            self.counts
+                .entry(pattern.clone())
+                .or_default()
+                .merge(counter);
+        }
+    }
+
+    fn delta(&self, baseline: &Self) -> Self::Delta {
+        let counts = self
+            .counts
+            .iter()
+            .filter_map(|(pattern, counter)| {
+                let baseline_counter = baseline.counts.get(pattern).cloned().unwrap_or_default();
+                let delta = counter.delta(&baseline_counter);
+                (!delta.positive.is_empty() || !delta.negative.is_empty())
+                    .then_some((pattern.clone(), delta))
+            })
+            .collect();
+        InterestSummaryDelta { counts }
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) {
+        for (pattern, counter_delta) in &delta.counts {
+            self.counts
+                .entry(pattern.clone())
+                .or_default()
+                .apply_delta(counter_delta);
+        }
+    }
+}
+
+/// Monotone coarse cursor position for one consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorMark {
+    offset: u64,
+    checkpoint_unix_ms: u64,
+    steward: NodeId,
+}
+
+impl CursorMark {
+    /// Create a new coarse cursor mark.
+    #[must_use]
+    pub fn new(offset: u64, checkpoint_unix_ms: u64, steward: NodeId) -> Self {
+        Self {
+            offset,
+            checkpoint_unix_ms,
+            steward,
+        }
+    }
+
+    /// Highest fully observed offset represented by this mark.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Capture timestamp for the mark.
+    #[must_use]
+    pub const fn checkpoint_unix_ms(&self) -> u64 {
+        self.checkpoint_unix_ms
+    }
+
+    /// Steward that emitted this mark.
+    #[must_use]
+    pub fn steward(&self) -> &NodeId {
+        &self.steward
+    }
+
+    fn is_newer_than(&self, other: &Self) -> bool {
+        (self.offset, self.checkpoint_unix_ms, self.steward.as_str())
+            > (
+                other.offset,
+                other.checkpoint_unix_ms,
+                other.steward.as_str(),
+            )
+    }
+}
+
+/// Delta-CRDT summary of coarse consumer cursor positions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CursorCheckpoint {
+    checkpoints: BTreeMap<String, CursorMark>,
+}
+
+/// Sparse delta for [`CursorCheckpoint`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CursorCheckpointDelta {
+    checkpoints: BTreeMap<String, CursorMark>,
+}
+
+impl CursorCheckpoint {
+    /// Observe a newer checkpoint for `consumer`.
+    pub fn observe(&mut self, consumer: impl Into<String>, mark: CursorMark) {
+        let consumer = consumer.into();
+        match self.checkpoints.get_mut(&consumer) {
+            Some(existing) if mark.is_newer_than(existing) => *existing = mark,
+            None => {
+                self.checkpoints.insert(consumer, mark);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Return the current converged mark for `consumer`.
+    #[must_use]
+    pub fn checkpoint(&self, consumer: &str) -> Option<&CursorMark> {
+        self.checkpoints.get(consumer)
+    }
+}
+
+impl JoinSemilattice for CursorCheckpoint {
+    type Delta = CursorCheckpointDelta;
+
+    fn merge(&mut self, other: &Self) {
+        for (consumer, mark) in &other.checkpoints {
+            self.observe(consumer.clone(), mark.clone());
+        }
+    }
+
+    fn delta(&self, baseline: &Self) -> Self::Delta {
+        let checkpoints = self
+            .checkpoints
+            .iter()
+            .filter_map(
+                |(consumer, mark)| match baseline.checkpoints.get(consumer) {
+                    Some(existing) if !mark.is_newer_than(existing) => None,
+                    _ => Some((consumer.clone(), mark.clone())),
+                },
+            )
+            .collect();
+        CursorCheckpointDelta { checkpoints }
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) {
+        for (consumer, mark) in &delta.checkpoints {
+            self.observe(consumer.clone(), mark.clone());
+        }
+    }
+}
+
+/// Coarse membership state used for non-authoritative control hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MembershipState {
+    /// No useful information yet.
+    Unknown,
+    /// Replica is joining the fabric.
+    Joining,
+    /// Replica is healthy and serving.
+    Healthy,
+    /// Replica is reachable but degraded.
+    Degraded,
+    /// Replica is draining or preparing to leave.
+    Leaving,
+    /// Replica has been removed from the non-authoritative view.
+    Removed,
+}
+
+/// Versioned non-authoritative membership record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipRecord {
+    version: u64,
+    state: MembershipState,
+    last_heartbeat_unix_ms: u64,
+    load_per_mille: u16,
+}
+
+impl MembershipRecord {
+    /// Construct a new membership record snapshot.
+    #[must_use]
+    pub const fn new(
+        version: u64,
+        state: MembershipState,
+        last_heartbeat_unix_ms: u64,
+        load_per_mille: u16,
+    ) -> Self {
+        Self {
+            version,
+            state,
+            last_heartbeat_unix_ms,
+            load_per_mille,
+        }
+    }
+
+    /// Monotone version stamp for this record.
+    #[must_use]
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Current coarse membership state.
+    #[must_use]
+    pub const fn state(&self) -> MembershipState {
+        self.state
+    }
+
+    /// Last heartbeat carried by the record.
+    #[must_use]
+    pub const fn last_heartbeat_unix_ms(&self) -> u64 {
+        self.last_heartbeat_unix_ms
+    }
+
+    /// Advertised load in per-mille units.
+    #[must_use]
+    pub const fn load_per_mille(&self) -> u16 {
+        self.load_per_mille
+    }
+
+    fn is_newer_than(&self, other: &Self) -> bool {
+        (
+            self.version,
+            self.last_heartbeat_unix_ms,
+            self.state,
+            self.load_per_mille,
+        ) > (
+            other.version,
+            other.last_heartbeat_unix_ms,
+            other.state,
+            other.load_per_mille,
+        )
+    }
+}
+
+/// Delta-CRDT view of non-authoritative replica membership.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MembershipView {
+    records: BTreeMap<NodeId, MembershipRecord>,
+}
+
+/// Sparse delta for [`MembershipView`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MembershipViewDelta {
+    records: BTreeMap<NodeId, MembershipRecord>,
+}
+
+impl MembershipView {
+    /// Observe a versioned membership record for `node`.
+    pub fn observe(&mut self, node: NodeId, record: MembershipRecord) {
+        match self.records.get_mut(&node) {
+            Some(existing) if record.is_newer_than(existing) => *existing = record,
+            None => {
+                self.records.insert(node, record);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Return the current converged record for `node`.
+    #[must_use]
+    pub fn record(&self, node: &NodeId) -> Option<&MembershipRecord> {
+        self.records.get(node)
+    }
+}
+
+impl JoinSemilattice for MembershipView {
+    type Delta = MembershipViewDelta;
+
+    fn merge(&mut self, other: &Self) {
+        for (node, record) in &other.records {
+            self.observe(node.clone(), record.clone());
+        }
+    }
+
+    fn delta(&self, baseline: &Self) -> Self::Delta {
+        let records = self
+            .records
+            .iter()
+            .filter_map(|(node, record)| match baseline.records.get(node) {
+                Some(existing) if !record.is_newer_than(existing) => None,
+                _ => Some((node.clone(), record.clone())),
+            })
+            .collect();
+        MembershipViewDelta { records }
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) {
+        for (node, record) in &delta.records {
+            self.observe(node.clone(), record.clone());
+        }
+    }
+}
+
+/// Bucketed delta-CRDT sketch for lag and load observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LagSketch {
+    bucket_width: u64,
+    buckets: BTreeMap<u64, ReplicaCounter>,
+}
+
+/// Sparse delta for [`LagSketch`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LagSketchDelta {
+    bucket_width: u64,
+    buckets: BTreeMap<u64, ReplicaCounterDelta>,
+}
+
+impl LagSketch {
+    /// Create a new sketch with a deterministic `bucket_width`.
+    #[must_use]
+    pub fn new(bucket_width: u64) -> Self {
+        Self {
+            bucket_width: bucket_width.max(1),
+            buckets: BTreeMap::new(),
+        }
+    }
+
+    /// Sketch bucket width in units of observed lag.
+    #[must_use]
+    pub const fn bucket_width(&self) -> u64 {
+        self.bucket_width
+    }
+
+    fn bucket_index(&self, lag: u64) -> u64 {
+        lag / self.bucket_width
+    }
+
+    fn bucket_midpoint(&self, bucket: u64) -> u64 {
+        bucket
+            .saturating_mul(self.bucket_width)
+            .saturating_add(self.bucket_width / 2)
+    }
+
+    /// Record one lag observation for `replica`.
+    pub fn observe(&mut self, replica: &NodeId, lag: u64) {
+        self.buckets
+            .entry(self.bucket_index(lag))
+            .or_default()
+            .increment(replica, 1);
+    }
+
+    /// Total number of samples represented by the sketch.
+    #[must_use]
+    pub fn total_samples(&self) -> u64 {
+        self.buckets.values().fold(0_u64, |total, counter| {
+            total.saturating_add(counter.value())
+        })
+    }
+
+    /// Midpoint-based mean estimate.
+    #[must_use]
+    pub fn estimated_mean(&self) -> Option<u64> {
+        let total_samples = self.total_samples();
+        if total_samples == 0 {
+            return None;
+        }
+
+        let weighted_sum = self
+            .buckets
+            .iter()
+            .fold(0_u128, |total, (bucket, counter)| {
+                total.saturating_add(
+                    u128::from(self.bucket_midpoint(*bucket))
+                        .saturating_mul(u128::from(counter.value())),
+                )
+            });
+        Some((weighted_sum / u128::from(total_samples)) as u64)
+    }
+
+    /// Worst-case absolute error of [`Self::estimated_mean`] under midpoint
+    /// reconstruction.
+    #[must_use]
+    pub const fn max_mean_error_bound(&self) -> u64 {
+        self.bucket_width / 2
+    }
+}
+
+impl Default for LagSketch {
+    fn default() -> Self {
+        Self::new(16)
+    }
+}
+
+impl JoinSemilattice for LagSketch {
+    type Delta = LagSketchDelta;
+
+    fn merge(&mut self, other: &Self) {
+        if self.bucket_width != other.bucket_width {
+            return;
+        }
+        for (bucket, counter) in &other.buckets {
+            self.buckets.entry(*bucket).or_default().merge(counter);
+        }
+    }
+
+    fn delta(&self, baseline: &Self) -> Self::Delta {
+        let buckets = if self.bucket_width == baseline.bucket_width {
+            self.buckets
+                .iter()
+                .filter_map(|(bucket, counter)| {
+                    let baseline_counter =
+                        baseline.buckets.get(bucket).cloned().unwrap_or_default();
+                    let delta = counter.delta(&baseline_counter);
+                    (!delta.positive.is_empty() || !delta.negative.is_empty())
+                        .then_some((*bucket, delta))
+                })
+                .collect()
+        } else {
+            self.buckets
+                .iter()
+                .map(|(bucket, counter)| (*bucket, counter.delta(&ReplicaCounter::default())))
+                .collect()
+        };
+        LagSketchDelta {
+            bucket_width: self.bucket_width,
+            buckets,
+        }
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) {
+        if self.bucket_width != delta.bucket_width {
+            return;
+        }
+        for (bucket, counter_delta) in &delta.buckets {
+            self.buckets
+                .entry(*bucket)
+                .or_default()
+                .apply_delta(counter_delta);
+        }
+    }
+}
+
+/// Windowed delta-CRDT aggregate of advisory counts and rates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvisoryAggregate {
+    window_width_ms: u64,
+    windows: BTreeMap<u64, BTreeMap<String, ReplicaCounter>>,
+}
+
+/// Sparse delta for [`AdvisoryAggregate`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdvisoryAggregateDelta {
+    window_width_ms: u64,
+    windows: BTreeMap<u64, BTreeMap<String, ReplicaCounterDelta>>,
+}
+
+impl AdvisoryAggregate {
+    /// Create a new aggregate with fixed `window_width_ms`.
+    #[must_use]
+    pub fn new(window_width_ms: u64) -> Self {
+        Self {
+            window_width_ms: window_width_ms.max(1),
+            windows: BTreeMap::new(),
+        }
+    }
+
+    /// Width of each advisory aggregation window.
+    #[must_use]
+    pub const fn window_width_ms(&self) -> u64 {
+        self.window_width_ms
+    }
+
+    fn window_start(&self, ts_unix_ms: u64) -> u64 {
+        ts_unix_ms - (ts_unix_ms % self.window_width_ms)
+    }
+
+    /// Record one advisory kind observation in the corresponding window.
+    pub fn record_kind(&mut self, replica: &NodeId, advisory_kind: &str, ts_unix_ms: u64) {
+        self.windows
+            .entry(self.window_start(ts_unix_ms))
+            .or_default()
+            .entry(advisory_kind.to_owned())
+            .or_default()
+            .increment(replica, 1);
+    }
+
+    /// Return the converged count for `advisory_kind` in `window_start`.
+    #[must_use]
+    pub fn count(&self, window_start: u64, advisory_kind: &str) -> u64 {
+        self.windows
+            .get(&window_start)
+            .and_then(|kinds| kinds.get(advisory_kind))
+            .map_or(0, ReplicaCounter::value)
+    }
+
+    /// Return the converged per-second rate for `advisory_kind` in
+    /// `window_start`.
+    #[must_use]
+    pub fn rate_per_second(&self, window_start: u64, advisory_kind: &str) -> f64 {
+        let count = self.count(window_start, advisory_kind) as f64;
+        count * 1000.0 / self.window_width_ms as f64
+    }
+}
+
+impl Default for AdvisoryAggregate {
+    fn default() -> Self {
+        Self::new(60_000)
+    }
+}
+
+impl JoinSemilattice for AdvisoryAggregate {
+    type Delta = AdvisoryAggregateDelta;
+
+    fn merge(&mut self, other: &Self) {
+        if self.window_width_ms != other.window_width_ms {
+            return;
+        }
+        for (window_start, kinds) in &other.windows {
+            let window = self.windows.entry(*window_start).or_default();
+            for (kind, counter) in kinds {
+                window.entry(kind.clone()).or_default().merge(counter);
+            }
+        }
+    }
+
+    fn delta(&self, baseline: &Self) -> Self::Delta {
+        let windows = if self.window_width_ms == baseline.window_width_ms {
+            self.windows
+                .iter()
+                .filter_map(|(window_start, kinds)| {
+                    let mut delta_kinds = BTreeMap::new();
+                    for (kind, counter) in kinds {
+                        let baseline_counter = baseline
+                            .windows
+                            .get(window_start)
+                            .and_then(|baseline_kinds| baseline_kinds.get(kind))
+                            .cloned()
+                            .unwrap_or_default();
+                        let delta = counter.delta(&baseline_counter);
+                        if !delta.positive.is_empty() || !delta.negative.is_empty() {
+                            delta_kinds.insert(kind.clone(), delta);
+                        }
+                    }
+                    (!delta_kinds.is_empty()).then_some((*window_start, delta_kinds))
+                })
+                .collect()
+        } else {
+            self.windows
+                .iter()
+                .map(|(window_start, kinds)| {
+                    let delta_kinds = kinds
+                        .iter()
+                        .map(|(kind, counter)| {
+                            (kind.clone(), counter.delta(&ReplicaCounter::default()))
+                        })
+                        .collect();
+                    (*window_start, delta_kinds)
+                })
+                .collect()
+        };
+        AdvisoryAggregateDelta {
+            window_width_ms: self.window_width_ms,
+            windows,
+        }
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) {
+        if self.window_width_ms != delta.window_width_ms {
+            return;
+        }
+        for (window_start, kinds) in &delta.windows {
+            let window = self.windows.entry(*window_start).or_default();
+            for (kind, counter_delta) in kinds {
+                window
+                    .entry(kind.clone())
+                    .or_default()
+                    .apply_delta(counter_delta);
+            }
         }
     }
 }
@@ -859,6 +1900,319 @@ impl ControlRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(id: &str) -> NodeId {
+        NodeId::new(id)
+    }
+
+    fn pattern(value: &str) -> SubjectPattern {
+        SubjectPattern::new(value)
+    }
+
+    fn assert_delta_round_trip<T>(baseline: T, updated: T)
+    where
+        T: JoinSemilattice + std::fmt::Debug,
+        T::Delta: std::fmt::Debug,
+    {
+        let delta = updated.delta(&baseline);
+        let mut applied = baseline.clone();
+        applied.apply_delta(&delta);
+        assert_eq!(applied, updated);
+    }
+
+    fn assert_converges<T>(left: T, middle: T, right: T)
+    where
+        T: JoinSemilattice + std::fmt::Debug,
+    {
+        let mut lhs = left.clone();
+        lhs.merge(&middle);
+        lhs.merge(&right);
+
+        let mut rhs = right.clone();
+        rhs.merge(&middle);
+        rhs.merge(&left);
+
+        assert_eq!(lhs, rhs);
+    }
+
+    // -- Delta-CRDT control metadata ----------------------------------------
+
+    #[test]
+    fn interest_summary_round_trips_delta() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let orders = pattern("tenant.orders.>");
+        let invoices = pattern("tenant.invoices.>");
+
+        let baseline = InterestSummary::default();
+        let mut updated = InterestSummary::default();
+        updated.subscribe(&replica_a, orders.clone());
+        updated.subscribe(&replica_b, orders.clone());
+        updated.unsubscribe(&replica_a, &orders);
+        updated.subscribe(&replica_b, invoices.clone());
+
+        assert_eq!(updated.interest_count(&orders), 1);
+        assert_eq!(updated.interest_count(&invoices), 1);
+        assert_delta_round_trip(baseline, updated);
+    }
+
+    #[test]
+    fn interest_summary_converges_across_merge_orders() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let orders = pattern("tenant.orders.>");
+
+        let mut left = InterestSummary::default();
+        left.subscribe(&replica_a, orders.clone());
+
+        let mut middle = InterestSummary::default();
+        middle.subscribe(&replica_b, orders.clone());
+
+        let mut right = InterestSummary::default();
+        right.unsubscribe(&replica_a, &orders);
+
+        assert_converges(left, middle, right);
+    }
+
+    #[test]
+    fn cursor_checkpoint_prefers_newest_mark() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let baseline = CursorCheckpoint::default();
+
+        let mut updated = CursorCheckpoint::default();
+        updated.observe("consumer-a", CursorMark::new(10, 1_000, replica_a.clone()));
+        updated.observe("consumer-a", CursorMark::new(12, 1_100, replica_b.clone()));
+
+        let checkpoint = updated.checkpoint("consumer-a").expect("checkpoint");
+        assert_eq!(checkpoint.offset(), 12);
+        assert_eq!(checkpoint.checkpoint_unix_ms(), 1_100);
+        assert_eq!(checkpoint.steward(), &replica_b);
+        assert_delta_round_trip(baseline, updated);
+    }
+
+    #[test]
+    fn membership_view_prefers_higher_version_and_converges() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+
+        let mut left = MembershipView::default();
+        left.observe(
+            replica_a.clone(),
+            MembershipRecord::new(1, MembershipState::Healthy, 1_000, 125),
+        );
+
+        let mut middle = MembershipView::default();
+        middle.observe(
+            replica_a.clone(),
+            MembershipRecord::new(2, MembershipState::Degraded, 1_100, 600),
+        );
+
+        let mut right = MembershipView::default();
+        right.observe(
+            replica_b.clone(),
+            MembershipRecord::new(1, MembershipState::Joining, 900, 50),
+        );
+
+        let mut merged = left.clone();
+        merged.merge(&middle);
+        let record = merged.record(&replica_a).expect("membership record");
+        assert_eq!(record.version(), 2);
+        assert_eq!(record.state(), MembershipState::Degraded);
+        assert_eq!(record.load_per_mille(), 600);
+
+        assert_delta_round_trip(MembershipView::default(), merged);
+        assert_converges(left, middle, right);
+    }
+
+    #[test]
+    fn lag_sketch_round_trips_delta_and_respects_error_bound() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let mut sketch = LagSketch::new(8);
+
+        let samples = [3_u64, 9, 12, 18];
+        sketch.observe(&replica_a, samples[0]);
+        sketch.observe(&replica_a, samples[1]);
+        sketch.observe(&replica_b, samples[2]);
+        sketch.observe(&replica_b, samples[3]);
+
+        assert_eq!(sketch.total_samples(), samples.len() as u64);
+        let estimated_mean = sketch.estimated_mean().expect("mean estimate");
+        let actual_mean = samples.iter().sum::<u64>() / samples.len() as u64;
+        let error = estimated_mean.abs_diff(actual_mean);
+        assert!(error <= sketch.max_mean_error_bound());
+
+        assert_delta_round_trip(LagSketch::new(8), sketch);
+    }
+
+    #[test]
+    fn advisory_aggregate_round_trips_delta_and_reports_rate() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let mut aggregate = AdvisoryAggregate::new(1_000);
+
+        aggregate.record_kind(&replica_a, "policy_decision", 1_200);
+        aggregate.record_kind(&replica_b, "policy_decision", 1_400);
+        aggregate.record_kind(&replica_b, "evidence_record", 1_800);
+
+        assert_eq!(aggregate.count(1_000, "policy_decision"), 2);
+        assert_eq!(aggregate.count(1_000, "evidence_record"), 1);
+        assert_eq!(aggregate.rate_per_second(1_000, "policy_decision"), 2.0);
+
+        assert_delta_round_trip(AdvisoryAggregate::new(1_000), aggregate);
+    }
+
+    #[test]
+    fn propagation_applies_incremental_delta_when_peer_is_one_step_behind() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let orders = pattern("tenant.orders.>");
+
+        let mut steward = CrdtPropagationReplica::<InterestSummary>::new(replica_a.clone());
+        let mut peer = CrdtPropagationReplica::<InterestSummary>::new(replica_b);
+
+        let envelope = steward
+            .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
+            .expect("incremental envelope");
+
+        assert_eq!(envelope.mode(), PropagationMode::Incremental);
+        assert_eq!(peer.apply(&envelope), PropagationApply::Applied);
+        assert_eq!(peer.state().interest_count(&orders), 1);
+        assert_eq!(peer.frontier().version(&replica_a), 1);
+    }
+
+    #[test]
+    fn propagation_relay_uses_snapshot_for_downstream_peer() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let replica_c = node("replica-c");
+        let orders = pattern("tenant.orders.>");
+
+        let mut steward = CrdtPropagationReplica::<InterestSummary>::new(replica_a.clone());
+        let mut relay = CrdtPropagationReplica::<InterestSummary>::new(replica_b);
+        let mut downstream = CrdtPropagationReplica::<InterestSummary>::new(replica_c);
+
+        let first_hop = steward
+            .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
+            .expect("first-hop envelope");
+        assert_eq!(relay.apply(&first_hop), PropagationApply::Applied);
+
+        let second_hop = relay
+            .prepare_for(&downstream.digest())
+            .expect("relay snapshot");
+        assert_eq!(second_hop.mode(), PropagationMode::AntiEntropy);
+        assert_eq!(downstream.apply(&second_hop), PropagationApply::Applied);
+        assert_eq!(downstream.state().interest_count(&orders), 1);
+    }
+
+    #[test]
+    fn propagation_detects_partition_gap_and_repairs_via_snapshot() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let orders = pattern("tenant.orders.>");
+        let invoices = pattern("tenant.invoices.>");
+
+        let mut steward = CrdtPropagationReplica::<InterestSummary>::new(replica_a.clone());
+        let mut peer = CrdtPropagationReplica::<InterestSummary>::new(replica_b);
+
+        let first = steward
+            .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
+            .expect("first delta");
+        let second = steward
+            .mutate(|summary| summary.subscribe(&replica_a, invoices.clone()))
+            .expect("second delta");
+
+        assert_eq!(peer.apply(&second), PropagationApply::NeedsAntiEntropy);
+        assert!(peer.needs_anti_entropy());
+
+        let repair = steward
+            .prepare_for(&peer.digest())
+            .expect("repair snapshot");
+        assert_eq!(repair.mode(), PropagationMode::AntiEntropy);
+        assert_eq!(peer.apply(&repair), PropagationApply::Applied);
+        assert!(!peer.needs_anti_entropy());
+        assert_eq!(peer.state().interest_count(&orders), 1);
+        assert_eq!(peer.state().interest_count(&invoices), 1);
+        assert_eq!(peer.frontier().version(&replica_a), 2);
+        assert_eq!(peer.apply(&first), PropagationApply::AlreadySatisfied);
+    }
+
+    #[test]
+    fn propagation_converges_leaderlessly_after_partition_via_relay() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let replica_c = node("replica-c");
+        let orders = pattern("tenant.orders.>");
+        let invoices = pattern("tenant.invoices.>");
+
+        let mut left = CrdtPropagationReplica::<InterestSummary>::new(replica_a.clone());
+        let mut right = CrdtPropagationReplica::<InterestSummary>::new(replica_b.clone());
+        let mut relay = CrdtPropagationReplica::<InterestSummary>::new(replica_c);
+
+        let left_delta = left
+            .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
+            .expect("left delta");
+        let right_delta = right
+            .mutate(|summary| summary.subscribe(&replica_b, invoices.clone()))
+            .expect("right delta");
+
+        assert_eq!(relay.apply(&left_delta), PropagationApply::Applied);
+        let from_right = right
+            .prepare_for(&relay.digest())
+            .expect("relay repair from right");
+        assert_eq!(from_right.mode(), PropagationMode::AntiEntropy);
+        assert_eq!(relay.apply(&from_right), PropagationApply::Applied);
+
+        let relay_to_left = relay.prepare_for(&left.digest()).expect("relay to left");
+        let relay_to_right = relay.prepare_for(&right.digest()).expect("relay to right");
+
+        assert_eq!(left.apply(&relay_to_left), PropagationApply::Applied);
+        assert_eq!(right.apply(&relay_to_right), PropagationApply::Applied);
+
+        let mut expected = InterestSummary::default();
+        expected.subscribe(&replica_a, orders.clone());
+        expected.subscribe(&replica_b, invoices.clone());
+
+        assert_eq!(left.state(), &expected);
+        assert_eq!(right.state(), &expected);
+        assert_eq!(relay.state(), &expected);
+    }
+
+    #[test]
+    fn propagation_prefers_incremental_delta_when_it_is_smaller_than_snapshot() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let orders = pattern("tenant.orders.>");
+        let invoices = pattern("tenant.invoices.>");
+
+        let mut steward = CrdtPropagationReplica::<InterestSummary>::new(replica_a.clone());
+        let mut peer = CrdtPropagationReplica::<InterestSummary>::new(replica_b);
+
+        let first = steward
+            .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
+            .expect("first delta");
+        assert_eq!(peer.apply(&first), PropagationApply::Applied);
+
+        let incremental = steward
+            .mutate(|summary| summary.subscribe(&replica_a, invoices.clone()))
+            .expect("incremental delta");
+        let snapshot = steward.snapshot_envelope().expect("snapshot delta");
+
+        assert_eq!(incremental.mode(), PropagationMode::Incremental);
+        assert_eq!(snapshot.mode(), PropagationMode::AntiEntropy);
+
+        let incremental_counts = match incremental.delta() {
+            InterestSummaryDelta { counts } => counts.len(),
+        };
+        let snapshot_counts = match snapshot.delta() {
+            InterestSummaryDelta { counts } => counts.len(),
+        };
+
+        assert_eq!(incremental_counts, 1);
+        assert_eq!(snapshot_counts, 2);
+        assert!(incremental_counts < snapshot_counts);
+    }
 
     // -- SystemSubjectFamily -------------------------------------------------
 
