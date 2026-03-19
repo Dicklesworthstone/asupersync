@@ -2177,7 +2177,7 @@ mod tests {
 
         let mut registry = DivergenceCorpusRegistry::new();
         registry.upsert(entry.clone());
-        registry.upsert(entry.clone().promote_to_regression("regression.promoted"));
+        registry.upsert(entry.promote_to_regression("regression.promoted"));
 
         assert_eq!(registry.schema_version, DIVERGENCE_CORPUS_SCHEMA_VERSION);
         assert_eq!(registry.entries.len(), 1);
