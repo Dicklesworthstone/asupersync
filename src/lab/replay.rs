@@ -33,6 +33,7 @@ use crate::lab::config::LabConfig;
 use crate::lab::runtime::{CrashpackLink, LabRuntime, SporkHarnessReport};
 use crate::lab::spork_harness::{ScenarioRunnerError, SporkScenarioConfig, SporkScenarioRunner};
 use crate::trace::{TraceBuffer, TraceBufferHandle, TraceEvent};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Compares two traces and returns the first divergence point.
@@ -487,6 +488,459 @@ pub fn explore_scenario_runner_seed_space(
         reports.push(result.report);
     }
     Ok(summarize_spork_reports(&reports))
+}
+
+/// Schema version for the divergence corpus registry.
+pub const DIVERGENCE_CORPUS_SCHEMA_VERSION: &str = "lab-live-divergence-corpus-v1";
+
+/// Retention class for a divergence artifact bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DivergenceBundleLevel {
+    /// Preserve the complete debugging bundle.
+    Full,
+    /// Preserve only the reduced summary bundle.
+    Reduced,
+}
+
+/// Final differential policy class from the divergence taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DifferentialPolicyClass {
+    /// Stable semantic mismatch on a supported surface.
+    RuntimeSemanticBug,
+    /// Lab model, mapping, or comparator bug.
+    LabModelOrMappingBug,
+    /// Required artifact schema or evidence is missing/malformed.
+    ArtifactSchemaViolation,
+    /// The surface lacks the observability needed for a strong claim.
+    InsufficientObservability,
+    /// The surface is outside the admitted differential scope.
+    UnsupportedSurface,
+    /// The mismatch looks like scheduling noise rather than semantics.
+    SchedulerNoiseSuspected,
+    /// The mismatch could not be stabilized by rerun policy.
+    IrreproducibleDivergence,
+}
+
+impl DifferentialPolicyClass {
+    /// Stable string form shared by docs, logs, and registry entries.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RuntimeSemanticBug => "runtime_semantic_bug",
+            Self::LabModelOrMappingBug => "lab_model_or_mapping_bug",
+            Self::ArtifactSchemaViolation => "artifact_schema_violation",
+            Self::InsufficientObservability => "insufficient_observability",
+            Self::UnsupportedSurface => "unsupported_surface",
+            Self::SchedulerNoiseSuspected => "scheduler_noise_suspected",
+            Self::IrreproducibleDivergence => "irreproducible_divergence",
+        }
+    }
+
+    /// Required bundle strength from the divergence taxonomy.
+    #[must_use]
+    pub fn bundle_level(self) -> DivergenceBundleLevel {
+        match self {
+            Self::RuntimeSemanticBug
+            | Self::LabModelOrMappingBug
+            | Self::ArtifactSchemaViolation
+            | Self::IrreproducibleDivergence => DivergenceBundleLevel::Full,
+            Self::InsufficientObservability
+            | Self::UnsupportedSurface
+            | Self::SchedulerNoiseSuspected => DivergenceBundleLevel::Reduced,
+        }
+    }
+}
+
+impl std::fmt::Display for DifferentialPolicyClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Lifecycle state for a divergence corpus entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegressionPromotionState {
+    /// Newly discovered divergence under investigation.
+    Investigating,
+    /// A minimized reproducer exists and preserves the same semantics.
+    Minimized,
+    /// Promoted into a durable regression artifact.
+    PromotedRegression,
+    /// Retained as a known-open investigation instead of a regression.
+    KnownOpen,
+    /// Explicitly rejected for promotion.
+    Rejected,
+}
+
+/// Minimization/shrinker status for a divergence entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DivergenceShrinkStatus {
+    /// No shrinker has been requested yet.
+    NotRequested,
+    /// Shrinking is still in progress.
+    Pending,
+    /// A minimized reproducer exists and preserves the semantic class.
+    PreservedSemanticClass,
+    /// Shrinking failed to preserve the semantic class and must not replace the original.
+    Rejected,
+}
+
+/// Stable artifact layout for a retained differential bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceArtifactBundle {
+    /// Root directory for the retained bundle.
+    pub bundle_root: String,
+    /// Stable summary record path.
+    pub differential_summary_path: String,
+    /// Stable event-log path.
+    pub differential_event_log_path: String,
+    /// Stable failures path.
+    pub differential_failures_path: String,
+    /// Stable deviations path.
+    pub differential_deviations_path: String,
+    /// Stable repro manifest path.
+    pub differential_repro_manifest_path: String,
+    /// Stable lab normalized-record path.
+    pub lab_normalized_path: String,
+    /// Stable live normalized-record path.
+    pub live_normalized_path: String,
+}
+
+impl DivergenceArtifactBundle {
+    /// Build the canonical bundle layout under a root directory.
+    #[must_use]
+    pub fn under(root: impl Into<String>) -> Self {
+        let bundle_root = root.into().trim_end_matches('/').to_string();
+        let join = |name: &str| format!("{bundle_root}/{name}");
+        Self {
+            bundle_root: bundle_root.clone(),
+            differential_summary_path: join("differential_summary.json"),
+            differential_event_log_path: join("differential_event_log.jsonl"),
+            differential_failures_path: join("differential_failures.json"),
+            differential_deviations_path: join("differential_deviations.json"),
+            differential_repro_manifest_path: join("differential_repro_manifest.json"),
+            lab_normalized_path: join("lab_normalized.json"),
+            live_normalized_path: join("live_normalized.json"),
+        }
+    }
+}
+
+/// Stable retention metadata for a divergence bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceRetentionMetadata {
+    /// Required bundle strength.
+    pub bundle_level: DivergenceBundleLevel,
+    /// Default local retention window in days.
+    pub local_retention_days: u16,
+    /// Default CI retention window in days.
+    pub ci_retention_days: u16,
+    /// Default redaction policy for retained artifacts.
+    pub redaction_mode: String,
+}
+
+impl DivergenceRetentionMetadata {
+    /// Retention defaults derived from the divergence taxonomy.
+    #[must_use]
+    pub fn for_policy_class(policy_class: DifferentialPolicyClass) -> Self {
+        Self {
+            bundle_level: policy_class.bundle_level(),
+            local_retention_days: 14,
+            ci_retention_days: 30,
+            redaction_mode: "metadata_only".to_string(),
+        }
+    }
+}
+
+/// First-seen execution context for a divergence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceFirstSeenContext {
+    /// Named runner profile such as `smoke`, `pilot_surface`, or `nightly`.
+    pub runner_profile: String,
+    /// Attempt index within the local run.
+    pub attempt_index: u32,
+    /// Number of reruns already attempted when this entry was recorded.
+    pub rerun_count: u32,
+}
+
+/// Minimization lineage for a divergence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceMinimizationLineage {
+    /// Original canonical seed from the first-seen run.
+    pub original_seed: u64,
+    /// Minimized seed when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimized_seed: Option<u64>,
+    /// Named shrinker or minimization pass when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shrinker: Option<String>,
+    /// Current shrink status.
+    pub shrink_status: DivergenceShrinkStatus,
+    /// Whether the minimized form preserved the same divergence class.
+    pub preserved_divergence_class: bool,
+    /// Whether the minimized form preserved the same policy class.
+    pub preserved_policy_class: bool,
+}
+
+impl DivergenceMinimizationLineage {
+    /// Start minimization lineage from a seed lineage record.
+    #[must_use]
+    pub fn from_seed_lineage(lineage: &crate::lab::dual_run::SeedLineageRecord) -> Self {
+        Self {
+            original_seed: lineage.canonical_seed,
+            minimized_seed: None,
+            shrinker: None,
+            shrink_status: DivergenceShrinkStatus::NotRequested,
+            preserved_divergence_class: true,
+            preserved_policy_class: true,
+        }
+    }
+
+    /// Record a minimized reproducer that preserves the same semantic meaning.
+    #[must_use]
+    pub fn with_minimized_seed(
+        mut self,
+        seed: u64,
+        shrinker: impl Into<String>,
+        preserved_divergence_class: bool,
+        preserved_policy_class: bool,
+    ) -> Self {
+        self.minimized_seed = Some(seed);
+        self.shrinker = Some(shrinker.into());
+        self.shrink_status = if preserved_divergence_class && preserved_policy_class {
+            DivergenceShrinkStatus::PreservedSemanticClass
+        } else {
+            DivergenceShrinkStatus::Rejected
+        };
+        self.preserved_divergence_class = preserved_divergence_class;
+        self.preserved_policy_class = preserved_policy_class;
+        self
+    }
+}
+
+/// One retained divergence entry in the differential corpus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceCorpusEntry {
+    /// Stable schema discriminator.
+    pub schema_version: String,
+    /// Stable entry identifier used for registry upsert.
+    pub entry_id: String,
+    /// Scenario id from the differential run.
+    pub scenario_id: String,
+    /// Surface id from the differential run.
+    pub surface_id: String,
+    /// Surface contract version from the differential run.
+    pub surface_contract_version: String,
+    /// Diagnostic divergence class for this entry.
+    pub divergence_class: String,
+    /// Final differential policy class for this entry.
+    pub policy_class: DifferentialPolicyClass,
+    /// First-seen execution context.
+    pub first_seen: DivergenceFirstSeenContext,
+    /// Full seed lineage from the originating run.
+    pub seed_lineage: crate::lab::dual_run::SeedLineageRecord,
+    /// Stable mismatch field names for semantic preservation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mismatch_fields: Vec<String>,
+    /// Stable retained bundle layout.
+    pub artifact_bundle: DivergenceArtifactBundle,
+    /// Shrinker/minimization lineage.
+    pub minimization_lineage: DivergenceMinimizationLineage,
+    /// Current promotion state for this entry.
+    pub regression_promotion_state: RegressionPromotionState,
+    /// Stable retention metadata.
+    pub retention: DivergenceRetentionMetadata,
+    /// Additional machine-readable annotations.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl DivergenceCorpusEntry {
+    /// Create a registry entry from a differential result and retained bundle root.
+    #[must_use]
+    pub fn from_dual_run_result(
+        result: &crate::lab::dual_run::DualRunResult,
+        runner_profile: impl Into<String>,
+        divergence_class: impl Into<String>,
+        policy_class: DifferentialPolicyClass,
+        bundle_root: impl Into<String>,
+    ) -> Self {
+        let seed_lineage = result.seed_lineage.clone();
+        let entry_id = Self::entry_id_for(
+            &result.verdict.scenario_id,
+            &seed_lineage.seed_lineage_id,
+            policy_class,
+        );
+        let mut mismatch_fields: Vec<String> = result
+            .verdict
+            .mismatches
+            .iter()
+            .map(|mismatch| mismatch.field.clone())
+            .collect();
+        mismatch_fields.sort_unstable();
+        mismatch_fields.dedup();
+
+        let mut metadata = BTreeMap::new();
+        if let Some(path) = result.lab.provenance.artifact_path.as_deref() {
+            metadata.insert("lab_artifact_path".to_string(), path.to_string());
+        }
+        if let Some(path) = result.live.provenance.artifact_path.as_deref() {
+            metadata.insert("live_artifact_path".to_string(), path.to_string());
+        }
+        if let Some(cmd) = result.lab.provenance.repro_command.as_deref() {
+            metadata.insert("lab_repro_command".to_string(), cmd.to_string());
+        }
+        if let Some(cmd) = result.live.provenance.repro_command.as_deref() {
+            metadata.insert("live_repro_command".to_string(), cmd.to_string());
+        }
+        if !result.lab_invariant_violations.is_empty() {
+            metadata.insert(
+                "lab_invariant_violations".to_string(),
+                result.lab_invariant_violations.join(","),
+            );
+        }
+        if !result.live_invariant_violations.is_empty() {
+            metadata.insert(
+                "live_invariant_violations".to_string(),
+                result.live_invariant_violations.join(","),
+            );
+        }
+
+        Self {
+            schema_version: DIVERGENCE_CORPUS_SCHEMA_VERSION.to_string(),
+            entry_id,
+            scenario_id: result.verdict.scenario_id.clone(),
+            surface_id: result.verdict.surface_id.clone(),
+            surface_contract_version: result.lab.surface_contract_version.clone(),
+            divergence_class: divergence_class.into(),
+            policy_class,
+            first_seen: DivergenceFirstSeenContext {
+                runner_profile: runner_profile.into(),
+                attempt_index: 0,
+                rerun_count: 0,
+            },
+            seed_lineage: seed_lineage.clone(),
+            mismatch_fields,
+            artifact_bundle: DivergenceArtifactBundle::under(bundle_root),
+            minimization_lineage: DivergenceMinimizationLineage::from_seed_lineage(&seed_lineage),
+            regression_promotion_state: RegressionPromotionState::Investigating,
+            retention: DivergenceRetentionMetadata::for_policy_class(policy_class),
+            metadata,
+        }
+    }
+
+    /// Stable entry id from the scenario, seed lineage, and final policy class.
+    #[must_use]
+    pub fn entry_id_for(
+        scenario_id: &str,
+        seed_lineage_id: &str,
+        policy_class: DifferentialPolicyClass,
+    ) -> String {
+        format!(
+            "{}.{}.{}",
+            sanitize_registry_component(scenario_id),
+            sanitize_registry_component(seed_lineage_id),
+            policy_class.as_str()
+        )
+    }
+
+    /// Default bundle root for this entry under `artifacts/differential/`.
+    #[must_use]
+    pub fn default_bundle_root(&self) -> String {
+        format!(
+            "artifacts/differential/{}/{}/{}",
+            sanitize_registry_component(&self.surface_id),
+            sanitize_registry_component(&self.scenario_id),
+            sanitize_registry_component(&self.seed_lineage.seed_lineage_id)
+        )
+    }
+
+    /// Update first-seen attempt/rerun counters.
+    #[must_use]
+    pub fn with_first_seen_attempt(mut self, attempt_index: u32, rerun_count: u32) -> Self {
+        self.first_seen.attempt_index = attempt_index;
+        self.first_seen.rerun_count = rerun_count;
+        self
+    }
+
+    /// Update the minimization lineage.
+    #[must_use]
+    pub fn with_minimization_lineage(mut self, lineage: DivergenceMinimizationLineage) -> Self {
+        self.minimization_lineage = lineage;
+        self.regression_promotion_state = if self.minimization_lineage.minimized_seed.is_some() {
+            RegressionPromotionState::Minimized
+        } else {
+            self.regression_promotion_state
+        };
+        self
+    }
+
+    /// Promote the entry into a durable regression artifact.
+    #[must_use]
+    pub fn promote_to_regression(mut self, promoted_scenario_id: impl Into<String>) -> Self {
+        self.regression_promotion_state = RegressionPromotionState::PromotedRegression;
+        self.metadata.insert(
+            "promoted_scenario_id".to_string(),
+            promoted_scenario_id.into(),
+        );
+        self
+    }
+}
+
+/// Deterministic registry of retained divergences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceCorpusRegistry {
+    /// Stable schema discriminator.
+    pub schema_version: String,
+    /// Entries sorted by stable entry id.
+    pub entries: Vec<DivergenceCorpusEntry>,
+}
+
+impl DivergenceCorpusRegistry {
+    /// Create an empty divergence corpus registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            schema_version: DIVERGENCE_CORPUS_SCHEMA_VERSION.to_string(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Insert or replace an entry by stable id, preserving deterministic order.
+    pub fn upsert(&mut self, entry: DivergenceCorpusEntry) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.entry_id == entry.entry_id)
+        {
+            *existing = entry;
+        } else {
+            self.entries.push(entry);
+            self.entries
+                .sort_by(|left, right| left.entry_id.cmp(&right.entry_id));
+        }
+    }
+}
+
+impl Default for DivergenceCorpusRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn sanitize_registry_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out.trim_matches('_').to_string()
 }
 
 // ============================================================================
@@ -1186,5 +1640,169 @@ mod tests {
         assert_eq!(seed_12[0].trace_fingerprint, seed_12[1].trace_fingerprint);
 
         crate::test_complete!("scenario_runner_exploration_has_deterministic_fingerprints");
+    }
+
+    fn make_dual_run_divergence_result() -> crate::lab::dual_run::DualRunResult {
+        use crate::lab::dual_run::{
+            CancellationRecord, DualRunHarness, LoserDrainRecord, ObligationBalanceRecord,
+            RegionCloseRecord, ResourceSurfaceRecord, TerminalOutcome,
+        };
+
+        fn base_semantics() -> crate::lab::dual_run::NormalizedSemantics {
+            crate::lab::dual_run::NormalizedSemantics {
+                terminal_outcome: TerminalOutcome::ok(),
+                cancellation: CancellationRecord::none(),
+                loser_drain: LoserDrainRecord::not_applicable(),
+                region_close: RegionCloseRecord::quiescent(),
+                obligation_balance: ObligationBalanceRecord::zero(),
+                resource_surface: ResourceSurfaceRecord::empty("test.surface"),
+            }
+        }
+
+        DualRunHarness::phase1(
+            "divergence.registry.case",
+            "test.surface",
+            "v1",
+            "Divergence corpus registry coverage",
+            0xD1,
+        )
+        .lab(|_config| base_semantics())
+        .live(|_seed, _entropy| {
+            let mut sem = base_semantics();
+            sem.obligation_balance = ObligationBalanceRecord {
+                reserved: 1,
+                committed: 0,
+                aborted: 0,
+                leaked: 1,
+                unresolved: 0,
+                balanced: false,
+            };
+            sem
+        })
+        .run()
+    }
+
+    #[test]
+    fn divergence_artifact_bundle_uses_stable_bundle_layout() {
+        init_test("divergence_artifact_bundle_uses_stable_bundle_layout");
+
+        let bundle = DivergenceArtifactBundle::under("artifacts/differential/run-001");
+        assert_eq!(
+            bundle.differential_summary_path,
+            "artifacts/differential/run-001/differential_summary.json"
+        );
+        assert_eq!(
+            bundle.live_normalized_path,
+            "artifacts/differential/run-001/live_normalized.json"
+        );
+
+        crate::test_complete!("divergence_artifact_bundle_uses_stable_bundle_layout");
+    }
+
+    #[test]
+    fn divergence_retention_defaults_follow_policy_class() {
+        init_test("divergence_retention_defaults_follow_policy_class");
+
+        let full = DivergenceRetentionMetadata::for_policy_class(
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+        assert_eq!(full.bundle_level, DivergenceBundleLevel::Full);
+        assert_eq!(full.local_retention_days, 14);
+        assert_eq!(full.ci_retention_days, 30);
+        assert_eq!(full.redaction_mode, "metadata_only");
+
+        let reduced = DivergenceRetentionMetadata::for_policy_class(
+            DifferentialPolicyClass::UnsupportedSurface,
+        );
+        assert_eq!(reduced.bundle_level, DivergenceBundleLevel::Reduced);
+
+        crate::test_complete!("divergence_retention_defaults_follow_policy_class");
+    }
+
+    #[test]
+    fn divergence_corpus_entry_tracks_lineage_and_promotion_state() {
+        init_test("divergence_corpus_entry_tracks_lineage_and_promotion_state");
+
+        let result = make_dual_run_divergence_result();
+        assert!(!result.passed(), "test fixture must produce a divergence");
+
+        let entry = DivergenceCorpusEntry::from_dual_run_result(
+            &result,
+            "pilot_surface",
+            "obligation_balance_mismatch",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+            "artifacts/differential/test-run",
+        )
+        .with_first_seen_attempt(2, 1)
+        .with_minimization_lineage(
+            DivergenceMinimizationLineage::from_seed_lineage(&result.seed_lineage)
+                .with_minimized_seed(0x2A, "prefix_shrinker", true, true),
+        )
+        .promote_to_regression("regression.test.surface.obligation_leak.seed_2a");
+
+        assert_eq!(
+            entry.policy_class,
+            DifferentialPolicyClass::RuntimeSemanticBug
+        );
+        assert_eq!(entry.first_seen.runner_profile, "pilot_surface");
+        assert_eq!(entry.first_seen.attempt_index, 2);
+        assert_eq!(entry.first_seen.rerun_count, 1);
+        assert_eq!(
+            entry.minimization_lineage.shrink_status,
+            DivergenceShrinkStatus::PreservedSemanticClass
+        );
+        assert_eq!(
+            entry.regression_promotion_state,
+            RegressionPromotionState::PromotedRegression
+        );
+        assert_eq!(
+            entry.metadata.get("promoted_scenario_id"),
+            Some(&"regression.test.surface.obligation_leak.seed_2a".to_string())
+        );
+        assert!(
+            entry
+                .mismatch_fields
+                .contains(&"semantics.obligation_balance.balanced".to_string()),
+            "mismatch fields should retain the semantic mismatch path"
+        );
+        assert!(
+            entry
+                .artifact_bundle
+                .differential_repro_manifest_path
+                .ends_with("differential_repro_manifest.json")
+        );
+        assert_eq!(
+            entry.artifact_bundle.bundle_root,
+            "artifacts/differential/test-run"
+        );
+
+        crate::test_complete!("divergence_corpus_entry_tracks_lineage_and_promotion_state");
+    }
+
+    #[test]
+    fn divergence_registry_upsert_is_deterministic() {
+        init_test("divergence_registry_upsert_is_deterministic");
+
+        let result = make_dual_run_divergence_result();
+        let entry = DivergenceCorpusEntry::from_dual_run_result(
+            &result,
+            "nightly",
+            "obligation_balance_mismatch",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+            "artifacts/differential/nightly-case",
+        );
+
+        let mut registry = DivergenceCorpusRegistry::new();
+        registry.upsert(entry.clone());
+        registry.upsert(entry.clone().promote_to_regression("regression.promoted"));
+
+        assert_eq!(registry.schema_version, DIVERGENCE_CORPUS_SCHEMA_VERSION);
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(
+            registry.entries[0].regression_promotion_state,
+            RegressionPromotionState::PromotedRegression
+        );
+
+        crate::test_complete!("divergence_registry_upsert_is_deterministic");
     }
 }

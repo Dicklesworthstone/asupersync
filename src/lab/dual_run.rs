@@ -416,6 +416,10 @@ pub struct ReplayMetadata {
     /// Hash of the config used for this execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
+
+    /// Live-side nondeterminism notes retained for later classification.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nondeterminism_notes: Vec<String>,
 }
 
 impl ReplayMetadata {
@@ -440,6 +444,7 @@ impl ReplayMetadata {
             artifact_path: None,
             repro_command: None,
             config_hash: None,
+            nondeterminism_notes: Vec::new(),
         }
     }
 
@@ -464,6 +469,7 @@ impl ReplayMetadata {
             artifact_path: None,
             repro_command: None,
             config_hash: None,
+            nondeterminism_notes: Vec::new(),
         }
     }
 
@@ -499,6 +505,13 @@ impl ReplayMetadata {
         self
     }
 
+    /// Attach nondeterminism notes gathered during the execution.
+    #[must_use]
+    pub fn with_nondeterminism_notes(mut self, notes: Vec<String>) -> Self {
+        self.nondeterminism_notes = notes;
+        self
+    }
+
     /// Generate a default repro command for this execution.
     #[must_use]
     pub fn default_repro_command(&self) -> String {
@@ -518,7 +531,7 @@ impl ReplayMetadata {
 /// Emitted into mismatch bundles and summary records so that every
 /// seed decision is auditable. Satisfies the contract requirement:
 /// "Seed rewrites must be explicit in `seed_plan`, never hidden."
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SeedLineageRecord {
     /// Seed lineage identifier from the plan.
     pub seed_lineage_id: String,
@@ -1187,6 +1200,199 @@ impl fmt::Display for ComparisonVerdict {
     }
 }
 
+/// Provisional mismatch class prior to any automatic reruns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvisionalDivergenceClass {
+    /// No semantic mismatch or invariant failure was observed.
+    Pass,
+    /// Surface is outside the current supported comparison envelope.
+    UnsupportedSurface,
+    /// The compared artifacts are not on the same schema contract.
+    ArtifactSchemaViolation,
+    /// The surface is conceptually valid, but current evidence is insufficient.
+    InsufficientObservability,
+    /// Only scheduler/provenance noise remains after semantic comparison.
+    SchedulerNoiseSuspected,
+    /// A semantic mismatch on an admitted surface still needs reruns.
+    SemanticMismatchAdmittedSurface,
+    /// The live side already shows a hard contract break.
+    HardContractBreak,
+}
+
+impl fmt::Display for ProvisionalDivergenceClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pass => write!(f, "pass"),
+            Self::UnsupportedSurface => write!(f, "unsupported_surface"),
+            Self::ArtifactSchemaViolation => write!(f, "artifact_schema_violation"),
+            Self::InsufficientObservability => write!(f, "insufficient_observability"),
+            Self::SchedulerNoiseSuspected => write!(f, "scheduler_noise_suspected"),
+            Self::SemanticMismatchAdmittedSurface => {
+                write!(f, "semantic_mismatch_admitted_surface")
+            }
+            Self::HardContractBreak => write!(f, "hard_contract_break"),
+        }
+    }
+}
+
+/// Final divergence class from the published taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalDivergenceClass {
+    RuntimeSemanticBug,
+    LabModelOrMappingBug,
+    IrreproducibleDivergence,
+    UnsupportedSurface,
+    ArtifactSchemaViolation,
+    InsufficientObservability,
+    SchedulerNoiseSuspected,
+}
+
+impl fmt::Display for FinalDivergenceClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RuntimeSemanticBug => write!(f, "runtime_semantic_bug"),
+            Self::LabModelOrMappingBug => write!(f, "lab_model_or_mapping_bug"),
+            Self::IrreproducibleDivergence => write!(f, "irreproducible_divergence"),
+            Self::UnsupportedSurface => write!(f, "unsupported_surface"),
+            Self::ArtifactSchemaViolation => write!(f, "artifact_schema_violation"),
+            Self::InsufficientObservability => write!(f, "insufficient_observability"),
+            Self::SchedulerNoiseSuspected => write!(f, "scheduler_noise_suspected"),
+        }
+    }
+}
+
+/// Time/noise class emitted by the mismatch policy layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimePolicyClass {
+    NotApplicable,
+    ProvenanceOnlyTime,
+    SchedulerNoiseSignal,
+    QualifiedTime,
+    UnsupportedTimeSurface,
+    SemanticTime,
+    PolicyViolation,
+}
+
+impl fmt::Display for TimePolicyClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotApplicable => write!(f, "not_applicable"),
+            Self::ProvenanceOnlyTime => write!(f, "provenance_only_time"),
+            Self::SchedulerNoiseSignal => write!(f, "scheduler_noise_signal"),
+            Self::QualifiedTime => write!(f, "qualified_time"),
+            Self::UnsupportedTimeSurface => write!(f, "unsupported_time_surface"),
+            Self::SemanticTime => write!(f, "semantic_time"),
+            Self::PolicyViolation => write!(f, "policy_violation"),
+        }
+    }
+}
+
+/// Which scheduler/provenance drift triggered a noise classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulerNoiseClass {
+    None,
+    NondeterminismNotesOnly,
+    ScheduleHashDrift,
+    EventHashDrift,
+    EventCountDrift,
+    ProvenanceDrift,
+}
+
+impl fmt::Display for SchedulerNoiseClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::NondeterminismNotesOnly => write!(f, "nondeterminism_notes_only"),
+            Self::ScheduleHashDrift => write!(f, "schedule_hash_drift"),
+            Self::EventHashDrift => write!(f, "event_hash_drift"),
+            Self::EventCountDrift => write!(f, "event_count_drift"),
+            Self::ProvenanceDrift => write!(f, "provenance_drift"),
+        }
+    }
+}
+
+/// Automatic rerun plan for a provisional differential classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RerunDecision {
+    None,
+    LiveConfirmations { additional_runs: u8 },
+    DeterministicLabReplayAndLiveConfirmations { additional_live_runs: u8 },
+    ConfirmationIfRicherInstrumentationEnabled { additional_runs: u8 },
+}
+
+impl fmt::Display for RerunDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::LiveConfirmations { additional_runs } => {
+                write!(f, "live_confirmations(+{additional_runs})")
+            }
+            Self::DeterministicLabReplayAndLiveConfirmations {
+                additional_live_runs,
+            } => write!(
+                f,
+                "deterministic_lab_replay_and_live_confirmations(+{additional_live_runs} live)"
+            ),
+            Self::ConfirmationIfRicherInstrumentationEnabled { additional_runs } => write!(
+                f,
+                "confirmation_if_richer_instrumentation_enabled(+{additional_runs})"
+            ),
+        }
+    }
+}
+
+/// Policy output layered on top of the raw semantic comparison result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DifferentialPolicyOutcome {
+    /// Provisional class before any automatic reruns are executed.
+    pub provisional_class: ProvisionalDivergenceClass,
+    /// Whether the harness should schedule reruns for classification.
+    pub rerun_decision: RerunDecision,
+    /// Final class suggestion when policy can decide immediately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_final_class: Option<FinalDivergenceClass>,
+    /// Time/noise interpretation from the normalization policy.
+    pub time_policy_class: TimePolicyClass,
+    /// Which scheduler/provenance signal was recognized.
+    pub scheduler_noise_class: SchedulerNoiseClass,
+    /// Optional reason for suppression or immediate rejection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppression_reason: Option<String>,
+    /// Human-readable explanation for logs and summaries.
+    pub explanation: String,
+}
+
+impl DifferentialPolicyOutcome {
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut parts = vec![
+            format!("provisional_class={}", self.provisional_class),
+            format!("rerun_decision={}", self.rerun_decision),
+            format!("time_policy_class={}", self.time_policy_class),
+            format!("scheduler_noise_class={}", self.scheduler_noise_class),
+        ];
+        if let Some(final_class) = self.suggested_final_class {
+            parts.push(format!("suggested_final_class={final_class}"));
+        }
+        if let Some(reason) = &self.suppression_reason {
+            parts.push(format!("suppression_reason={reason}"));
+        }
+        parts.push(self.explanation.clone());
+        parts.join("; ")
+    }
+}
+
+impl fmt::Display for DifferentialPolicyOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.summary())
+    }
+}
+
 /// Compare two normalized observables and produce a verdict.
 ///
 /// Compares all semantic fields. Provenance is recorded but not compared
@@ -1607,6 +1813,285 @@ fn compare_resource_surface(
                 live_value: format!("{live_val}"),
             });
         }
+    }
+}
+
+fn classify_scheduler_noise(
+    lab: &NormalizedObservable,
+    live: &NormalizedObservable,
+) -> SchedulerNoiseClass {
+    if !live.provenance.nondeterminism_notes.is_empty() {
+        return SchedulerNoiseClass::NondeterminismNotesOnly;
+    }
+    if let (Some(lab_hash), Some(live_hash)) =
+        (lab.provenance.schedule_hash, live.provenance.schedule_hash)
+    {
+        if lab_hash != live_hash {
+            return SchedulerNoiseClass::ScheduleHashDrift;
+        }
+    }
+    if let (Some(lab_hash), Some(live_hash)) =
+        (lab.provenance.event_hash, live.provenance.event_hash)
+    {
+        if lab_hash != live_hash {
+            return SchedulerNoiseClass::EventHashDrift;
+        }
+    }
+    if let (Some(lab_count), Some(live_count)) =
+        (lab.provenance.event_count, live.provenance.event_count)
+    {
+        if lab_count != live_count {
+            return SchedulerNoiseClass::EventCountDrift;
+        }
+    }
+    if lab.provenance.artifact_path != live.provenance.artifact_path
+        || lab.provenance.config_hash != live.provenance.config_hash
+    {
+        return SchedulerNoiseClass::ProvenanceDrift;
+    }
+    SchedulerNoiseClass::None
+}
+
+fn classify_time_policy(
+    identity: &DualRunScenarioIdentity,
+    verdict: &ComparisonVerdict,
+    noise_class: SchedulerNoiseClass,
+) -> TimePolicyClass {
+    let has_timer_contract = [
+        "scenario_clock_id",
+        "logical_deadline_id",
+        "normalization_window",
+    ]
+    .iter()
+    .all(|key| identity.metadata.contains_key(*key));
+    let has_time_mismatch = verdict.mismatches.iter().any(|mismatch| {
+        mismatch.field.contains("timeout")
+            || mismatch.field.contains("deadline")
+            || mismatch.field.contains("clock")
+    });
+
+    if has_time_mismatch && has_timer_contract {
+        return TimePolicyClass::SemanticTime;
+    }
+    if has_time_mismatch {
+        return TimePolicyClass::UnsupportedTimeSurface;
+    }
+    if noise_class != SchedulerNoiseClass::None && verdict.mismatches.is_empty() {
+        return TimePolicyClass::SchedulerNoiseSignal;
+    }
+    TimePolicyClass::NotApplicable
+}
+
+fn unsupported_surface_reason(identity: &DualRunScenarioIdentity) -> Option<String> {
+    if let Some(reason) = identity.metadata.get("unsupported_reason") {
+        return Some(reason.clone());
+    }
+    if let Some(verdict) = identity.metadata.get("eligibility_verdict") {
+        if matches!(
+            verdict.as_str(),
+            "unsupported" | "rejected" | "unsupported_surface"
+        ) {
+            return Some(format!("eligibility_verdict={verdict}"));
+        }
+    }
+    if let Some(class) = identity.metadata.get("support_class") {
+        if matches!(
+            class.as_str(),
+            "unsupported" | "unsupported_surface" | "bridge_only"
+        ) {
+            return Some(format!("support_class={class}"));
+        }
+    }
+    None
+}
+
+fn insufficient_observability_reason(
+    identity: &DualRunScenarioIdentity,
+    verdict: &ComparisonVerdict,
+    live: &NormalizedObservable,
+) -> Option<String> {
+    if let Some(status) = identity.metadata.get("observability_status") {
+        let lowered = status.to_ascii_lowercase();
+        if ["blocked", "missing", "limited", "insufficient"]
+            .iter()
+            .any(|needle| lowered.contains(needle))
+        {
+            return Some(status.clone());
+        }
+    }
+
+    if verdict
+        .mismatches
+        .iter()
+        .any(|mismatch| mismatch.description.contains("missing in live observable"))
+        && live
+            .semantics
+            .resource_surface
+            .tolerances
+            .values()
+            .any(|tolerance| *tolerance == CounterTolerance::Unsupported)
+    {
+        return Some(
+            "live observable omitted a required counter while declaring unsupported tolerance"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+fn hard_contract_break_reason(
+    live: &NormalizedObservable,
+    live_invariant_violations: &[String],
+) -> Option<String> {
+    if !live_invariant_violations.is_empty() {
+        return Some(format!(
+            "live invariant violations: {}",
+            live_invariant_violations.join("; ")
+        ));
+    }
+    if live.semantics.obligation_balance.leaked > 0 {
+        return Some("live run leaked obligations".to_string());
+    }
+    if live.semantics.obligation_balance.unresolved > 0 {
+        return Some("live run left obligations unresolved".to_string());
+    }
+    if live.semantics.loser_drain.applicable
+        && live.semantics.loser_drain.status != DrainStatus::Complete
+    {
+        return Some("live run did not complete loser drain".to_string());
+    }
+    if !live.semantics.region_close.quiescent {
+        return Some("live root region did not close to quiescence".to_string());
+    }
+    if live.semantics.terminal_outcome.class == OutcomeClass::Panicked {
+        return Some("live run panicked on an admitted surface".to_string());
+    }
+    if live.semantics.cancellation.acknowledged
+        && (!live.semantics.cancellation.cleanup_completed
+            || !live.semantics.cancellation.finalization_completed)
+    {
+        return Some("live cancellation acknowledged without cleanup/finalization".to_string());
+    }
+    None
+}
+
+fn classify_differential_policy(
+    identity: &DualRunScenarioIdentity,
+    lab: &NormalizedObservable,
+    live: &NormalizedObservable,
+    verdict: &ComparisonVerdict,
+    lab_invariant_violations: &[String],
+    live_invariant_violations: &[String],
+) -> DifferentialPolicyOutcome {
+    let noise_class = classify_scheduler_noise(lab, live);
+    let time_policy_class = classify_time_policy(identity, verdict, noise_class);
+
+    if lab.schema_version != live.schema_version {
+        return DifferentialPolicyOutcome {
+            provisional_class: ProvisionalDivergenceClass::ArtifactSchemaViolation,
+            rerun_decision: RerunDecision::None,
+            suggested_final_class: Some(FinalDivergenceClass::ArtifactSchemaViolation),
+            time_policy_class,
+            scheduler_noise_class: noise_class,
+            suppression_reason: Some("schema version mismatch".to_string()),
+            explanation:
+                "comparison artifacts do not share a schema contract, so reruns would not be honest"
+                    .to_string(),
+        };
+    }
+
+    if let Some(reason) = unsupported_surface_reason(identity) {
+        return DifferentialPolicyOutcome {
+            provisional_class: ProvisionalDivergenceClass::UnsupportedSurface,
+            rerun_decision: RerunDecision::None,
+            suggested_final_class: Some(FinalDivergenceClass::UnsupportedSurface),
+            time_policy_class,
+            scheduler_noise_class: noise_class,
+            suppression_reason: Some(reason),
+            explanation:
+                "scenario metadata marks this surface unsupported, so the mismatch is rejected immediately"
+                    .to_string(),
+        };
+    }
+
+    if let Some(reason) = insufficient_observability_reason(identity, verdict, live) {
+        return DifferentialPolicyOutcome {
+            provisional_class: ProvisionalDivergenceClass::InsufficientObservability,
+            rerun_decision: RerunDecision::ConfirmationIfRicherInstrumentationEnabled {
+                additional_runs: 1,
+            },
+            suggested_final_class: Some(FinalDivergenceClass::InsufficientObservability),
+            time_policy_class,
+            scheduler_noise_class: noise_class,
+            suppression_reason: Some(reason),
+            explanation:
+                "required evidence is missing or explicitly blocked, so this surface cannot be promoted honestly"
+                    .to_string(),
+        };
+    }
+
+    if let Some(reason) = hard_contract_break_reason(live, live_invariant_violations) {
+        return DifferentialPolicyOutcome {
+            provisional_class: ProvisionalDivergenceClass::HardContractBreak,
+            rerun_decision: RerunDecision::None,
+            suggested_final_class: Some(FinalDivergenceClass::RuntimeSemanticBug),
+            time_policy_class,
+            scheduler_noise_class: noise_class,
+            suppression_reason: Some(reason),
+            explanation:
+                "the live side already violates a hard semantic contract, so the framework should escalate immediately"
+                    .to_string(),
+        };
+    }
+
+    if verdict.passed
+        && lab_invariant_violations.is_empty()
+        && live_invariant_violations.is_empty()
+        && noise_class != SchedulerNoiseClass::None
+    {
+        return DifferentialPolicyOutcome {
+            provisional_class: ProvisionalDivergenceClass::SchedulerNoiseSuspected,
+            rerun_decision: RerunDecision::LiveConfirmations { additional_runs: 2 },
+            suggested_final_class: Some(FinalDivergenceClass::SchedulerNoiseSuspected),
+            time_policy_class,
+            scheduler_noise_class: noise_class,
+            suppression_reason: Some(
+                "semantic observables stayed equal while only scheduler/provenance signals drifted"
+                    .to_string(),
+            ),
+            explanation:
+                "the semantic verdict remains a pass, but the report should retain scheduler-noise triage metadata"
+                    .to_string(),
+        };
+    }
+
+    if verdict.passed && lab_invariant_violations.is_empty() && live_invariant_violations.is_empty()
+    {
+        return DifferentialPolicyOutcome {
+            provisional_class: ProvisionalDivergenceClass::Pass,
+            rerun_decision: RerunDecision::None,
+            suggested_final_class: None,
+            time_policy_class,
+            scheduler_noise_class: noise_class,
+            suppression_reason: None,
+            explanation: "semantic observables match and no invariant failures were observed"
+                .to_string(),
+        };
+    }
+
+    DifferentialPolicyOutcome {
+        provisional_class: ProvisionalDivergenceClass::SemanticMismatchAdmittedSurface,
+        rerun_decision: RerunDecision::DeterministicLabReplayAndLiveConfirmations {
+            additional_live_runs: 2,
+        },
+        suggested_final_class: None,
+        time_policy_class,
+        scheduler_noise_class: noise_class,
+        suppression_reason: None,
+        explanation:
+            "semantic mismatches survived the initial comparison on an admitted surface; schedule the canonical lab replay plus two live confirmation reruns"
+                .to_string(),
     }
 }
 
@@ -2829,6 +3314,8 @@ pub struct DualRunResult {
     pub live_invariant_violations: Vec<String>,
     /// Seed lineage record.
     pub seed_lineage: SeedLineageRecord,
+    /// Policy-layer classification and rerun plan.
+    pub policy: DifferentialPolicyOutcome,
 }
 
 impl DualRunResult {
@@ -2857,6 +3344,7 @@ impl DualRunResult {
                 self.live_invariant_violations.join("; ")
             ));
         }
+        parts.push(format!("Policy: {}", self.policy.summary()));
         parts.join("\n")
     }
 }
@@ -2895,7 +3383,36 @@ impl fmt::Display for DualRunResult {
 pub struct DualRunHarness {
     identity: DualRunScenarioIdentity,
     lab_fn: Option<Box<dyn FnOnce(LabConfig) -> NormalizedSemantics>>,
-    live_fn: Option<Box<dyn FnOnce(u64, u64) -> NormalizedSemantics>>,
+    live_fn: Option<Box<dyn FnOnce(u64, u64) -> LiveExecutionCapture>>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveExecutionCapture {
+    semantics: NormalizedSemantics,
+    replay: Option<ReplayMetadata>,
+}
+
+impl From<NormalizedSemantics> for LiveExecutionCapture {
+    fn from(semantics: NormalizedSemantics) -> Self {
+        Self {
+            semantics,
+            replay: None,
+        }
+    }
+}
+
+impl From<LiveRunResult> for LiveExecutionCapture {
+    fn from(result: LiveRunResult) -> Self {
+        Self {
+            semantics: result.semantics,
+            replay: Some(
+                result
+                    .metadata
+                    .replay
+                    .with_nondeterminism_notes(result.metadata.nondeterminism_notes),
+            ),
+        }
+    }
 }
 
 impl DualRunHarness {
@@ -2947,7 +3464,17 @@ impl DualRunHarness {
     /// Must return normalized semantics from the live execution.
     #[must_use]
     pub fn live(mut self, f: impl FnOnce(u64, u64) -> NormalizedSemantics + 'static) -> Self {
-        self.live_fn = Some(Box::new(f));
+        self.live_fn = Some(Box::new(move |seed, entropy| f(seed, entropy).into()));
+        self
+    }
+
+    /// Set the live execution function using the richer `LiveRunResult`.
+    ///
+    /// This preserves nondeterminism notes and replay metadata so the
+    /// mismatch classifier can distinguish scheduler noise from semantic drift.
+    #[must_use]
+    pub fn live_result(mut self, f: impl FnOnce(u64, u64) -> LiveRunResult + 'static) -> Self {
+        self.live_fn = Some(Box::new(move |seed, entropy| f(seed, entropy).into()));
         self
     }
 
@@ -2980,8 +3507,11 @@ impl DualRunHarness {
         // Run live side.
         let live_seed = plan.effective_live_seed();
         let live_entropy = plan.effective_entropy_seed(live_seed);
-        let live_semantics = live_fn(live_seed, live_entropy);
-        let live_prov = ReplayMetadata::for_live(family, plan);
+        let live_capture = live_fn(live_seed, live_entropy);
+        let live_semantics = live_capture.semantics;
+        let live_prov = live_capture
+            .replay
+            .unwrap_or_else(|| ReplayMetadata::for_live(family, plan));
         let live_obs =
             NormalizedObservable::new(&self.identity, RuntimeKind::Live, live_semantics, live_prov);
 
@@ -2992,6 +3522,14 @@ impl DualRunHarness {
         // Compare.
         let lineage = SeedLineageRecord::from_plan(plan);
         let verdict = compare_observables(&lab_obs, &live_obs, lineage.clone());
+        let policy = classify_differential_policy(
+            &self.identity,
+            &lab_obs,
+            &live_obs,
+            &verdict,
+            &lab_violations,
+            &live_violations,
+        );
 
         // Log result.
         tracing::info!(
@@ -3002,6 +3540,11 @@ impl DualRunHarness {
             lab_violations = lab_violations.len(),
             live_violations = live_violations.len(),
             mismatches = verdict.mismatches.len(),
+            provisional_class = %policy.provisional_class,
+            rerun_decision = %policy.rerun_decision,
+            time_policy_class = %policy.time_policy_class,
+            scheduler_noise_class = %policy.scheduler_noise_class,
+            suppression_reason = ?policy.suppression_reason,
             "DUAL_RUN_RESULT"
         );
 
@@ -3012,6 +3555,7 @@ impl DualRunHarness {
             lab_invariant_violations: lab_violations,
             live_invariant_violations: live_violations,
             seed_lineage: lineage,
+            policy,
         }
     }
 }
@@ -3823,6 +4367,27 @@ mod tests {
     }
 
     #[test]
+    fn compare_resource_counter_missing_in_lab_fails() {
+        init_test("compare_resource_counter_missing_in_lab_fails");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.resource_surface = ResourceSurfaceRecord::empty("test");
+        let mut live_sem = make_happy_semantics();
+        live_sem.resource_surface = ResourceSurfaceRecord::empty("test").with_counter("msgs", 0);
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.description.contains("present in live but not in lab"))
+        );
+        crate::test_complete!("compare_resource_counter_missing_in_lab_fails");
+    }
+
+    #[test]
     fn compare_resource_tolerance_mismatch_fails() {
         init_test("compare_resource_tolerance_mismatch_fails");
         let mut lab_sem = make_happy_semantics();
@@ -4201,6 +4766,156 @@ mod tests {
         let summary = format!("{result}");
         assert!(summary.contains("PASS"));
         crate::test_complete!("dual_run_result_display");
+    }
+
+    #[test]
+    fn harness_noise_notes_classify_scheduler_noise() {
+        init_test("harness_noise_notes_classify_scheduler_noise");
+        let ident = DualRunScenarioIdentity::phase1("test.noise", "test.surface", "v1", "d", 42);
+        let live_ident = ident.clone();
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| make_happy_semantics())
+            .live_result(move |_, _| {
+                let mut result = run_live_adapter(&live_ident, |_config, witness| {
+                    witness.set_outcome(TerminalOutcome::ok());
+                    witness.note_nondeterminism("thread scheduling");
+                });
+                result.semantics.resource_surface = ResourceSurfaceRecord::empty("test");
+                result
+            })
+            .run();
+
+        assert!(result.passed());
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::SchedulerNoiseSuspected
+        );
+        assert_eq!(
+            result.policy.rerun_decision,
+            RerunDecision::LiveConfirmations { additional_runs: 2 }
+        );
+        assert_eq!(
+            result.policy.scheduler_noise_class,
+            SchedulerNoiseClass::NondeterminismNotesOnly
+        );
+        crate::test_complete!("harness_noise_notes_classify_scheduler_noise");
+    }
+
+    #[test]
+    fn harness_semantic_mismatch_policy_requests_reruns() {
+        init_test("harness_semantic_mismatch_policy_requests_reruns");
+        let result = DualRunHarness::phase1("test.mismatch.policy", "test.surface", "v1", "d", 42)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| {
+                let mut sem = make_happy_semantics();
+                sem.terminal_outcome = TerminalOutcome::err("network_error");
+                sem
+            })
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::SemanticMismatchAdmittedSurface
+        );
+        assert_eq!(
+            result.policy.rerun_decision,
+            RerunDecision::DeterministicLabReplayAndLiveConfirmations {
+                additional_live_runs: 2,
+            }
+        );
+        assert_eq!(result.policy.suggested_final_class, None);
+        crate::test_complete!("harness_semantic_mismatch_policy_requests_reruns");
+    }
+
+    #[test]
+    fn harness_unsupported_surface_policy_short_circuits() {
+        init_test("harness_unsupported_surface_policy_short_circuits");
+        let ident =
+            DualRunScenarioIdentity::phase1("test.unsupported", "browser.surface", "v1", "d", 42)
+                .with_metadata("eligibility_verdict", "unsupported")
+                .with_metadata("unsupported_reason", "browser timing surface not admitted");
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| {
+                let mut sem = make_happy_semantics();
+                sem.terminal_outcome = TerminalOutcome::err("unsupported_surface");
+                sem
+            })
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::UnsupportedSurface
+        );
+        assert_eq!(result.policy.rerun_decision, RerunDecision::None);
+        assert_eq!(
+            result.policy.suggested_final_class,
+            Some(FinalDivergenceClass::UnsupportedSurface)
+        );
+        crate::test_complete!("harness_unsupported_surface_policy_short_circuits");
+    }
+
+    #[test]
+    fn harness_insufficient_observability_policy_marks_gap() {
+        init_test("harness_insufficient_observability_policy_marks_gap");
+        let ident =
+            DualRunScenarioIdentity::phase1("test.observability", "timer.surface", "v1", "d", 42)
+                .with_metadata("observability_status", "blocked_missing_live_timer_surface");
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| {
+                let mut sem = make_happy_semantics();
+                sem.resource_surface =
+                    ResourceSurfaceRecord::empty("timer.surface").with_counter("timeouts", 1);
+                sem
+            })
+            .live(|_, _| {
+                let mut sem = make_happy_semantics();
+                sem.resource_surface = ResourceSurfaceRecord::empty("timer.surface");
+                sem
+            })
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::InsufficientObservability
+        );
+        assert_eq!(
+            result.policy.rerun_decision,
+            RerunDecision::ConfirmationIfRicherInstrumentationEnabled { additional_runs: 1 }
+        );
+        assert_eq!(
+            result.policy.suggested_final_class,
+            Some(FinalDivergenceClass::InsufficientObservability)
+        );
+        crate::test_complete!("harness_insufficient_observability_policy_marks_gap");
+    }
+
+    #[test]
+    fn harness_hard_contract_break_policy_short_circuits() {
+        init_test("harness_hard_contract_break_policy_short_circuits");
+        let result = DualRunHarness::phase1("test.hard_break", "test.surface", "v1", "d", 42)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| {
+                let mut sem = make_happy_semantics();
+                sem.obligation_balance.leaked = 1;
+                sem.obligation_balance.balanced = false;
+                sem
+            })
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::HardContractBreak
+        );
+        assert_eq!(result.policy.rerun_decision, RerunDecision::None);
+        assert_eq!(
+            result.policy.suggested_final_class,
+            Some(FinalDivergenceClass::RuntimeSemanticBug)
+        );
+        crate::test_complete!("harness_hard_contract_break_policy_short_circuits");
     }
 
     #[test]

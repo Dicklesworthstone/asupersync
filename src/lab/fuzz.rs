@@ -120,6 +120,42 @@ pub struct FuzzRegressionCorpus {
     pub cases: Vec<FuzzRegressionCase>,
 }
 
+impl FuzzFinding {
+    /// Promote this fuzz finding into a replayable dual-run scenario.
+    #[must_use]
+    pub fn to_promoted_scenario(
+        &self,
+        surface_id: &str,
+        contract_version: &str,
+    ) -> crate::lab::dual_run::PromotedFuzzScenario {
+        crate::lab::dual_run::promote_fuzz_finding(self, surface_id, contract_version)
+    }
+}
+
+impl FuzzRegressionCase {
+    /// Promote this deterministic regression case into a replayable scenario.
+    #[must_use]
+    pub fn to_promoted_scenario(
+        &self,
+        surface_id: &str,
+        contract_version: &str,
+    ) -> crate::lab::dual_run::PromotedFuzzScenario {
+        crate::lab::dual_run::promote_regression_case(self, surface_id, contract_version)
+    }
+}
+
+impl FuzzRegressionCorpus {
+    /// Promote this deterministic regression corpus into replayable scenarios.
+    #[must_use]
+    pub fn to_promoted_scenarios(
+        &self,
+        surface_id: &str,
+        contract_version: &str,
+    ) -> Vec<crate::lab::dual_run::PromotedFuzzScenario> {
+        crate::lab::dual_run::promote_regression_corpus(self, surface_id, contract_version)
+    }
+}
+
 impl FuzzReport {
     /// True if any violations were found.
     #[must_use]
@@ -178,6 +214,34 @@ impl FuzzReport {
             iterations: self.iterations,
             cases,
         }
+    }
+
+    /// Promote every raw fuzz finding into replayable dual-run scenarios.
+    #[must_use]
+    pub fn to_promoted_findings(
+        &self,
+        surface_id: &str,
+        contract_version: &str,
+    ) -> Vec<crate::lab::dual_run::PromotedFuzzScenario> {
+        self.findings
+            .iter()
+            .map(|finding| finding.to_promoted_scenario(surface_id, contract_version))
+            .collect()
+    }
+
+    /// Build a deterministic regression corpus and promote it into scenarios.
+    ///
+    /// This is the main fuzz-to-scenario bridge used by higher-level replay
+    /// and differential suites.
+    #[must_use]
+    pub fn to_promoted_regression_scenarios(
+        &self,
+        base_seed: u64,
+        surface_id: &str,
+        contract_version: &str,
+    ) -> Vec<crate::lab::dual_run::PromotedFuzzScenario> {
+        self.to_regression_corpus(base_seed)
+            .to_promoted_scenarios(surface_id, contract_version)
     }
 }
 
@@ -618,5 +682,56 @@ mod tests {
                 second_replay.trace_fingerprint
             );
         }
+    }
+
+    #[test]
+    fn fuzz_report_promotes_findings_into_replayable_scenarios() {
+        let report = FuzzReport {
+            iterations: 1,
+            findings: vec![FuzzFinding {
+                seed: 0xABCD,
+                steps: 10,
+                violations: vec![InvariantViolation::TaskLeak { count: 1 }],
+                certificate_hash: 0x101,
+                trace_fingerprint: 0x202,
+                minimized_seed: Some(0x55),
+            }],
+            violation_counts: BTreeMap::from([("task_leak".to_string(), 1)]),
+            unique_certificates: 1,
+        };
+
+        let promoted = report.to_promoted_findings("scheduler.surface", "v1");
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].original_seed, 0xABCD);
+        assert_eq!(promoted[0].replay_seed, 0x55);
+        assert_eq!(promoted[0].trace_fingerprint, 0x202);
+        assert_eq!(promoted[0].violation_categories, vec!["task_leak"]);
+    }
+
+    #[test]
+    fn regression_corpus_promotes_cases_with_campaign_lineage() {
+        let corpus = FuzzRegressionCorpus {
+            schema_version: 1,
+            base_seed: 0xCAFE,
+            iterations: 2,
+            cases: vec![FuzzRegressionCase {
+                seed: 0x10,
+                replay_seed: 0x08,
+                certificate_hash: 0x111,
+                trace_fingerprint: 0x222,
+                violation_categories: vec!["task_leak".to_string()],
+            }],
+        };
+
+        let promoted = corpus.to_promoted_scenarios("scheduler.surface", "v1");
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].campaign_base_seed, Some(0xCAFE));
+        assert_eq!(promoted[0].campaign_iteration, Some(0));
+        assert_eq!(promoted[0].original_seed, 0x10);
+        assert_eq!(promoted[0].replay_seed, 0x08);
+        assert_eq!(
+            promoted[0].violation_categories,
+            vec!["task_leak".to_string()]
+        );
     }
 }
