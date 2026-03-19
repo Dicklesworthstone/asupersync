@@ -763,6 +763,7 @@ impl fmt::Display for OutcomeClass {
 /// Terminal phase of the cancellation protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
 pub enum CancelTerminalPhase {
     NotCancelled,
     CancelRequested,
@@ -815,6 +816,7 @@ pub enum CounterTolerance {
 
 /// Terminal outcome subrecord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct TerminalOutcome {
     pub class: OutcomeClass,
     pub severity: OutcomeClass,
@@ -872,6 +874,7 @@ impl TerminalOutcome {
 /// Cancellation subrecord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
+#[allow(missing_docs)]
 pub struct CancellationRecord {
     pub requested: bool,
     pub acknowledged: bool,
@@ -912,6 +915,7 @@ impl CancellationRecord {
 
 /// Loser drain subrecord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct LoserDrainRecord {
     pub applicable: bool,
     pub expected_losers: u32,
@@ -949,6 +953,7 @@ impl LoserDrainRecord {
 
 /// Region close subrecord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct RegionCloseRecord {
     pub root_state: RegionState,
     pub quiescent: bool,
@@ -973,6 +978,7 @@ impl RegionCloseRecord {
 
 /// Obligation balance subrecord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct ObligationBalanceRecord {
     pub reserved: u32,
     pub committed: u32,
@@ -1014,6 +1020,7 @@ impl ObligationBalanceRecord {
 
 /// Resource surface subrecord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct ResourceSurfaceRecord {
     pub contract_scope: String,
     #[serde(default)]
@@ -1059,6 +1066,7 @@ impl ResourceSurfaceRecord {
 
 /// Semantic section of a normalized observable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct NormalizedSemantics {
     pub terminal_outcome: TerminalOutcome,
     pub cancellation: CancellationRecord,
@@ -1070,6 +1078,7 @@ pub struct NormalizedSemantics {
 
 /// Complete normalized observable record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct NormalizedObservable {
     pub schema_version: String,
     pub scenario_id: String,
@@ -2087,6 +2096,7 @@ pub fn capture_loser_drain(loser_joined: &[bool]) -> LoserDrainRecord {
 
 /// Capture cancellation evidence from explicit lifecycle flags.
 #[must_use]
+#[allow(clippy::fn_params_excessive_bools)]
 pub fn capture_cancellation(
     requested: bool,
     acknowledged: bool,

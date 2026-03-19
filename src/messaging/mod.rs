@@ -123,3 +123,8 @@ pub use morphism::{
 };
 pub use nats::{Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription};
 pub use redis::{RedisClient, RedisConfig, RedisError};
+#[cfg(feature = "messaging-fabric")]
+pub use subject::{
+    Subject, SubjectPattern, SubjectPatternError, SubjectToken, Sublist, SublistResult,
+    SubscriptionGuard, SubscriptionId,
+};
