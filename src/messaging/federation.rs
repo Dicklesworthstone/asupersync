@@ -554,7 +554,7 @@ pub enum FederationError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::morphism::{ResponsePolicy, ReversibilityRequirement};
+    use super::super::morphism::{ResponsePolicy, ReversibilityRequirement, SharingPolicy};
     use super::*;
 
     fn derived_view_morphism() -> Morphism {
@@ -1242,6 +1242,9 @@ mod tests {
     fn leaf_accepts_egress_morphism() {
         let mut morphism = derived_view_morphism();
         morphism.class = MorphismClass::Egress;
+        morphism.response_policy = ResponsePolicy::StripReplies;
+        morphism.reversibility = ReversibilityRequirement::Irreversible;
+        morphism.sharing_policy = SharingPolicy::Federated;
         let bridge = FederationBridge::new(
             FederationRole::LeafFabric(LeafConfig::default()),
             vec![morphism],
