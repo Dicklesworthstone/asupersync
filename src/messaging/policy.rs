@@ -205,13 +205,15 @@ impl TrafficSlice {
 
     fn degradation_disposition(&self) -> DegradationDisposition {
         match self.service_class {
-            // Control/recovery traffic "must stay live" — widen repair budget
-            // rather than rejecting work that prevents semantic debt growth.
-            SemanticServiceClass::ControlRecovery => DegradationDisposition::WidenRepair,
+            // Control/recovery and lease/repair traffic "must stay live" — widen
+            // the repair budget rather than rejecting work that prevents semantic
+            // debt growth.
+            SemanticServiceClass::ControlRecovery | SemanticServiceClass::LeaseRepair => {
+                DegradationDisposition::WidenRepair
+            }
             SemanticServiceClass::LowValueFanout => DegradationDisposition::ReduceFanout,
             SemanticServiceClass::ReadModel => DegradationDisposition::Defer,
             SemanticServiceClass::ExpensiveReplay => DegradationDisposition::PauseReplay,
-            SemanticServiceClass::LeaseRepair => DegradationDisposition::WidenRepair,
             SemanticServiceClass::ReplyCritical
                 if self.obligation_load.prefers_repair_widening() =>
             {
