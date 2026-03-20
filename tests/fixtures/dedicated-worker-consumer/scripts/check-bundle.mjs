@@ -28,6 +28,13 @@ if (jsAssets.length < 2) {
 
 let sawBootstrapMarker = false;
 let sawShutdownMarker = false;
+let sawRuntimeSelectionBaselineMarker = false;
+let sawScopeSelectionBaselineMarker = false;
+let sawScopeSelectionPreferredMainThreadMarker = false;
+let sawLaneHealthDemotionMarker = false;
+let sawRuntimeSelectionDemotedMarker = false;
+let sawLaneHealthResetMarker = false;
+let sawRuntimeSelectionRecoveredMarker = false;
 let sawStorageSupportMarker = false;
 let sawStorageRoundtripMarker = false;
 let sawStorageArtifactMarker = false;
@@ -40,6 +47,15 @@ for (const assetName of jsAssets) {
   const content = fs.readFileSync(path.join(assetDir, assetName), "utf8");
   sawBootstrapMarker ||= content.includes("worker-bootstrap");
   sawShutdownMarker ||= content.includes("worker-shutdown-complete");
+  sawRuntimeSelectionBaselineMarker ||= content.includes("worker-runtime-selection-baseline");
+  sawScopeSelectionBaselineMarker ||= content.includes("worker-scope-selection-baseline");
+  sawScopeSelectionPreferredMainThreadMarker ||= content.includes(
+    "worker-scope-selection-preferred-main-thread",
+  );
+  sawLaneHealthDemotionMarker ||= content.includes("worker-lane-health-demotion");
+  sawRuntimeSelectionDemotedMarker ||= content.includes("worker-runtime-selection-demoted");
+  sawLaneHealthResetMarker ||= content.includes("worker-lane-health-reset");
+  sawRuntimeSelectionRecoveredMarker ||= content.includes("worker-runtime-selection-recovered");
   sawStorageSupportMarker ||= content.includes("worker-storage-support");
   sawStorageRoundtripMarker ||= content.includes("worker-storage-roundtrip");
   sawStorageArtifactMarker ||= content.includes("worker-storage-artifact-export-handoff");
@@ -60,6 +76,36 @@ if (!sawShutdownMarker) {
   throw new Error(
     "Built worker bundle must retain the worker-shutdown-complete message marker",
   );
+}
+
+if (!sawRuntimeSelectionBaselineMarker) {
+  throw new Error("Built worker bundle must retain the worker-runtime-selection-baseline marker");
+}
+
+if (!sawScopeSelectionBaselineMarker) {
+  throw new Error("Built worker bundle must retain the worker-scope-selection-baseline marker");
+}
+
+if (!sawScopeSelectionPreferredMainThreadMarker) {
+  throw new Error(
+    "Built worker bundle must retain the worker-scope-selection-preferred-main-thread marker",
+  );
+}
+
+if (!sawLaneHealthDemotionMarker) {
+  throw new Error("Built worker bundle must retain the worker-lane-health-demotion marker");
+}
+
+if (!sawRuntimeSelectionDemotedMarker) {
+  throw new Error("Built worker bundle must retain the worker-runtime-selection-demoted marker");
+}
+
+if (!sawLaneHealthResetMarker) {
+  throw new Error("Built worker bundle must retain the worker-lane-health-reset marker");
+}
+
+if (!sawRuntimeSelectionRecoveredMarker) {
+  throw new Error("Built worker bundle must retain the worker-runtime-selection-recovered marker");
 }
 
 if (!sawStorageArtifactMarker) {
@@ -103,6 +149,13 @@ console.log(
       jsAssetCount: jsAssets.length,
       sawBootstrapMarker,
       sawShutdownMarker,
+      sawRuntimeSelectionBaselineMarker,
+      sawScopeSelectionBaselineMarker,
+      sawScopeSelectionPreferredMainThreadMarker,
+      sawLaneHealthDemotionMarker,
+      sawRuntimeSelectionDemotedMarker,
+      sawLaneHealthResetMarker,
+      sawRuntimeSelectionRecoveredMarker,
       sawStorageSupportMarker,
       sawStorageRoundtripMarker,
       sawStorageArtifactMarker,

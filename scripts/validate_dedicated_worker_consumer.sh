@@ -11,6 +11,7 @@ TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RESULT_ROOT}/${TIMESTAMP}"
 LOG_FILE="${RUN_DIR}/consumer_build.log"
 SUMMARY_FILE="${RUN_DIR}/summary.json"
+BROWSER_RUN_FILE="${RUN_DIR}/browser-run.json"
 
 mkdir -p "${RUN_DIR}"
 
@@ -22,7 +23,7 @@ require_cmd() {
   fi
 }
 
-require_cmd nodejs
+require_cmd node
 require_cmd npm
 require_cmd npx
 require_cmd python3
@@ -92,9 +93,10 @@ PY
   PATH="/usr/bin:${PATH}" npm install --no-audit --no-fund
   PATH="/usr/bin:${PATH}" npm run build
   PATH="/usr/bin:${PATH}" npm run check:bundle
+  PATH="/usr/bin:${PATH}" npm run check:browser -- "${BROWSER_RUN_FILE}"
 ) | tee "${LOG_FILE}"
 
-python3 - "${CONSUMER_DIR}" "${SUMMARY_FILE}" "${TIMESTAMP}" <<'PY'
+python3 - "${CONSUMER_DIR}" "${SUMMARY_FILE}" "${TIMESTAMP}" "${BROWSER_RUN_FILE}" <<'PY'
 import json
 import pathlib
 import sys
@@ -102,13 +104,22 @@ import sys
 consumer = pathlib.Path(sys.argv[1])
 summary_path = pathlib.Path(sys.argv[2])
 timestamp = sys.argv[3]
+browser_run_path = pathlib.Path(sys.argv[4])
 dist = consumer / "dist"
 assets = dist / "assets"
 asset_files = list(assets.glob("*.js")) if assets.exists() else []
+browser_run = json.loads(browser_run_path.read_text())
 
 markers = {
     "worker_bootstrap_marker": False,
     "worker_shutdown_marker": False,
+    "worker_runtime_selection_baseline_marker": False,
+    "worker_scope_selection_baseline_marker": False,
+    "worker_scope_selection_preferred_main_thread_marker": False,
+    "worker_lane_health_demotion_marker": False,
+    "worker_runtime_selection_demoted_marker": False,
+    "worker_lane_health_reset_marker": False,
+    "worker_runtime_selection_recovered_marker": False,
     "worker_storage_support_marker": False,
     "worker_storage_roundtrip_marker": False,
     "storage_artifact_marker": False,
@@ -122,6 +133,15 @@ for asset in asset_files:
     content = asset.read_text(encoding="utf-8", errors="replace")
     markers["worker_bootstrap_marker"] |= "worker-bootstrap" in content
     markers["worker_shutdown_marker"] |= "worker-shutdown-complete" in content
+    markers["worker_runtime_selection_baseline_marker"] |= "worker-runtime-selection-baseline" in content
+    markers["worker_scope_selection_baseline_marker"] |= "worker-scope-selection-baseline" in content
+    markers["worker_scope_selection_preferred_main_thread_marker"] |= (
+        "worker-scope-selection-preferred-main-thread" in content
+    )
+    markers["worker_lane_health_demotion_marker"] |= "worker-lane-health-demotion" in content
+    markers["worker_runtime_selection_demoted_marker"] |= "worker-runtime-selection-demoted" in content
+    markers["worker_lane_health_reset_marker"] |= "worker-lane-health-reset" in content
+    markers["worker_runtime_selection_recovered_marker"] |= "worker-runtime-selection-recovered" in content
     markers["worker_storage_support_marker"] |= "worker-storage-support" in content
     markers["worker_storage_roundtrip_marker"] |= "worker-storage-roundtrip" in content
     markers["storage_artifact_marker"] |= "worker-storage-artifact-export-handoff" in content
@@ -142,6 +162,26 @@ summary = {
         "dist_exists": dist.exists(),
         "index_html_exists": (dist / "index.html").exists(),
         "asset_js_count": len(asset_files),
+        "real_browser_run_ok": browser_run["status"] == "ok",
+        "browser_scenario_id": browser_run["scenario_id"],
+        "browser_final_phase_is_shutdown_complete": browser_run["final_phase"] == "shutdown_complete",
+        "browser_shutdown_reason": browser_run["shutdown_reason"],
+        "browser_support_runtime_context": browser_run["support_runtime_context"],
+        "browser_baseline_selected_lane": browser_run["baseline_selected_lane"],
+        "browser_baseline_scope_outcome_is_ok": browser_run["baseline_scope_outcome"] == "ok",
+        "browser_preferred_scope_selected_lane": browser_run["preferred_scope_selected_lane"],
+        "browser_preferred_scope_outcome_is_ok": browser_run["preferred_scope_outcome"] == "ok",
+        "browser_demotion_status": browser_run["demotion_status"],
+        "browser_demoted_selected_lane": browser_run["demoted_selected_lane"],
+        "browser_demoted_reason_code": browser_run["demoted_reason_code"],
+        "browser_demoted_outcome_is_null": browser_run["demoted_outcome"] is None,
+        "browser_demoted_worker_candidate_reason": browser_run["demoted_worker_candidate_reason"],
+        "browser_recovered_status": browser_run["recovered_status"],
+        "browser_recovered_selected_lane": browser_run["recovered_selected_lane"],
+        "browser_recovered_outcome_is_ok": browser_run["recovered_outcome"] == "ok",
+        "browser_storage_backend": browser_run["storage_backend"],
+        "browser_artifact_download_failure_code": browser_run["artifact_download_failure_code"],
+        "browser_quota_failure_reason": browser_run["quota_failure_reason"],
         **markers,
     },
 }
@@ -152,5 +192,6 @@ cat <<EOF
 Dedicated worker consumer validation passed.
 Artifacts:
   log: ${LOG_FILE}
+  browser run: ${BROWSER_RUN_FILE}
   summary: ${SUMMARY_FILE}
 EOF

@@ -7,6 +7,9 @@ Purpose:
 - validate a real dedicated-worker consumer build against packaged Browser Edition outputs
 - demonstrate the supported direct-runtime worker bootstrap path for `@asupersync/browser`
 - make worker startup, message coordination, and shutdown explicit in maintained example code
+- prove the no-throw `createBrowserRuntimeSelection()` / `createBrowserScopeSelection()`
+  fallback story across truthful worker selection, preferred-lane mismatch, and
+  lane-health demotion/recovery
 - exercise a worker-safe IndexedDB round-trip plus explicit `BrowserArtifactStore`
   export, cleanup, quota-guard, and download-fallback behavior
 
@@ -24,15 +27,24 @@ local package copies to keep runs deterministic and side-effect free.
   readiness
 - `src/worker.ts`
   dedicated-worker bootstrap that detects direct-runtime support, initializes a
-  Browser Edition runtime, enters a scope, performs a `BrowserStorage`
-  round-trip, persists/export-clears evidence through `BrowserArtifactStore`,
-  proves `downloadArchive()` fails closed in workers, and reports shutdown
-  completion back to the main thread
+  Browser Edition runtime, proves `createBrowserRuntimeSelection()` and
+  `createBrowserScopeSelection()` stay on the no-throw path, forces a
+  lane-health demotion with `reportBrowserLaneUnhealthy()`, proves recovery with
+  `resetBrowserLaneHealth()`, performs a `BrowserStorage` round-trip,
+  persists/export-clears evidence through `BrowserArtifactStore`, proves
+  `downloadArchive()` fails closed in workers, and reports shutdown completion
+  back to the main thread
 - `scripts/check-bundle.mjs`
   verifies the bundled app still carries the durable-storage and artifact-export
-  markers (`worker-storage-roundtrip`, `worker-artifact-archive`,
-  `worker-artifact-download-unavailable`, `worker-artifact-quota-guard`,
-  `worker-artifact-cleanup`)
+  markers plus the selection/demotion markers (`worker-runtime-selection-baseline`,
+  `worker-scope-selection-preferred-main-thread`,
+  `worker-runtime-selection-demoted`, `worker-runtime-selection-recovered`,
+  `worker-artifact-download-unavailable`, `worker-artifact-quota-guard`)
+- `scripts/check-browser-run.mjs`
+  serves the built app, launches Chromium, waits for the dedicated worker to
+  finish, and asserts the rendered browser-run state proves truthful worker-lane
+  selection, no-throw preferred-lane mismatch handling, fail-closed health
+  demotion, and healthy recovery
 
 ## Deterministic Validation
 
@@ -47,3 +59,6 @@ The validation artifacts are emitted under:
 ```text
 target/e2e-results/dedicated_worker_consumer/
 ```
+
+The canonical validator writes both `summary.json` and `browser-run.json` so
+future regressions can inspect the browser-observed lane diagnostics directly.

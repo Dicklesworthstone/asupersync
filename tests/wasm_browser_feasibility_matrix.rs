@@ -393,6 +393,13 @@ fn dedicated_worker_storage_export_flow_is_supported() {
 fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
     let worker_src = read_file("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
     for marker in [
+        "worker-runtime-selection-baseline",
+        "worker-scope-selection-baseline",
+        "worker-scope-selection-preferred-main-thread",
+        "worker-lane-health-demotion",
+        "worker-runtime-selection-demoted",
+        "worker-lane-health-reset",
+        "worker-runtime-selection-recovered",
         "worker-storage-support",
         "worker-storage-roundtrip",
         "worker-storage-artifact-export-handoff",
@@ -409,6 +416,12 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
 
     let validator = read_file("scripts/validate_dedicated_worker_consumer.sh");
     for marker in [
+        "BROWSER_RUN_FILE",
+        "npm run check:browser",
+        "real_browser_run_ok",
+        "browser_baseline_selected_lane",
+        "browser_demoted_selected_lane",
+        "browser_recovered_selected_lane",
         "worker_storage_support_marker",
         "worker_storage_roundtrip_marker",
         "storage_artifact_marker",
@@ -420,6 +433,22 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
         assert!(
             validator.contains(marker),
             "dedicated-worker validator must preserve storage/artifact summary marker: {marker}"
+        );
+    }
+
+    let browser_check =
+        read_file("tests/fixtures/dedicated-worker-consumer/scripts/check-browser-run.mjs");
+    for marker in [
+        "DEDICATED-WORKER-CONSUMER",
+        "lane.browser.dedicated_worker.direct_runtime",
+        "lane.browser.main_thread.direct_runtime",
+        "lane.unsupported",
+        "candidate_lane_unhealthy",
+        "shutdown_complete",
+    ] {
+        assert!(
+            browser_check.contains(marker),
+            "dedicated-worker browser-run checker must preserve marker: {marker}"
         );
     }
 }

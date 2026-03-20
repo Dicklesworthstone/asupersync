@@ -578,6 +578,17 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
     let worker_src = std::fs::read_to_string(worker_path)
         .unwrap_or_else(|_| panic!("missing {}", worker_path.display()));
     for marker in [
+        "createBrowserRuntimeSelection",
+        "createBrowserScopeSelection",
+        "reportBrowserLaneUnhealthy",
+        "resetBrowserLaneHealth",
+        "worker-runtime-selection-baseline",
+        "worker-scope-selection-baseline",
+        "worker-scope-selection-preferred-main-thread",
+        "worker-lane-health-demotion",
+        "worker-runtime-selection-demoted",
+        "worker-lane-health-reset",
+        "worker-runtime-selection-recovered",
         "createBrowserStorage",
         "createBrowserArtifactStore",
         "detectBrowserStorageSupport",
@@ -603,6 +614,12 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
     for marker in [
         "BrowserStorage",
         "BrowserArtifactStore",
+        "createBrowserRuntimeSelection()",
+        "createBrowserScopeSelection()",
+        "reportBrowserLaneUnhealthy()",
+        "resetBrowserLaneHealth()",
+        "check-browser-run.mjs",
+        "browser-run.json",
         "downloadArchive()",
         "worker-artifact-download-unavailable",
         "worker-artifact-quota-guard",
@@ -618,6 +635,10 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
     let bundle = std::fs::read_to_string(bundle_path)
         .unwrap_or_else(|_| panic!("missing {}", bundle_path.display()));
     for marker in [
+        "worker-runtime-selection-baseline",
+        "worker-scope-selection-preferred-main-thread",
+        "worker-runtime-selection-demoted",
+        "worker-runtime-selection-recovered",
         "worker-storage-support",
         "worker-storage-roundtrip",
         "worker-storage-artifact-export-handoff",
@@ -629,6 +650,24 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         assert!(
             bundle.contains(marker),
             "dedicated-worker bundle check missing marker: {marker}"
+        );
+    }
+
+    let browser_check_path =
+        Path::new("tests/fixtures/dedicated-worker-consumer/scripts/check-browser-run.mjs");
+    let browser_check = std::fs::read_to_string(browser_check_path)
+        .unwrap_or_else(|_| panic!("missing {}", browser_check_path.display()));
+    for marker in [
+        "DEDICATED-WORKER-CONSUMER",
+        "worker_error",
+        "shutdown_complete",
+        "candidate_lane_unhealthy",
+        "runtimeSelectionDemoted",
+        "runtimeSelectionRecovered",
+    ] {
+        assert!(
+            browser_check.contains(marker),
+            "dedicated-worker browser-run check missing marker: {marker}"
         );
     }
 }
