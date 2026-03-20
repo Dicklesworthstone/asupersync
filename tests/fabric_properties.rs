@@ -755,7 +755,9 @@ proptest! {
         )
         .expect("generated obligation should allocate");
 
-        let receipt = obligation.abort(&mut ledger, Time::from_nanos(11), failure);
+        let receipt = obligation
+            .abort(&mut ledger, Time::from_nanos(11), failure)
+            .expect("abort should succeed");
         let request_id_after_abort = receipt.request_id;
         let obligation_id = receipt.obligation_id;
         let failure_after_abort = receipt.failure;

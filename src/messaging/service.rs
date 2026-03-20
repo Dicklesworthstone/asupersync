@@ -540,6 +540,332 @@ pub struct ServiceTransferHop {
     pub transferred_at: Time,
 }
 
+// ─── Certificate-carrying request/reply protocol ────────────────────────────
+
+/// Deterministic certificate that a request was admitted, validated, and
+/// authorised before entering the service pipeline.
+///
+/// Callers attach a `RequestCertificate` to every request so the callee can
+/// verify the caller's identity, capability proof, and negotiated service class
+/// without re-validating the contract schema at the hot path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestCertificate {
+    /// Stable identifier for the request (same as `ServiceObligation.request_id`).
+    pub request_id: String,
+    /// Caller identity verified during admission.
+    pub caller: String,
+    /// Subject the request was issued on.
+    pub subject: String,
+    /// Delivery class negotiated between caller options and provider terms.
+    pub delivery_class: DeliveryClass,
+    /// Reply-space rule governing where the reply may land.
+    pub reply_space_rule: super::ir::ReplySpaceRule,
+    /// Service class from the validated contract.
+    pub service_class: String,
+    /// Fingerprint of the capability proof used during admission.
+    ///
+    /// This is a deterministic hash of the caller's capability set at admission
+    /// time — not the raw capability material itself.
+    pub capability_fingerprint: u64,
+    /// Timestamp when the certificate was issued.
+    pub issued_at: Time,
+    /// Optional timeout after which the request is considered stale.
+    pub timeout: Option<Duration>,
+}
+
+impl RequestCertificate {
+    /// Build a certificate from request metadata and a validated request.
+    #[must_use]
+    pub fn from_validated(
+        request_id: String,
+        caller: String,
+        subject: String,
+        validated: &ValidatedServiceRequest,
+        reply_space_rule: super::ir::ReplySpaceRule,
+        service_class: String,
+        capability_fingerprint: u64,
+        issued_at: Time,
+    ) -> Self {
+        Self {
+            request_id,
+            caller,
+            subject,
+            delivery_class: validated.delivery_class,
+            reply_space_rule,
+            service_class,
+            capability_fingerprint,
+            issued_at,
+            timeout: validated.timeout,
+        }
+    }
+
+    /// Validate that the certificate fields are internally consistent.
+    pub fn validate(&self) -> Result<(), ServiceObligationError> {
+        validate_service_text("request_id", &self.request_id)?;
+        validate_service_text("caller", &self.caller)?;
+        validate_service_text("subject", &self.subject)?;
+        validate_service_text("service_class", &self.service_class)?;
+        if self.timeout.is_some_and(|d| d.is_zero()) {
+            return Err(ServiceObligationError::ZeroTimeout);
+        }
+        Ok(())
+    }
+
+    /// Deterministic digest of the certificate for audit trails.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = crate::util::DetHasher::default();
+        self.request_id.hash(&mut hasher);
+        self.caller.hash(&mut hasher);
+        self.subject.hash(&mut hasher);
+        (self.delivery_class as u8).hash(&mut hasher);
+        match &self.reply_space_rule {
+            super::ir::ReplySpaceRule::CallerInbox => 0u8.hash(&mut hasher),
+            super::ir::ReplySpaceRule::SharedPrefix { prefix } => {
+                1u8.hash(&mut hasher);
+                prefix.hash(&mut hasher);
+            }
+            super::ir::ReplySpaceRule::DedicatedPrefix { prefix } => {
+                2u8.hash(&mut hasher);
+                prefix.hash(&mut hasher);
+            }
+        }
+        self.service_class.hash(&mut hasher);
+        self.capability_fingerprint.hash(&mut hasher);
+        self.issued_at.hash(&mut hasher);
+        self.timeout.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Deterministic certificate that a reply was produced, committed, and
+/// (optionally) obligation-tracked before delivery to the caller.
+///
+/// Callees produce a `ReplyCertificate` as evidence that the reply
+/// obligation was honestly resolved — either successfully or via an
+/// explicit abort with a typed failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyCertificate {
+    /// Request ID this reply corresponds to.
+    pub request_id: String,
+    /// Callee identity that produced the reply.
+    pub callee: String,
+    /// Delivery class of the original request.
+    pub delivery_class: DeliveryClass,
+    /// Obligation ID if the reply was tracked by the ledger.
+    pub service_obligation_id: Option<ObligationId>,
+    /// Digest of the reply payload for integrity verification.
+    pub payload_digest: u64,
+    /// Whether the reply is chunked (streamed) rather than unary.
+    pub is_chunked: bool,
+    /// Total chunks if this is a chunked reply.
+    pub total_chunks: Option<u32>,
+    /// Timestamp when the reply certificate was issued.
+    pub issued_at: Time,
+    /// Service latency: time between request admission and reply production.
+    pub service_latency: Duration,
+}
+
+impl ReplyCertificate {
+    /// Build a reply certificate from a committed service reply.
+    #[must_use]
+    pub fn from_commit(
+        commit: &ServiceReplyCommit,
+        callee: String,
+        issued_at: Time,
+        service_latency: Duration,
+    ) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = crate::util::DetHasher::default();
+        commit.payload.hash(&mut hasher);
+        let payload_digest = hasher.finish();
+
+        Self {
+            request_id: commit.request_id.clone(),
+            callee,
+            delivery_class: commit.delivery_class,
+            service_obligation_id: commit.service_obligation_id,
+            payload_digest,
+            is_chunked: false,
+            total_chunks: None,
+            issued_at,
+            service_latency,
+        }
+    }
+
+    /// Validate that the certificate fields are internally consistent.
+    pub fn validate(&self) -> Result<(), ServiceObligationError> {
+        validate_service_text("request_id", &self.request_id)?;
+        validate_service_text("callee", &self.callee)?;
+        if self.is_chunked && self.total_chunks.is_none() {
+            return Err(ServiceObligationError::ChunkedReplyMissingCount);
+        }
+        Ok(())
+    }
+
+    /// Deterministic digest of the certificate for audit trails.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = crate::util::DetHasher::default();
+        self.request_id.hash(&mut hasher);
+        self.callee.hash(&mut hasher);
+        (self.delivery_class as u8).hash(&mut hasher);
+        self.service_obligation_id.hash(&mut hasher);
+        self.payload_digest.hash(&mut hasher);
+        self.is_chunked.hash(&mut hasher);
+        self.total_chunks.hash(&mut hasher);
+        self.issued_at.hash(&mut hasher);
+        self.service_latency.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Obligation family for chunked/streamed replies with bounded cleanup.
+///
+/// When a reply is streamed in chunks, each chunk is tracked as a member
+/// of an obligation family. The family enforces bounded cleanup: if the
+/// stream is cancelled or times out, pending chunks are drained within
+/// the cleanup budget.
+#[derive(Debug)]
+pub struct ChunkedReplyObligation {
+    /// Family identifier for the chunk obligation set.
+    pub family_id: String,
+    /// Parent service obligation ID.
+    pub service_obligation_id: Option<ObligationId>,
+    /// Request ID this chunked reply belongs to.
+    pub request_id: String,
+    /// Total expected chunks (may be unknown for unbounded streams).
+    pub expected_chunks: Option<u32>,
+    /// Number of chunks committed so far.
+    received_chunks: u32,
+    /// Whether the stream has been finalized (all chunks received or aborted).
+    finalized: bool,
+    /// Delivery class governing chunk obligations.
+    pub delivery_class: DeliveryClass,
+    /// Delivery boundary for per-chunk acknowledgement.
+    pub chunk_ack_boundary: AckKind,
+}
+
+impl ChunkedReplyObligation {
+    /// Create a new chunked reply obligation family.
+    pub fn new(
+        family_id: String,
+        request_id: String,
+        service_obligation_id: Option<ObligationId>,
+        expected_chunks: Option<u32>,
+        delivery_class: DeliveryClass,
+        chunk_ack_boundary: AckKind,
+    ) -> Result<Self, ServiceObligationError> {
+        validate_service_text("family_id", &family_id)?;
+        validate_service_text("request_id", &request_id)?;
+        if expected_chunks == Some(0) {
+            return Err(ServiceObligationError::ChunkedReplyZeroExpected);
+        }
+        Ok(Self {
+            family_id,
+            service_obligation_id,
+            request_id,
+            expected_chunks,
+            received_chunks: 0,
+            finalized: false,
+            delivery_class,
+            chunk_ack_boundary,
+        })
+    }
+
+    /// Record receipt of a chunk. Returns the chunk index (0-based).
+    pub fn receive_chunk(&mut self) -> Result<u32, ServiceObligationError> {
+        if self.finalized {
+            return Err(ServiceObligationError::AlreadyResolved {
+                operation: "receive chunk on finalized stream",
+            });
+        }
+        if let Some(expected) = self.expected_chunks {
+            if self.received_chunks >= expected {
+                return Err(ServiceObligationError::ChunkedReplyOverflow {
+                    expected,
+                    received: self.received_chunks + 1,
+                });
+            }
+        }
+        let index = self.received_chunks;
+        self.received_chunks += 1;
+        Ok(index)
+    }
+
+    /// Finalize the stream. Returns the number of chunks received.
+    pub fn finalize(&mut self) -> Result<u32, ServiceObligationError> {
+        if self.finalized {
+            return Err(ServiceObligationError::AlreadyResolved {
+                operation: "finalize chunked reply",
+            });
+        }
+        if let Some(expected) = self.expected_chunks
+            && self.received_chunks != expected
+        {
+            return Err(ServiceObligationError::ChunkedReplyIncomplete {
+                expected,
+                received: self.received_chunks,
+            });
+        }
+        self.finalized = true;
+        Ok(self.received_chunks)
+    }
+
+    /// Whether all expected chunks have been received.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.expected_chunks
+            .is_some_and(|expected| self.received_chunks >= expected)
+    }
+
+    /// Number of chunks received so far.
+    #[must_use]
+    pub fn received_chunks(&self) -> u32 {
+        self.received_chunks
+    }
+
+    /// Whether the stream has been finalized.
+    #[must_use]
+    pub fn is_finalized(&self) -> bool {
+        self.finalized
+    }
+
+    /// Build a reply certificate for the completed chunked stream.
+    pub fn certificate(
+        &self,
+        callee: String,
+        payload_digest: u64,
+        issued_at: Time,
+        service_latency: Duration,
+    ) -> Result<ReplyCertificate, ServiceObligationError> {
+        if !self.finalized {
+            return Err(ServiceObligationError::ChunkedReplyNotFinalized);
+        }
+        if let Some(expected) = self.expected_chunks
+            && self.received_chunks != expected
+        {
+            return Err(ServiceObligationError::ChunkedReplyIncomplete {
+                expected,
+                received: self.received_chunks,
+            });
+        }
+        Ok(ReplyCertificate {
+            request_id: self.request_id.clone(),
+            callee,
+            delivery_class: self.delivery_class,
+            service_obligation_id: self.service_obligation_id,
+            payload_digest,
+            is_chunked: true,
+            total_chunks: Some(self.received_chunks),
+            issued_at,
+            service_latency,
+        })
+    }
+}
+
 /// Runtime request/reply obligation tracked against the global obligation
 /// ledger when the delivery class requires it.
 #[derive(Debug)]
@@ -735,29 +1061,27 @@ impl ServiceObligation {
         ledger: &mut ObligationLedger,
         now: Time,
         failure: ServiceFailure,
-    ) -> ServiceAbortReceipt {
-        assert!(
-            !self.resolved,
-            "service obligation already resolved; cannot abort"
-        );
+    ) -> Result<ServiceAbortReceipt, ServiceObligationError> {
+        self.ensure_active("abort")?;
         let obligation_id = self.obligation_id();
         if let Some(token) = self.token.take() {
             ledger.abort(token, now, failure.abort_reason());
         }
-        ServiceAbortReceipt {
+        Ok(ServiceAbortReceipt {
             request_id: self.request_id,
             obligation_id,
             failure,
             delivery_class: self.delivery_class,
-        }
+        })
     }
 
     /// Explicitly timeout the service obligation instead of letting it vanish.
-    pub fn timeout(self, ledger: &mut ObligationLedger, now: Time) -> ServiceAbortReceipt {
-        assert!(
-            !self.resolved,
-            "service obligation already resolved; cannot timeout"
-        );
+    pub fn timeout(
+        self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<ServiceAbortReceipt, ServiceObligationError> {
+        self.ensure_active("timeout")?;
         self.abort(ledger, now, ServiceFailure::TimedOut)
     }
 }
@@ -967,6 +1291,31 @@ pub enum ServiceObligationError {
         requested_boundary: AckKind,
         /// Whether explicit receipt was requested.
         receipt_required: bool,
+    },
+    /// Chunked reply declared as chunked but missing expected count.
+    #[error("chunked reply certificate must declare total_chunks")]
+    ChunkedReplyMissingCount,
+    /// Chunked reply declared zero expected chunks.
+    #[error("chunked reply expected_chunks must be > 0")]
+    ChunkedReplyZeroExpected,
+    /// Chunked reply stream was certified before finalization.
+    #[error("chunked reply certificate requires a finalized stream")]
+    ChunkedReplyNotFinalized,
+    /// Bounded chunked reply stream was finalized or certified before all chunks arrived.
+    #[error("chunked reply incomplete: expected {expected}, received {received}")]
+    ChunkedReplyIncomplete {
+        /// Declared expected chunk count.
+        expected: u32,
+        /// Actual chunk count recorded so far.
+        received: u32,
+    },
+    /// More chunks received than the declared expected count.
+    #[error("chunked reply overflow: expected {expected}, received {received}")]
+    ChunkedReplyOverflow {
+        /// Declared expected chunk count.
+        expected: u32,
+        /// Actual chunk count that exceeded the limit.
+        received: u32,
     },
 }
 
@@ -1313,7 +1662,7 @@ mod tests {
     #[test]
     fn ephemeral_request_reply_stays_untracked() {
         let mut ledger = ObligationLedger::new();
-        let obligation = ServiceObligation::allocate(
+        let mut obligation = ServiceObligation::allocate(
             &mut ledger,
             "req-ephemeral",
             "caller",
@@ -1348,7 +1697,7 @@ mod tests {
     #[test]
     fn obligation_backed_request_commits_and_creates_reply_obligation() {
         let mut ledger = ObligationLedger::new();
-        let obligation = ServiceObligation::allocate(
+        let mut obligation = ServiceObligation::allocate(
             &mut ledger,
             "req-1",
             "caller",
@@ -1394,7 +1743,7 @@ mod tests {
     #[test]
     fn service_obligation_abort_records_typed_failure() {
         let mut ledger = ObligationLedger::new();
-        let mut obligation = ServiceObligation::allocate(
+        let obligation = ServiceObligation::allocate(
             &mut ledger,
             "req-2",
             "caller",
@@ -1409,11 +1758,13 @@ mod tests {
         .expect("tracked request should allocate");
         let obligation_id = obligation.obligation_id().expect("tracked id");
 
-        let aborted = obligation.abort(
-            &mut ledger,
-            Time::from_nanos(15),
-            ServiceFailure::ApplicationError,
-        );
+        let aborted = obligation
+            .abort(
+                &mut ledger,
+                Time::from_nanos(15),
+                ServiceFailure::ApplicationError,
+            )
+            .expect("abort should succeed");
 
         assert_eq!(aborted.obligation_id, Some(obligation_id));
         assert_eq!(aborted.failure, ServiceFailure::ApplicationError);
@@ -1492,18 +1843,20 @@ mod tests {
         );
         assert_eq!(obligation.obligation_id(), Some(obligation_id));
         assert_eq!(ledger.pending_count(), 1);
-        obligation.abort(
-            &mut ledger,
-            Time::from_nanos(3),
-            ServiceFailure::ApplicationError,
-        );
+        obligation
+            .abort(
+                &mut ledger,
+                Time::from_nanos(3),
+                ServiceFailure::ApplicationError,
+            )
+            .expect("abort should succeed");
         assert_eq!(ledger.pending_count(), 0);
     }
 
     #[test]
     fn service_obligation_timeout_is_explicit_abort() {
         let mut ledger = ObligationLedger::new();
-        let mut obligation = ServiceObligation::allocate(
+        let obligation = ServiceObligation::allocate(
             &mut ledger,
             "req-4",
             "caller",
@@ -1518,7 +1871,9 @@ mod tests {
         .expect("tracked request should allocate");
         let obligation_id = obligation.obligation_id().expect("tracked id");
 
-        let timed_out = obligation.timeout(&mut ledger, Time::from_nanos(100));
+        let timed_out = obligation
+            .timeout(&mut ledger, Time::from_nanos(100))
+            .expect("timeout should abort successfully");
 
         assert_eq!(timed_out.failure, ServiceFailure::TimedOut);
         let record = ledger.get(obligation_id).expect("ledger record exists");
@@ -1575,6 +1930,86 @@ mod tests {
     }
 
     #[test]
+    fn resolved_service_obligation_rejects_abort_after_commit() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-resolved-abort",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+
+        obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(2),
+                b"payload".to_vec(),
+                AckKind::Served,
+                false,
+            )
+            .expect("first resolution should succeed");
+
+        let err = obligation
+            .abort(
+                &mut ledger,
+                Time::from_nanos(3),
+                ServiceFailure::ApplicationError,
+            )
+            .expect_err("resolved obligation should reject abort");
+
+        assert_eq!(
+            err,
+            ServiceObligationError::AlreadyResolved { operation: "abort" }
+        );
+    }
+
+    #[test]
+    fn resolved_service_obligation_rejects_timeout_after_commit() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-resolved-timeout",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+
+        obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(2),
+                b"payload".to_vec(),
+                AckKind::Served,
+                false,
+            )
+            .expect("first resolution should succeed");
+
+        let err = obligation
+            .timeout(&mut ledger, Time::from_nanos(3))
+            .expect_err("resolved obligation should reject timeout");
+
+        assert_eq!(
+            err,
+            ServiceObligationError::AlreadyResolved {
+                operation: "timeout",
+            }
+        );
+    }
+
+    #[test]
     fn tracked_reply_boundary_below_minimum_preserves_obligation() {
         let mut ledger = ObligationLedger::new();
         let mut obligation = ServiceObligation::allocate(
@@ -1612,11 +2047,13 @@ mod tests {
         );
         assert_eq!(obligation.obligation_id(), Some(obligation_id));
         assert_eq!(ledger.pending_count(), 1);
-        let aborted = obligation.abort(
-            &mut ledger,
-            Time::from_nanos(3),
-            ServiceFailure::ApplicationError,
-        );
+        let aborted = obligation
+            .abort(
+                &mut ledger,
+                Time::from_nanos(3),
+                ServiceFailure::ApplicationError,
+            )
+            .expect("abort should succeed");
         assert_eq!(aborted.obligation_id, Some(obligation_id));
         assert_eq!(ledger.pending_count(), 0);
     }
@@ -2190,5 +2627,392 @@ mod tests {
         assert_eq!(ledger.pending_count(), 1);
         assert!(leaks.leaked.iter().any(|entry| entry.id == obligation_id));
         drop(obligation);
+    }
+
+    // ── RequestCertificate tests ────────────────────────────────────────
+
+    #[test]
+    fn request_certificate_from_validated_roundtrip() {
+        let request = ValidatedServiceRequest {
+            delivery_class: DeliveryClass::ObligationBacked,
+            timeout: Some(Duration::from_secs(5)),
+            priority_hint: None,
+            guaranteed_durability: DeliveryClass::MobilitySafe,
+            evidence_level: EvidenceLevel::Standard,
+            mobility_constraint: MobilityConstraint::Unrestricted,
+            compensation_policy: CompensationSemantics::None,
+            overload_policy: OverloadPolicy::RejectNew,
+        };
+
+        let cert = RequestCertificate::from_validated(
+            "req-1".into(),
+            "caller-a".into(),
+            "orders.region1.created".into(),
+            &request,
+            super::super::ir::ReplySpaceRule::CallerInbox,
+            "OrderService".into(),
+            0xDEAD_BEEF,
+            Time::from_nanos(1000),
+        );
+
+        assert_eq!(cert.request_id, "req-1");
+        assert_eq!(cert.caller, "caller-a");
+        assert_eq!(cert.delivery_class, DeliveryClass::ObligationBacked);
+        assert_eq!(cert.capability_fingerprint, 0xDEAD_BEEF);
+        assert!(cert.validate().is_ok());
+    }
+
+    #[test]
+    fn request_certificate_rejects_empty_fields() {
+        let cert = RequestCertificate {
+            request_id: String::new(),
+            caller: "caller".into(),
+            subject: "sub".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            reply_space_rule: super::super::ir::ReplySpaceRule::CallerInbox,
+            service_class: "svc".into(),
+            capability_fingerprint: 0,
+            issued_at: Time::from_nanos(1),
+            timeout: None,
+        };
+        assert!(cert.validate().is_err());
+    }
+
+    #[test]
+    fn request_certificate_rejects_zero_timeout() {
+        let cert = RequestCertificate {
+            request_id: "req-1".into(),
+            caller: "caller".into(),
+            subject: "sub".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            reply_space_rule: super::super::ir::ReplySpaceRule::CallerInbox,
+            service_class: "svc".into(),
+            capability_fingerprint: 0,
+            issued_at: Time::from_nanos(1),
+            timeout: Some(Duration::ZERO),
+        };
+        assert!(matches!(
+            cert.validate(),
+            Err(ServiceObligationError::ZeroTimeout)
+        ));
+    }
+
+    #[test]
+    fn request_certificate_digest_is_deterministic() {
+        let cert = RequestCertificate {
+            request_id: "req-1".into(),
+            caller: "caller-a".into(),
+            subject: "orders.created".into(),
+            delivery_class: DeliveryClass::DurableOrdered,
+            reply_space_rule: super::super::ir::ReplySpaceRule::CallerInbox,
+            service_class: "OrderSvc".into(),
+            capability_fingerprint: 42,
+            issued_at: Time::from_nanos(1000),
+            timeout: None,
+        };
+        assert_eq!(cert.digest(), cert.digest());
+    }
+
+    #[test]
+    fn request_certificate_digest_distinguishes_reply_contract_metadata() {
+        let shared = RequestCertificate {
+            request_id: "req-1".into(),
+            caller: "caller-a".into(),
+            subject: "orders.created".into(),
+            delivery_class: DeliveryClass::DurableOrdered,
+            reply_space_rule: super::super::ir::ReplySpaceRule::SharedPrefix {
+                prefix: "_INBOX.shared".into(),
+            },
+            service_class: "OrderSvc".into(),
+            capability_fingerprint: 42,
+            issued_at: Time::from_nanos(1000),
+            timeout: Some(Duration::from_secs(5)),
+        };
+        let dedicated = RequestCertificate {
+            reply_space_rule: super::super::ir::ReplySpaceRule::DedicatedPrefix {
+                prefix: "_INBOX.dedicated".into(),
+            },
+            ..shared.clone()
+        };
+
+        assert_ne!(shared.digest(), dedicated.digest());
+    }
+
+    // ── ReplyCertificate tests ──────────────────────────────────────────
+
+    #[test]
+    fn reply_certificate_from_commit() {
+        let commit = ServiceReplyCommit {
+            request_id: "req-1".into(),
+            service_obligation_id: None,
+            payload: b"hello".to_vec(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            reply_obligation: None,
+        };
+
+        let cert = ReplyCertificate::from_commit(
+            &commit,
+            "callee-a".into(),
+            Time::from_nanos(2000),
+            Duration::from_millis(50),
+        );
+
+        assert_eq!(cert.request_id, "req-1");
+        assert_eq!(cert.callee, "callee-a");
+        assert!(!cert.is_chunked);
+        assert!(cert.total_chunks.is_none());
+        assert!(cert.validate().is_ok());
+    }
+
+    #[test]
+    fn reply_certificate_rejects_chunked_without_count() {
+        let cert = ReplyCertificate {
+            request_id: "req-1".into(),
+            callee: "callee-a".into(),
+            delivery_class: DeliveryClass::DurableOrdered,
+            service_obligation_id: None,
+            payload_digest: 0,
+            is_chunked: true,
+            total_chunks: None,
+            issued_at: Time::from_nanos(1),
+            service_latency: Duration::from_millis(1),
+        };
+        assert!(matches!(
+            cert.validate(),
+            Err(ServiceObligationError::ChunkedReplyMissingCount)
+        ));
+    }
+
+    #[test]
+    fn reply_certificate_digest_is_deterministic() {
+        let cert = ReplyCertificate {
+            request_id: "req-1".into(),
+            callee: "callee-a".into(),
+            delivery_class: DeliveryClass::DurableOrdered,
+            service_obligation_id: None,
+            payload_digest: 0xCAFE,
+            is_chunked: false,
+            total_chunks: None,
+            issued_at: Time::from_nanos(1000),
+            service_latency: Duration::from_millis(10),
+        };
+        assert_eq!(cert.digest(), cert.digest());
+    }
+
+    #[test]
+    fn reply_certificate_digest_distinguishes_chunk_metadata() {
+        let unary = ReplyCertificate {
+            request_id: "req-1".into(),
+            callee: "callee-a".into(),
+            delivery_class: DeliveryClass::DurableOrdered,
+            service_obligation_id: Some(ObligationId::new_for_test(7, 0)),
+            payload_digest: 0xCAFE,
+            is_chunked: false,
+            total_chunks: None,
+            issued_at: Time::from_nanos(1000),
+            service_latency: Duration::from_millis(10),
+        };
+        let chunked = ReplyCertificate {
+            is_chunked: true,
+            total_chunks: Some(3),
+            ..unary.clone()
+        };
+
+        assert_ne!(unary.digest(), chunked.digest());
+    }
+
+    // ── ChunkedReplyObligation tests ────────────────────────────────────
+
+    #[test]
+    fn chunked_reply_lifecycle_bounded() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-1".into(),
+            "req-1".into(),
+            None,
+            Some(3),
+            DeliveryClass::DurableOrdered,
+            AckKind::Committed,
+        )
+        .unwrap();
+
+        assert!(!chunked.is_complete());
+        assert_eq!(chunked.receive_chunk().unwrap(), 0);
+        assert_eq!(chunked.receive_chunk().unwrap(), 1);
+        assert!(!chunked.is_complete());
+        assert_eq!(chunked.receive_chunk().unwrap(), 2);
+        assert!(chunked.is_complete());
+
+        // Fourth chunk should overflow
+        assert!(matches!(
+            chunked.receive_chunk(),
+            Err(ServiceObligationError::ChunkedReplyOverflow {
+                expected: 3,
+                received: 4,
+            })
+        ));
+
+        let count = chunked.finalize().unwrap();
+        assert_eq!(count, 3);
+        assert!(chunked.is_finalized());
+    }
+
+    #[test]
+    fn chunked_reply_unbounded_stream() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-2".into(),
+            "req-2".into(),
+            None,
+            None, // unbounded
+            DeliveryClass::ObligationBacked,
+            AckKind::Accepted,
+        )
+        .unwrap();
+
+        for _ in 0..100 {
+            chunked.receive_chunk().unwrap();
+        }
+        assert!(!chunked.is_complete()); // unbounded never reports complete
+        assert_eq!(chunked.received_chunks(), 100);
+
+        let count = chunked.finalize().unwrap();
+        assert_eq!(count, 100);
+    }
+
+    #[test]
+    fn chunked_reply_rejects_zero_expected() {
+        assert!(matches!(
+            ChunkedReplyObligation::new(
+                "family-3".into(),
+                "req-3".into(),
+                None,
+                Some(0),
+                DeliveryClass::DurableOrdered,
+                AckKind::Committed,
+            ),
+            Err(ServiceObligationError::ChunkedReplyZeroExpected)
+        ));
+    }
+
+    #[test]
+    fn chunked_reply_finalize_is_idempotent_guard() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-4".into(),
+            "req-4".into(),
+            None,
+            Some(1),
+            DeliveryClass::EphemeralInteractive,
+            AckKind::Accepted,
+        )
+        .unwrap();
+
+        chunked.receive_chunk().unwrap();
+        chunked.finalize().unwrap();
+
+        // Second finalize should fail
+        assert!(matches!(
+            chunked.finalize(),
+            Err(ServiceObligationError::AlreadyResolved { .. })
+        ));
+    }
+
+    #[test]
+    fn chunked_reply_certificate_carries_chunk_count() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-5".into(),
+            "req-5".into(),
+            None,
+            Some(2),
+            DeliveryClass::DurableOrdered,
+            AckKind::Committed,
+        )
+        .unwrap();
+
+        chunked.receive_chunk().unwrap();
+        chunked.receive_chunk().unwrap();
+        chunked.finalize().unwrap();
+
+        let cert = chunked
+            .certificate(
+                "callee-a".into(),
+                0xBEEF,
+                Time::from_nanos(3000),
+                Duration::from_millis(100),
+            )
+            .expect("finalized bounded stream should produce a certificate");
+
+        assert!(cert.is_chunked);
+        assert_eq!(cert.total_chunks, Some(2));
+        assert_eq!(cert.payload_digest, 0xBEEF);
+        assert!(cert.validate().is_ok());
+    }
+
+    #[test]
+    fn chunked_reply_finalize_rejects_incomplete_bounded_stream() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-early-finalize".into(),
+            "req-early-finalize".into(),
+            None,
+            Some(2),
+            DeliveryClass::DurableOrdered,
+            AckKind::Committed,
+        )
+        .unwrap();
+
+        chunked.receive_chunk().unwrap();
+
+        assert!(matches!(
+            chunked.finalize(),
+            Err(ServiceObligationError::ChunkedReplyIncomplete {
+                expected: 2,
+                received: 1,
+            })
+        ));
+        assert!(!chunked.is_finalized());
+    }
+
+    #[test]
+    fn chunked_reply_certificate_requires_finalize() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-unfinalized-cert".into(),
+            "req-unfinalized-cert".into(),
+            None,
+            Some(1),
+            DeliveryClass::DurableOrdered,
+            AckKind::Committed,
+        )
+        .unwrap();
+
+        chunked.receive_chunk().unwrap();
+
+        assert!(matches!(
+            chunked.certificate(
+                "callee-a".into(),
+                0xCAFE,
+                Time::from_nanos(1),
+                Duration::from_millis(10),
+            ),
+            Err(ServiceObligationError::ChunkedReplyNotFinalized)
+        ));
+    }
+
+    #[test]
+    fn chunked_reply_receive_after_finalize_fails() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-6".into(),
+            "req-6".into(),
+            None,
+            Some(5),
+            DeliveryClass::ObligationBacked,
+            AckKind::Recoverable,
+        )
+        .unwrap();
+
+        chunked.receive_chunk().unwrap();
+        chunked.finalize().unwrap();
+
+        assert!(matches!(
+            chunked.receive_chunk(),
+            Err(ServiceObligationError::AlreadyResolved { .. })
+        ));
     }
 }
