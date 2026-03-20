@@ -9,7 +9,8 @@ use asupersync::cli::doctor::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 const FIXTURE_PACK_PATH: &str = "tests/fixtures/doctor_analyzer_harness/fixtures.json";
 const FIXTURE_PACK_SCHEMA_VERSION: &str = "doctor-analyzer-fixture-pack-v1";
@@ -89,6 +90,41 @@ fn fixture_path(relative: &str) -> PathBuf {
     repo_root().join(relative)
 }
 
+fn copy_fixture_tree(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("create staged fixture dir");
+    for entry in fs::read_dir(src).expect("read fixture dir") {
+        let entry = entry.expect("read fixture entry");
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type().expect("fixture file type");
+        if file_type.is_dir() {
+            copy_fixture_tree(&src_path, &dst_path);
+        } else {
+            fs::copy(&src_path, &dst_path).expect("copy fixture file");
+        }
+    }
+}
+
+fn stage_workspace_fixture(relative: &str) -> (Option<TempDir>, PathBuf) {
+    if relative != "tests/fixtures/doctor_workspace_scan_e2e" {
+        return (None, fixture_path(relative));
+    }
+
+    let temp_dir = tempfile::tempdir().expect("fixture temp dir");
+    let staged_root = temp_dir.path().join("doctor_workspace_scan_e2e");
+    copy_fixture_tree(&fixture_path(relative), &staged_root);
+    fs::write(
+        staged_root.join("beta/Cargo.toml"),
+        r#"[package]
+name = beta
+version = "0.1.0"
+edition = "2024"
+"#,
+    )
+    .expect("write malformed staged beta manifest");
+    (Some(temp_dir), staged_root)
+}
+
 fn mixed_artifacts_fixture() -> Vec<RuntimeArtifact> {
     vec![
         RuntimeArtifact {
@@ -151,9 +187,9 @@ fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
                 .workspace_root
                 .as_deref()
                 .expect("scanner fixture requires workspace_root");
-            let report = scan_workspace(&fixture_path(workspace_root)).expect("scan workspace");
-            let report_again =
-                scan_workspace(&fixture_path(workspace_root)).expect("scan workspace (repeat)");
+            let (_staged_fixture, workspace_root) = stage_workspace_fixture(workspace_root);
+            let report = scan_workspace(&workspace_root).expect("scan workspace");
+            let report_again = scan_workspace(&workspace_root).expect("scan workspace (repeat)");
             if report != report_again {
                 diagnostics
                     .push("scanner report is non-deterministic across repeated run".to_string());
@@ -179,8 +215,8 @@ fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
                 .workspace_root
                 .as_deref()
                 .expect("invariant fixture requires workspace_root");
-            let scan_report =
-                scan_workspace(&fixture_path(workspace_root)).expect("scan workspace");
+            let (_staged_fixture, workspace_root) = stage_workspace_fixture(workspace_root);
+            let scan_report = scan_workspace(&workspace_root).expect("scan workspace");
             let analysis = analyze_workspace_invariants(&scan_report);
             let analysis_again = analyze_workspace_invariants(&scan_report);
             if analysis != analysis_again {
