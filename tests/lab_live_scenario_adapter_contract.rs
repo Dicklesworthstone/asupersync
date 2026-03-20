@@ -361,13 +361,13 @@ fn shared_harness_smoke_executes_same_contract_across_lab_and_live_entrypoints()
     let fixture = load_golden_harness_fixture();
 
     let actual = json!({
-        "scenario_id": identity.scenario_id.clone(),
-        "surface_id": identity.surface_id.clone(),
-        "surface_contract_version": identity.surface_contract_version.clone(),
-        "seed_lineage_id": identity.seed_plan.seed_lineage_id.clone(),
+        "scenario_id": identity.scenario_id,
+        "surface_id": identity.surface_id,
+        "surface_contract_version": identity.surface_contract_version,
+        "seed_lineage_id": identity.seed_plan.seed_lineage_id,
         "adapters": {
-            "lab": lab_result.adapter.clone(),
-            "spork": spork_result.adapter.clone(),
+            "lab": lab_result.adapter,
+            "spork": spork_result.adapter,
             "live": live_ctx.adapter.as_deref().expect("live adapter"),
         },
         "execution_instances": {

@@ -152,11 +152,11 @@ fn build_dual_run_harness_contract_fixture() -> Value {
         ],
         "description": "Expected shared dual-run identity and provenance records for the canonical harness contract case",
         "identity": {
-            "schema_version": identity.schema_version.clone(),
-            "scenario_id": identity.scenario_id.clone(),
-            "surface_id": identity.surface_id.clone(),
-            "surface_contract_version": identity.surface_contract_version.clone(),
-            "description": identity.description.clone(),
+            "schema_version": identity.schema_version,
+            "scenario_id": identity.scenario_id,
+            "surface_id": identity.surface_id,
+            "surface_contract_version": identity.surface_contract_version,
+            "description": identity.description,
             "phase": identity.phase,
             "seed_plan": {
                 "canonical_seed": identity.seed_plan.canonical_seed,
@@ -207,13 +207,13 @@ fn build_dual_run_harness_contract_fixture() -> Value {
             "Explicit entropy overrides are retained in both replay metadata and seed lineage"
         ],
         "smoke_snapshot": {
-            "scenario_id": identity.scenario_id.clone(),
-            "surface_id": identity.surface_id.clone(),
-            "surface_contract_version": identity.surface_contract_version.clone(),
-            "seed_lineage_id": identity.seed_plan.seed_lineage_id.clone(),
+            "scenario_id": identity.scenario_id,
+            "surface_id": identity.surface_id,
+            "surface_contract_version": identity.surface_contract_version,
+            "seed_lineage_id": identity.seed_plan.seed_lineage_id,
             "adapters": {
-                "lab": lab_result.adapter.clone(),
-                "spork": spork_result.adapter.clone(),
+                "lab": lab_result.adapter,
+                "spork": spork_result.adapter,
                 "live": live_ctx.adapter.as_deref().expect("live adapter"),
             },
             "execution_instances": {
