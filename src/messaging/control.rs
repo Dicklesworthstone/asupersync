@@ -33,7 +33,7 @@ use super::ir::{
     EvidencePolicy, MobilityPermission, PrivacyPolicy, RetentionPolicy, SubjectFamily,
     SubjectPattern, SubjectSchema,
 };
-use super::subject::Subject;
+use super::subject::{NamespaceComponent, NamespaceKernel, NamespaceKernelError, Subject};
 
 // ---------------------------------------------------------------------------
 // System subject families
@@ -1110,12 +1110,23 @@ impl LagSketch {
             .increment(replica, 1);
     }
 
+    /// Compatibility alias for recording one lag observation.
+    pub fn record(&mut self, replica: &NodeId, lag: u64) {
+        self.observe(replica, lag);
+    }
+
     /// Total number of samples represented by the sketch.
     #[must_use]
     pub fn total_samples(&self) -> u64 {
         self.buckets.values().fold(0_u64, |total, counter| {
             total.saturating_add(counter.value())
         })
+    }
+
+    /// Number of populated buckets in the sketch.
+    #[must_use]
+    pub fn bucket_count(&self) -> usize {
+        self.buckets.len()
     }
 
     /// Midpoint-based mean estimate.
@@ -1760,6 +1771,80 @@ impl fmt::Display for ControlHandlerId {
     }
 }
 
+/// Tenant/service-scoped control surface under one `$SYS.FABRIC.<FAMILY>` root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceControlScope {
+    family: SystemSubjectFamily,
+    tenant: NamespaceComponent,
+    service: NamespaceComponent,
+}
+
+impl NamespaceControlScope {
+    /// Build a control scope directly from an existing namespace kernel.
+    #[must_use]
+    pub fn from_namespace(family: SystemSubjectFamily, namespace: &NamespaceKernel) -> Self {
+        Self {
+            family,
+            tenant: namespace.tenant().clone(),
+            service: namespace.service().clone(),
+        }
+    }
+
+    /// Build a validated tenant/service control scope for one system family.
+    pub fn new(
+        family: SystemSubjectFamily,
+        tenant: impl AsRef<str>,
+        service: impl AsRef<str>,
+    ) -> Result<Self, NamespaceKernelError> {
+        Ok(Self {
+            family,
+            tenant: NamespaceComponent::parse(tenant)?,
+            service: NamespaceComponent::parse(service)?,
+        })
+    }
+
+    /// Return the control family covered by this scope.
+    #[must_use]
+    pub const fn family(&self) -> SystemSubjectFamily {
+        self.family
+    }
+
+    /// Return the tenant component.
+    #[must_use]
+    pub fn tenant(&self) -> &NamespaceComponent {
+        &self.tenant
+    }
+
+    /// Return the service component.
+    #[must_use]
+    pub fn service(&self) -> &NamespaceComponent {
+        &self.service
+    }
+
+    /// Return the namespace-scoped wildcard pattern for this control surface.
+    #[must_use]
+    pub fn wildcard_pattern(&self) -> SubjectPattern {
+        SubjectPattern::new(format!(
+            "{}.TENANT.{}.SERVICE.{}.>",
+            self.family.prefix(),
+            self.tenant,
+            self.service
+        ))
+    }
+
+    /// Return one concrete channel subject inside this control scope.
+    pub fn subject(&self, channel: impl AsRef<str>) -> Result<Subject, NamespaceKernelError> {
+        let channel = NamespaceComponent::parse(channel)?;
+        Ok(Subject::new(format!(
+            "{}.TENANT.{}.SERVICE.{}.{}",
+            self.family.prefix(),
+            self.tenant,
+            self.service,
+            channel
+        )))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Control namespace registry
 // ---------------------------------------------------------------------------
@@ -1883,6 +1968,36 @@ impl ControlRegistry {
         self.register(
             family,
             family.wildcard_pattern(),
+            ControlBudget::default(),
+            AdvisoryDampingPolicy::default(),
+            false,
+        )
+    }
+
+    /// Register a tenant/service-scoped control handler.
+    pub fn register_namespace(
+        &mut self,
+        scope: &NamespaceControlScope,
+        budget: ControlBudget,
+        damping: AdvisoryDampingPolicy,
+        break_glass: bool,
+    ) -> Result<ControlHandlerId, ControlRegistryError> {
+        self.register(
+            scope.family(),
+            scope.wildcard_pattern(),
+            budget,
+            damping,
+            break_glass,
+        )
+    }
+
+    /// Register a tenant/service-scoped handler with default policies.
+    pub fn register_namespace_default(
+        &mut self,
+        scope: &NamespaceControlScope,
+    ) -> Result<ControlHandlerId, ControlRegistryError> {
+        self.register_namespace(
+            scope,
             ControlBudget::default(),
             AdvisoryDampingPolicy::default(),
             false,
@@ -2836,6 +2951,81 @@ mod tests {
         let drain_subj = Subject::new("$SYS.FABRIC.DRAIN.start");
         let matches = registry.matching_handlers(&drain_subj);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn namespace_control_scope_builds_tenant_service_system_subjects() {
+        let scope = NamespaceControlScope::new(SystemSubjectFamily::Health, "acme", "orders")
+            .expect("namespace control scope");
+
+        assert_eq!(scope.family(), SystemSubjectFamily::Health);
+        assert_eq!(scope.tenant().as_str(), "acme");
+        assert_eq!(scope.service().as_str(), "orders");
+        assert_eq!(
+            scope.wildcard_pattern().as_str(),
+            "$SYS.FABRIC.HEALTH.TENANT.acme.SERVICE.orders.>"
+        );
+        assert_eq!(
+            scope.subject("status").expect("status subject").as_str(),
+            "$SYS.FABRIC.HEALTH.TENANT.acme.SERVICE.orders.status"
+        );
+    }
+
+    #[test]
+    fn namespace_control_scope_can_be_derived_from_namespace_kernel() {
+        let namespace = NamespaceKernel::new("acme", "orders").expect("namespace kernel");
+        let scope = NamespaceControlScope::from_namespace(SystemSubjectFamily::Route, &namespace);
+
+        assert_eq!(scope.family(), SystemSubjectFamily::Route);
+        assert_eq!(scope.tenant(), namespace.tenant());
+        assert_eq!(scope.service(), namespace.service());
+        assert_eq!(
+            scope.wildcard_pattern().as_str(),
+            "$SYS.FABRIC.ROUTE.TENANT.acme.SERVICE.orders.>"
+        );
+        assert_eq!(
+            scope
+                .subject("rebalance")
+                .expect("route control subject")
+                .as_str(),
+            "$SYS.FABRIC.ROUTE.TENANT.acme.SERVICE.orders.rebalance"
+        );
+    }
+
+    #[test]
+    fn control_registry_keeps_namespace_control_handlers_isolated() {
+        let mut registry = ControlRegistry::new();
+        let acme_orders_ns = NamespaceKernel::new("acme", "orders").expect("acme orders kernel");
+        let bravo_orders_ns = NamespaceKernel::new("bravo", "orders").expect("bravo orders kernel");
+        let acme_orders =
+            NamespaceControlScope::from_namespace(SystemSubjectFamily::Health, &acme_orders_ns);
+        let bravo_orders =
+            NamespaceControlScope::from_namespace(SystemSubjectFamily::Health, &bravo_orders_ns);
+
+        let acme_id = registry
+            .register_namespace_default(&acme_orders)
+            .expect("register acme orders");
+        let bravo_id = registry
+            .register_namespace_default(&bravo_orders)
+            .expect("register bravo orders");
+
+        let acme_status = acme_orders.subject("status").expect("acme status");
+        let matches = registry.matching_handlers(&acme_status);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, acme_id);
+        assert_eq!(
+            matches[0].pattern.as_str(),
+            acme_orders.wildcard_pattern().as_str()
+        );
+
+        let bravo_status = bravo_orders.subject("status").expect("bravo status");
+        let matches = registry.matching_handlers(&bravo_status);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, bravo_id);
+        assert_eq!(
+            matches[0].pattern.as_str(),
+            bravo_orders.wildcard_pattern().as_str()
+        );
     }
 
     #[test]
