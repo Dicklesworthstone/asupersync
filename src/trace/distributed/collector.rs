@@ -278,6 +278,7 @@ impl SymbolTraceCollector {
     }
 
     fn evict_oldest(&self, traces: &mut HashMap<TraceId, TraceRecord>, now: Time) {
+        // First pass: evict oldest complete traces (cheapest to discard).
         let mut to_remove: Vec<_> = traces
             .iter()
             .filter(|(_, r)| r.is_complete)
@@ -289,6 +290,22 @@ impl SymbolTraceCollector {
         let remove_count = (traces.len() / 10).max(1);
         for (id, _) in to_remove.into_iter().take(remove_count) {
             traces.remove(&id);
+        }
+
+        // Second pass: if still over capacity after complete-trace eviction,
+        // evict oldest incomplete traces to prevent unbounded growth from a
+        // burst of incomplete traces that never finish.
+        if traces.len() > self.max_traces {
+            let mut incomplete: Vec<_> = traces
+                .iter()
+                .filter(|(_, r)| !r.is_complete)
+                .map(|(id, r)| (*id, r.last_updated))
+                .collect();
+            incomplete.sort_by_key(|(_, updated)| *updated);
+            let excess = traces.len() - self.max_traces;
+            for (id, _) in incomplete.into_iter().take(excess) {
+                traces.remove(&id);
+            }
         }
 
         let max_age_nanos = self.max_age.as_nanos().min(u128::from(u64::MAX)) as u64;
