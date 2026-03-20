@@ -32,7 +32,7 @@ SCAN2_NORM_JSON="${ARTIFACT_DIR}/scan_run2.normalized.json"
 SCAN1_LOG="${ARTIFACT_DIR}/scan1.log"
 SCAN2_LOG="${ARTIFACT_DIR}/scan2.log"
 FIXTURE_TEMPLATE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_workspace_scan_e2e"
-STAGED_FIXTURE_ROOT="${ARTIFACT_DIR}/fixture_workspace"
+FIXTURE_TEMPLATE_REL="tests/fixtures/doctor_workspace_scan_e2e"
 SUITE_ID="doctor_workspace_scan_e2e"
 SCENARIO_ID="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
 
@@ -65,17 +65,6 @@ update_run_failure_class() {
 
 mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}"
 
-stage_workspace_fixture() {
-    mkdir -p "${STAGED_FIXTURE_ROOT}"
-    cp -R "${FIXTURE_TEMPLATE_ROOT}/." "${STAGED_FIXTURE_ROOT}/"
-    cat > "${STAGED_FIXTURE_ROOT}/beta/Cargo.toml" <<'ENDMANIFEST'
-[package]
-name = beta
-version = "0.1.0"
-edition = "2024"
-ENDMANIFEST
-}
-
 echo "==================================================================="
 echo "           Asupersync Doctor Workspace Scanner E2E                "
 echo "==================================================================="
@@ -87,18 +76,11 @@ echo "  TEST_SEED:        ${TEST_SEED}"
 echo "  Retry attempts:   ${RCH_RETRY_ATTEMPTS}"
 echo "  Artifact dir:     ${ARTIFACT_DIR}"
 echo "  Fixture template: ${FIXTURE_TEMPLATE_ROOT}"
-echo "  Fixture root:     ${STAGED_FIXTURE_ROOT}"
+echo "  Remote fixture:   /tmp/asupersync-doctor-workspace-scan-${TIMESTAMP}-<run>"
 echo ""
 
 if [[ ! -f "${FIXTURE_TEMPLATE_ROOT}/Cargo.toml" ]]; then
     echo "FATAL: fixture workspace missing at ${FIXTURE_TEMPLATE_ROOT}" >&2
-    exit 1
-fi
-
-stage_workspace_fixture
-
-if [[ ! -f "${STAGED_FIXTURE_ROOT}/Cargo.toml" ]]; then
-    echo "FATAL: staged fixture workspace missing at ${STAGED_FIXTURE_ROOT}" >&2
     exit 1
 fi
 
@@ -116,23 +98,21 @@ run_scan_call() {
     local payload=""
     local attempt_log=""
     local last_failure_reason="test_or_pattern_failure"
+    local remote_stage_root="/tmp/asupersync-doctor-workspace-scan-${TIMESTAMP}-${run_id}"
+    local remote_target_dir="/tmp/rch-doctor-workspace-scan-${TIMESTAMP}"
+    local remote_scan_script="set -euo pipefail; stage_root='${remote_stage_root}'; \
+mkdir -p \"\${stage_root}\"; \
+cp -R '${FIXTURE_TEMPLATE_REL}/.' \"\${stage_root}/\"; \
+printf '%s\\n' '[package]' 'name = beta' 'version = \"0.1.0\"' 'edition = \"2024\"' > \"\${stage_root}/beta/Cargo.toml\"; \
+env CARGO_TARGET_DIR='${remote_target_dir}' cargo run --quiet --features cli --bin asupersync -- --format json --color never doctor scan-workspace --root \"\${stage_root}\""
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         # Keep one deterministic target dir per script invocation so run1/run2
         # and retries reuse compiled artifacts instead of cold-compiling each call.
-        local target_dir="/tmp/rch-doctor-workspace-scan-${TIMESTAMP}"
-        local -a scan_cmd=(
-            env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo run --quiet --features cli --bin asupersync --
-            --format json
-            --color never
-            doctor scan-workspace
-            --root "${STAGED_FIXTURE_ROOT}"
-        )
         attempt_log="${run_log%.log}.attempt${attempt}.log"
         if (
             cd "${PROJECT_ROOT}"
-            timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${scan_cmd[@]}"
+            timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- bash -lc "${remote_scan_script}"
         ) >"${attempt_log}" 2>&1; then
             rc=0
         else
