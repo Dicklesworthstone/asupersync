@@ -599,20 +599,8 @@ impl<T> SendPermit<'_, T> {
 
         if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
             // Receiver is gone; drop the value and release capacity.
-            // Collect wakers before dropping the lock to avoid wake-under-lock.
-            if inner.send_wakers.is_empty() {
-                drop(inner);
-                return Err(SendError::Disconnected(value));
-            }
-            let wakers: SmallVec<[Waker; 4]> = inner
-                .send_wakers
-                .drain(..)
-                .map(|waiter| waiter.waker)
-                .collect();
+            // Note: Receiver::drop already drained and woke any pending send_wakers.
             drop(inner);
-            for waker in wakers {
-                waker.wake();
-            }
             return Err(SendError::Disconnected(value));
         }
 
