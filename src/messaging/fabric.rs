@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -31,6 +31,22 @@ fn parse_subject(raw: impl AsRef<str>) -> Result<Subject, AsupersyncError> {
 
 fn parse_subject_pattern(raw: impl AsRef<str>) -> Result<SubjectPattern, AsupersyncError> {
     SubjectPattern::parse(raw.as_ref()).map_err(|error| fabric_input_error(error.to_string()))
+}
+
+fn shared_fabric_state(endpoint: &str) -> Arc<Mutex<FabricState>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<String, Weak<Mutex<FabricState>>>>> = OnceLock::new();
+
+    let registry = REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut registry = registry.lock();
+    registry.retain(|_, state| state.upgrade().is_some());
+
+    if let Some(existing) = registry.get(endpoint).and_then(Weak::upgrade) {
+        return existing;
+    }
+
+    let state = Arc::new(Mutex::new(FabricState::default()));
+    registry.insert(endpoint.to_owned(), Arc::downgrade(&state));
+    state
 }
 
 /// Minimal public Browser/Native FABRIC handle.
@@ -216,7 +232,7 @@ impl Fabric {
 
         Ok(Self {
             endpoint: endpoint.to_owned(),
-            state: Arc::new(Mutex::new(FabricState::default())),
+            state: shared_fabric_state(endpoint),
         })
     }
 
@@ -261,10 +277,14 @@ impl Fabric {
         subject_pattern: impl AsRef<str>,
     ) -> Result<FabricSubscription, AsupersyncError> {
         cx.checkpoint()?;
+        let next_index = self.state.lock().published.len();
 
         Ok(FabricSubscription {
             pattern: parse_subject_pattern(subject_pattern)?,
-            next_index: 0,
+            // Layer-0 FABRIC models packet-plane pub/sub rather than durable
+            // replay, so subscriptions observe publishes from the subscription
+            // point forward even when endpoint state is shared across handles.
+            next_index,
             state: Arc::clone(&self.state),
         })
     }
@@ -1826,7 +1846,9 @@ mod tests {
     #[test]
     fn publish_and_subscribe_round_trip_with_ephemeral_defaults() {
         run_test_with_cx(|cx| async move {
-            let fabric = Fabric::connect(&cx, "node1:4222").await.expect("connect");
+            let fabric = Fabric::connect(&cx, "node1:4222/publish")
+                .await
+                .expect("connect");
             let mut subscription = fabric.subscribe(&cx, "orders.>").await.expect("subscribe");
 
             let receipt = fabric
@@ -1846,7 +1868,9 @@ mod tests {
     #[test]
     fn request_uses_same_surface_and_returns_reply() {
         run_test_with_cx(|cx| async move {
-            let fabric = Fabric::connect(&cx, "node1:4222").await.expect("connect");
+            let fabric = Fabric::connect(&cx, "node1:4222/request")
+                .await
+                .expect("connect");
             let reply = fabric
                 .request(&cx, "service.lookup", b"lookup".to_vec())
                 .await
@@ -1862,7 +1886,9 @@ mod tests {
     #[test]
     fn stream_accepts_explicit_subjects_and_preserves_endpoint() {
         run_test_with_cx(|cx| async move {
-            let fabric = Fabric::connect(&cx, "node1:4222").await.expect("connect");
+            let fabric = Fabric::connect(&cx, "node1:4222/stream")
+                .await
+                .expect("connect");
             let handle = fabric
                 .stream(
                     &cx,
@@ -1876,12 +1902,92 @@ mod tests {
                 .await
                 .expect("stream");
 
-            assert_eq!(handle.endpoint(), "node1:4222");
+            assert_eq!(handle.endpoint(), "node1:4222/stream");
             assert_eq!(
                 handle.config().delivery_class,
                 DeliveryClass::DurableOrdered
             );
             assert_eq!(handle.config().subjects.len(), 1);
+        });
+    }
+
+    #[test]
+    fn same_endpoint_connections_share_published_messages() {
+        run_test_with_cx(|cx| async move {
+            let publisher = Fabric::connect(&cx, "node1:4222/shared")
+                .await
+                .expect("connect");
+            let subscriber = Fabric::connect(&cx, "node1:4222/shared")
+                .await
+                .expect("connect");
+            let mut subscription = subscriber
+                .subscribe(&cx, "orders.>")
+                .await
+                .expect("subscribe");
+
+            publisher
+                .publish(&cx, "orders.created", b"payload".to_vec())
+                .await
+                .expect("publish");
+            let message = subscription.next(&cx).await.expect("message");
+
+            assert_eq!(message.subject.as_str(), "orders.created");
+            assert_eq!(message.payload, b"payload".to_vec());
+        });
+    }
+
+    #[test]
+    fn different_endpoints_do_not_share_messages() {
+        run_test_with_cx(|cx| async move {
+            let left = Fabric::connect(&cx, "node1:4222/left")
+                .await
+                .expect("connect");
+            let right = Fabric::connect(&cx, "node1:4222/right")
+                .await
+                .expect("connect");
+            let mut subscription = right.subscribe(&cx, "orders.>").await.expect("subscribe");
+
+            left.publish(&cx, "orders.created", b"payload".to_vec())
+                .await
+                .expect("publish");
+
+            assert_eq!(subscription.next(&cx).await, None);
+        });
+    }
+
+    #[test]
+    fn late_subscriber_does_not_replay_prior_messages_on_shared_endpoint() {
+        run_test_with_cx(|cx| async move {
+            let publisher = Fabric::connect(&cx, "node1:4222/live-only")
+                .await
+                .expect("connect");
+            let late_subscriber = Fabric::connect(&cx, "node1:4222/live-only")
+                .await
+                .expect("connect");
+
+            publisher
+                .publish(&cx, "orders.created", b"before-subscribe".to_vec())
+                .await
+                .expect("publish");
+
+            let mut subscription = late_subscriber
+                .subscribe(&cx, "orders.>")
+                .await
+                .expect("subscribe");
+
+            assert_eq!(
+                subscription.next(&cx).await,
+                None,
+                "late subscribers should not replay pre-subscription packet-plane history"
+            );
+
+            publisher
+                .publish(&cx, "orders.created", b"after-subscribe".to_vec())
+                .await
+                .expect("publish");
+
+            let message = subscription.next(&cx).await.expect("live message");
+            assert_eq!(message.payload, b"after-subscribe".to_vec());
         });
     }
 

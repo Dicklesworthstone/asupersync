@@ -198,7 +198,7 @@ pub enum SubjectTransform {
     /// Compose a finite sequence of transforms into a deterministic pipeline.
     Compose {
         /// Ordered transform pipeline.
-        steps: Vec<SubjectTransform>,
+        steps: Vec<Self>,
     },
 }
 
@@ -344,9 +344,7 @@ impl SubjectTransform {
             Self::DeterministicHash { buckets, .. } if *buckets == 0 => {
                 Err(MorphismValidationError::DeterministicHashRequiresBuckets)
             }
-            Self::DeterministicHash { source_indices, .. }
-                if source_indices.iter().any(|index| *index == 0) =>
-            {
+            Self::DeterministicHash { source_indices, .. } if source_indices.contains(&0) => {
                 Err(MorphismValidationError::DeterministicHashIndexMustBePositive)
             }
             Self::SplitSlice { index, .. } if *index == 0 => {
@@ -561,6 +559,12 @@ impl Morphism {
                     .contains(&FabricCapability::DelegateNamespace)
                 {
                     return Err(MorphismValidationError::DelegationRequiresDelegateCapability);
+                }
+                if self.reversibility == ReversibilityRequirement::Irreversible {
+                    return Err(MorphismValidationError::DelegationMustBeReversible);
+                }
+                if self.transform.is_lossy() {
+                    return Err(MorphismValidationError::DelegationTransformMustBeLossless);
                 }
                 if self.quota_policy.max_handoff_duration.is_none() {
                     return Err(MorphismValidationError::DelegationMustBeTimeBounded);
@@ -825,7 +829,8 @@ pub enum SemanticCycleClass {
 }
 
 /// Auditable summary of what metadata crosses a morphism boundary.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataBoundarySummary {
     /// Whether the plan crosses an authority or stewardship boundary.
     pub crosses_boundary: bool,
@@ -988,6 +993,12 @@ pub enum MorphismValidationError {
     /// Delegation requires the delegation capability.
     #[error("delegation morphisms require delegate-namespace capability")]
     DelegationRequiresDelegateCapability,
+    /// Delegation preserves authority and therefore must not be one-way.
+    #[error("delegation morphisms must be reversible")]
+    DelegationMustBeReversible,
+    /// Delegation preserves authority and therefore must not use lossy rewrites.
+    #[error("delegation morphisms must use lossless transforms")]
+    DelegationTransformMustBeLossless,
     /// Delegation must declare a finite handoff duration.
     #[error("delegation morphisms must declare a bounded handoff duration")]
     DelegationMustBeTimeBounded,
@@ -1261,33 +1272,30 @@ fn select_reply_space(
     requested_reply_space: Option<ReplySpaceRule>,
     permitted_reply_spaces: &[ReplySpaceRule],
 ) -> Result<Option<ReplySpaceRule>, MorphismCompileError> {
-    let selected_reply_space = match requested_reply_space {
-        Some(reply_space) => Some(reply_space),
-        None => default_reply_space(morphism, permitted_reply_spaces),
-    };
+    let selected_reply_space = requested_reply_space.map_or_else(
+        || default_reply_space(morphism, permitted_reply_spaces),
+        Some,
+    );
 
     if !morphism.crosses_boundary() {
         return Ok(selected_reply_space);
     }
 
-    match selected_reply_space {
-        Some(reply_space) => {
-            if permitted_reply_spaces.contains(&reply_space) {
-                Ok(Some(reply_space))
-            } else if permitted_reply_spaces.is_empty() {
-                Err(MorphismCompileError::ReplySpaceForbidden {
-                    policy: morphism.response_policy,
-                })
-            } else {
-                Err(MorphismCompileError::ReplySpaceNotPermitted {
-                    policy: morphism.response_policy,
-                    requested: reply_space,
-                    permitted: permitted_reply_spaces.to_vec(),
-                })
-            }
+    selected_reply_space.map_or(Ok(None), |reply_space| {
+        if permitted_reply_spaces.contains(&reply_space) {
+            Ok(Some(reply_space))
+        } else if permitted_reply_spaces.is_empty() {
+            Err(MorphismCompileError::ReplySpaceForbidden {
+                policy: morphism.response_policy,
+            })
+        } else {
+            Err(MorphismCompileError::ReplySpaceNotPermitted {
+                policy: morphism.response_policy,
+                requested: reply_space,
+                permitted: permitted_reply_spaces.to_vec(),
+            })
         }
-        None => Ok(None),
-    }
+    })
 }
 
 fn default_reply_space(
@@ -1517,6 +1525,34 @@ mod tests {
 
         delegation.quota_policy.revocation_required = true;
         assert!(delegation.validate().is_ok());
+    }
+
+    #[test]
+    fn delegation_rejects_irreversible_and_lossy_transforms() {
+        let mut delegation = Morphism {
+            source_language: SubjectPattern::new("tenant.rpc"),
+            dest_language: SubjectPattern::new("delegate.rpc"),
+            class: MorphismClass::Delegation,
+            capability_requirements: vec![FabricCapability::DelegateNamespace],
+            response_policy: ResponsePolicy::ForwardOpaque,
+            sharing_policy: SharingPolicy::TenantScoped,
+            ..Morphism::default()
+        };
+        delegation.quota_policy.max_handoff_duration = Some(Duration::from_secs(30));
+        delegation.quota_policy.revocation_required = true;
+
+        delegation.reversibility = ReversibilityRequirement::Irreversible;
+        assert_eq!(
+            delegation.validate(),
+            Err(MorphismValidationError::DelegationMustBeReversible)
+        );
+
+        delegation.reversibility = ReversibilityRequirement::EvidenceBacked;
+        delegation.transform = SubjectTransform::RedactLiterals;
+        assert_eq!(
+            delegation.validate(),
+            Err(MorphismValidationError::DelegationTransformMustBeLossless)
+        );
     }
 
     #[test]

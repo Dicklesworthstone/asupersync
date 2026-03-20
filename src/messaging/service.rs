@@ -1370,6 +1370,16 @@ pub enum QuantitativeContractError {
     /// Max delay must be positive.
     #[error("max delay must be > 0")]
     ZeroMaxDelay,
+    /// Max delay must not be smaller than the initial delay.
+    #[error(
+        "max delay {max_delay:?} must be greater than or equal to initial delay {initial_delay:?}"
+    )]
+    MaxDelayBelowInitialDelay {
+        /// Initial backoff delay configured for the contract.
+        initial_delay: Duration,
+        /// Maximum backoff delay cap configured for the contract.
+        max_delay: Duration,
+    },
     /// Initial delay must be positive.
     #[error("initial delay must be > 0")]
     ZeroInitialDelay,
@@ -1428,6 +1438,12 @@ impl QuantitativeContract {
                 }
                 if max_delay.is_zero() {
                     return Err(QuantitativeContractError::ZeroMaxDelay);
+                }
+                if max_delay < initial_delay {
+                    return Err(QuantitativeContractError::MaxDelayBelowInitialDelay {
+                        initial_delay: *initial_delay,
+                        max_delay: *max_delay,
+                    });
                 }
                 if *max_attempts == 0 {
                     return Err(QuantitativeContractError::ZeroMaxAttempts);
@@ -3529,6 +3545,29 @@ mod tests {
         assert!(matches!(
             contract.validate(),
             Err(QuantitativeContractError::InvalidMultiplier(_))
+        ));
+
+        // Max delay below initial delay
+        let contract = QuantitativeContract {
+            name: "bad-delay-order".into(),
+            delivery_class: DeliveryClass::DurableOrdered,
+            target_latency: Duration::from_secs(1),
+            target_probability: 0.99,
+            retry_law: RetryLaw::ExponentialBackoff {
+                initial_delay: Duration::from_secs(2),
+                multiplier: 2.0,
+                max_delay: Duration::from_secs(1),
+                max_attempts: 3,
+            },
+            monitoring_policy: MonitoringPolicy::Passive,
+            record_violations: false,
+        };
+        assert!(matches!(
+            contract.validate(),
+            Err(QuantitativeContractError::MaxDelayBelowInitialDelay {
+                initial_delay,
+                max_delay,
+            }) if initial_delay == Duration::from_secs(2) && max_delay == Duration::from_secs(1)
         ));
     }
 

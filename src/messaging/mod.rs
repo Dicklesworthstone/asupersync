@@ -162,8 +162,10 @@ pub use policy::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use privacy::{
-    AuthoritativeMetadataSummary, ExportedMetadataSummary, PrivacyBudgetLedger, PrivacyExportError,
-    export_metadata_summary,
+    AuthoritativeMetadataSummary, CellKeyContext, CellKeyHierarchy, CellKeyHierarchySpec,
+    DerivedKeyMaterial, ExportedMetadataSummary, KeyHierarchyError, PoolEpochKeyMaterial,
+    PrivacyBudgetLedger, PrivacyExportError, ReadDelegationSpec, ReadDelegationTicket,
+    RestoreScrubRequest, SubgroupKeyContext, WitnessScopeMaterial, export_metadata_summary,
 };
 pub use redis::{RedisClient, RedisConfig, RedisError};
 #[cfg(feature = "messaging-fabric")]
