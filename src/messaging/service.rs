@@ -560,6 +560,7 @@ pub struct ServiceObligation {
     pub timeout: Option<Duration>,
     /// Morphism transfer lineage captured across forwards.
     pub lineage: Vec<ServiceTransferHop>,
+    resolved: bool,
     token: Option<ObligationToken>,
 }
 
@@ -619,8 +620,16 @@ impl ServiceObligation {
             created_at,
             timeout,
             lineage: Vec::new(),
+            resolved: false,
             token,
         })
+    }
+
+    fn ensure_active(&self, operation: &'static str) -> Result<(), ServiceObligationError> {
+        if self.resolved {
+            return Err(ServiceObligationError::AlreadyResolved { operation });
+        }
+        Ok(())
     }
 
     /// Return the underlying ledger obligation id when the request is tracked.
@@ -638,12 +647,13 @@ impl ServiceObligation {
     /// Transfer the request through an import/export morphism while preserving
     /// the existing service obligation.
     pub fn transfer(
-        mut self,
+        &mut self,
         callee: impl Into<String>,
         subject: impl Into<String>,
         morphism: impl Into<String>,
         transferred_at: Time,
-    ) -> Result<Self, ServiceObligationError> {
+    ) -> Result<(), ServiceObligationError> {
+        self.ensure_active("transfer")?;
         let callee = callee.into();
         let subject = subject.into();
         let morphism = morphism.into();
@@ -658,20 +668,21 @@ impl ServiceObligation {
             subject,
             transferred_at,
         });
-        Ok(self)
+        Ok(())
     }
 
     /// Commit the service obligation with a reply payload and optionally create
     /// a follow-on reply-delivery obligation.
     #[track_caller]
     pub fn commit_with_reply(
-        mut self,
+        &mut self,
         ledger: &mut ObligationLedger,
         now: Time,
         payload: impl Into<Vec<u8>>,
         delivery_boundary: AckKind,
         receipt_required: bool,
     ) -> Result<ServiceReplyCommit, ServiceObligationError> {
+        self.ensure_active("commit_with_reply")?;
         validate_reply_boundary(self.delivery_class, delivery_boundary, receipt_required)?;
 
         let service_obligation_id = self.obligation_id();
@@ -707,8 +718,10 @@ impl ServiceObligation {
             None
         };
 
+        self.resolved = true;
+
         Ok(ServiceReplyCommit {
-            request_id: self.request_id,
+            request_id: self.request_id.clone(),
             service_obligation_id,
             payload,
             delivery_class: self.delivery_class,
@@ -723,6 +736,10 @@ impl ServiceObligation {
         now: Time,
         failure: ServiceFailure,
     ) -> ServiceAbortReceipt {
+        assert!(
+            !self.resolved,
+            "service obligation already resolved; cannot abort"
+        );
         let obligation_id = self.obligation_id();
         if let Some(token) = self.token.take() {
             ledger.abort(token, now, failure.abort_reason());
@@ -737,6 +754,10 @@ impl ServiceObligation {
 
     /// Explicitly timeout the service obligation instead of letting it vanish.
     pub fn timeout(self, ledger: &mut ObligationLedger, now: Time) -> ServiceAbortReceipt {
+        assert!(
+            !self.resolved,
+            "service obligation already resolved; cannot timeout"
+        );
         self.abort(ledger, now, ServiceFailure::TimedOut)
     }
 }
@@ -907,6 +928,12 @@ pub enum ServiceObligationError {
     /// Timeout values must be strictly positive when present.
     #[error("service obligation timeout must be greater than zero")]
     ZeroTimeout,
+    /// Resolved obligations cannot be mutated again.
+    #[error("service obligation already resolved; cannot {operation}")]
+    AlreadyResolved {
+        /// Operation attempted on an already-resolved obligation.
+        operation: &'static str,
+    },
     /// Requested reply boundary is weaker than the selected delivery class can
     /// honestly claim.
     #[error(
@@ -1367,7 +1394,7 @@ mod tests {
     #[test]
     fn service_obligation_abort_records_typed_failure() {
         let mut ledger = ObligationLedger::new();
-        let obligation = ServiceObligation::allocate(
+        let mut obligation = ServiceObligation::allocate(
             &mut ledger,
             "req-2",
             "caller",
@@ -1399,7 +1426,7 @@ mod tests {
     #[test]
     fn service_obligation_transfer_preserves_identity_and_lineage() {
         let mut ledger = ObligationLedger::new();
-        let obligation = ServiceObligation::allocate(
+        let mut obligation = ServiceObligation::allocate(
             &mut ledger,
             "req-3",
             "caller",
@@ -1414,7 +1441,7 @@ mod tests {
         .expect("tracked request should allocate");
         let obligation_id = obligation.obligation_id().expect("tracked id");
 
-        let transferred = obligation
+        obligation
             .transfer(
                 "callee-b",
                 "svc.echo.imported",
@@ -1423,17 +1450,60 @@ mod tests {
             )
             .expect("transfer should succeed");
 
-        assert_eq!(transferred.obligation_id(), Some(obligation_id));
-        assert_eq!(transferred.callee, "callee-b");
-        assert_eq!(transferred.subject, "svc.echo.imported");
-        assert_eq!(transferred.lineage.len(), 1);
-        assert_eq!(transferred.lineage[0].morphism, "import/orders->edge");
+        assert_eq!(obligation.obligation_id(), Some(obligation_id));
+        assert_eq!(obligation.callee, "callee-b");
+        assert_eq!(obligation.subject, "svc.echo.imported");
+        assert_eq!(obligation.lineage.len(), 1);
+        assert_eq!(obligation.lineage[0].morphism, "import/orders->edge");
+    }
+
+    #[test]
+    fn invalid_transfer_preserves_tracked_obligation() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-invalid",
+            "caller",
+            "callee-a",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+        let obligation_id = obligation.obligation_id().expect("tracked id");
+
+        let err = obligation
+            .transfer(
+                "",
+                "svc.echo.imported",
+                "import/orders->edge",
+                Time::from_nanos(2),
+            )
+            .expect_err("invalid transfer should be rejected");
+
+        assert_eq!(
+            err,
+            ServiceObligationError::EmptyField {
+                field: "transfer.callee",
+            }
+        );
+        assert_eq!(obligation.obligation_id(), Some(obligation_id));
+        assert_eq!(ledger.pending_count(), 1);
+        obligation.abort(
+            &mut ledger,
+            Time::from_nanos(3),
+            ServiceFailure::ApplicationError,
+        );
+        assert_eq!(ledger.pending_count(), 0);
     }
 
     #[test]
     fn service_obligation_timeout_is_explicit_abort() {
         let mut ledger = ObligationLedger::new();
-        let obligation = ServiceObligation::allocate(
+        let mut obligation = ServiceObligation::allocate(
             &mut ledger,
             "req-4",
             "caller",
@@ -1452,6 +1522,262 @@ mod tests {
 
         assert_eq!(timed_out.failure, ServiceFailure::TimedOut);
         let record = ledger.get(obligation_id).expect("ledger record exists");
+        assert_eq!(record.state, ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Explicit));
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn resolved_service_obligation_rejects_second_resolution() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-resolved-twice",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+
+        let committed = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(2),
+                b"payload".to_vec(),
+                AckKind::Served,
+                false,
+            )
+            .expect("first resolution should succeed");
+
+        assert!(committed.reply_obligation.is_none());
+        assert_eq!(ledger.pending_count(), 0);
+        let err = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(3),
+                b"payload".to_vec(),
+                AckKind::Served,
+                false,
+            )
+            .expect_err("resolved obligation should reject a second commit");
+
+        assert_eq!(
+            err,
+            ServiceObligationError::AlreadyResolved {
+                operation: "commit_with_reply",
+            }
+        );
+    }
+
+    #[test]
+    fn tracked_reply_boundary_below_minimum_preserves_obligation() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-boundary-floor",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::MobilitySafe,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+        let obligation_id = obligation.obligation_id().expect("tracked id");
+
+        let err = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(2),
+                b"payload".to_vec(),
+                AckKind::Committed,
+                false,
+            )
+            .expect_err("boundary below durable floor should be rejected");
+
+        assert_eq!(
+            err,
+            ServiceObligationError::ReplyBoundaryBelowMinimum {
+                delivery_class: DeliveryClass::MobilitySafe,
+                minimum_boundary: AckKind::Received,
+                requested_boundary: AckKind::Committed,
+            }
+        );
+        assert_eq!(obligation.obligation_id(), Some(obligation_id));
+        assert_eq!(ledger.pending_count(), 1);
+        let aborted = obligation.abort(
+            &mut ledger,
+            Time::from_nanos(3),
+            ServiceFailure::ApplicationError,
+        );
+        assert_eq!(aborted.obligation_id, Some(obligation_id));
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn receipt_required_reply_must_use_received_boundary() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-receipt-boundary",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::EphemeralInteractive,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("ephemeral request should allocate");
+
+        let err = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(2),
+                b"payload".to_vec(),
+                AckKind::Served,
+                true,
+            )
+            .expect_err("receipt-required replies must use the received boundary");
+
+        assert_eq!(
+            err,
+            ServiceObligationError::ReceiptRequiresReceivedBoundary {
+                requested_boundary: AckKind::Served,
+            }
+        );
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn untracked_delivery_class_rejects_follow_up_reply_tracking() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-untracked-follow-up",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::EphemeralInteractive,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("ephemeral request should allocate");
+
+        let err = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(2),
+                b"payload".to_vec(),
+                AckKind::Received,
+                false,
+            )
+            .expect_err("cheap path should not pretend to support tracked reply delivery");
+
+        assert_eq!(
+            err,
+            ServiceObligationError::ReplyTrackingUnavailable {
+                delivery_class: DeliveryClass::EphemeralInteractive,
+                requested_boundary: AckKind::Received,
+                receipt_required: false,
+            }
+        );
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn reply_obligation_abort_records_failure_and_clears_pending() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-reply-abort",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::MobilitySafe,
+            make_task(),
+            make_region(),
+            Time::from_nanos(10),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+
+        let committed = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(20),
+                b"payload".to_vec(),
+                AckKind::Received,
+                true,
+            )
+            .expect("tracked commit should succeed");
+
+        let reply = committed
+            .reply_obligation
+            .expect("reply obligation expected");
+        let reply_id = reply.obligation_id();
+        let aborted = reply.abort_delivery(
+            &mut ledger,
+            Time::from_nanos(30),
+            ServiceFailure::TransportError,
+        );
+
+        assert_eq!(aborted.obligation_id, reply_id);
+        assert_eq!(aborted.failure, ServiceFailure::TransportError);
+        assert_eq!(aborted.delivery_boundary, AckKind::Received);
+        let record = ledger.get(reply_id).expect("reply record exists");
+        assert_eq!(record.state, ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Error));
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn reply_obligation_timeout_is_explicit_abort() {
+        let mut ledger = ObligationLedger::new();
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-reply-timeout",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::MobilitySafe,
+            make_task(),
+            make_region(),
+            Time::from_nanos(10),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+
+        let committed = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(20),
+                b"payload".to_vec(),
+                AckKind::Received,
+                true,
+            )
+            .expect("tracked commit should succeed");
+
+        let reply = committed
+            .reply_obligation
+            .expect("reply obligation expected");
+        let reply_id = reply.obligation_id();
+        let timed_out = reply.timeout(&mut ledger, Time::from_nanos(40));
+
+        assert_eq!(timed_out.obligation_id, reply_id);
+        assert_eq!(timed_out.failure, ServiceFailure::TimedOut);
+        assert_eq!(timed_out.delivery_boundary, AckKind::Received);
+        let record = ledger.get(reply_id).expect("reply record exists");
         assert_eq!(record.state, ObligationState::Aborted);
         assert_eq!(record.abort_reason, Some(ObligationAbortReason::Explicit));
         assert_eq!(ledger.pending_count(), 0);
@@ -1555,9 +1881,11 @@ mod tests {
 
     #[test]
     fn mobility_pinned_satisfies_bounded_region() {
-        assert!(MobilityConstraint::Pinned.satisfies(&MobilityConstraint::BoundedRegion {
-            region: "us-east".to_owned(),
-        }));
+        assert!(
+            MobilityConstraint::Pinned.satisfies(&MobilityConstraint::BoundedRegion {
+                region: "us-east".to_owned(),
+            })
+        );
     }
 
     #[test]
@@ -1584,9 +1912,11 @@ mod tests {
 
     #[test]
     fn mobility_unrestricted_does_not_satisfy_bounded() {
-        assert!(!MobilityConstraint::Unrestricted.satisfies(&MobilityConstraint::BoundedRegion {
-            region: "any".to_owned(),
-        }));
+        assert!(
+            !MobilityConstraint::Unrestricted.satisfies(&MobilityConstraint::BoundedRegion {
+                region: "any".to_owned(),
+            })
+        );
     }
 
     #[test]
