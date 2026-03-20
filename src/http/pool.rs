@@ -401,7 +401,9 @@ impl Pool {
 
     fn maybe_cleanup(&mut self, now: Time) {
         let elapsed = now.as_nanos().saturating_sub(self.last_cleanup.as_nanos());
-        if elapsed >= self.config.cleanup_interval.as_nanos() as u64 {
+        let interval_nanos =
+            u64::try_from(self.config.cleanup_interval.as_nanos()).unwrap_or(u64::MAX);
+        if elapsed >= interval_nanos {
             self.cleanup_expired(now);
             self.last_cleanup = now;
         }
