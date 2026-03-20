@@ -184,18 +184,21 @@ pub fn emit_scheduler_evidence(
         f64::from(timed_depth) / total,
         f64::from(ready_depth) / total,
     ];
+    let chosen_expected_loss = match suggestion {
+        "drain_obligations" | "drain_cancel" | "cancel_lane" => f64::from(cancel_depth),
+        "meet_deadlines" | "drain_regions" => f64::from(timed_depth),
+        "process_ready" | "ready_lane" => f64::from(ready_depth),
+        _ => 0.0,
+    };
+    let action = suggestion.to_string();
 
     let entry = EvidenceLedger {
         ts_unix_ms: sink.next_evidence_ts(),
         component: "scheduler".to_string(),
-        action: suggestion.to_string(),
+        action: action.clone(),
         posterior,
-        expected_loss_by_action: std::collections::BTreeMap::from([
-            ("meet_deadlines".to_string(), f64::from(timed_depth)),
-            ("drain_cancel".to_string(), f64::from(cancel_depth)),
-            ("process_ready".to_string(), f64::from(ready_depth)),
-        ]),
-        chosen_expected_loss: 0.0,
+        expected_loss_by_action: std::collections::BTreeMap::from([(action, chosen_expected_loss)]),
+        chosen_expected_loss,
         calibration_score: if fallback { 0.0 } else { 1.0 },
         fallback_active: fallback,
         top_features: vec![
@@ -351,6 +354,11 @@ mod tests {
         // posterior should sum to ~1.0
         let sum: f64 = entry.posterior.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "posterior sum={sum}");
+        assert_eq!(
+            entry.expected_loss_by_action.get("cancel_lane"),
+            Some(&10.0)
+        );
+        assert!((entry.chosen_expected_loss - 10.0).abs() < f64::EPSILON);
         // top_features should include depth values
         assert_eq!(entry.top_features.len(), 3);
     }
@@ -381,6 +389,8 @@ mod tests {
         for &p in &entry.posterior {
             assert!((p).abs() < f64::EPSILON, "expected 0.0, got {p}");
         }
+        assert_eq!(entry.expected_loss_by_action.get("idle"), Some(&0.0));
+        assert!((entry.chosen_expected_loss).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -546,39 +556,16 @@ mod tests {
     }
 
     #[test]
-    fn emit_scheduler_evidence_expected_loss_keys() {
+    fn emit_scheduler_evidence_expected_loss_tracks_chosen_action() {
         let sink = CollectorSink::new();
-        emit_scheduler_evidence(&sink, "test_lane", 10, 5, 3, false);
+        emit_scheduler_evidence(&sink, "drain_obligations", 10, 5, 3, false);
 
         let entry = &sink.entries()[0];
         let map = &entry.expected_loss_by_action;
 
-        assert!(
-            map.contains_key("meet_deadlines"),
-            "missing meet_deadlines key"
-        );
-        assert!(map.contains_key("drain_cancel"), "missing drain_cancel key");
-        assert!(
-            map.contains_key("process_ready"),
-            "missing process_ready key"
-        );
-
-        let meet = map["meet_deadlines"];
-        let drain = map["drain_cancel"];
-        let ready = map["process_ready"];
-
-        assert!(
-            (meet - 5.0).abs() < f64::EPSILON,
-            "meet_deadlines: expected 5.0, got {meet}"
-        );
-        assert!(
-            (drain - 10.0).abs() < f64::EPSILON,
-            "drain_cancel: expected 10.0, got {drain}"
-        );
-        assert!(
-            (ready - 3.0).abs() < f64::EPSILON,
-            "process_ready: expected 3.0, got {ready}"
-        );
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("drain_obligations"), Some(&10.0));
+        assert!((entry.chosen_expected_loss - 10.0).abs() < f64::EPSILON);
     }
 
     #[test]
