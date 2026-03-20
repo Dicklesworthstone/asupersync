@@ -361,7 +361,7 @@ fn segments_can_match(left: &SubjectToken, right: &SubjectToken) -> bool {
 // ---------------------------------------------------------------------------
 
 use parking_lot::{Mutex, RwLock};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -490,6 +490,72 @@ struct SublistCache {
     entries: HashMap<String, CacheEntry>,
 }
 
+/// Per-link hot cache for recently resolved literal subjects.
+///
+/// Links or sessions can keep one of these alongside their own state to avoid
+/// re-walking the trie on repeated hot subjects while still respecting the
+/// sublist generation counter.
+#[derive(Debug)]
+pub struct SublistLinkCache {
+    capacity: usize,
+    entries: HashMap<String, CacheEntry>,
+    order: VecDeque<String>,
+}
+
+impl Default for SublistLinkCache {
+    fn default() -> Self {
+        Self::new(64)
+    }
+}
+
+impl SublistLinkCache {
+    /// Create a per-link cache with a bounded entry capacity.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Return the number of currently cached subjects.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Return true when the cache holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn get(&self, subject: &str, generation: u64) -> Option<&CacheEntry> {
+        self.entries
+            .get(subject)
+            .filter(|entry| entry.generation == generation)
+    }
+
+    fn insert(&mut self, subject: String, entry: CacheEntry) {
+        if self.entries.contains_key(&subject) {
+            self.entries.insert(subject, entry);
+            return;
+        }
+
+        if self.entries.len() >= self.capacity {
+            while let Some(oldest) = self.order.pop_front() {
+                if self.entries.remove(&oldest).is_some() {
+                    break;
+                }
+            }
+        }
+
+        self.order.push_back(subject.clone());
+        self.entries.insert(subject, entry);
+    }
+}
+
 impl Default for Sublist {
     fn default() -> Self {
         Self::new()
@@ -555,42 +621,28 @@ impl Sublist {
     #[must_use]
     pub fn lookup(&self, subject: &Subject) -> SublistResult {
         let current_gen = self.generation.load(Ordering::Acquire);
+        let entry = self.resolve_entry(subject, current_gen);
+        self.apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups)
+    }
 
-        // Check cache first (read lock only). Cache stores raw match sets;
-        // queue group selection runs fresh each time.
-        {
-            let cache = self.cache.read();
-            if let Some(entry) = cache.entries.get(subject.as_str()) {
-                if entry.generation == current_gen {
-                    return self
-                        .apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups);
-                }
-            }
+    /// Look up a concrete subject using a caller-owned per-link cache.
+    ///
+    /// The cache stores raw match sets keyed by the sublist generation, so
+    /// queue-group round-robin still advances fresh on every lookup.
+    #[must_use]
+    pub fn lookup_with_link_cache(
+        &self,
+        subject: &Subject,
+        link_cache: &mut SublistLinkCache,
+    ) -> SublistResult {
+        let current_gen = self.generation.load(Ordering::Acquire);
+        if let Some(entry) = link_cache.get(subject.as_str(), current_gen) {
+            return self.apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups);
         }
 
-        // Cache miss — walk the trie.
-        let trie = self.trie.read();
-        let mut raw_matches: Vec<&Subscriber> = Vec::new();
-        collect_matches(&trie, subject.tokens(), &mut raw_matches);
-
-        // Split into plain and queue-group buckets.
-        let (plain_ids, queue_groups) = Self::split_matches(&raw_matches);
-
-        // Store in cache (generation-tagged).
-        {
-            let mut cache = self.cache.write();
-            let gen_now = self.generation.load(Ordering::Acquire);
-            cache.entries.insert(
-                subject.as_str().to_owned(),
-                CacheEntry {
-                    generation: gen_now,
-                    plain_ids: plain_ids.clone(),
-                    queue_groups: queue_groups.clone(),
-                },
-            );
-        }
-
-        self.apply_queue_selection(plain_ids, &queue_groups)
+        let entry = self.resolve_entry(subject, current_gen);
+        link_cache.insert(subject.as_str().to_owned(), entry.clone());
+        self.apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups)
     }
 
     /// Return the count of all registered subscriptions.
@@ -617,6 +669,42 @@ impl Sublist {
 
         let queue_groups = groups.into_iter().collect();
         (plain, queue_groups)
+    }
+
+    fn resolve_entry(&self, subject: &Subject, current_gen: u64) -> CacheEntry {
+        // Check cache first (read lock only). Cache stores raw match sets;
+        // queue group selection runs fresh each time.
+        {
+            let cache = self.cache.read();
+            if let Some(entry) = cache.entries.get(subject.as_str())
+                && entry.generation == current_gen
+            {
+                return entry.clone();
+            }
+        }
+
+        // Cache miss — walk the trie.
+        let trie = self.trie.read();
+        let mut raw_matches: Vec<&Subscriber> = Vec::new();
+        collect_matches(&trie, subject.tokens(), &mut raw_matches);
+
+        // Split into plain and queue-group buckets.
+        let (plain_ids, queue_groups) = Self::split_matches(&raw_matches);
+        let entry = CacheEntry {
+            generation: current_gen,
+            plain_ids,
+            queue_groups,
+        };
+
+        // Store in cache (generation-tagged).
+        {
+            let mut cache = self.cache.write();
+            cache
+                .entries
+                .insert(subject.as_str().to_owned(), entry.clone());
+        }
+
+        entry
     }
 
     /// Apply round-robin queue group selection to produce the final result.
@@ -1646,6 +1734,20 @@ mod tests {
     }
 
     #[test]
+    fn sublist_link_cache_hit_returns_same_result() {
+        let sl = sublist();
+        let _guard = sl.subscribe(&SubjectPattern::new("foo.bar"), None);
+        let subject = Subject::new("foo.bar");
+        let mut link_cache = SublistLinkCache::new(4);
+
+        let r1 = sl.lookup_with_link_cache(&subject, &mut link_cache);
+        let r2 = sl.lookup_with_link_cache(&subject, &mut link_cache);
+
+        assert_eq!(link_cache.len(), 1);
+        assert_eq!(r1.subscribers, r2.subscribers);
+    }
+
+    #[test]
     fn sublist_cache_invalidated_on_mutation() {
         let sl = sublist();
         let pattern = SubjectPattern::new("foo.bar");
@@ -1659,6 +1761,74 @@ mod tests {
         assert!(gen_after > gen_before);
         // After mutation, lookup should reflect the new state.
         assert_eq!(sl.lookup(&subject).subscribers.len(), 2);
+    }
+
+    #[test]
+    fn sublist_link_cache_invalidated_on_mutation() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("foo.bar");
+        let _g1 = sl.subscribe(&pattern, None);
+        let subject = Subject::new("foo.bar");
+        let mut link_cache = SublistLinkCache::new(4);
+
+        assert_eq!(
+            sl.lookup_with_link_cache(&subject, &mut link_cache)
+                .subscribers
+                .len(),
+            1
+        );
+
+        let _g2 = sl.subscribe(&pattern, None);
+        assert_eq!(
+            sl.lookup_with_link_cache(&subject, &mut link_cache)
+                .subscribers
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn sublist_link_cache_evicts_oldest_subject() {
+        let sl = sublist();
+        let _ga = sl.subscribe(&SubjectPattern::new("foo.a"), None);
+        let _gb = sl.subscribe(&SubjectPattern::new("foo.b"), None);
+        let _gc = sl.subscribe(&SubjectPattern::new("foo.c"), None);
+        let mut link_cache = SublistLinkCache::new(2);
+
+        let _ = sl.lookup_with_link_cache(&Subject::new("foo.a"), &mut link_cache);
+        let _ = sl.lookup_with_link_cache(&Subject::new("foo.b"), &mut link_cache);
+        assert!(link_cache.entries.contains_key("foo.a"));
+        assert!(link_cache.entries.contains_key("foo.b"));
+
+        let _ = sl.lookup_with_link_cache(&Subject::new("foo.c"), &mut link_cache);
+
+        assert_eq!(link_cache.len(), 2);
+        assert!(!link_cache.entries.contains_key("foo.a"));
+        assert!(link_cache.entries.contains_key("foo.b"));
+        assert!(link_cache.entries.contains_key("foo.c"));
+    }
+
+    #[test]
+    fn sublist_link_cache_keeps_queue_round_robin_live() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("work.items");
+        let g1 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let g2 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let mut link_cache = SublistLinkCache::new(4);
+        let subject = Subject::new("work.items");
+
+        let pick1 = sl
+            .lookup_with_link_cache(&subject, &mut link_cache)
+            .queue_group_picks[0]
+            .1;
+        let pick2 = sl
+            .lookup_with_link_cache(&subject, &mut link_cache)
+            .queue_group_picks[0]
+            .1;
+
+        assert_ne!(pick1, pick2);
+        assert!(pick1 == g1.id() || pick1 == g2.id());
+        assert!(pick2 == g1.id() || pick2 == g2.id());
     }
 
     #[test]
