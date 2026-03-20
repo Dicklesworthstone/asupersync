@@ -704,6 +704,7 @@ impl ConsistencyChecker {
 
         for (scope, entries) in groups {
             let mut partition_holders: BTreeMap<u16, NodeId> = BTreeMap::new();
+            let mut conflicted = false;
 
             for entry in &entries {
                 for partition in &entry.fact.delegated_partitions {
@@ -725,10 +726,15 @@ impl ConsistencyChecker {
                             emitters: collect_emitters(&entries),
                             details,
                         });
+                        conflicted = true;
                         continue;
                     }
                     partition_holders.insert(*partition, entry.fact.holder.clone());
                 }
+            }
+
+            if conflicted {
+                continue;
             }
 
             if let Some(first) = entries.first()
@@ -1764,6 +1770,12 @@ mod tests {
                 .len(),
             1
         );
+        assert!(
+            !report
+                .global_section
+                .cursor_delegations
+                .contains_key(&cell_epoch_scope_key(cell_id, epoch))
+        );
     }
 
     #[test]
@@ -1915,6 +1927,12 @@ mod tests {
                 .global_section
                 .reply_space_bindings
                 .contains_key("partial-rpc")
+        );
+        assert!(
+            !report
+                .global_section
+                .cursor_delegations
+                .contains_key(&cell_epoch_scope_key(cell_id, epoch))
         );
         assert!(
             report
