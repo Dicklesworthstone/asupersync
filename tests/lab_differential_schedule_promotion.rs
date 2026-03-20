@@ -1,10 +1,14 @@
 #![allow(missing_docs)]
 
 use asupersync::lab::explorer::SaturationMetrics;
+use asupersync::lab::replay::{
+    DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
+    DivergenceMinimizationLineage, DivergenceShrinkStatus, RegressionPromotionState,
+};
 use asupersync::lab::runtime::InvariantViolation;
 use asupersync::lab::{
-    CoverageMetrics, DualRunHarness, ExplorationReport, RunResult, ViolationReport,
-    promote_exploration_report,
+    promote_exploration_report, CoverageMetrics, DualRunHarness, ExplorationReport,
+    ObligationBalanceRecord, RunResult, ViolationReport,
 };
 use std::collections::BTreeMap;
 
@@ -72,6 +76,19 @@ fn make_happy_semantics() -> asupersync::lab::NormalizedSemantics {
     }
 }
 
+fn make_obligation_leak_semantics() -> asupersync::lab::NormalizedSemantics {
+    let mut semantics = make_happy_semantics();
+    semantics.obligation_balance = ObligationBalanceRecord {
+        reserved: 1,
+        committed: 0,
+        aborted: 0,
+        leaked: 1,
+        unresolved: 0,
+        balanced: false,
+    };
+    semantics
+}
+
 #[test]
 fn promoted_schedule_scenarios_preserve_lineage_and_class_shape() {
     let promoted = promote_exploration_report(&sample_report(), "scheduler.surface", "v1");
@@ -85,12 +102,10 @@ fn promoted_schedule_scenarios_preserve_lineage_and_class_shape() {
     assert_eq!(violating.original_seeds, vec![0x11, 0x22]);
     assert_eq!(violating.violation_seeds, vec![0x22]);
     assert_eq!(violating.class_run_count, 2);
-    assert!(
-        violating
-            .violation_summaries
-            .iter()
-            .any(|summary| summary.contains("tasks leaked"))
-    );
+    assert!(violating
+        .violation_summaries
+        .iter()
+        .any(|summary| summary.contains("tasks leaked")));
 }
 
 #[test]
@@ -121,4 +136,89 @@ fn promoted_schedule_scenario_runs_through_dual_run_harness_and_metadata() {
         .run();
 
     assert!(result.passed(), "promoted scenario should replay cleanly");
+}
+
+#[test]
+fn promoted_schedule_divergence_builds_retained_bundle_with_lineage() {
+    let promoted = promote_exploration_report(&sample_report(), "scheduler.surface", "v1");
+    let promoted = promoted[0]
+        .clone()
+        .with_source_artifact_path("/tmp/exploration/report.json");
+
+    let result = DualRunHarness::from_identity(promoted.identity.clone())
+        .lab(|_config| make_happy_semantics())
+        .live(|_seed, _entropy| make_obligation_leak_semantics())
+        .run();
+
+    assert!(
+        !result.passed(),
+        "leaky live side should create a divergence"
+    );
+
+    let entry =
+        DivergenceCorpusEntry::from_dual_run_result(
+            &result,
+            "smoke",
+            "obligation_balance_mismatch",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+            "artifacts/differential/scheduler/promoted-case",
+        )
+        .with_first_seen_attempt(1, 0)
+        .with_minimization_lineage(
+            DivergenceMinimizationLineage::from_seed_lineage(&result.seed_lineage)
+                .with_minimized_seed(0x2A, "schedule_prefix", true, true),
+        )
+        .promote_to_regression("regression.scheduler.surface.obligation_leak.seed_2a");
+
+    let default_bundle_root = entry.default_bundle_root();
+    assert!(
+        default_bundle_root.starts_with("artifacts/differential/scheduler_surface/"),
+        "default bundle root should normalize the surface id: {default_bundle_root}"
+    );
+
+    let bundle = DifferentialBundleArtifacts::from_dual_run_result(&entry, &result);
+
+    assert_eq!(bundle.summary.scenario_id, promoted.identity.scenario_id);
+    assert_eq!(bundle.summary.surface_id, promoted.identity.surface_id);
+    assert_eq!(
+        bundle.summary.policy_class,
+        DifferentialPolicyClass::RuntimeSemanticBug
+    );
+    assert_eq!(
+        bundle.summary.regression_promotion_state,
+        RegressionPromotionState::PromotedRegression
+    );
+    assert_eq!(
+        bundle.repro_manifest.seed_lineage.seed_lineage_id,
+        promoted.identity.seed_plan.seed_lineage_id
+    );
+    assert_eq!(
+        bundle.repro_manifest.promoted_scenario_id.as_deref(),
+        Some("regression.scheduler.surface.obligation_leak.seed_2a")
+    );
+    assert_eq!(
+        bundle.repro_manifest.minimization_lineage.shrink_status,
+        DivergenceShrinkStatus::PreservedSemanticClass
+    );
+    assert_eq!(bundle.failures.failure_artifacts.len(), 2);
+    assert_eq!(
+        bundle.failures.failure_artifacts[0].normalized_record_path,
+        entry.artifact_bundle.lab_normalized_path
+    );
+    assert_eq!(
+        bundle.failures.failure_artifacts[1].normalized_record_path,
+        entry.artifact_bundle.live_normalized_path
+    );
+    assert!(
+        !bundle.repro_manifest.repro_commands.is_empty(),
+        "bundle must retain deterministic repro commands"
+    );
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.obligation_balance.balanced"),
+        "obligation balance divergence should be retained in the bundle"
+    );
 }

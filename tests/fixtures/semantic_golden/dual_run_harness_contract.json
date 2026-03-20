@@ -60,5 +60,38 @@
     "Seed lineage records explicit live overrides instead of hiding them",
     "Live current-thread provenance keeps the same surface contract as lab",
     "Explicit entropy overrides are retained in both replay metadata and seed lineage"
-  ]
+  ],
+  "smoke_snapshot": {
+    "scenario_id": "phase1.cancel.race.one_loser",
+    "surface_id": "cancel.race",
+    "surface_contract_version": "cancel.race.v1",
+    "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+    "adapters": {
+      "lab": "lab.scenario_runner",
+      "spork": "lab.spork_harness",
+      "live": "live.current_thread"
+    },
+    "execution_instances": {
+      "lab": "phase1.cancel.race.one_loser:lab:0x2A:0",
+      "spork": "phase1.cancel.race.one_loser:lab:0x2A:0",
+      "live": "phase1.cancel.race.one_loser:live:0x63:0"
+    },
+    "passed": {
+      "lab": true,
+      "spork": true
+    }
+  },
+  "failure_manifest_excerpt": {
+    "scenario_id": "phase1.cancel.race.one_loser",
+    "adapter": "live.current_thread",
+    "surface_id": "cancel.race",
+    "surface_contract_version": "cancel.race.v1",
+    "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+    "failure_reason": "contract smoke mismatch",
+    "phases_executed": [
+      "setup",
+      "execute",
+      "compare"
+    ]
+  }
 }

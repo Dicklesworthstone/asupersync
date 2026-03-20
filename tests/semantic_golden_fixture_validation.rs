@@ -8,10 +8,14 @@
 //! Bead: asupersync-3cddg.12.8
 //! Rule IDs exercised: #7, #8, #29, #30, #31, #39, #42, #46
 
-use asupersync::lab::{DualRunScenarioIdentity, SeedPlan};
-use asupersync::test_logging::TestContext;
-use serde_json::Value;
-use std::collections::HashMap;
+use asupersync::lab::{
+    ChaosSection, DualRunScenarioIdentity, LabSection, NetworkSection, Scenario, ScenarioRunner,
+    SeedPlan, SporkScenarioConfig, SporkScenarioRunner, SporkScenarioSpec,
+};
+use asupersync::spork::prelude::AppSpec;
+use asupersync::test_logging::{ReproManifest, TestContext};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
 
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::lab::fuzz::{FuzzConfig, FuzzHarness};
@@ -47,20 +51,83 @@ fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
     }
 }
 
-fn build_dual_run_harness_contract_fixture() -> Value {
+fn build_contract_identity() -> DualRunScenarioIdentity {
     let seed_plan = SeedPlan::inherit(42, "seed.phase1.cancel.race.one_loser.v1")
         .with_live_override(99)
         .with_entropy_seed(777);
-    let identity = DualRunScenarioIdentity::phase1(
+    DualRunScenarioIdentity::phase1(
         "phase1.cancel.race.one_loser",
         "cancel.race",
         "cancel.race.v1",
         "Single loser is cancelled and drained",
         seed_plan.canonical_seed,
     )
-    .with_seed_plan(seed_plan);
+    .with_seed_plan(seed_plan)
+}
+
+fn build_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
+    let mut metadata = BTreeMap::new();
+    metadata.insert("surface_id".into(), identity.surface_id.clone());
+    metadata.insert(
+        "surface_contract_version".into(),
+        identity.surface_contract_version.clone(),
+    );
+    metadata.insert(
+        "seed_lineage_id".into(),
+        identity.seed_plan.seed_lineage_id.clone(),
+    );
+
+    Scenario {
+        schema_version: 1,
+        id: identity.scenario_id.clone(),
+        description: identity.description.clone(),
+        lab: LabSection {
+            seed: identity.seed_plan.canonical_seed,
+            ..LabSection::default()
+        },
+        chaos: ChaosSection::Off,
+        network: NetworkSection::default(),
+        faults: Vec::new(),
+        participants: Vec::new(),
+        oracles: vec!["all".to_string()],
+        cancellation: None,
+        include: Vec::new(),
+        metadata,
+    }
+}
+
+fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::SporkScenarioResult {
+    let mut runner = SporkScenarioRunner::new();
+    runner
+        .register(
+            SporkScenarioSpec::new(&identity.scenario_id, |_config| {
+                AppSpec::new("dual_run_contract_app")
+            })
+            .with_description(identity.description.clone())
+            .with_expected_invariants(["no_task_leaks", "quiescence_on_close"])
+            .with_default_config(SporkScenarioConfig {
+                seed: identity.seed_plan.canonical_seed,
+                ..SporkScenarioConfig::default()
+            })
+            .with_surface_id(identity.surface_id.clone())
+            .with_surface_contract_version(identity.surface_contract_version.clone())
+            .with_seed_lineage_id(identity.seed_plan.seed_lineage_id.clone()),
+        )
+        .expect("register spork scenario");
+
+    runner
+        .run(&identity.scenario_id)
+        .expect("run spork scenario")
+}
+
+fn build_dual_run_harness_contract_fixture() -> Value {
+    let identity = build_contract_identity();
+    let scenario = build_contract_scenario(&identity);
     let lab_config = identity.to_lab_config();
     let lab_replay = identity.lab_replay_metadata();
+    let lab_result = ScenarioRunner::run_with_identity(&scenario, &identity)
+        .expect("lab scenario runner smoke contract must execute");
+    let spork_result = run_minimal_spork(&identity);
     let live_ctx = TestContext::from_live_dual_run(&identity);
     let live_replay = live_ctx
         .replay_metadata
@@ -70,8 +137,13 @@ fn build_dual_run_harness_contract_fixture() -> Value {
         .seed_lineage
         .as_ref()
         .expect("dual-run live context should include seed lineage");
+    let failure_manifest = ReproManifest::from_context(&live_ctx, false)
+        .with_failure_reason("contract smoke mismatch")
+        .with_phases(vec!["setup".into(), "execute".into(), "compare".into()]);
+    let failure_value =
+        serde_json::to_value(&failure_manifest).expect("serialize failure manifest");
 
-    serde_json::json!({
+    json!({
         "schema_version": "semantic-golden-fixture-v1",
         "fixture_id": "golden-dual-run-harness-contract",
         "rule_ids": [
@@ -133,7 +205,36 @@ fn build_dual_run_harness_contract_fixture() -> Value {
             "Seed lineage records explicit live overrides instead of hiding them",
             "Live current-thread provenance keeps the same surface contract as lab",
             "Explicit entropy overrides are retained in both replay metadata and seed lineage"
-        ]
+        ],
+        "smoke_snapshot": {
+            "scenario_id": identity.scenario_id.clone(),
+            "surface_id": identity.surface_id.clone(),
+            "surface_contract_version": identity.surface_contract_version.clone(),
+            "seed_lineage_id": identity.seed_plan.seed_lineage_id.clone(),
+            "adapters": {
+                "lab": lab_result.adapter.clone(),
+                "spork": spork_result.adapter.clone(),
+                "live": live_ctx.adapter.as_deref().expect("live adapter"),
+            },
+            "execution_instances": {
+                "lab": lab_result.replay_metadata.instance.key(),
+                "spork": spork_result.replay_metadata.instance.key(),
+                "live": live_replay.instance.key(),
+            },
+            "passed": {
+                "lab": lab_result.passed(),
+                "spork": spork_result.passed(),
+            }
+        },
+        "failure_manifest_excerpt": {
+            "scenario_id": failure_value["scenario_id"],
+            "adapter": failure_value["adapter"],
+            "surface_id": failure_value["replay_metadata"]["family"]["surface_id"],
+            "surface_contract_version": failure_value["replay_metadata"]["family"]["surface_contract_version"],
+            "seed_lineage_id": failure_value["seed_lineage"]["seed_lineage_id"],
+            "failure_reason": failure_value["failure_reason"],
+            "phases_executed": failure_value["phases_executed"],
+        }
     })
 }
 

@@ -24,6 +24,14 @@ fn load_doc() -> String {
     std::fs::read_to_string(path).expect("lab-live scenario adapter contract must exist")
 }
 
+fn load_golden_harness_fixture() -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/semantic_golden/dual_run_harness_contract.json");
+    let content =
+        std::fs::read_to_string(path).expect("dual-run harness golden fixture must exist");
+    serde_json::from_str(&content).expect("dual-run harness golden fixture must parse")
+}
+
 #[test]
 fn doc_exists_and_is_substantial() {
     let doc = load_doc();
@@ -216,7 +224,9 @@ fn doc_binds_downstream_beads_and_validation_commands() {
 }
 
 fn minimal_contract_identity() -> DualRunScenarioIdentity {
-    let seed_plan = SeedPlan::inherit(42, "seed.phase1.cancel.race.one_loser.v1");
+    let seed_plan = SeedPlan::inherit(42, "seed.phase1.cancel.race.one_loser.v1")
+        .with_live_override(99)
+        .with_entropy_seed(777);
     DualRunScenarioIdentity::phase1(
         "phase1.cancel.race.one_loser",
         "cancel.race",
@@ -348,6 +358,7 @@ fn shared_harness_smoke_executes_same_contract_across_lab_and_live_entrypoints()
         .replay_metadata
         .as_ref()
         .expect("live context should retain replay metadata");
+    let fixture = load_golden_harness_fixture();
 
     let actual = json!({
         "scenario_id": identity.scenario_id.clone(),
@@ -370,26 +381,7 @@ fn shared_harness_smoke_executes_same_contract_across_lab_and_live_entrypoints()
         }
     });
 
-    let expected = json!({
-        "scenario_id": "phase1.cancel.race.one_loser",
-        "surface_id": "cancel.race",
-        "surface_contract_version": "cancel.race.v1",
-        "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
-        "adapters": {
-            "lab": "lab.scenario_runner",
-            "spork": "lab.spork_harness",
-            "live": "live.current_thread",
-        },
-        "execution_instances": {
-            "lab": "phase1.cancel.race.one_loser:lab:0x2A:0",
-            "spork": "phase1.cancel.race.one_loser:lab:0x2A:0",
-            "live": "phase1.cancel.race.one_loser:live:0x2A:0",
-        },
-        "passed": {
-            "lab": true,
-            "spork": true,
-        }
-    });
+    let expected = fixture["smoke_snapshot"].clone();
 
     assert_pretty_json_eq("shared dual-run smoke snapshot", &actual, &expected);
 }
@@ -402,15 +394,7 @@ fn dual_run_failure_manifest_keeps_readable_provenance() {
         .with_phases(vec!["setup".into(), "execute".into(), "compare".into()]);
 
     let actual = serde_json::to_value(&manifest).expect("serialize repro manifest");
-    let expected = json!({
-        "scenario_id": "phase1.cancel.race.one_loser",
-        "adapter": "live.current_thread",
-        "surface_id": "cancel.race",
-        "surface_contract_version": "cancel.race.v1",
-        "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
-        "failure_reason": "contract smoke mismatch",
-        "phases_executed": ["setup", "execute", "compare"],
-    });
+    let expected = load_golden_harness_fixture()["failure_manifest_excerpt"].clone();
     let normalized = json!({
         "scenario_id": actual["scenario_id"],
         "adapter": actual["adapter"],

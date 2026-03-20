@@ -8,9 +8,10 @@ use asupersync::messaging::capability::{
 };
 use asupersync::messaging::compiler::FabricCompiler;
 use asupersync::messaging::fabric::{
-    CellEpoch, CellTemperature, DataCapsule, NodeRole, NormalizationPolicy, ObservedCellLoad,
-    PlacementPolicy, RebalanceBudget, RebalancePlan, RepairPolicy, ReplySpaceCompactionPolicy,
-    StewardCandidate, StorageClass, SubjectCell, SubjectPattern, SubjectPrefixMorphism,
+    CellEpoch, CellTemperature, DataCapsule, Fabric, NodeRole, NormalizationPolicy,
+    ObservedCellLoad, PlacementPolicy, RebalanceBudget, RebalancePlan, RepairPolicy,
+    ReplySpaceCompactionPolicy, StewardCandidate, StorageClass, SubjectCell, SubjectPattern,
+    SubjectPrefixMorphism,
 };
 use asupersync::messaging::ir::{
     CostVector, EvidencePolicy, FabricIr, MobilityPermission, PrivacyPolicy, ReplySpaceRule,
@@ -18,7 +19,7 @@ use asupersync::messaging::ir::{
 };
 use asupersync::messaging::{
     DeliveryClass, FabricCapability as MorphismCapability, Morphism, MorphismClass, ResponsePolicy,
-    ReversibilityRequirement, SharingPolicy, SubjectTransform,
+    ReversibilityRequirement, ShardedSublist, SharingPolicy, Subject, SubjectTransform,
 };
 use asupersync::remote::NodeId;
 use asupersync::runtime::yield_now;
@@ -71,6 +72,28 @@ struct CompilerScenarioSummary {
     export_reply_space: Option<ReplySpaceRule>,
     import_fingerprint: String,
     import_reply_space: Option<ReplySpaceRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PacketPlaneScenarioSummary {
+    wildcard_subjects: Vec<String>,
+    exact_subjects: Vec<String>,
+    cancelled_next_is_none: bool,
+    reply_subject: String,
+    reply_payload_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShardedRoutingSummary {
+    first_four_queue_picks: Vec<u64>,
+    after_drop_queue_pick: u64,
+    created_total_before_drop: usize,
+    updated_total_before_drop: usize,
+    created_total_after_one_drop: usize,
+    created_total_after_all_drops: usize,
+    exact_shard: Option<usize>,
+    wildcard_shard: Option<usize>,
+    remaining_after_all_drops: usize,
 }
 
 fn candidate(
@@ -675,6 +698,285 @@ fn run_rebalance_scenario(seed: u64, inputs: &[&str]) -> (Vec<RebalanceSnapshot>
     (snapshots, runtime.steps())
 }
 
+fn run_packet_plane_scenario(seed: u64) -> (PacketPlaneScenarioSummary, Vec<FabricLogEntry>, u64) {
+    #[derive(Debug, Clone, Default)]
+    struct PacketPlaneState {
+        wildcard_subjects: Vec<String>,
+        exact_subjects: Vec<String>,
+        cancelled_next_is_none: bool,
+        reply_subject: Option<String>,
+        reply_payload_len: Option<usize>,
+    }
+
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let state = Arc::new(Mutex::new(PacketPlaneState::default()));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let state = Arc::clone(&state);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = test_fabric_cx(700);
+                let cancelled = test_fabric_cx(701);
+
+                yield_now().await;
+                let fabric = Fabric::connect(&cx, "lab://fabric").await.expect("connect");
+                push_log(
+                    &log,
+                    &seq,
+                    "packet",
+                    "connect",
+                    fabric.endpoint().to_string(),
+                );
+
+                let mut wildcard = fabric.subscribe(&cx, "orders.>").await.expect("wildcard");
+                let mut exact = fabric
+                    .subscribe(&cx, "orders.created")
+                    .await
+                    .expect("exact");
+                push_log(
+                    &log,
+                    &seq,
+                    "packet",
+                    "subscribe",
+                    "orders.> + orders.created",
+                );
+
+                yield_now().await;
+                let _receipt = fabric
+                    .publish(&cx, "orders.created", b"created".to_vec())
+                    .await
+                    .expect("publish created");
+                push_log(&log, &seq, "packet", "publish", "orders.created");
+
+                yield_now().await;
+                let _receipt = fabric
+                    .publish(&cx, "orders.updated", b"updated".to_vec())
+                    .await
+                    .expect("publish updated");
+                push_log(&log, &seq, "packet", "publish", "orders.updated");
+
+                let wildcard_created = wildcard.next(&cx).await.expect("wildcard created");
+                let exact_created = exact.next(&cx).await.expect("exact created");
+                let wildcard_updated = wildcard.next(&cx).await.expect("wildcard updated");
+
+                cancelled.set_cancel_requested(true);
+                let cancelled_next_is_none = wildcard.next(&cancelled).await.is_none();
+                push_log(
+                    &log,
+                    &seq,
+                    "packet",
+                    "cancelled_next",
+                    format!("none={cancelled_next_is_none}"),
+                );
+
+                let reply = fabric
+                    .request(&cx, "service.lookup", b"lookup".to_vec())
+                    .await
+                    .expect("request");
+                push_log(
+                    &log,
+                    &seq,
+                    "packet",
+                    "request",
+                    format!("reply_subject={}", reply.subject.as_str()),
+                );
+
+                let mut guard = state.lock().expect("state lock");
+                guard.wildcard_subjects = vec![
+                    wildcard_created.subject.as_str().to_string(),
+                    wildcard_updated.subject.as_str().to_string(),
+                ];
+                guard.exact_subjects = vec![exact_created.subject.as_str().to_string()];
+                guard.cancelled_next_is_none = cancelled_next_is_none;
+                guard.reply_subject = Some(reply.subject.as_str().to_string());
+                guard.reply_payload_len = Some(reply.payload.len());
+            })
+            .expect("create packet-plane task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let violations = runtime.check_invariants();
+    let pending_obligations = runtime.state.pending_obligation_count();
+    assert!(
+        runtime.is_quiescent(),
+        "runtime should quiesce after packet-plane scenario"
+    );
+    assert_eq!(
+        pending_obligations, 0,
+        "packet-plane scenario should not leave pending obligations"
+    );
+    assert!(
+        violations.is_empty(),
+        "packet-plane scenario should not violate lab invariants: {violations:?}"
+    );
+
+    let state = state.lock().expect("state lock").clone();
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+
+    (
+        PacketPlaneScenarioSummary {
+            wildcard_subjects: state.wildcard_subjects,
+            exact_subjects: state.exact_subjects,
+            cancelled_next_is_none: state.cancelled_next_is_none,
+            reply_subject: state.reply_subject.expect("reply subject"),
+            reply_payload_len: state.reply_payload_len.expect("reply payload len"),
+        },
+        log_entries,
+        runtime.steps(),
+    )
+}
+
+fn run_sharded_routing_scenario(seed: u64) -> (ShardedRoutingSummary, Vec<FabricLogEntry>, u64) {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<ShardedRoutingSummary>));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let index = ShardedSublist::with_prefix_depth(8, 2);
+                let exact_pattern = SubjectPattern::new("orders.created");
+                let wildcard_pattern = SubjectPattern::new("orders.>");
+                let created = Subject::new("orders.created");
+                let updated = Subject::new("orders.updated");
+
+                yield_now().await;
+                let queue_a = index.subscribe(&exact_pattern, Some("workers".to_string()));
+                let queue_b = index.subscribe(&exact_pattern, Some("workers".to_string()));
+                let plain_exact = index.subscribe(&exact_pattern, None);
+                let wildcard = index.subscribe(&wildcard_pattern, None);
+                let exact_shard = queue_a.shard_index();
+                let wildcard_shard = wildcard.shard_index();
+
+                push_log(
+                    &log,
+                    &seq,
+                    "routing",
+                    "subscribe",
+                    format!(
+                        "exact_shard={:?} wildcard_shard={:?}",
+                        exact_shard, wildcard_shard
+                    ),
+                );
+
+                let mut first_four_queue_picks = Vec::new();
+                let created_total_before_drop = {
+                    let first = index.lookup(&created);
+                    let first_pick = first.queue_group_picks[0].1.raw();
+                    first_four_queue_picks.push(first_pick);
+                    first.total()
+                };
+
+                for _ in 0..3 {
+                    yield_now().await;
+                    let result = index.lookup(&created);
+                    first_four_queue_picks.push(result.queue_group_picks[0].1.raw());
+                }
+
+                let updated_total_before_drop = index.lookup(&updated).total();
+                push_log(
+                    &log,
+                    &seq,
+                    "routing",
+                    "lookup_before_drop",
+                    format!(
+                        "created_total={created_total_before_drop} updated_total={updated_total_before_drop}"
+                    ),
+                );
+
+                let remaining_queue_id = queue_b.id().raw();
+                drop(queue_a);
+                yield_now().await;
+                let after_one_drop = index.lookup(&created);
+                let created_total_after_one_drop = after_one_drop.total();
+                let after_drop_queue_pick = after_one_drop.queue_group_picks[0].1.raw();
+                push_log(
+                    &log,
+                    &seq,
+                    "routing",
+                    "lookup_after_one_drop",
+                    format!(
+                        "created_total={created_total_after_one_drop} queue_pick={after_drop_queue_pick}"
+                    ),
+                );
+
+                drop(queue_b);
+                drop(plain_exact);
+                drop(wildcard);
+                yield_now().await;
+                let created_total_after_all_drops = index.lookup(&created).total();
+                let remaining_after_all_drops = index.count();
+                push_log(
+                    &log,
+                    &seq,
+                    "routing",
+                    "lookup_after_all_drops",
+                    format!(
+                        "created_total={created_total_after_all_drops} remaining={remaining_after_all_drops}"
+                    ),
+                );
+
+                *summary.lock().expect("summary lock") = Some(ShardedRoutingSummary {
+                    first_four_queue_picks,
+                    after_drop_queue_pick,
+                    created_total_before_drop,
+                    updated_total_before_drop,
+                    created_total_after_one_drop,
+                    created_total_after_all_drops,
+                    exact_shard,
+                    wildcard_shard,
+                    remaining_after_all_drops,
+                });
+
+                assert_eq!(
+                    after_drop_queue_pick, remaining_queue_id,
+                    "after one drop only the remaining queue member should receive picks"
+                );
+            })
+            .expect("create sharded routing task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let violations = runtime.check_invariants();
+    let pending_obligations = runtime.state.pending_obligation_count();
+    assert!(
+        runtime.is_quiescent(),
+        "runtime should quiesce after sharded routing scenario"
+    );
+    assert_eq!(
+        pending_obligations, 0,
+        "sharded routing scenario should not leave pending obligations"
+    );
+    assert!(
+        violations.is_empty(),
+        "sharded routing scenario should not violate lab invariants: {violations:?}"
+    );
+
+    let summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("scenario summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    (summary, log_entries, runtime.steps())
+}
+
 #[test]
 fn subject_cell_replay_is_deterministic_across_seeded_lab_runs() {
     let inputs = [
@@ -933,5 +1235,133 @@ fn fabric_compiler_and_morphism_plans_match_expected_surfaces() {
         log.len(),
         3,
         "expected one structured log entry per compile lane"
+    );
+}
+
+#[test]
+fn fabric_public_publish_subscribe_is_deterministic_across_seeded_lab_runs() {
+    let (first_summary, first_log, first_steps) = run_packet_plane_scenario(0xFA61_1C01);
+    let (second_summary, second_log, second_steps) = run_packet_plane_scenario(0xFA61_1C01);
+
+    assert_eq!(
+        first_summary, second_summary,
+        "same seed should yield identical packet-plane summaries"
+    );
+    assert_eq!(
+        first_log, second_log,
+        "same seed should yield identical packet-plane logs"
+    );
+    assert_eq!(
+        first_steps, second_steps,
+        "same seed should yield identical packet-plane scheduler steps"
+    );
+}
+
+#[test]
+fn fabric_public_subscription_respects_routing_and_cancellation() {
+    let (summary, log, _) = run_packet_plane_scenario(0xFA61_1C02);
+
+    assert_eq!(
+        summary.wildcard_subjects,
+        vec!["orders.created".to_string(), "orders.updated".to_string()],
+        "wildcard subscriber should observe both matching subjects in publish order"
+    );
+    assert_eq!(
+        summary.exact_subjects,
+        vec!["orders.created".to_string()],
+        "exact subscriber should only observe the exact subject"
+    );
+    assert!(
+        summary.cancelled_next_is_none,
+        "cancelled contexts should short-circuit subscription polling"
+    );
+    assert_eq!(summary.reply_subject, "service.lookup");
+    assert_eq!(summary.reply_payload_len, 6);
+    assert_eq!(
+        log.len(),
+        6,
+        "expected one structured log entry per packet-plane phase"
+    );
+}
+
+#[test]
+fn sharded_routing_is_deterministic_across_seeded_lab_runs() {
+    let (first_summary, first_log, first_steps) = run_sharded_routing_scenario(0x5A4D_0001);
+    let (second_summary, second_log, second_steps) = run_sharded_routing_scenario(0x5A4D_0001);
+
+    assert_eq!(
+        first_summary, second_summary,
+        "same seed should yield identical sharded-routing summaries"
+    );
+    assert_eq!(
+        first_log, second_log,
+        "same seed should yield identical sharded-routing logs"
+    );
+    assert_eq!(
+        first_steps, second_steps,
+        "same seed should yield identical sharded-routing scheduler steps"
+    );
+}
+
+#[test]
+fn sharded_queue_group_selection_rotates_fairly_under_lab_runtime() {
+    let (summary, _, _) = run_sharded_routing_scenario(0x5A4D_0002);
+
+    assert_eq!(
+        summary.first_four_queue_picks.len(),
+        4,
+        "expected four queue-group selections before drops"
+    );
+    assert_ne!(
+        summary.first_four_queue_picks[0], summary.first_four_queue_picks[1],
+        "queue-group picks should rotate between members"
+    );
+    assert_eq!(
+        summary.first_four_queue_picks[0], summary.first_four_queue_picks[2],
+        "round-robin should cycle back to the first queue member"
+    );
+    assert_eq!(
+        summary.first_four_queue_picks[1], summary.first_four_queue_picks[3],
+        "round-robin should cycle back to the second queue member"
+    );
+}
+
+#[test]
+fn sharded_fallback_and_concrete_routes_compose_under_lab_runtime() {
+    let (summary, _, _) = run_sharded_routing_scenario(0x5A4D_0003);
+
+    assert!(
+        summary.exact_shard.is_some(),
+        "fully literal patterns should route to a concrete shard"
+    );
+    assert_eq!(
+        summary.wildcard_shard, None,
+        "broad wildcard patterns should live in the fallback shard"
+    );
+    assert_eq!(
+        summary.created_total_before_drop, 3,
+        "created lookups should include concrete plain interest, fallback interest, and one queue pick"
+    );
+    assert_eq!(
+        summary.updated_total_before_drop, 1,
+        "updated lookups should still hit the fallback wildcard interest"
+    );
+    assert_eq!(
+        summary.created_total_after_one_drop, 3,
+        "dropping one queue member should preserve the remaining queue pick plus plain and fallback interest"
+    );
+}
+
+#[test]
+fn sharded_routing_drains_cancelled_interest_without_ghosts() {
+    let (summary, _, _) = run_sharded_routing_scenario(0x5A4D_0004);
+
+    assert_eq!(
+        summary.created_total_after_all_drops, 0,
+        "after all guards drop there should be no remaining interest"
+    );
+    assert_eq!(
+        summary.remaining_after_all_drops, 0,
+        "sharded sublist count should drain to zero after all guards drop"
     );
 }
