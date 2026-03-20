@@ -1241,3 +1241,18 @@
 {"file":"src/messaging/subject.rs","lines":2358,"batch":404,"date":"2026-03-20","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"compile error: Entry API refactor by another agent caused borrow checker error in SublistLinkCache::insert"}
 {"file":"src/messaging/control.rs","lines":3585,"batch":404,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"deep CRDT audit: all JoinSemilattice impls correct. MEDIUM design note: width-mismatch infinite anti-entropy loop (filed separately)"}
 {"file":"src/messaging/service.rs","lines":2068,"batch":404,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"deep audit: resolved guard correct, token lifecycle sound, all paths checked"}
+{"file": "src/io/buf_writer.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:49Z", "agent": "yolo"}
+{"file": "src/io/buf_reader.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:49Z", "agent": "yolo"}
+{"file": "src/io/copy.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:49Z", "agent": "yolo"}
+{"file": "src/io/split.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/io/stream_adapters.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/io/read_line.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/io/lines.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/sync/barrier.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/sync/rwlock.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/sync/pool.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/sync/once_cell.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/time/wheel.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/time/interval.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/time/sleep.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
+{"file": "src/time/intrusive_wheel.rs", "commit": "60e9bcda98e04a6866f8274f81ce8f1e46738d16", "date": "2026-03-20T21:07:50Z", "agent": "yolo"}
