@@ -340,21 +340,43 @@ fn clamp_permille(value: usize) -> u32 {
     value.min(PERMILLE_SCALE as usize) as u32
 }
 
-fn normalize_permille(scores: [u32; state::COUNT]) -> [u16; state::COUNT] {
+fn normalize_permille_generic<const N: usize>(scores: [u32; N], zero_total: [u16; N]) -> [u16; N] {
     let total: u32 = scores.iter().sum();
     if total == 0 {
-        return [250, 250, 250, 250];
+        return zero_total;
     }
 
-    let mut normalized = [0u16; state::COUNT];
+    let mut normalized = [0u16; N];
+    let mut remainders = [(0usize, 0u32); N];
     let mut assigned = 0u32;
-    for (index, score) in scores.iter().take(state::COUNT - 1).enumerate() {
-        let scaled = score.saturating_mul(PERMILLE_SCALE) / total;
-        normalized[index] = scaled as u16;
-        assigned = assigned.saturating_add(scaled);
+    for (index, score) in scores.iter().copied().enumerate() {
+        let scaled = score.saturating_mul(PERMILLE_SCALE);
+        let base = scaled / total;
+        normalized[index] = u16::try_from(base).expect("permille base fits into u16");
+        assigned = assigned.saturating_add(base);
+        remainders[index] = (index, scaled % total);
     }
-    normalized[state::COUNT - 1] = PERMILLE_SCALE.saturating_sub(assigned) as u16;
+
+    let mut remaining = usize::try_from(PERMILLE_SCALE.saturating_sub(assigned))
+        .expect("permille remainder fits into usize");
+    remainders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    for (index, remainder) in remainders {
+        if remaining == 0 || remainder == 0 {
+            break;
+        }
+        normalized[index] = normalized[index].saturating_add(1);
+        remaining -= 1;
+    }
+
     normalized
+}
+
+fn normalize_permille(scores: [u32; state::COUNT]) -> [u16; state::COUNT] {
+    normalize_permille_generic(scores, [250; state::COUNT])
+}
+
+fn normalize_contributor_permille(scores: [u32; 3]) -> [u16; 3] {
+    normalize_permille_generic(scores, [0; 3])
 }
 
 fn posterior_from_permille(posterior_permille: [u16; state::COUNT]) -> Posterior {
@@ -521,24 +543,20 @@ fn top_evidence_contributors(snapshot: &GovernanceSnapshot) -> [GovernanceEviden
     ];
     signals.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
 
-    let total = signals[0].2 + signals[1].2 + signals[2].2;
-    let total = total.max(1);
-    let first = signals[0].2 * PERMILLE_SCALE / total;
-    let second = signals[1].2 * PERMILLE_SCALE / total;
-    let third = PERMILLE_SCALE.saturating_sub(first + second);
+    let normalized = normalize_contributor_permille([signals[0].2, signals[1].2, signals[2].2]);
 
     [
         GovernanceEvidenceContributor {
             name: signals[0].1,
-            contribution_permille: first as u16,
+            contribution_permille: normalized[0],
         },
         GovernanceEvidenceContributor {
             name: signals[1].1,
-            contribution_permille: second as u16,
+            contribution_permille: normalized[1],
         },
         GovernanceEvidenceContributor {
             name: signals[2].1,
-            contribution_permille: third as u16,
+            contribution_permille: normalized[2],
         },
     ]
 }
@@ -982,6 +1000,18 @@ mod tests {
     fn normalize_permille_zero_total_gives_uniform() {
         let result = normalize_permille([0, 0, 0, 0]);
         assert_eq!(result, [250, 250, 250, 250]);
+    }
+
+    #[test]
+    fn normalize_permille_does_not_assign_remainder_to_zero_score_bucket() {
+        let result = normalize_permille([1, 1, 1, 0]);
+        assert_eq!(result, [334, 333, 333, 0]);
+    }
+
+    #[test]
+    fn contributor_normalization_does_not_assign_remainder_to_zero_weight() {
+        let result = normalize_contributor_permille([2, 1, 0]);
+        assert_eq!(result, [667, 333, 0]);
     }
 
     #[test]
