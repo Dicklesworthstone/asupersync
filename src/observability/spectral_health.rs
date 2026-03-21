@@ -7,12 +7,16 @@
 //! second-smallest eigenvalue of the graph Laplacian) is a powerful indicator
 //! of structural health:
 //!
-//! - The system is approaching deadlock when the Fiedler value approaches zero
-//!   (the graph is about to disconnect).
+//! - The system is approaching structural fragmentation when the Fiedler value
+//!   approaches zero (the graph is about to disconnect).
 //! - The system is healthy when the Fiedler value is large (the dependency
 //!   graph is well-connected with redundant paths).
 //! - Oscillatory eigenvalue trajectories indicate potential livelock (periodic
 //!   behavior in the dependency structure).
+//!
+//! Zero or disconnected spectral connectivity is a topology signal, not a
+//! proof of trapped wait-cycle deadlock. The runtime uses directional SCC
+//! analysis elsewhere for actual deadlock detection.
 //!
 //! # Mathematical Foundation
 //!
@@ -553,8 +557,11 @@ pub enum HealthClassification {
         /// Whether the trend indicates imminent disconnection.
         approaching_disconnect: bool,
     },
-    /// The graph is disconnected (Fiedler value is zero).
-    Deadlocked {
+    /// The graph has split into disconnected dependency islands.
+    ///
+    /// This is a structural fragmentation signal, not by itself a proof of a
+    /// trapped wait-cycle deadlock.
+    Fragmented {
         /// Number of connected components.
         components: usize,
     },
@@ -585,8 +592,8 @@ impl fmt::Display for HealthClassification {
                     "Critical (fiedler={fiedler:.4}, approaching_disconnect={approaching_disconnect})"
                 )
             }
-            Self::Deadlocked { components } => {
-                write!(f, "Deadlocked (components={components})")
+            Self::Fragmented { components } => {
+                write!(f, "Fragmented (components={components})")
             }
         }
     }
@@ -602,11 +609,17 @@ pub fn classify_health(
 ) -> HealthClassification {
     let fiedler = decomposition.fiedler_value;
 
+    // Edge-free graphs have no dependency structure to fragment, so the
+    // connectivity score is not a health failure by itself.
+    if laplacian.edge_count() == 0 {
+        return HealthClassification::Healthy { margin: 0.0 };
+    }
+
     // Check for disconnected graph first.
     if fiedler < thresholds.convergence_tolerance {
         let (components, _) = laplacian.connected_components();
         if components > 1 {
-            return HealthClassification::Deadlocked { components };
+            return HealthClassification::Fragmented { components };
         }
     }
 
@@ -2162,7 +2175,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_deadlocked_system() {
+    fn classify_fragmented_system() {
         let edges = vec![(0, 1), (2, 3)];
         let lap = DependencyLaplacian::new(4, &edges);
         let thresholds = SpectralThresholds::default();
@@ -2170,8 +2183,21 @@ mod tests {
         let health = classify_health(&decomp, &lap, &thresholds, false);
 
         assert!(
-            matches!(health, HealthClassification::Deadlocked { components: 2 }),
-            "Disconnected graph should be deadlocked, got {health}"
+            matches!(health, HealthClassification::Fragmented { components: 2 }),
+            "Disconnected graph should be fragmented, got {health}"
+        );
+    }
+
+    #[test]
+    fn classify_edge_free_graph_as_healthy() {
+        let lap = DependencyLaplacian::new(3, &[]);
+        let thresholds = SpectralThresholds::default();
+        let decomp = compute_spectral_decomposition(&lap, &thresholds);
+        let health = classify_health(&decomp, &lap, &thresholds, false);
+
+        assert!(
+            matches!(health, HealthClassification::Healthy { margin: 0.0 }),
+            "Edge-free graph should not be treated as fragmented or deadlocked, got {health}"
         );
     }
 
@@ -2187,7 +2213,7 @@ mod tests {
                 fiedler: 0.005,
                 approaching_disconnect: true,
             },
-            HealthClassification::Deadlocked { components: 3 },
+            HealthClassification::Fragmented { components: 3 },
         ];
         for v in &variants {
             assert!(!v.to_string().is_empty());
@@ -2477,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_deadlocked_disconnected() {
+    fn monitor_fragmented_disconnected() {
         let mut monitor = SpectralHealthMonitor::new(SpectralThresholds::default());
         let edges = vec![(0, 1), (2, 3)];
         let report = monitor.analyze(4, &edges);
@@ -2485,9 +2511,9 @@ mod tests {
         assert!(
             matches!(
                 report.classification,
-                HealthClassification::Deadlocked { components: 2 }
+                HealthClassification::Fragmented { components: 2 }
             ),
-            "Disconnected graph should be deadlocked, got {}",
+            "Disconnected graph should be fragmented, got {}",
             report.classification
         );
     }
