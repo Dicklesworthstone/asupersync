@@ -326,15 +326,22 @@ validate_dual_policy_probe_contract() {
             .schema_version == "raptorq-track-e-dual-policy-probe-v4" and
             (.scenario_id | type == "string" and length > 0) and
             (.seed | type == "number" and . >= 0 and floor == .) and
-            (.mode | type == "string" and length > 0) and
+            (.mode == "Auto" or .mode == "Sequential" or .mode == "Fused") and
+            (.architecture_class | type == "string" and length > 0) and
             (.profile_pack | type == "string" and length > 0) and
             (.profile_fallback_reason | type == "string" and length > 0) and
             (.rejected_profile_packs | type == "string" and length > 0) and
+            (.profile_catalog_count | type == "number" and . >= 3 and floor == .) and
+            (.tuning_candidate_catalog_count | type == "number" and . >= 3 and floor == .) and
+            (.active_profile_architecture_class | type == "string" and length > 0) and
+            (.tuning_corpus_id | type == "string" and length > 0) and
             (.selected_tuning_candidate_id | type == "string" and length > 0) and
             (.selected_tuning_tile_bytes | type == "number" and . >= 0 and floor == .) and
             (.selected_tuning_unroll | type == "number" and . >= 0 and floor == .) and
             (.selected_tuning_prefetch_distance | type == "number" and . >= 0 and floor == .) and
             (.selected_tuning_fusion_shape | type == "string" and length > 0) and
+            (.rejected_tuning_candidate_ids | type == "string" and length > 0) and
+            (.command_bundle | type == "string" and test("^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark -- gf256_primitives)")) and
             (.decision_artifact_id | type == "string" and length > 0) and
             (.decision_role | type == "string" and length > 0) and
             (.selected_candidate_summary | type == "string" and length > 0) and
@@ -360,8 +367,10 @@ validate_dual_policy_probe_contract() {
             (.addmul_window_max | type == "number" and . >= 0 and floor == .) and
             (.addmul_min_lane | type == "number" and . >= 0 and floor == .) and
             (.max_lane_ratio | type == "number" and . >= 1 and floor == .) and
-            (.mul_decision == "fused" or .mul_decision == "sequential") and
-            (.addmul_decision == "fused" or .addmul_decision == "sequential") and
+            (.mul_decision == "Fused" or .mul_decision == "Sequential") and
+            (.mul_decision_reason | type == "string" and length > 0) and
+            (.addmul_decision == "Fused" or .addmul_decision == "Sequential") and
+            (.addmul_decision_reason | type == "string" and length > 0) and
             (.criterion_sample_size | type == "number" and . >= 1 and floor == .) and
             (.criterion_warm_up_seconds | type == "number" and . > 0) and
             (.criterion_measurement_seconds | type == "number" and . > 0) and
@@ -379,7 +388,7 @@ validate_dual_policy_probe_contract() {
                     .decision_role == "runtime_override_not_canonical_profile_selection" and
                     .replay_pointer == "replay:rq-e-gf256-profile-pack-env-override-v1" and
                     (
-                        .mode != "auto" or
+                        .mode != "Auto" or
                         .mul_min_total_env_override or
                         .mul_max_total_env_override or
                         .addmul_min_total_env_override or
@@ -395,7 +404,7 @@ validate_dual_policy_probe_contract() {
                     .decision_role != "runtime_override_not_canonical_profile_selection" and
                     .replay_pointer != "replay:rq-e-gf256-profile-pack-env-override-v1"
              end) and
-            (if .addmul_decision == "fused"
+            (if .addmul_decision == "Fused"
                 then
                     (.total_len >= .addmul_window_min and .total_len <= .addmul_window_max) and
                     (.lane_len_a >= .addmul_min_lane) and
@@ -405,8 +414,8 @@ validate_dual_policy_probe_contract() {
                 else true
              end)
         ) and
-        any(.[]; .addmul_decision == "fused") and
-        any(.[]; .addmul_decision == "sequential")
+        any(.[]; .addmul_decision == "Fused") and
+        any(.[]; .addmul_decision == "Sequential")
     ' "$contract_log" >/dev/null; then
         status="fail"
         rc=1

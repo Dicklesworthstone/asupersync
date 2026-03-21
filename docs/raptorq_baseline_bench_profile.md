@@ -151,12 +151,17 @@ Probe log schema:
 - `schema_version = raptorq-track-e-dual-policy-probe-v4`
 - `manifest_schema_version`, `profile_schema_version`
 - `scenario_id`, `seed`
-- `kernel`, `mode`, `profile_pack`, `profile_fallback_reason`
+- `kernel`, `architecture_class`, `active_profile_architecture_class`
+- `mode`, `profile_pack`, `profile_fallback_reason`
 - `rejected_profile_packs` lists every non-selected pack id for the active profile selection
+- `profile_catalog_count`, `tuning_candidate_catalog_count`
+- `tuning_corpus_id`
 - `profile_pack_env_requested`
 - `mul_min_total_env_override`, `mul_max_total_env_override`
 - `addmul_min_total_env_override`, `addmul_max_total_env_override`, `addmul_min_lane_env_override`
 - `max_lane_ratio_env_override`
+- `selected_tuning_candidate_id`, `rejected_tuning_candidate_ids`
+- `command_bundle` keeps the manifest-side `gf256_primitives` comparator bundle distinct from the probe `repro_command`
 - `lane_len_a`, `lane_len_b`, `total_len`, `lane_ratio`
 - `mul_window_min`, `mul_window_max`
 - `addmul_window_min`, `addmul_window_max`, `addmul_min_lane`

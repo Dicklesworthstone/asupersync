@@ -8,6 +8,7 @@
 //! Follows the optimization loop: baseline → profile → single lever → golden outputs.
 
 #![allow(missing_docs)]
+#![recursion_limit = "512"]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
