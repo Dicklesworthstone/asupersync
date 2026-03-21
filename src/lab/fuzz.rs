@@ -398,6 +398,7 @@ impl FuzzHarness {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct SingleRunResult {
     steps: u64,
     violations: Vec<InvariantViolation>,

@@ -1086,6 +1086,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)]
     fn wakeup_probability_with_reversed_count_range_is_effectively_disabled() {
         let config = ChaosConfig::new(42)
             .with_wakeup_storm_probability(1.0)

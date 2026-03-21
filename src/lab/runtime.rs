@@ -2440,7 +2440,7 @@ impl Wake for CancelTaskWaker {
 }
 
 /// An invariant violation detected by the lab runtime.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvariantViolation {
     /// Obligations were not resolved.
     ObligationLeak {

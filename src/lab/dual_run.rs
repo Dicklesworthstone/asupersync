@@ -1955,16 +1955,16 @@ fn is_bridge_only_downgrade(identity: &DualRunScenarioIdentity) -> bool {
 }
 
 fn unsupported_surface_reason(identity: &DualRunScenarioIdentity) -> Option<String> {
-    match eligibility_verdict(identity) {
-        Some(
-            verdict @ ("blocked_missing_virtualization"
-            | "blocked_missing_verification"
-            | "blocked_scope_red_line"
-            | "unsupported"
-            | "rejected"
-            | "unsupported_surface"),
-        ) => return Some(format!("eligibility_verdict={verdict}")),
-        _ => {}
+    if let Some(
+        verdict @ ("blocked_missing_virtualization"
+        | "blocked_missing_verification"
+        | "blocked_scope_red_line"
+        | "unsupported"
+        | "rejected"
+        | "unsupported_surface"),
+    ) = eligibility_verdict(identity)
+    {
+        return Some(format!("eligibility_verdict={verdict}"));
     }
 
     if let Some(class) = identity.metadata.get("support_class") {

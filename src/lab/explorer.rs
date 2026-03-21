@@ -1235,7 +1235,7 @@ impl TopologyExplorer {
                 score: Some(score),
             })
             .collect();
-        ranked.sort_unstable_by(|left, right| right.score.cmp(&left.score));
+        ranked.sort_unstable_by_key(|right| std::cmp::Reverse(right.score));
         ranked.truncate(limit);
         ranked
     }
