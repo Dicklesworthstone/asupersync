@@ -427,6 +427,12 @@ pub struct DualKernelPolicySnapshot {
     /// benchmark surface. Probe-specific validation logs use a separate
     /// `gf256_dual_policy` repro command emitted by the Criterion harness.
     pub command_bundle: &'static str,
+    /// Artifact packet or override marker backing the current effective decision contract.
+    pub decision_artifact_id: &'static str,
+    /// Stable role label for the effective decision artifact.
+    pub decision_role: &'static str,
+    /// Maturity of the evidence backing the effective decision contract.
+    pub decision_evidence_status: Gf256ProfileEvidenceStatus,
     /// Effective policy mode.
     pub mode: DualKernelMode,
     /// Bitmask describing which policy knobs were explicitly overridden via env vars.
@@ -1424,6 +1430,7 @@ fn dual_addmul_decision_detail_with_policy(
 #[must_use]
 pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
     let policy = dual_policy();
+    let effective_profile = effective_profile_pack_metadata(policy);
     DualKernelPolicySnapshot {
         profile_schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
         profile_pack: policy.profile_pack,
@@ -1434,8 +1441,11 @@ pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
         rejected_tuning_candidate_ids: policy.rejected_tuning_candidate_ids,
         fallback_reason: policy.fallback_reason,
         rejected_candidates: policy.rejected_candidates,
-        replay_pointer: policy.replay_pointer,
-        command_bundle: policy.command_bundle,
+        replay_pointer: effective_profile.replay_pointer,
+        command_bundle: effective_profile.command_bundle,
+        decision_artifact_id: effective_profile.decision_artifact_id,
+        decision_role: effective_profile.decision_role,
+        decision_evidence_status: effective_profile.decision_evidence_status,
         mode: to_public_mode(policy.mode),
         override_mask: policy.override_mask,
         mul_min_total: policy.mul_min_total,
@@ -4388,6 +4398,9 @@ mod tests {
             rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
             replay_pointer: metadata.replay_pointer,
             command_bundle: metadata.command_bundle,
+            decision_artifact_id: metadata.decision_artifact_id,
+            decision_role: metadata.decision_role,
+            decision_evidence_status: metadata.decision_evidence_status,
             mode: DualKernelMode::Auto,
             override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: metadata.mul_min_total,
@@ -4672,6 +4685,7 @@ mod tests {
     #[test]
     fn dual_policy_snapshot_exposes_profile_pack_metadata() {
         let snapshot = dual_kernel_policy_snapshot();
+        let effective_profile = effective_profile_pack_metadata(dual_policy());
         assert_eq!(
             snapshot.profile_schema_version,
             GF256_PROFILE_PACK_SCHEMA_VERSION
@@ -4686,6 +4700,18 @@ mod tests {
         assert!(snapshot.command_bundle.contains("gf256_primitives"));
         assert!(!snapshot.command_bundle.contains("gf256_dual_policy"));
         assert_eq!(snapshot.replay_pointer, GF256_PROFILE_PACK_REPLAY_POINTER);
+        assert!(!snapshot.decision_artifact_id.is_empty());
+        assert!(!snapshot.decision_role.is_empty());
+        assert!(!snapshot.decision_evidence_status.as_str().is_empty());
+        assert_eq!(
+            snapshot.decision_artifact_id,
+            effective_profile.decision_artifact_id
+        );
+        assert_eq!(snapshot.decision_role, effective_profile.decision_role);
+        assert_eq!(
+            snapshot.decision_evidence_status,
+            effective_profile.decision_evidence_status
+        );
         assert!(!snapshot.profile_pack.as_str().is_empty());
         for rejected_id in snapshot.rejected_tuning_candidate_ids {
             assert_ne!(snapshot.selected_tuning_candidate_id, *rejected_id);
@@ -4711,6 +4737,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn profile_pack_manifest_snapshot_is_deterministic_and_self_consistent() {
         let manifest = gf256_profile_pack_manifest_snapshot();
         let policy = manifest.active_policy;
@@ -4742,6 +4769,18 @@ mod tests {
         assert_eq!(
             manifest.active_profile_metadata.addmul_min_lane,
             policy.addmul_min_lane
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.decision_artifact_id,
+            policy.decision_artifact_id
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.decision_role,
+            policy.decision_role
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.decision_evidence_status,
+            policy.decision_evidence_status
         );
         assert!(
             manifest

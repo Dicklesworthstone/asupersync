@@ -977,13 +977,19 @@ impl AuthPolicy {
                 // Constant-time scan: evaluate every token to prevent timing
                 // side-channel leaks about which token matched or list length.
                 tokens.iter().fold(false, |matched, expected| {
-                    let this_match = expected.len() == token.len()
-                        && expected
-                            .bytes()
-                            .zip(token.bytes())
-                            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                            == 0;
-                    matched | this_match
+                    let mut diff = 0u8;
+                    if expected.len() != token.len() {
+                        diff |= 1;
+                    }
+                    let token_bytes = token.as_bytes();
+                    for (i, b) in expected.bytes().enumerate() {
+                        diff |= b ^ token_bytes.get(i).copied().unwrap_or(0);
+                    }
+                    // Intentional bitwise OR for constant-time comparison —
+                    // `||` would short-circuit and leak timing information.
+                    #[allow(clippy::needless_bitwise_bool)]
+                    let result = matched | (diff == 0);
+                    result
                 })
             }
         }
