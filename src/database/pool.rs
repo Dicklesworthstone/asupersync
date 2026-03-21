@@ -29,11 +29,11 @@
 
 use crate::combinator::{RetryPolicy, calculate_delay};
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // ─── ConnectionManager trait ────────────────────────────────────────────────

@@ -1074,7 +1074,10 @@ mod tests {
 
         assert_eq!(builder.connect_timeout, Some(Duration::from_secs(1)));
         assert_eq!(builder.nodelay, Some(true));
-        assert_eq!(builder.keepalive, KeepaliveConfig::Enabled(Duration::from_secs(30)));
+        assert_eq!(
+            builder.keepalive,
+            KeepaliveConfig::Enabled(Duration::from_secs(30))
+        );
     }
 
     #[test]

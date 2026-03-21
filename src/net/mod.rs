@@ -57,8 +57,8 @@ pub mod worker_channel;
 pub use happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect};
 #[cfg(all(feature = "quic-compat", not(feature = "quic")))]
 pub use quic::{
-    ClientAuth as QuicClientAuth, QuicConfig, QuicConnection, QuicEndpoint, QuicError, QuicIncoming,
-    RecvStream as QuicRecvStream, SendStream as QuicSendStream,
+    ClientAuth as QuicClientAuth, QuicConfig, QuicConnection, QuicEndpoint, QuicError,
+    QuicIncoming, RecvStream as QuicRecvStream, SendStream as QuicSendStream,
 };
 #[cfg(feature = "quic")]
 pub use quic::{
@@ -69,8 +69,8 @@ pub use quic::{
 pub use quic_compat::{
     ClientAuth as QuicCompatClientAuth, QuicConfig as QuicCompatConfig,
     QuicConnection as QuicCompatConnection, QuicEndpoint as QuicCompatEndpoint,
-    QuicError as QuicCompatError, QuicIncoming as QuicCompatIncoming, RecvStream as QuicCompatRecvStream,
-    SendStream as QuicCompatSendStream,
+    QuicError as QuicCompatError, QuicIncoming as QuicCompatIncoming,
+    RecvStream as QuicCompatRecvStream, SendStream as QuicCompatSendStream,
 };
 pub use quic_native::{
     AckEvent, AckRange, CryptoLevel, FlowControlError, FlowCredit, KeyUpdateEvent,

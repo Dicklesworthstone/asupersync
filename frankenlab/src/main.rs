@@ -128,9 +128,15 @@ fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, Str
 
 fn runner_error_message(err: ScenarioRunnerError) -> String {
     match err {
-        ScenarioRunnerError::Validation { scenario_id, errors } => {
+        ScenarioRunnerError::Validation {
+            scenario_id,
+            errors,
+        } => {
             let detail: Vec<String> = errors.iter().map(|e| format!("  - {e}")).collect();
-            format!("Scenario validation failed for '{scenario_id}':\n{}", detail.join("\n"))
+            format!(
+                "Scenario validation failed for '{scenario_id}':\n{}",
+                detail.join("\n")
+            )
         }
         ScenarioRunnerError::UnknownOracle(name) => {
             format!(
