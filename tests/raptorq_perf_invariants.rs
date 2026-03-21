@@ -1424,6 +1424,7 @@ fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
     let artifact_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_v1.json");
     let artifact: serde_json::Value =
         serde_json::from_str(artifact_json).expect("Track-E p95/p99 artifact must be valid JSON");
+    let expected_scope_boundary_note = "The c==1 addmul fast path is intentionally excluded from this percentile corpus. It reuses dual-add semantics and remains covered separately by deterministic bench validation via addmul_slices2_c1_bit_exact and the benchmark IDs addmul_slices2_c1_auto/addmul_slices2_c1_sequential.";
 
     assert_eq!(
         artifact["schema_version"].as_str(),
@@ -1462,6 +1463,10 @@ fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
         "mul_slices2_fused".to_string(),
         "mul_slices2_sequential".to_string(),
     ]);
+    let expected_excluded_ops = BTreeSet::from([
+        "addmul_slices2_c1_auto".to_string(),
+        "addmul_slices2_c1_sequential".to_string(),
+    ]);
 
     let op_scope = artifact["methodology"]["operation_scope"]
         .as_array()
@@ -1476,7 +1481,27 @@ fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         op_scope, expected_ops,
-        "operation scope must cover the canonical four dual-slice operations"
+        "operation scope must cover the canonical four percentile-scored dual-slice operations"
+    );
+    let excluded_ops = artifact["methodology"]["excluded_operation_scope"]
+        .as_array()
+        .expect("methodology.excluded_operation_scope must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("excluded_operation_scope entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        excluded_ops, expected_excluded_ops,
+        "base p95/p99 artifact must pin the deliberate c==1 addmul fast-path exclusion"
+    );
+    assert_eq!(
+        artifact["methodology"]["scope_boundary_note"].as_str(),
+        Some(expected_scope_boundary_note),
+        "base p95/p99 artifact must explain the c==1 scope boundary explicitly"
     );
 
     let overall = artifact["per_mode_overall_percentiles"]
@@ -1599,6 +1624,7 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
     let base_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_v1.json");
     let base: serde_json::Value =
         serde_json::from_str(base_json).expect("Track-E base p95/p99 artifact must be valid JSON");
+    let expected_scope_boundary_note = "The c==1 addmul fast path is intentionally excluded from this percentile corpus. It reuses dual-add semantics and remains covered separately by deterministic bench validation via addmul_slices2_c1_bit_exact and the benchmark IDs addmul_slices2_c1_auto/addmul_slices2_c1_sequential.";
 
     assert_eq!(
         highconf["schema_version"].as_str(),
@@ -1660,6 +1686,42 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
         highconf["methodology"]["filter"].as_str(),
         highconf["methodology"]["scenario_scope"][0].as_str(),
         "high-confidence methodology.filter must match the single scenario scope entry"
+    );
+    let base_excluded_ops = base["methodology"]["excluded_operation_scope"]
+        .as_array()
+        .expect("base methodology.excluded_operation_scope must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("base excluded_operation_scope entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let highconf_excluded_ops = highconf["methodology"]["excluded_operation_scope"]
+        .as_array()
+        .expect("highconf methodology.excluded_operation_scope must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("highconf excluded_operation_scope entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        highconf_excluded_ops, base_excluded_ops,
+        "high-confidence artifact must preserve the base c==1 fast-path exclusion contract"
+    );
+    assert_eq!(
+        base["methodology"]["scope_boundary_note"].as_str(),
+        Some(expected_scope_boundary_note),
+        "base artifact must pin the c==1 scope-boundary note"
+    );
+    assert_eq!(
+        highconf["methodology"]["scope_boundary_note"].as_str(),
+        Some(expected_scope_boundary_note),
+        "high-confidence artifact must preserve the c==1 scope-boundary note"
     );
 
     let base_pairs = base["per_mode_operation_percentiles"]
@@ -2973,6 +3035,11 @@ fn e5_profile_pack_doc_mentions_current_x86_default_contract() {
         "replay:rq-e-gf256-profile-pack-v3",
         "decision_artifact_id = simd_policy_ablation_2026_03_04",
         "decision_role = canonical_current_x86_default_contract",
+        "`target_arch`, `target_os`, `target_env`, `target_endian`, `target_pointer_width_bits`",
+        "addmul_slices2_c1_auto",
+        "addmul_slices2_c1_sequential",
+        "addmul_slices2_c1_bit_exact",
+        "percentile-scored `operation_scope`",
         "selected_candidate_summary",
         "rejected_candidate_set_summary",
         "mul_min_total > mul_max_total",
@@ -4790,8 +4857,16 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         "validate_dual_policy_probe_contract",
         "bench-smoke-gf256-dual-policy-contract",
         "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v4\"",
+        ".manifest_schema_version | type == \"string\" and length > 0",
+        ".profile_schema_version | type == \"string\" and length > 0",
+        ".kernel | type == \"string\" and length > 0",
         ".mode == \"Auto\" or .mode == \"Sequential\" or .mode == \"Fused\"",
         ".architecture_class | type == \"string\" and length > 0",
+        ".target_arch | type == \"string\" and length > 0",
+        ".target_os | type == \"string\" and length > 0",
+        ".target_env | type == \"string\" and length > 0",
+        ".target_endian | type == \"string\" and length > 0",
+        ".target_pointer_width_bits | type == \"number\" and . >= 1 and floor == .",
         ".selected_tuning_candidate_id",
         ".active_profile_architecture_class | type == \"string\" and length > 0",
         ".profile_catalog_count | type == \"number\" and . >= 3 and floor == .",
@@ -4803,6 +4878,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".selected_tuning_fusion_shape",
         ".rejected_tuning_candidate_ids | type == \"string\" and length > 0",
         ".command_bundle | type == \"string\" and test(\"^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark -- gf256_primitives)\")",
+        ".replay_pointer | type == \"string\" and length > 0",
         ".decision_artifact_id",
         ".decision_role",
         ".selected_candidate_summary",
@@ -4813,6 +4889,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".profile_pack_env_requested | type == \"boolean\"",
         ".max_lane_ratio_env_override | type == \"boolean\"",
         ".selected_tuning_candidate_id == \"manual-env-override-unbacked\"",
+        ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives\"",
         ".decision_artifact_id == \"manual_env_override_unbacked\"",
         ".decision_role == \"runtime_override_not_canonical_profile_selection\"",
         ".replay_pointer == \"replay:rq-e-gf256-profile-pack-env-override-v1\"",
@@ -4832,6 +4909,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".criterion_warm_up_seconds",
         ".criterion_measurement_seconds",
         ".tail_confidence_proxy == \"criterion_interval_high_endpoint_proxy_p95p99\"",
+        ".command_bundle == \"rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives\"",
         "bench_gf256_dual_policy_contract.ndjson",
     ] {
         assert!(

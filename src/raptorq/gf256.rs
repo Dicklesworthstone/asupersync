@@ -4130,7 +4130,14 @@ mod tests {
             "snapshot mode should be a valid public dual-kernel mode",
         );
 
-        for (len_a, len_b) in [(0, 0), (64, 64), (512, 4096), (4096, 4096), (16384, 2048)] {
+        for (len_a, len_b) in [
+            (0, 0),
+            (64, 64),
+            (512, 4096),
+            (4096, 4096),
+            (16384, 2048),
+            (16385, 8191),
+        ] {
             let mul_decision = dual_mul_kernel_decision(len_a, len_b);
             let addmul_decision = dual_addmul_kernel_decision(len_a, len_b);
             assert_eq!(
@@ -4146,7 +4153,7 @@ mod tests {
         }
     }
 
-    fn expected_decision_from_snapshot(
+    fn expected_decision_detail_from_snapshot(
         mode: DualKernelMode,
         min_total: usize,
         max_total: usize,
@@ -4154,15 +4161,40 @@ mod tests {
         max_lane_ratio: usize,
         len_a: usize,
         len_b: usize,
-    ) -> bool {
+    ) -> DualKernelDecisionDetail {
         match mode {
-            DualKernelMode::Sequential => false,
-            DualKernelMode::Fused => true,
+            DualKernelMode::Sequential => DualKernelDecisionDetail {
+                decision: DualKernelDecision::Sequential,
+                reason: DualKernelDecisionReason::ForcedSequentialMode,
+            },
+            DualKernelMode::Fused => DualKernelDecisionDetail {
+                decision: DualKernelDecision::Fused,
+                reason: DualKernelDecisionReason::ForcedFusedMode,
+            },
             DualKernelMode::Auto => {
                 let total = len_a.saturating_add(len_b);
-                in_window(total, min_total, max_total)
-                    && len_a.min(len_b) >= min_lane
-                    && lane_ratio_within(len_a, len_b, max_lane_ratio)
+                if let Some(reason) = window_gate_reason(total, min_total, max_total) {
+                    return DualKernelDecisionDetail {
+                        decision: DualKernelDecision::Sequential,
+                        reason,
+                    };
+                }
+                if len_a.min(len_b) < min_lane {
+                    return DualKernelDecisionDetail {
+                        decision: DualKernelDecision::Sequential,
+                        reason: DualKernelDecisionReason::LaneBelowMinFloor,
+                    };
+                }
+                if !lane_ratio_within(len_a, len_b, max_lane_ratio) {
+                    return DualKernelDecisionDetail {
+                        decision: DualKernelDecision::Sequential,
+                        reason: DualKernelDecisionReason::LaneRatioExceeded,
+                    };
+                }
+                DualKernelDecisionDetail {
+                    decision: DualKernelDecision::Fused,
+                    reason: DualKernelDecisionReason::EligibleAutoWindow,
+                }
             }
         }
     }
@@ -4188,10 +4220,11 @@ mod tests {
             ("RQ-E-GF256-DUAL-005", 15360usize, 15360usize),
             ("RQ-E-GF256-DUAL-006", 16384usize, 16384usize),
             ("RQ-E-GF256-DUAL-007", 12288usize, 1536usize),
+            ("RQ-E-GF256-DUAL-008", 16385usize, 8191usize),
         ];
 
         for (scenario_id, len_a, len_b) in scenarios {
-            let expected_mul = expected_decision_from_snapshot(
+            let expected_mul = expected_decision_detail_from_snapshot(
                 snapshot.mode,
                 snapshot.mul_min_total,
                 snapshot.mul_max_total,
@@ -4200,7 +4233,7 @@ mod tests {
                 len_a,
                 len_b,
             );
-            let expected_addmul = expected_decision_from_snapshot(
+            let expected_addmul = expected_decision_detail_from_snapshot(
                 snapshot.mode,
                 snapshot.addmul_min_total,
                 snapshot.addmul_max_total,
@@ -4209,8 +4242,8 @@ mod tests {
                 len_a,
                 len_b,
             );
-            let mul_actual = dual_mul_kernel_decision(len_a, len_b).is_fused();
-            let addmul_actual = dual_addmul_kernel_decision(len_a, len_b).is_fused();
+            let mul_actual = dual_mul_kernel_decision_detail(len_a, len_b);
+            let addmul_actual = dual_addmul_kernel_decision_detail(len_a, len_b);
             assert_eq!(
                 mul_actual, expected_mul,
                 "{context}; scenario_id={scenario_id}; mul mismatch for lane_a={len_a}, lane_b={len_b}"
@@ -4764,6 +4797,7 @@ mod tests {
             (12288usize, 12288usize),
             (12288usize, 1536usize),
             (16384usize, 16384usize),
+            (16385usize, 8191usize),
         ] {
             assert_eq!(
                 dual_mul_kernel_decision(len_a, len_b),

@@ -152,6 +152,7 @@ Probe log schema:
 - `manifest_schema_version`, `profile_schema_version`
 - `scenario_id`, `seed`
 - `kernel`, `architecture_class`, `active_profile_architecture_class`
+- `target_arch`, `target_os`, `target_env`, `target_endian`, `target_pointer_width_bits`
 - `mode`, `profile_pack`, `profile_fallback_reason`
 - `rejected_profile_packs` lists every non-selected pack id for the active profile selection
 - `profile_catalog_count`, `tuning_candidate_catalog_count`
@@ -162,6 +163,7 @@ Probe log schema:
 - `max_lane_ratio_env_override`
 - `selected_tuning_candidate_id`, `rejected_tuning_candidate_ids`
 - `command_bundle` keeps the manifest-side `gf256_primitives` comparator bundle distinct from the probe `repro_command`
+- `replay_pointer`
 - `lane_len_a`, `lane_len_b`, `total_len`, `lane_ratio`
 - `mul_window_min`, `mul_window_max`
 - `addmul_window_min`, `addmul_window_max`, `addmul_min_lane`
@@ -182,7 +184,8 @@ Override truthfulness rule:
   `decision_role = runtime_override_not_canonical_profile_selection`,
   `decision_artifact_id = manual_env_override_unbacked`,
   `replay_pointer = replay:rq-e-gf256-profile-pack-env-override-v1`
-  and an override-specific `command_bundle` placeholder that tells operators to replay from the emitted override fields
+  and an override-specific `command_bundle = rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives`
+  placeholder that tells operators to replay from the emitted override fields
 
 Coverage intent:
 
@@ -353,6 +356,13 @@ Contract note: `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` is
 intentionally a narrowed single-scenario guardrail packet. Any broader
 multi-scenario high-confidence refresh must publish a new artifact/schema
 version rather than silently mutating this `highconf_v1` contract in place.
+
+Scope boundary note: both `artifacts/raptorq_track_e_gf256_p95p99_v1.json`
+and `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` intentionally
+exclude `addmul_slices2_c1_auto` / `addmul_slices2_c1_sequential` from their
+percentile-scored `operation_scope`. The `c==1` addmul fast path reuses
+dual-add semantics and is covered separately by deterministic bench validation
+via `addmul_slices2_c1_bit_exact` plus the dedicated benchmark IDs above.
 
 ### E5 Broader Multi-Scenario Directional Refresh (`asupersync-36m6p`, 2026-03-15)
 

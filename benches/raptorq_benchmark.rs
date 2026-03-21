@@ -466,7 +466,7 @@ fn gf256_scenarios() -> [Gf256BenchScenario; 5] {
     ]
 }
 
-fn gf256_dual_policy_scenarios() -> [Gf256DualPolicyScenario; 7] {
+fn gf256_dual_policy_scenarios() -> [Gf256DualPolicyScenario; 8] {
     [
         Gf256DualPolicyScenario {
             scenario_id: "RQ-E-GF256-DUAL-001",
@@ -516,6 +516,13 @@ fn gf256_dual_policy_scenarios() -> [Gf256DualPolicyScenario; 7] {
             lane_a_len: 12288,
             lane_b_len: 1536,
             mul_const: 211,
+        },
+        Gf256DualPolicyScenario {
+            scenario_id: "RQ-E-GF256-DUAL-008",
+            seed: 0x2008,
+            lane_a_len: 16385,
+            lane_b_len: 8191,
+            mul_const: 223,
         },
     ]
 }

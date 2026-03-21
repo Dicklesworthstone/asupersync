@@ -27,6 +27,11 @@
       "addmul_slices2_fused",
       "addmul_slices2_sequential"
     ],
+    "excluded_operation_scope": [
+      "addmul_slices2_c1_auto",
+      "addmul_slices2_c1_sequential"
+    ],
+    "scope_boundary_note": "The c==1 addmul fast path is intentionally excluded from this percentile corpus. It reuses dual-add semantics and remains covered separately by deterministic bench validation via addmul_slices2_c1_bit_exact and the benchmark IDs addmul_slices2_c1_auto/addmul_slices2_c1_sequential.",
     "criterion_settings": {
       "sample_size": 60,
       "warm_up_time_seconds": 0.2,

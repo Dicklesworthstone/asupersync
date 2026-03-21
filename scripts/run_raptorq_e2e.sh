@@ -324,10 +324,18 @@ validate_dual_policy_probe_contract() {
         length >= 7 and
         all(.[];
             .schema_version == "raptorq-track-e-dual-policy-probe-v4" and
+            (.manifest_schema_version | type == "string" and length > 0) and
+            (.profile_schema_version | type == "string" and length > 0) and
             (.scenario_id | type == "string" and length > 0) and
             (.seed | type == "number" and . >= 0 and floor == .) and
+            (.kernel | type == "string" and length > 0) and
             (.mode == "Auto" or .mode == "Sequential" or .mode == "Fused") and
             (.architecture_class | type == "string" and length > 0) and
+            (.target_arch | type == "string" and length > 0) and
+            (.target_os | type == "string" and length > 0) and
+            (.target_env | type == "string" and length > 0) and
+            (.target_endian | type == "string" and length > 0) and
+            (.target_pointer_width_bits | type == "number" and . >= 1 and floor == .) and
             (.profile_pack | type == "string" and length > 0) and
             (.profile_fallback_reason | type == "string" and length > 0) and
             (.rejected_profile_packs | type == "string" and length > 0) and
@@ -384,6 +392,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_unroll == 0 and
                     .selected_tuning_prefetch_distance == 0 and
                     .selected_tuning_fusion_shape == "unknown" and
+                    .command_bundle == "rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives" and
                     .decision_artifact_id == "manual_env_override_unbacked" and
                     .decision_role == "runtime_override_not_canonical_profile_selection" and
                     .replay_pointer == "replay:rq-e-gf256-profile-pack-env-override-v1" and
@@ -400,6 +409,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_tile_bytes >= 1 and
                     .selected_tuning_unroll >= 1 and
                     .selected_tuning_fusion_shape != "unknown" and
+                    .command_bundle == "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives" and
                     .decision_artifact_id != "manual_env_override_unbacked" and
                     .decision_role != "runtime_override_not_canonical_profile_selection" and
                     .replay_pointer != "replay:rq-e-gf256-profile-pack-env-override-v1"
