@@ -124,7 +124,7 @@ jobs:
     name: Publish to crates.io
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     if: ${{ !contains(needs.plan.outputs.tag, '-') }}
     steps:
       - uses: actions/checkout@v4
@@ -145,8 +145,16 @@ jobs:
           fi
           echo "Version verified: $cargo_version"
 
-      - name: Dry run publish (root crate)
-        run: cargo publish --dry-run --locked
+      - name: Dry run/package release crates
+        run: |
+          set -e
+          cargo publish -p asupersync-macros --dry-run --locked
+          cargo publish -p franken-kernel --dry-run --locked
+          cargo publish -p franken-evidence --dry-run --locked
+          cargo publish -p asupersync-conformance --dry-run --locked
+          cargo package -p franken-decision --locked
+          cargo package -p asupersync --locked
+          cargo package -p frankenlab --locked
 
       - name: Publish crates to crates.io
         if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
@@ -168,16 +176,24 @@ jobs:
 
           publish_if_needed asupersync-macros
           sleep 30
+          publish_if_needed franken-kernel
+          sleep 30
+          publish_if_needed franken-evidence
+          sleep 30
           publish_if_needed asupersync-conformance
           sleep 30
+          publish_if_needed franken-decision
+          sleep 30
           publish_if_needed asupersync
+          sleep 30
+          publish_if_needed frankenlab
 
       - name: Summary
         run: |
           echo "## Crates.io Publish" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [[ -n "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]]; then
-            echo "Published asupersync v${{ needs.plan.outputs.version }} (+ macros/conformance) to crates.io" >> $GITHUB_STEP_SUMMARY
+            echo "Published asupersync v${{ needs.plan.outputs.version }} plus supporting workspace crates to crates.io" >> $GITHUB_STEP_SUMMARY
           else
             echo "Skipped - CARGO_REGISTRY_TOKEN not configured" >> $GITHUB_STEP_SUMMARY
           fi
