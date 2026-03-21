@@ -377,42 +377,56 @@ percentile-scored `operation_scope`. The `c==1` addmul fast path reuses
 dual-add semantics and is covered separately by deterministic bench validation
 via `addmul_slices2_c1_bit_exact` plus the dedicated benchmark IDs above.
 
-### E5 Broader Multi-Scenario Directional Refresh (`asupersync-36m6p`, 2026-03-15)
+### E5 Broader Multi-Scenario Guardrail Packets (`asupersync-36m6p`, 2026-03-21)
 
-`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` is the new
-versioned broader packet for the seven-scenario `RQ-E-GF256-DUAL-*` corpus
-already anchored in `artifacts/raptorq_track_e_gf256_bench_v1.json` under
+`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the
+historical short-window directional packet for the seven-scenario
+`RQ-E-GF256-DUAL-*` corpus already anchored in
+`artifacts/raptorq_track_e_gf256_bench_v1.json` under
 `simd_policy_ablation_2026_03_04`.
 
 - `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v2`
 - `evidence_role = broader_multiscenario_directional_refresh`
 - `scope_contract = same_target_multi_scenario_directional_corpus`
 - `confidence_contract = short_window_directional_not_closure_grade`
-- `successor_policy = requires_new_artifact_version_for_raw_sample_or_longer_window_closure_attempt`
-- scenario scope widens to `RQ-E-GF256-DUAL-001..007`
+- selected candidate remains `candidate_addmul_window_only`
+
+`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` is now the
+current broader longer-window negative-guardrail packet for the eight-scenario
+`RQ-E-GF256-DUAL-001..008` corpus.
+
+- `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v3`
+- `evidence_role = broader_multiscenario_longer_window_guardrail`
+- `scope_contract = same_target_multi_scenario_longer_window_corpus`
+- `confidence_contract = longer_window_interval_proxy_negative_guardrail`
+- `successor_policy = requires_new_artifact_version_for_raw_sample_positive_retest_or_profile_contract_change`
+- scenario scope widens to `RQ-E-GF256-DUAL-001..008`
 - selected candidate remains `candidate_addmul_window_only`
 - canonical current x86 default contract remains:
   - `mul_window = unchanged: disabled (mul_min_total > mul_max_total)`
   - `addmul_window = 24576..32768 total bytes`
   - `addmul_min_lane = 8192`
 
-Interpretation: this broader packet complements rather than replaces
+Interpretation: these broader packets complement rather than replace
 `highconf_v1`. The narrowed guardrail still owns the live closure-status check
-(`ready_for_e5_closure = false`), while `multiscenario_refresh_v2` proves that
-broader scenario coverage and targeted addmul uplift now exist in artifact
-form. That is useful scope expansion, but it is still short-window directional
-evidence, not closure-grade tail proof.
+(`ready_for_e5_closure = false`). `multiscenario_refresh_v2` preserves the
+historical short-window directional read, while `multiscenario_refresh_v3`
+keeps the current broader longer-window negative result machine-checkable:
+overall broader-corpus percentile proxies still regress under auto, so the
+broader packet remains a guardrail rather than closure-grade proof.
 
 Closure consequence:
 
 - `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` remains the
-  negative-evidence guardrail for the current not-ready state
-- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` records the
-  broader corpus and the current x86 default contract without claiming AC#4
-  closure
-- a future closure attempt still needs raw-sample or longer-window
-  multi-scenario evidence and must publish a new artifact/schema version rather
-  than mutating either checked-in packet in place
+  narrowed negative-evidence guardrail for the current not-ready state
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the
+  historical broader directional packet
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` is the
+  current broader longer-window negative guardrail and still keeps
+  `ready_for_e5_closure = false`
+- a future closure attempt still needs raw-sample or materially better broader
+  evidence and must publish a new artifact/schema version rather than mutating
+  any checked-in packet in place
 
 ## Calibration Checklist for Closure
 

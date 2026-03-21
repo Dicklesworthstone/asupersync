@@ -143,12 +143,12 @@ The E5 dependency is intentionally modeled as a three-part evidence contract:
   current broader longer-window negative guardrail. It expands the corpus to
   `RQ-E-GF256-DUAL-001..008` and still keeps `ready_for_e5_closure = false`.
 
-In invariant-test terms, the current E5 evidence posture is
-`confidence_contract = short_window_directional_not_closure_grade`: the
-directional refresh is informative for rollout posture, but it is not sufficient
-to close the dependency on its own. The broader successor packet now carries
-`confidence_contract = longer_window_interval_proxy_negative_guardrail`, which
-means the longer-window broader read exists but still lands as negative
+In invariant-test terms, the historical directional packet keeps
+`confidence_contract = short_window_directional_not_closure_grade`: that
+short-window refresh is informative for rollout posture, but it is not
+sufficient to close the dependency on its own. The current broader successor
+packet now carries `confidence_contract = longer_window_interval_proxy_negative_guardrail`,
+which means the longer-window broader read exists but still lands as negative
 evidence rather than closure-grade proof.
 
 That means Track-G still needs a broader positive E5 packet before G7 can

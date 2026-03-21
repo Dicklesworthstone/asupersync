@@ -14,7 +14,9 @@ mod common;
 
 use asupersync::raptorq::decision_contract::G7_DECISION_REPLAY_REF;
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::gf256::{Gf256, Gf256ProfilePackId, gf256_profile_pack_catalog};
+use asupersync::raptorq::gf256::{
+    Gf256, Gf256ProfilePackId, dual_kernel_policy_snapshot, gf256_profile_pack_catalog,
+};
 use asupersync::raptorq::proof::ProofOutcome;
 use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
 use asupersync::types::ObjectId;
@@ -29,7 +31,7 @@ const E3_TRACK_E_GF256_P95P99_SCHEMA_VERSION: &str = "raptorq-track-e-gf256-p95p
 const E3_TRACK_E_GF256_P95P99_HIGHCONF_SCHEMA_VERSION: &str =
     "raptorq-track-e-gf256-p95p99-highconf-v1";
 const E5_TRACK_E_MULTISCENARIO_REFRESH_SCHEMA_VERSION: &str =
-    "raptorq-track-e-gf256-multiscenario-refresh-v2";
+    "raptorq-track-e-gf256-multiscenario-refresh-v3";
 const H3_POST_CLOSURE_BACKLOG_SCHEMA_VERSION: &str =
     "raptorq-h3-post-closure-opportunity-backlog-v1";
 const H2_PROGRAM_CLOSURE_PACKET_SCHEMA_VERSION: &str =
@@ -2005,7 +2007,7 @@ fn e3_track_e_highconf_closure_assessment_matches_recorded_tails() {
 #[allow(clippy::too_many_lines)]
 fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
     let refresh: serde_json::Value = serde_json::from_str(include_str!(
-        "../artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json"
+        "../artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json"
     ))
     .expect("Track-E broader multiscenario refresh artifact must be valid JSON");
     let bench: serde_json::Value = serde_json::from_str(include_str!(
@@ -2029,22 +2031,24 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
     );
     assert_eq!(
         refresh["evidence_role"].as_str(),
-        Some("broader_multiscenario_directional_refresh"),
+        Some("broader_multiscenario_longer_window_guardrail"),
         "broader refresh must declare its evidence role explicitly"
     );
     assert_eq!(
         refresh["scope_contract"].as_str(),
-        Some("same_target_multi_scenario_directional_corpus"),
+        Some("same_target_multi_scenario_longer_window_corpus"),
         "broader refresh must keep its scenario-scope contract explicit"
     );
     assert_eq!(
         refresh["confidence_contract"].as_str(),
-        Some("short_window_directional_not_closure_grade"),
+        Some("longer_window_interval_proxy_negative_guardrail"),
         "broader refresh must explicitly remain non-closure-grade"
     );
     assert_eq!(
         refresh["successor_policy"].as_str(),
-        Some("requires_new_artifact_version_for_raw_sample_or_longer_window_closure_attempt"),
+        Some(
+            "requires_new_artifact_version_for_raw_sample_positive_retest_or_profile_contract_change"
+        ),
         "closure-grade refreshes must version separately instead of mutating v2 semantics in place"
     );
 
@@ -2064,8 +2068,9 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
         vec![
             "artifacts/raptorq_track_e_gf256_bench_v1.json".to_string(),
             "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json".to_string(),
+            "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json".to_string(),
         ],
-        "broader refresh must cite bench and high-confidence guardrail artifacts in order"
+        "broader refresh must cite bench, narrowed guardrail, and historical directional packet in order"
     );
 
     let refresh_scope = refresh["methodology"]["scenario_scope"]
@@ -2092,12 +2097,18 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
         .collect::<Vec<_>>();
     assert_eq!(
         refresh_scope.len(),
-        7,
-        "broader refresh must widen scope to the seven-scenario dual corpus"
+        8,
+        "broader refresh must widen scope to the eight-scenario dual corpus"
     );
     assert_eq!(
-        refresh_scope, bench_scope,
-        "broader refresh scenario scope must match the canonical 2026-03-04 corpus"
+        &refresh_scope[..bench_scope.len()],
+        bench_scope.as_slice(),
+        "broader refresh must preserve the canonical 2026-03-04 seven-scenario prefix"
+    );
+    assert_eq!(
+        refresh_scope.last().map(String::as_str),
+        Some("RQ-E-GF256-DUAL-008"),
+        "broader refresh must add the DUAL-008 scenario to the broader corpus"
     );
 
     let commands = refresh["methodology"]["commands"]
@@ -2106,7 +2117,7 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
     assert_eq!(
         commands.len(),
         3,
-        "broader refresh must keep baseline plus two candidate command bundles"
+        "broader refresh must keep baseline/auto/rollback command bundles"
     );
     for command in commands {
         let command = command
@@ -2117,33 +2128,40 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
             "broader refresh command must be rch-offloaded: {command}"
         );
         assert!(
-            command.contains("CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual"),
-            "broader refresh command must pin the same target dir as the canonical corpus: {command}"
+            command.contains("CARGO_TARGET_DIR=/tmp/rch-e5-long"),
+            "broader refresh command must pin a dedicated longer-window target dir family: {command}"
         );
         assert!(
-            command.contains("--sample-size 20"),
-            "broader refresh command must preserve the short-window sample-size 20 contract: {command}"
+            command.contains("--sample-size 40"),
+            "broader refresh command must preserve the longer-window sample-size 40 contract: {command}"
+        );
+        assert!(
+            command.contains("--warm-up-time 0.2")
+                && command.contains("--measurement-time 0.2")
+                && command.contains("--features simd-intrinsics"),
+            "broader refresh command must preserve the longer-window SIMD benchmark contract: {command}"
         );
     }
 
-    let selected = refresh["candidate_results"]
-        .as_array()
-        .expect("multiscenario refresh candidate_results must be an array")
-        .iter()
-        .find(|entry| entry["selected"].as_bool() == Some(true))
-        .expect("multiscenario refresh must mark exactly one selected candidate");
-    assert_eq!(
-        selected["id"].as_str(),
-        Some("candidate_addmul_window_only"),
-        "broader refresh must keep candidate_addmul_window_only as the selected current contract"
-    );
-    let targeted_average =
-        selected["targeted_large_lane_deltas_pct"]["targeted_addmul_auto_average"]
-            .as_f64()
-            .expect("selected candidate targeted average must be numeric");
+    let auto_mul = &refresh["aggregate_deltas_pct"]["auto_vs_baseline"]["mul_slices2_auto"];
     assert!(
-        (targeted_average - (-8.9924)).abs() < f64::EPSILON,
-        "selected candidate targeted average must remain the recorded -8.9924% uplift"
+        (auto_mul["average_median_delta_pct"]
+            .as_f64()
+            .expect("mul aggregate delta must be numeric")
+            - (-1.07))
+            .abs()
+            < 1e-9,
+        "broader refresh must preserve the near-neutral/slightly favorable mul median delta"
+    );
+    assert!(
+        (refresh["aggregate_deltas_pct"]["auto_vs_baseline"]["addmul_slices2_auto"]
+            ["average_tail_delta_pct"]
+            .as_f64()
+            .expect("addmul aggregate delta must be numeric")
+            - 9.7188)
+            .abs()
+            < 1e-9,
+        "broader refresh must preserve the recorded broader addmul tail regression"
     );
 
     let current_contract = &refresh["current_contract_summary"];
@@ -2190,9 +2208,9 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
         "broader refresh must explicitly record that wider scenario coverage now exists"
     );
     assert_eq!(
-        closure["directional_material_uplift_demonstrated"].as_bool(),
+        closure["longer_window_demonstrated"].as_bool(),
         Some(true),
-        "broader refresh must explicitly record that directional targeted uplift exists"
+        "broader refresh must explicitly record that longer-window evidence now exists"
     );
     assert_eq!(
         closure["closure_grade_material_uplift_demonstrated"].as_bool(),
@@ -2200,9 +2218,24 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
         "broader refresh must not overstate the evidence as closure-grade"
     );
     assert_eq!(
-        closure["tail_coverage_status"].as_str(),
-        Some("directional_short_window_only"),
-        "broader refresh must preserve the short-window tail-coverage caveat"
+        closure["material_regression_demonstrated"].as_bool(),
+        Some(true),
+        "broader refresh must explicitly record the broader regression signal"
+    );
+    assert_eq!(
+        closure["overall_tail_direction_vs_baseline"].as_str(),
+        Some("regressed"),
+        "broader refresh must keep the overall broader-corpus tail direction explicit"
+    );
+    assert_eq!(
+        closure["operation_tail_pattern_vs_baseline"].as_str(),
+        Some("mul_mixed_addmul_regressed"),
+        "broader refresh must preserve the mixed-mul / regressed-addmul summary"
+    );
+    assert_eq!(
+        closure["scope_sufficiency"].as_str(),
+        Some("broader_corpus_sufficient_for_negative_guardrail_only"),
+        "broader refresh must keep the broader negative-guardrail-only sufficiency contract explicit"
     );
     assert_eq!(
         closure["linked_guardrail_artifact"].as_str(),
@@ -2214,6 +2247,11 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
         highconf["closure_assessment"]["ready_for_e5_closure"].as_bool(),
         "broader refresh must mirror the current guardrail not-ready state"
     );
+    assert_eq!(
+        closure["supersedes_directional_refresh_artifact"].as_str(),
+        Some("artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json"),
+        "broader refresh must explicitly supersede the historical v2 directional packet"
+    );
     assert!(
         closure["blocking_requirements"]
             .as_array()
@@ -2224,7 +2262,8 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
         refresh["limitations"].as_array().is_some_and(|items| {
             items.iter().any(|item| {
                 item.as_str().is_some_and(|text| {
-                    text.contains("new artifact/schema version") && text.contains("v2 packet")
+                    text.contains("supersedes the broader directional refresh")
+                        && text.contains("highconf_v1")
                 })
             })
         }),
@@ -2417,6 +2456,61 @@ fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
         Some(x86.addmul_min_lane as u64),
         "artifact must keep the x86 addmul lane-floor contract in sync with live metadata"
     );
+}
+
+/// Validate the live runtime policy snapshot carries the same decision
+/// provenance as the effective profile-pack contract it selected.
+#[test]
+fn e5_live_dual_policy_snapshot_surfaces_decision_provenance() {
+    let snapshot = dual_kernel_policy_snapshot();
+    let selected_profile = gf256_profile_pack_catalog()
+        .iter()
+        .find(|metadata| metadata.profile_pack == snapshot.profile_pack)
+        .expect("active profile pack must exist in the deterministic catalog");
+
+    assert!(!snapshot.decision_artifact_id.is_empty());
+    assert!(!snapshot.decision_role.is_empty());
+    assert!(
+        !snapshot.decision_evidence_status.as_str().is_empty(),
+        "live dual-policy snapshot must carry a non-empty evidence maturity label"
+    );
+
+    if snapshot.decision_artifact_id == "manual_env_override_unbacked" {
+        assert_eq!(
+            snapshot.decision_artifact_id, "manual_env_override_unbacked",
+            "override policy snapshots must fail closed on decision provenance"
+        );
+        assert_eq!(
+            snapshot.decision_role, "runtime_override_not_canonical_profile_selection",
+            "override policy snapshots must keep the override-specific decision role"
+        );
+        assert_eq!(
+            snapshot.decision_evidence_status.as_str(),
+            "runtime-override-unbacked",
+            "override policy snapshots must keep the override-specific evidence status"
+        );
+        assert_ne!(
+            snapshot.decision_artifact_id, selected_profile.decision_artifact_id,
+            "override policy snapshots must not keep the catalog artifact id"
+        );
+        assert_ne!(
+            snapshot.decision_evidence_status, selected_profile.decision_evidence_status,
+            "override policy snapshots must not keep the catalog evidence maturity"
+        );
+    } else {
+        assert_eq!(
+            snapshot.decision_artifact_id, selected_profile.decision_artifact_id,
+            "canonical policy snapshots must mirror the selected catalog artifact id"
+        );
+        assert_eq!(
+            snapshot.decision_role, selected_profile.decision_role,
+            "canonical policy snapshots must mirror the selected catalog decision role"
+        );
+        assert_eq!(
+            snapshot.decision_evidence_status, selected_profile.decision_evidence_status,
+            "canonical policy snapshots must mirror the selected catalog evidence maturity"
+        );
+    }
 }
 
 /// Validate the Track-E bench policy logs emit the live decision-metadata
@@ -2925,8 +3019,8 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
     assert!(
         artifact_refs
             .iter()
-            .any(|entry| entry.contains("raptorq_track_e_gf256_multiscenario_refresh_v2.json")),
-        "E5 decision card must reference the broader multiscenario refresh artifact"
+            .any(|entry| entry.contains("raptorq_track_e_gf256_multiscenario_refresh_v3.json")),
+        "E5 decision card must reference the current broader multiscenario negative guardrail artifact"
     );
     assert!(
         pending_blockers.iter().any(|entry| {
@@ -2938,13 +3032,13 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
     assert!(
         pending_blockers
             .iter()
-            .any(|entry| entry.contains("short_window_directional_not_closure_grade")),
-        "E5 pending blockers must preserve the broader refresh non-closure-grade contract"
+            .any(|entry| entry.contains("longer_window_interval_proxy_negative_guardrail")),
+        "E5 pending blockers must preserve the current broader negative-guardrail contract"
     );
     assert!(
-        pending_blockers
-            .iter()
-            .any(|entry| entry.contains("raw-sample") || entry.contains("longer-window")),
+        pending_blockers.iter().any(
+            |entry| entry.contains("raw-sample") || entry.contains("materially better broader")
+        ),
         "E5 pending blockers must preserve the remaining closure-grade evidence requirement"
     );
 
@@ -2955,8 +3049,8 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
         "G3 closure remains blocked by E5",
         "new artifact/schema version",
         "highconf_v1",
-        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
-        "short_window_directional_not_closure_grade",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+        "longer_window_interval_proxy_negative_guardrail",
     ] {
         assert!(
             RAPTORQ_OPT_DECISIONS_MD.contains(required),
@@ -2971,10 +3065,11 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
 fn e5_profile_pack_doc_explains_multiscenario_refresh_contract() {
     for required in [
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
-        "schema_version = raptorq-track-e-gf256-multiscenario-refresh-v2",
-        "evidence_role = broader_multiscenario_directional_refresh",
-        "scope_contract = same_target_multi_scenario_directional_corpus",
-        "confidence_contract = short_window_directional_not_closure_grade",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+        "schema_version = raptorq-track-e-gf256-multiscenario-refresh-v3",
+        "evidence_role = broader_multiscenario_longer_window_guardrail",
+        "scope_contract = same_target_multi_scenario_longer_window_corpus",
+        "confidence_contract = longer_window_interval_proxy_negative_guardrail",
         "candidate_addmul_window_only",
         "ready_for_e5_closure = false",
     ] {
@@ -3676,6 +3771,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
     for required in [
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
     ] {
         assert!(
             e5_evidence_refs.contains(required),
@@ -3703,7 +3799,8 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         assert!(
             remaining_requirements
                 .iter()
-                .any(|entry| entry.contains("raw-sample") || entry.contains("longer-window")),
+                .any(|entry| entry.contains("raw-sample")
+                    || entry.contains("materially better broader")),
             "remaining_requirements must preserve the missing closure-grade E5 evidence requirement"
         );
     }
@@ -3913,11 +4010,13 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "artifacts/raptorq_replay_catalog_v1.json",
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
         "closure_readiness",
         "ready_to_close",
         "asupersync-3ltrv",
         "highconf_v1",
         "short_window_directional_not_closure_grade",
+        "longer_window_interval_proxy_negative_guardrail",
         "raw-sample",
         "asupersync-2zu9p",
         "argmin_expected_loss",

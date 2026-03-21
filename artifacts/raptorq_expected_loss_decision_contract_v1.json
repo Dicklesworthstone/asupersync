@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-m7o6i",
   "parent_track_bead_id": "asupersync-2cyx5",
   "external_ref": "bd-2bd8e",
-  "generated_at_utc": "2026-03-21T07:24:00Z",
+  "generated_at_utc": "2026-03-21T16:50:12Z",
   "contract": {
     "states": [
       "healthy",
@@ -413,6 +413,7 @@
         "evidence_refs": [
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
           "thread:coord-2026-02-19"
         ]
       },
@@ -439,7 +440,7 @@
     ],
     "remaining_requirements": [
       "Close asupersync-36m6p (E5) so closure_readiness dependencies all reach required_status=closed.",
-      "Publish the raw-sample or longer-window broader E5 closure-grade evidence packet so Track-G is not relying only on the narrowed highconf_v1 guardrail and short-window multiscenario refresh."
+      "Publish the raw-sample or materially better broader E5 closure-grade evidence packet so Track-G is not relying only on the narrowed highconf_v1 guardrail and the current longer-window negative multiscenario guardrail."
     ],
     "track_g_handoff": {
       "bead_id": "asupersync-2cyx5",
