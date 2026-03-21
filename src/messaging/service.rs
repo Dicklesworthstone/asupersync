@@ -605,6 +605,13 @@ impl RequestCertificate {
         validate_service_text("caller", &self.caller)?;
         validate_service_text("subject", &self.subject)?;
         validate_service_text("service_class", &self.service_class)?;
+        match &self.reply_space_rule {
+            super::ir::ReplySpaceRule::CallerInbox => {}
+            super::ir::ReplySpaceRule::SharedPrefix { prefix }
+            | super::ir::ReplySpaceRule::DedicatedPrefix { prefix } => {
+                validate_service_text("reply_space_rule.prefix", prefix)?;
+            }
+        }
         if self.timeout.is_some_and(|d| d.is_zero()) {
             return Err(ServiceObligationError::ZeroTimeout);
         }
@@ -698,8 +705,21 @@ impl ReplyCertificate {
     pub fn validate(&self) -> Result<(), ServiceObligationError> {
         validate_service_text("request_id", &self.request_id)?;
         validate_service_text("callee", &self.callee)?;
-        if self.is_chunked && self.total_chunks.is_none() {
-            return Err(ServiceObligationError::ChunkedReplyMissingCount);
+        if self.is_chunked {
+            if self.total_chunks.is_none() {
+                return Err(ServiceObligationError::ChunkedReplyMissingCount);
+            }
+        } else if self.total_chunks.is_some() {
+            return Err(ServiceObligationError::UnaryReplyChunkCountPresent);
+        }
+        if self.delivery_class >= DeliveryClass::ObligationBacked
+            && self.service_obligation_id.is_none()
+        {
+            return Err(
+                ServiceObligationError::TrackedReplyMissingParentObligationId {
+                    delivery_class: self.delivery_class,
+                },
+            );
         }
         Ok(())
     }
@@ -762,6 +782,11 @@ impl ChunkedReplyObligation {
         validate_service_text("request_id", &request_id)?;
         if expected_chunks == Some(0) {
             return Err(ServiceObligationError::ChunkedReplyZeroExpected);
+        }
+        if delivery_class >= DeliveryClass::ObligationBacked && service_obligation_id.is_none() {
+            return Err(
+                ServiceObligationError::TrackedReplyMissingParentObligationId { delivery_class },
+            );
         }
         validate_reply_boundary(delivery_class, chunk_ack_boundary, false)?;
         Ok(Self {
@@ -1575,9 +1600,20 @@ pub enum ServiceObligationError {
         /// Whether explicit receipt was requested.
         receipt_required: bool,
     },
+    /// Tracked reply state must keep the parent service obligation id.
+    #[error(
+        "delivery class `{delivery_class}` requires a parent service obligation id for tracked reply state"
+    )]
+    TrackedReplyMissingParentObligationId {
+        /// Delivery class bound to the reply.
+        delivery_class: DeliveryClass,
+    },
     /// Chunked reply declared as chunked but missing expected count.
     #[error("chunked reply certificate must declare total_chunks")]
     ChunkedReplyMissingCount,
+    /// Unary replies must not claim streamed chunk counts.
+    #[error("unary reply certificate must not declare total_chunks")]
+    UnaryReplyChunkCountPresent,
     /// Chunked reply declared zero expected chunks.
     #[error("chunked reply expected_chunks must be > 0")]
     ChunkedReplyZeroExpected,
@@ -2981,6 +3017,29 @@ mod tests {
     }
 
     #[test]
+    fn request_certificate_rejects_empty_reply_space_prefix() {
+        let cert = RequestCertificate {
+            request_id: "req-1".into(),
+            caller: "caller".into(),
+            subject: "sub".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            reply_space_rule: super::super::ir::ReplySpaceRule::SharedPrefix {
+                prefix: "   ".into(),
+            },
+            service_class: "svc".into(),
+            capability_fingerprint: 0,
+            issued_at: Time::from_nanos(1),
+            timeout: None,
+        };
+        assert_eq!(
+            cert.validate(),
+            Err(ServiceObligationError::EmptyField {
+                field: "reply_space_rule.prefix",
+            })
+        );
+    }
+
+    #[test]
     fn request_certificate_digest_is_deterministic() {
         let cert = RequestCertificate {
             request_id: "req-1".into(),
@@ -3067,6 +3126,48 @@ mod tests {
     }
 
     #[test]
+    fn reply_certificate_rejects_unary_chunk_count() {
+        let cert = ReplyCertificate {
+            request_id: "req-1".into(),
+            callee: "callee-a".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            service_obligation_id: None,
+            payload_digest: 0,
+            is_chunked: false,
+            total_chunks: Some(1),
+            issued_at: Time::from_nanos(1),
+            service_latency: Duration::from_millis(1),
+        };
+        assert!(matches!(
+            cert.validate(),
+            Err(ServiceObligationError::UnaryReplyChunkCountPresent)
+        ));
+    }
+
+    #[test]
+    fn reply_certificate_rejects_tracked_class_without_service_obligation_id() {
+        let cert = ReplyCertificate {
+            request_id: "req-1".into(),
+            callee: "callee-a".into(),
+            delivery_class: DeliveryClass::ObligationBacked,
+            service_obligation_id: None,
+            payload_digest: 0,
+            is_chunked: false,
+            total_chunks: None,
+            issued_at: Time::from_nanos(1),
+            service_latency: Duration::from_millis(1),
+        };
+        assert!(matches!(
+            cert.validate(),
+            Err(
+                ServiceObligationError::TrackedReplyMissingParentObligationId {
+                    delivery_class: DeliveryClass::ObligationBacked,
+                }
+            )
+        ));
+    }
+
+    #[test]
     fn reply_certificate_digest_is_deterministic() {
         let cert = ReplyCertificate {
             request_id: "req-1".into(),
@@ -3144,7 +3245,7 @@ mod tests {
         let mut chunked = ChunkedReplyObligation::new(
             "family-2".into(),
             "req-2".into(),
-            None,
+            Some(ObligationId::new_for_test(21, 0)),
             None, // unbounded
             DeliveryClass::ObligationBacked,
             AckKind::Served,
@@ -3283,7 +3384,7 @@ mod tests {
         let mut chunked = ChunkedReplyObligation::new(
             "family-6".into(),
             "req-6".into(),
-            None,
+            Some(ObligationId::new_for_test(22, 0)),
             Some(1), // bounded stream — finalize is allowed once the single chunk arrives
             DeliveryClass::ObligationBacked,
             AckKind::Served,
@@ -3304,7 +3405,7 @@ mod tests {
         let mut chunked = ChunkedReplyObligation::new(
             "family-7".into(),
             "req-7".into(),
-            None,
+            Some(ObligationId::new_for_test(23, 0)),
             Some(5),
             DeliveryClass::ObligationBacked,
             AckKind::Served,
@@ -3357,6 +3458,25 @@ mod tests {
                 requested_boundary: AckKind::Received,
                 receipt_required: false,
             })
+        ));
+    }
+
+    #[test]
+    fn chunked_reply_rejects_tracked_class_without_parent_obligation_id() {
+        assert!(matches!(
+            ChunkedReplyObligation::new(
+                "family-tracked-missing-parent".into(),
+                "req-tracked-missing-parent".into(),
+                None,
+                Some(1),
+                DeliveryClass::ObligationBacked,
+                AckKind::Served,
+            ),
+            Err(
+                ServiceObligationError::TrackedReplyMissingParentObligationId {
+                    delivery_class: DeliveryClass::ObligationBacked,
+                }
+            )
         ));
     }
 
