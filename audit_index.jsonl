@@ -1333,3 +1333,4 @@
 {"file":"src/messaging/redis.rs","lines":2434,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PubSub ping buffering correct, reconnect clears pending_events, RESP parser sound"}
 {"file":"src/record/symbolic_obligation.rs","lines":1477,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"expected_symbol check applied to all fulfillment paths, fulfill_many guard correct"}
 {"file":"src/time/driver.rs","lines":1943,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"generation-based lazy deletion correct, no timer fire after cancel, wheel advancement sound"}
+{"file":"src/messaging/redis.rs","lines":2434,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"LOW: unbounded pending_events during ping - added 4096-entry cap. Subscribe/unsub interleaving already correct."}

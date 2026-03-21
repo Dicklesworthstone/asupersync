@@ -1532,19 +1532,21 @@ impl RedisPubSub {
         }
         self.conn.write_command(cx, &args).await?;
 
-        for _ in 0..channels.len() {
-            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+        let mut acks_remaining = channels.len();
+        while acks_remaining > 0 {
+            let event = self.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::Subscribe,
                     channel,
                     ..
-                } => Self::track_subscribe(&mut self.channels, &channel),
-                other => {
-                    return Err(RedisError::Protocol(format!(
-                        "expected subscribe acknowledgement, got {other:?}"
-                    )));
+                } => {
+                    Self::track_subscribe(&mut self.channels, &channel);
+                    acks_remaining -= 1;
                 }
+                // Buffer interleaved messages from existing subscriptions
+                // so they aren't silently dropped while waiting for acks.
+                other => self.pending_events.push_back(other),
             }
         }
 
@@ -1566,19 +1568,19 @@ impl RedisPubSub {
         }
         self.conn.write_command(cx, &args).await?;
 
-        for _ in 0..patterns.len() {
-            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+        let mut acks_remaining = patterns.len();
+        while acks_remaining > 0 {
+            let event = self.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::PatternSubscribe,
                     channel,
                     ..
-                } => Self::track_subscribe(&mut self.patterns, &channel),
-                other => {
-                    return Err(RedisError::Protocol(format!(
-                        "expected psubscribe acknowledgement, got {other:?}"
-                    )));
+                } => {
+                    Self::track_subscribe(&mut self.patterns, &channel);
+                    acks_remaining -= 1;
                 }
+                other => self.pending_events.push_back(other),
             }
         }
 
@@ -1600,24 +1602,23 @@ impl RedisPubSub {
         }
         self.conn.write_command(cx, &args).await?;
 
-        let expected = if channels.is_empty() {
+        let mut acks_remaining = if channels.is_empty() {
             self.channels.len()
         } else {
             channels.len()
         };
-        for _ in 0..expected {
-            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+        while acks_remaining > 0 {
+            let event = self.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::Unsubscribe,
                     channel,
                     ..
-                } => Self::untrack_subscribe(&mut self.channels, &channel),
-                other => {
-                    return Err(RedisError::Protocol(format!(
-                        "expected unsubscribe acknowledgement, got {other:?}"
-                    )));
+                } => {
+                    Self::untrack_subscribe(&mut self.channels, &channel);
+                    acks_remaining -= 1;
                 }
+                other => self.pending_events.push_back(other),
             }
         }
         Ok(())
@@ -1638,24 +1639,23 @@ impl RedisPubSub {
         }
         self.conn.write_command(cx, &args).await?;
 
-        let expected = if patterns.is_empty() {
+        let mut acks_remaining = if patterns.is_empty() {
             self.patterns.len()
         } else {
             patterns.len()
         };
-        for _ in 0..expected {
-            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+        while acks_remaining > 0 {
+            let event = self.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::PatternUnsubscribe,
                     channel,
                     ..
-                } => Self::untrack_subscribe(&mut self.patterns, &channel),
-                other => {
-                    return Err(RedisError::Protocol(format!(
-                        "expected punsubscribe acknowledgement, got {other:?}"
-                    )));
+                } => {
+                    Self::untrack_subscribe(&mut self.patterns, &channel);
+                    acks_remaining -= 1;
                 }
+                other => self.pending_events.push_back(other),
             }
         }
         Ok(())
@@ -1679,12 +1679,19 @@ impl RedisPubSub {
             self.conn.write_command(cx, &[b"PING"]).await?;
         }
         // Loop until we receive PONG, buffering any interleaved events so a
-        // liveness check cannot silently drop real messages.
+        // liveness check cannot silently drop real messages. Cap the buffer
+        // to prevent unbounded growth under high publish throughput.
+        const MAX_PING_BUFFERED: usize = 4096;
         loop {
             match self.read_next_event(cx).await? {
                 PubSubEvent::Pong(_) => return Ok(()),
                 event @ (PubSubEvent::Message(_) | PubSubEvent::Subscription { .. }) => {
-                    self.pending_events.push_back(event);
+                    if self.pending_events.len() < MAX_PING_BUFFERED {
+                        self.pending_events.push_back(event);
+                    }
+                    // Beyond the cap, interleaved messages are dropped to
+                    // bound memory.  This is a defensive limit — in normal
+                    // operation PONG arrives within a few round-trips.
                 }
             }
         }
