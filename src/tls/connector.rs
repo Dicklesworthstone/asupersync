@@ -262,12 +262,12 @@ impl TlsConnectorBuilder {
         if let Ok(cert_file) = cert_file {
             let path = std::path::Path::new(&cert_file);
             if path.exists() {
-                let added = self.load_pem_file(path);
+                let _added = self.load_pem_file(path);
                 #[cfg(feature = "tracing-integration")]
-                if added > 0 {
+                if _added > 0 {
                     tracing::debug!(
                         path = %cert_file,
-                        count = added,
+                        count = _added,
                         "Loaded CA certificates from SSL_CERT_FILE"
                     );
                 }
@@ -277,14 +277,14 @@ impl TlsConnectorBuilder {
         if let Ok(cert_dir) = std::env::var("SSL_CERT_DIR") {
             let dir = std::path::Path::new(&cert_dir);
             if dir.is_dir() {
-                let mut added = 0usize;
+                let mut _added = 0usize;
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.filter_map(Result::ok) {
                         let path = entry.path();
                         if path.is_file() {
                             if let Some(ext) = path.extension() {
                                 if ext == "pem" || ext == "crt" || ext == "cer" {
-                                    added += self.load_pem_file(&path);
+                                    _added += self.load_pem_file(&path);
                                 }
                             }
                         } else if path.is_dir() {
@@ -293,10 +293,10 @@ impl TlsConnectorBuilder {
                     }
                 }
                 #[cfg(feature = "tracing-integration")]
-                if added > 0 {
+                if _added > 0 {
                     tracing::debug!(
                         path = %cert_dir,
-                        count = added,
+                        count = _added,
                         "Loaded CA certificates from SSL_CERT_DIR"
                     );
                 }

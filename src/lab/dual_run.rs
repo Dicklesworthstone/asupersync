@@ -1050,7 +1050,10 @@ impl ObligationBalanceRecord {
     /// Recompute `balanced` and `unresolved` from the other fields.
     #[must_use]
     pub fn recompute(mut self) -> Self {
-        let terminal = self.committed.saturating_add(self.aborted).saturating_add(self.leaked);
+        let terminal = self
+            .committed
+            .saturating_add(self.aborted)
+            .saturating_add(self.leaked);
         self.unresolved = self.reserved.saturating_sub(terminal);
         self.balanced = self.leaked == 0 && self.unresolved == 0;
         self
