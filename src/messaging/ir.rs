@@ -18,7 +18,6 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[cfg(all(test, not(feature = "messaging-fabric")))]
-#[allow(dead_code)]
 #[path = "subject.rs"]
 mod subject_defs;
 
@@ -2202,7 +2201,8 @@ fn validate_unique_keys<I>(
 {
     let mut seen = BTreeSet::new();
     for value in values {
-        if value.trim().is_empty() || !seen.insert(value) {
+        let trimmed = value.trim().to_owned();
+        if trimmed.is_empty() || !seen.insert(trimmed) {
             errors.push(FabricIrValidationError::new(field, message));
             break;
         }

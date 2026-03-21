@@ -2286,9 +2286,6 @@ impl FabricConsumer {
         pending: &PendingAckState,
         obligation_id: ObligationId,
     ) -> (ConsumerRedeliveryAction, Option<ConsumerDecisionRecord>) {
-        if self.config.adaptive_kernel != AdaptiveConsumerKernel::AuditBacked {
-            return (ConsumerRedeliveryAction::RetryNow, None);
-        }
         let next_attempt = pending.delivery_attempt.saturating_add(1);
         let pending_ratio =
             pending_ratio_permille(self.state.pending_count, self.config.max_ack_pending);
@@ -2299,6 +2296,10 @@ impl FabricConsumer {
         } else {
             ConsumerRedeliveryAction::RetryNow
         };
+
+        if self.config.adaptive_kernel != AdaptiveConsumerKernel::AuditBacked {
+            return (action, None);
+        }
         let snapshot = ConsumerRedeliveryDecisionSnapshot {
             next_attempt,
             max_deliver: self.config.max_deliver,
