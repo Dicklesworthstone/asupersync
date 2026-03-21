@@ -108,6 +108,8 @@ pub mod service;
 #[cfg(feature = "messaging-fabric")]
 pub mod session;
 #[cfg(feature = "messaging-fabric")]
+pub mod snapshot;
+#[cfg(feature = "messaging-fabric")]
 pub mod stream;
 #[cfg(feature = "messaging-fabric")]
 pub mod subject;
@@ -161,8 +163,11 @@ pub use morphism::{
 pub use nats::{Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription};
 #[cfg(feature = "messaging-fabric")]
 pub use policy::{
-    DegradationDecision, DegradationDisposition, DegradationPlan, DegradationPolicy,
-    ObligationLoad, SemanticServiceClass, TrafficSlice,
+    CompiledOperatorIntent, ControlCapsulePolicy, CrossTenantTrafficPolicy, DegradationDecision,
+    DegradationDisposition, DegradationPlan, DegradationPolicy, EgressBudget, EgressBudgetMode,
+    FederationConstraints, IntentCompileError, MobilityBudget, MobilityPreference, ObligationLoad,
+    OperatorIntent, OperatorIntentCompiler, PromotionApproval, PromotionEvidence,
+    SemanticServiceClass, SovereigntyMode, TrafficSlice, ViolationResponse,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use privacy::{
@@ -189,6 +194,11 @@ pub use session::{
     CompensationPath, CutoffPath, EvidenceCheckpoint, GlobalSessionType, Label, MessageType,
     ProtocolContract, ProtocolContractValidationError, RoleName, SessionBranch, SessionPath,
     SessionType, TimeoutLaw, TimeoutOverride,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use snapshot::{
+    CapsuleStateDigest, EvidenceDigest, RecoverableServiceCapsule, RestoredServiceCapsule,
+    ServiceCapsuleError, ServiceCapsuleRestorePlan, ServiceCapsuleState,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use subject::{

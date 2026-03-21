@@ -257,7 +257,7 @@ pub struct CellKeyHierarchySpec {
 }
 
 impl CellKeyHierarchySpec {
-    fn validate(&self) -> Result<(), KeyHierarchyError> {
+    pub(crate) fn validate(&self) -> Result<(), KeyHierarchyError> {
         self.subgroup.validate()?;
         self.cell.validate()?;
         Ok(())

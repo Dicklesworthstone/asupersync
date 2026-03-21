@@ -1424,6 +1424,16 @@ pub enum QuantitativeContractError {
     /// E-process max_evidence must be > 0.
     #[error("e-process max_evidence must be > 0")]
     ZeroMaxEvidence,
+    /// E-process max_evidence must not cap evidence below the alert threshold.
+    #[error(
+        "e-process max_evidence {max_evidence} must be greater than or equal to alert threshold {threshold}"
+    )]
+    MaxEvidenceBelowAlertThreshold {
+        /// Configured evidence cap.
+        max_evidence: f64,
+        /// Minimum alert threshold implied by confidence.
+        threshold: f64,
+    },
 }
 
 impl QuantitativeContract {
@@ -1518,6 +1528,13 @@ impl QuantitativeContract {
                 }
                 if !is_finite_positive(*max_evidence) {
                     return Err(QuantitativeContractError::ZeroMaxEvidence);
+                }
+                let threshold = quantitative_eprocess_threshold(*confidence);
+                if *max_evidence < threshold {
+                    return Err(QuantitativeContractError::MaxEvidenceBelowAlertThreshold {
+                        max_evidence: *max_evidence,
+                        threshold,
+                    });
                 }
             }
             MonitoringPolicy::Conformal {
@@ -1941,12 +1958,20 @@ impl QuantitativeContractMonitor {
 }
 
 fn new_quantitative_eprocess(target_latency: Duration, confidence: f64) -> LeakMonitor {
-    let alpha = (1.0 - confidence).clamp(f64::EPSILON, 1.0 - f64::EPSILON);
+    let alpha = quantitative_eprocess_alpha(confidence);
     LeakMonitor::new(LeakMonitorConfig {
         alpha,
         expected_lifetime_ns: duration_to_monitor_nanos(target_latency),
         min_observations: 3,
     })
+}
+
+fn quantitative_eprocess_alpha(confidence: f64) -> f64 {
+    (1.0 - confidence).clamp(f64::EPSILON, 1.0 - f64::EPSILON)
+}
+
+fn quantitative_eprocess_threshold(confidence: f64) -> f64 {
+    1.0 / quantitative_eprocess_alpha(confidence)
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -5134,6 +5159,64 @@ mod tests {
             bad_max_evidence.validate(),
             Err(QuantitativeContractError::ZeroMaxEvidence)
         ));
+
+        let cap_below_threshold = QuantitativeContract {
+            name: "bad-evidence-threshold".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            target_latency: Duration::from_millis(50),
+            target_probability: 0.99,
+            retry_law: RetryLaw::None,
+            monitoring_policy: MonitoringPolicy::EProcess {
+                confidence: 0.80,
+                max_evidence: 4.0,
+            },
+            record_violations: false,
+        };
+        assert!(matches!(
+            cap_below_threshold.validate(),
+            Err(QuantitativeContractError::MaxEvidenceBelowAlertThreshold {
+                max_evidence,
+                threshold,
+            }) if (max_evidence - 4.0).abs() < f64::EPSILON
+                && (threshold - 5.0).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn quantitative_contract_uses_clamped_eprocess_threshold_near_confidence_one() {
+        let confidence = f64::from_bits(1.0_f64.to_bits() - 1);
+        let threshold = quantitative_eprocess_threshold(confidence);
+        assert_eq!(quantitative_eprocess_alpha(confidence), f64::EPSILON);
+        assert_eq!(threshold, 1.0 / f64::EPSILON);
+
+        let contract = QuantitativeContract {
+            name: "near-one-confidence".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            target_latency: Duration::from_millis(50),
+            target_probability: 0.99,
+            retry_law: RetryLaw::None,
+            monitoring_policy: MonitoringPolicy::EProcess {
+                confidence,
+                max_evidence: threshold,
+            },
+            record_violations: false,
+        };
+        assert!(contract.validate().is_ok());
+
+        let rejected = QuantitativeContract {
+            monitoring_policy: MonitoringPolicy::EProcess {
+                confidence,
+                max_evidence: threshold / 2.0,
+            },
+            ..contract
+        };
+        assert!(matches!(
+            rejected.validate(),
+            Err(QuantitativeContractError::MaxEvidenceBelowAlertThreshold {
+                max_evidence,
+                threshold: rejected_threshold,
+            }) if max_evidence == threshold / 2.0 && rejected_threshold == threshold
+        ));
     }
 
     #[test]
@@ -5245,7 +5328,7 @@ mod tests {
             },
             monitoring_policy: MonitoringPolicy::EProcess {
                 confidence: 0.80,
-                max_evidence: 2.0,
+                max_evidence: 10.0,
             },
             record_violations: true,
         };
@@ -5256,6 +5339,9 @@ mod tests {
 
         assert_eq!(evaluation.state, QuantitativeContractState::Violated);
         let QuantitativeMonitorEvidence::EProcess {
+            e_value,
+            threshold,
+            max_evidence,
             capped,
             alert_state,
             ..
@@ -5263,6 +5349,14 @@ mod tests {
         else {
             panic!("expected e-process evidence");
         };
+        assert!(
+            max_evidence >= threshold,
+            "test config must not cap evidence below the alert threshold"
+        );
+        assert!(
+            e_value >= threshold,
+            "reported evidence should clear the alert threshold once alert_state=Alert"
+        );
         assert!(capped, "e-value should cap and reset");
         assert_eq!(alert_state, QuantitativeMonitorAlertState::Alert);
 

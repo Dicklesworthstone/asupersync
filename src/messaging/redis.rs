@@ -1335,6 +1335,13 @@ impl RedisPubSub {
         })
     }
 
+    fn push_pending_event(&mut self, event: PubSubEvent) {
+        const MAX_PENDING_EVENTS: usize = 4096;
+        if self.pending_events.len() < MAX_PENDING_EVENTS {
+            self.pending_events.push_back(event);
+        }
+    }
+
     fn decode_text(value: RespValue, field: &str) -> Result<String, RedisError> {
         match value {
             RespValue::SimpleString(s) => Ok(s),
@@ -1546,7 +1553,7 @@ impl RedisPubSub {
                 }
                 // Buffer interleaved messages from existing subscriptions
                 // so they aren't silently dropped while waiting for acks.
-                other => self.pending_events.push_back(other),
+                other => self.push_pending_event(other),
             }
         }
 
@@ -1580,7 +1587,7 @@ impl RedisPubSub {
                     Self::track_subscribe(&mut self.patterns, &channel);
                     acks_remaining -= 1;
                 }
-                other => self.pending_events.push_back(other),
+                other => self.push_pending_event(other),
             }
         }
 
@@ -1618,7 +1625,7 @@ impl RedisPubSub {
                     Self::untrack_subscribe(&mut self.channels, &channel);
                     acks_remaining -= 1;
                 }
-                other => self.pending_events.push_back(other),
+                other => self.push_pending_event(other),
             }
         }
         Ok(())
@@ -1655,7 +1662,7 @@ impl RedisPubSub {
                     Self::untrack_subscribe(&mut self.patterns, &channel);
                     acks_remaining -= 1;
                 }
-                other => self.pending_events.push_back(other),
+                other => self.push_pending_event(other),
             }
         }
         Ok(())
@@ -1673,7 +1680,6 @@ impl RedisPubSub {
     ///
     /// Redis returns a `pong` event while subscribed.
     pub async fn ping(&mut self, cx: &Cx, payload: Option<&[u8]>) -> Result<(), RedisError> {
-        const MAX_PING_BUFFERED: usize = 4096;
         if let Some(payload) = payload {
             self.conn.write_command(cx, &[b"PING", payload]).await?;
         } else {
@@ -1686,9 +1692,7 @@ impl RedisPubSub {
             match self.read_next_event(cx).await? {
                 PubSubEvent::Pong(_) => return Ok(()),
                 event @ (PubSubEvent::Message(_) | PubSubEvent::Subscription { .. }) => {
-                    if self.pending_events.len() < MAX_PING_BUFFERED {
-                        self.pending_events.push_back(event);
-                    }
+                    self.push_pending_event(event);
                     // Beyond the cap, interleaved messages are dropped to
                     // bound memory.  This is a defensive limit — in normal
                     // operation PONG arrives within a few round-trips.

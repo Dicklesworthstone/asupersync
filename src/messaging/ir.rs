@@ -488,6 +488,7 @@ impl SubjectSchema {
 
 /// Latency estimate with median and tail percentiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawLatencyEstimate")]
 pub struct LatencyEstimate {
     /// Median steady-state latency.
     pub median: Duration,
@@ -501,6 +502,28 @@ impl Default for LatencyEstimate {
     fn default() -> Self {
         Self::zero()
     }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct RawLatencyEstimate {
+    median: Duration,
+    p99: Duration,
+    p999: Duration,
+}
+
+impl From<RawLatencyEstimate> for LatencyEstimate {
+    fn from(value: RawLatencyEstimate) -> Self {
+        Self::new(value.median, value.p99, value.p999)
+    }
+}
+
+const fn duration_less(lhs: Duration, rhs: Duration) -> bool {
+    lhs.as_secs() < rhs.as_secs()
+        || (lhs.as_secs() == rhs.as_secs() && lhs.subsec_nanos() < rhs.subsec_nanos())
+}
+
+const fn duration_max(lhs: Duration, rhs: Duration) -> Duration {
+    if duration_less(lhs, rhs) { rhs } else { lhs }
 }
 
 impl LatencyEstimate {
@@ -517,6 +540,8 @@ impl LatencyEstimate {
     /// Construct a monotone latency estimate.
     #[must_use]
     pub const fn new(median: Duration, p99: Duration, p999: Duration) -> Self {
+        let p99 = duration_max(p99, median);
+        let p999 = duration_max(p999, p99);
         Self { median, p99, p999 }
     }
 
@@ -536,6 +561,7 @@ impl LatencyEstimate {
 
 /// CPU-cost estimate per message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawCpuEstimate")]
 pub struct CpuEstimate {
     /// Typical per-message CPU budget in microseconds.
     pub typical_micros: u64,
@@ -544,9 +570,14 @@ pub struct CpuEstimate {
 }
 
 impl CpuEstimate {
-    /// Construct a CPU estimate.
+    /// Construct a monotone CPU estimate.
     #[must_use]
     pub const fn new(typical_micros: u64, p99_micros: u64) -> Self {
+        let p99_micros = if p99_micros < typical_micros {
+            typical_micros
+        } else {
+            p99_micros
+        };
         Self {
             typical_micros,
             p99_micros,
@@ -573,6 +604,18 @@ impl CpuEstimate {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct RawCpuEstimate {
+    typical_micros: u64,
+    p99_micros: u64,
+}
+
+impl From<RawCpuEstimate> for CpuEstimate {
+    fn from(value: RawCpuEstimate) -> Self {
+        Self::new(value.typical_micros, value.p99_micros)
+    }
+}
+
 impl Default for CpuEstimate {
     fn default() -> Self {
         Self::new(0, 0)
@@ -581,6 +624,7 @@ impl Default for CpuEstimate {
 
 /// Byte-cost estimate with bounded range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawByteEstimate")]
 pub struct ByteEstimate {
     /// Minimum expected bytes.
     pub min_bytes: u64,
@@ -591,9 +635,19 @@ pub struct ByteEstimate {
 }
 
 impl ByteEstimate {
-    /// Construct a byte estimate.
+    /// Construct a monotone byte estimate.
     #[must_use]
     pub const fn new(min_bytes: u64, typical_bytes: u64, max_bytes: u64) -> Self {
+        let typical_bytes = if typical_bytes < min_bytes {
+            min_bytes
+        } else {
+            typical_bytes
+        };
+        let max_bytes = if max_bytes < typical_bytes {
+            typical_bytes
+        } else {
+            max_bytes
+        };
         Self {
             min_bytes,
             typical_bytes,
@@ -625,6 +679,19 @@ impl ByteEstimate {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct RawByteEstimate {
+    min_bytes: u64,
+    typical_bytes: u64,
+    max_bytes: u64,
+}
+
+impl From<RawByteEstimate> for ByteEstimate {
+    fn from(value: RawByteEstimate) -> Self {
+        Self::new(value.min_bytes, value.typical_bytes, value.max_bytes)
+    }
+}
+
 impl Default for ByteEstimate {
     fn default() -> Self {
         Self::new(0, 0, 0)
@@ -633,6 +700,7 @@ impl Default for ByteEstimate {
 
 /// Duration estimate for restore or handoff operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawDurationEstimate")]
 pub struct DurationEstimate {
     /// Minimum expected duration.
     pub min: Duration,
@@ -643,9 +711,11 @@ pub struct DurationEstimate {
 }
 
 impl DurationEstimate {
-    /// Construct a duration estimate.
+    /// Construct a monotone duration estimate.
     #[must_use]
     pub const fn new(min: Duration, typical: Duration, max: Duration) -> Self {
+        let typical = duration_max(typical, min);
+        let max = duration_max(max, typical);
         Self { min, typical, max }
     }
 
@@ -668,6 +738,19 @@ impl DurationEstimate {
 
     fn cheaper_or_equal(self, other: Self) -> bool {
         self.min <= other.min && self.typical <= other.typical && self.max <= other.max
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct RawDurationEstimate {
+    min: Duration,
+    typical: Duration,
+    max: Duration,
+}
+
+impl From<RawDurationEstimate> for DurationEstimate {
+    fn from(value: RawDurationEstimate) -> Self {
+        Self::new(value.min, value.typical, value.max)
     }
 }
 
@@ -2456,6 +2539,173 @@ mod tests {
         let json = serde_json::to_string_pretty(&ir).expect("serialize FABRIC IR");
         let decoded: FabricIr = serde_json::from_str(&json).expect("deserialize FABRIC IR");
         assert_eq!(decoded, ir);
+    }
+
+    #[test]
+    fn latency_estimate_new_normalizes_monotone_order() {
+        let estimate = LatencyEstimate::new(
+            Duration::from_millis(10),
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            estimate,
+            LatencyEstimate {
+                median: Duration::from_millis(10),
+                p99: Duration::from_millis(10),
+                p999: Duration::from_millis(10),
+            }
+        );
+    }
+
+    #[test]
+    fn cpu_estimate_new_normalizes_monotone_order() {
+        let estimate = CpuEstimate::new(12, 4);
+
+        assert_eq!(
+            estimate,
+            CpuEstimate {
+                typical_micros: 12,
+                p99_micros: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn byte_estimate_new_normalizes_monotone_order() {
+        let estimate = ByteEstimate::new(100, 50, 25);
+
+        assert_eq!(
+            estimate,
+            ByteEstimate {
+                min_bytes: 100,
+                typical_bytes: 100,
+                max_bytes: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn duration_estimate_new_normalizes_monotone_order() {
+        let estimate = DurationEstimate::new(
+            Duration::from_millis(10),
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            estimate,
+            DurationEstimate {
+                min: Duration::from_millis(10),
+                typical: Duration::from_millis(10),
+                max: Duration::from_millis(10),
+            }
+        );
+    }
+
+    #[test]
+    fn estimate_constructors_only_raise_inverted_fields() {
+        assert_eq!(
+            LatencyEstimate::new(
+                Duration::from_millis(10),
+                Duration::from_millis(15),
+                Duration::from_millis(12),
+            ),
+            LatencyEstimate {
+                median: Duration::from_millis(10),
+                p99: Duration::from_millis(15),
+                p999: Duration::from_millis(15),
+            }
+        );
+        assert_eq!(
+            CpuEstimate::new(12, 20),
+            CpuEstimate {
+                typical_micros: 12,
+                p99_micros: 20,
+            }
+        );
+        assert_eq!(
+            ByteEstimate::new(10, 5, 30),
+            ByteEstimate {
+                min_bytes: 10,
+                typical_bytes: 10,
+                max_bytes: 30,
+            }
+        );
+        assert_eq!(
+            DurationEstimate::new(
+                Duration::from_millis(10),
+                Duration::from_millis(12),
+                Duration::from_millis(11),
+            ),
+            DurationEstimate {
+                min: Duration::from_millis(10),
+                typical: Duration::from_millis(12),
+                max: Duration::from_millis(12),
+            }
+        );
+    }
+
+    #[test]
+    fn estimate_deserialization_normalizes_monotone_order() {
+        let latency: LatencyEstimate = serde_json::from_value(serde_json::json!({
+            "median": serde_json::to_value(Duration::from_millis(10)).expect("serialize duration"),
+            "p99": serde_json::to_value(Duration::from_millis(5)).expect("serialize duration"),
+            "p999": serde_json::to_value(Duration::from_millis(1)).expect("serialize duration"),
+        }))
+        .expect("deserialize latency estimate");
+        assert_eq!(
+            latency,
+            LatencyEstimate {
+                median: Duration::from_millis(10),
+                p99: Duration::from_millis(10),
+                p999: Duration::from_millis(10),
+            }
+        );
+
+        let cpu: CpuEstimate = serde_json::from_value(serde_json::json!({
+            "typical_micros": 12,
+            "p99_micros": 4,
+        }))
+        .expect("deserialize cpu estimate");
+        assert_eq!(
+            cpu,
+            CpuEstimate {
+                typical_micros: 12,
+                p99_micros: 12,
+            }
+        );
+
+        let bytes: ByteEstimate = serde_json::from_value(serde_json::json!({
+            "min_bytes": 100,
+            "typical_bytes": 50,
+            "max_bytes": 25,
+        }))
+        .expect("deserialize byte estimate");
+        assert_eq!(
+            bytes,
+            ByteEstimate {
+                min_bytes: 100,
+                typical_bytes: 100,
+                max_bytes: 100,
+            }
+        );
+
+        let duration: DurationEstimate = serde_json::from_value(serde_json::json!({
+            "min": serde_json::to_value(Duration::from_millis(10)).expect("serialize duration"),
+            "typical": serde_json::to_value(Duration::from_millis(5)).expect("serialize duration"),
+            "max": serde_json::to_value(Duration::from_millis(1)).expect("serialize duration"),
+        }))
+        .expect("deserialize duration estimate");
+        assert_eq!(
+            duration,
+            DurationEstimate {
+                min: Duration::from_millis(10),
+                typical: Duration::from_millis(10),
+                max: Duration::from_millis(10),
+            }
+        );
     }
 
     #[test]

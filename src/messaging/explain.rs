@@ -1307,6 +1307,7 @@ mod tests {
     use franken_kernel::{DecisionId, TraceId};
 
     fn test_audit_entry(seed: u128, action: &str) -> DecisionAuditEntry {
+        let alternate_action = if action == "allow" { "deny" } else { "allow" };
         DecisionAuditEntry {
             decision_id: DecisionId::from_parts(1_700_000_000_000, seed),
             trace_id: TraceId::from_parts(1_700_000_000_000, seed),
@@ -1317,8 +1318,8 @@ mod tests {
             fallback_active: false,
             posterior_snapshot: vec![0.8, 0.2],
             expected_loss_by_action: BTreeMap::from([
-                ("allow".to_owned(), 0.05),
-                ("deny".to_owned(), 0.8),
+                (action.to_owned(), 0.05),
+                (alternate_action.to_owned(), 0.8),
             ]),
             ts_unix_ms: 1_700_000_000_000,
         }

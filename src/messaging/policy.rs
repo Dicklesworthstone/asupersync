@@ -1,6 +1,6 @@
 //! Semantic degradation policy for the FABRIC lane.
 
-use super::class::DeliveryClass;
+use super::class::{DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError};
 use super::service::{CancellationObligations, CleanupUrgency};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -930,9 +930,602 @@ fn demote_delivery_class(current: DeliveryClass, min: DeliveryClass) -> Delivery
     demoted
 }
 
+/// Sovereignty posture the operator wants the compiler to preserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SovereigntyMode {
+    /// No additional sovereignty constraints beyond the class defaults.
+    #[default]
+    Relaxed,
+    /// Prefer tenant-local placement and avoid unnecessary remote relays.
+    PreferLocal,
+    /// Keep policy decisions tenant-local unless explicitly certified otherwise.
+    Strict,
+}
+
+/// Mobility bias selected by the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobilityPreference {
+    /// Let the compiler choose the default mobility posture for the workload.
+    #[default]
+    Balanced,
+    /// Prefer quiescent handoff and cut-certified mobility over restart-style failover.
+    PreferQuiescent,
+    /// Allow restart-style failover when it is the cheaper safe option.
+    PreferRestartFailover,
+}
+
+/// Cross-tenant trust boundary required by the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossTenantTrafficPolicy {
+    /// Cross-tenant traffic is permitted through the usual trusted-boundary checks.
+    #[default]
+    AllowTrusted,
+    /// Every cross-tenant edge must carry an explicit certificate.
+    RequireCertificates,
+    /// Cross-tenant edges are not allowed for this intent.
+    Deny,
+}
+
+/// Egress posture applied when compiling operator intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressBudgetMode {
+    /// Use the default relay/egress posture for the service class.
+    #[default]
+    Balanced,
+    /// Minimize egress whenever possible.
+    Minimize,
+    /// Minimize egress until recoverability would drop below the declared floor.
+    MinimizeUnlessRecoverabilityDrops,
+}
+
+/// Explicit operator control over remote relay and egress posture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressBudget {
+    /// How aggressively the compiler should minimize egress.
+    pub mode: EgressBudgetMode,
+    /// Maximum number of remote relays the compiler may allocate.
+    pub max_remote_relays: u16,
+}
+
+impl Default for EgressBudget {
+    fn default() -> Self {
+        Self {
+            mode: EgressBudgetMode::Balanced,
+            max_remote_relays: 2,
+        }
+    }
+}
+
+impl EgressBudget {
+    /// Construct a concrete egress budget.
+    #[must_use]
+    pub const fn new(mode: EgressBudgetMode, max_remote_relays: u16) -> Self {
+        Self {
+            mode,
+            max_remote_relays,
+        }
+    }
+}
+
+/// Narrow, auditable operator intent surface for FABRIC control policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorIntent {
+    /// Human-readable intent name.
+    pub name: String,
+    /// Optional tail-latency objective carried by the intent.
+    pub latency_objective: Option<Duration>,
+    /// Sovereignty posture the operator wants preserved.
+    pub sovereignty: SovereigntyMode,
+    /// Mobility preference compiled into delivery and failover artifacts.
+    pub mobility: MobilityPreference,
+    /// Egress posture compiled into relay and federation constraints.
+    pub egress_budget: EgressBudget,
+    /// Minimum recoverability class to preserve before relaxing the egress posture.
+    pub recoverability_floor: u8,
+    /// Cross-tenant trust requirement.
+    pub cross_tenant_policy: CrossTenantTrafficPolicy,
+}
+
+impl OperatorIntent {
+    /// Build a new intent with conservative defaults.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            latency_objective: None,
+            sovereignty: SovereigntyMode::Relaxed,
+            mobility: MobilityPreference::Balanced,
+            egress_budget: EgressBudget::default(),
+            recoverability_floor: 0,
+            cross_tenant_policy: CrossTenantTrafficPolicy::AllowTrusted,
+        }
+    }
+
+    /// Attach a latency objective to the intent.
+    #[must_use]
+    pub fn with_latency_objective(mut self, latency_objective: Duration) -> Self {
+        self.latency_objective = Some(latency_objective);
+        self
+    }
+
+    /// Set the sovereignty posture.
+    #[must_use]
+    pub fn with_sovereignty(mut self, sovereignty: SovereigntyMode) -> Self {
+        self.sovereignty = sovereignty;
+        self
+    }
+
+    /// Set the mobility preference.
+    #[must_use]
+    pub fn with_mobility(mut self, mobility: MobilityPreference) -> Self {
+        self.mobility = mobility;
+        self
+    }
+
+    /// Override the egress budget.
+    #[must_use]
+    pub fn with_egress_budget(mut self, egress_budget: EgressBudget) -> Self {
+        self.egress_budget = egress_budget;
+        self
+    }
+
+    /// Require a minimum recoverability floor before relaxing egress constraints.
+    #[must_use]
+    pub fn with_recoverability_floor(mut self, recoverability_floor: u8) -> Self {
+        self.recoverability_floor = recoverability_floor;
+        self
+    }
+
+    /// Set the cross-tenant boundary policy.
+    #[must_use]
+    pub fn with_cross_tenant_policy(
+        mut self,
+        cross_tenant_policy: CrossTenantTrafficPolicy,
+    ) -> Self {
+        self.cross_tenant_policy = cross_tenant_policy;
+        self
+    }
+}
+
+/// Mobility artifact compiled from one operator intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobilityBudget {
+    /// Whether quiescent handoff is preferred over restart-style failover.
+    pub prefer_quiescent: bool,
+    /// Whether restart-style failover remains allowed.
+    pub allow_restart_failover: bool,
+    /// Bounded retry budget for cutover and mobility handoff attempts.
+    pub cutover_retry_budget: u16,
+    /// Minimum recoverability class the mobility plan must preserve.
+    pub recoverability_floor: u8,
+}
+
+/// Federation and placement constraints compiled from one operator intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FederationConstraints {
+    /// Whether the compiler should preserve tenant-local placement whenever possible.
+    pub preserve_sovereignty: bool,
+    /// Cross-tenant traffic requirement.
+    pub cross_tenant_policy: CrossTenantTrafficPolicy,
+    /// Whether every cross-tenant edge must carry a certificate.
+    pub require_certificate_edges: bool,
+    /// Whether cross-tenant edges are allowed at all.
+    pub allow_cross_tenant: bool,
+    /// Maximum number of remote relays the plan may use.
+    pub max_remote_relays: u16,
+}
+
+/// Approval posture for promoting a compiled control-capsule policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionApproval {
+    /// The policy may promote automatically once evidence is sufficient.
+    Automatic,
+    /// A human operator must approve promotion.
+    OperatorApprovalRequired,
+}
+
+/// Evidence mode required before promoting a control-capsule policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionEvidence {
+    /// Inline evidence is sufficient.
+    Inline,
+    /// Replay evidence is required before promotion.
+    ReplayBacked,
+}
+
+/// Violation response compiled for control-capsule policy changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViolationResponse {
+    /// Hold the current policy and await operator intervention.
+    Hold,
+    /// Roll back automatically to the last stable policy.
+    RollbackToStable,
+}
+
+/// Control-capsule promotion and rollback policy compiled from one intent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlCapsulePolicy {
+    /// Evidence threshold required before the control plane may promote changes automatically.
+    pub evidence_threshold: f64,
+    /// Approval posture for promotion.
+    pub promotion_approval: PromotionApproval,
+    /// Evidence mode required before promotion.
+    pub promotion_evidence: PromotionEvidence,
+    /// Response applied when the policy violates its declared envelope.
+    pub violation_response: ViolationResponse,
+    /// Recoverability floor that may justify relaxing a minimized-egress stance.
+    pub recoverability_override_floor: Option<u8>,
+}
+
+/// Explicit policy artifacts compiled from one narrow operator intent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompiledOperatorIntent {
+    /// Service class selected for the intent.
+    pub service_class: SemanticServiceClass,
+    /// Caller/provider delivery policy compiled from the intent.
+    pub delivery_policy: DeliveryClassPolicy,
+    /// Degradation policy selected for overload control.
+    pub degradation_policy: DegradationPolicy,
+    /// Reliability envelope constraining adaptive policy changes.
+    pub safety_envelope: SafetyEnvelope,
+    /// Mobility policy compiled for cutover/failover decisions.
+    pub mobility_budget: MobilityBudget,
+    /// Federation boundary and placement constraints.
+    pub federation_constraints: FederationConstraints,
+    /// Control-capsule promotion/rollback rules.
+    pub control_capsule_policy: ControlCapsulePolicy,
+}
+
+/// Stateless compiler turning narrow operator intent into explicit artifacts.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorIntentCompiler;
+
+impl OperatorIntentCompiler {
+    /// Compile one operator intent into explicit policy artifacts.
+    pub fn compile(intent: &OperatorIntent) -> Result<CompiledOperatorIntent, IntentCompileError> {
+        validate_operator_intent(intent)?;
+        let service_class = compile_service_class(intent);
+        let safety_envelope = compile_safety_envelope(intent, service_class);
+        safety_envelope.validate()?;
+        let delivery_policy = compile_delivery_policy(service_class, &safety_envelope)?;
+        let degradation_policy = compile_degradation_policy(intent, service_class);
+        let mobility_budget = compile_mobility_budget(intent, service_class);
+        let federation_constraints = compile_federation_constraints(intent, &safety_envelope);
+        let control_capsule_policy =
+            compile_control_capsule_policy(intent, &safety_envelope, &federation_constraints);
+
+        Ok(CompiledOperatorIntent {
+            service_class,
+            delivery_policy,
+            degradation_policy,
+            safety_envelope,
+            mobility_budget,
+            federation_constraints,
+            control_capsule_policy,
+        })
+    }
+}
+
+/// Validation failures for operator-intent compilation.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum IntentCompileError {
+    /// Latency objectives must be non-zero when present.
+    #[error("latency objective must be greater than zero")]
+    ZeroLatencyObjective,
+    /// Recoverability floors must stay within the declared bounded range.
+    #[error("recoverability floor must be in 1..=8 when required, got {value}")]
+    InvalidRecoverabilityFloor {
+        /// Rejected recoverability floor.
+        value: u8,
+    },
+    /// Delivery-class policy validation failed during compilation.
+    #[error(transparent)]
+    InvalidDeliveryClassPolicy(#[from] DeliveryClassPolicyError),
+    /// Safety-envelope validation failed during compilation.
+    #[error(transparent)]
+    InvalidSafetyEnvelope(#[from] ReliabilityControlError),
+}
+
+fn validate_operator_intent(intent: &OperatorIntent) -> Result<(), IntentCompileError> {
+    if matches!(intent.latency_objective, Some(latency) if latency.is_zero()) {
+        return Err(IntentCompileError::ZeroLatencyObjective);
+    }
+    if matches!(
+        intent.egress_budget.mode,
+        EgressBudgetMode::MinimizeUnlessRecoverabilityDrops
+    ) {
+        if !(1..=8).contains(&intent.recoverability_floor) {
+            return Err(IntentCompileError::InvalidRecoverabilityFloor {
+                value: intent.recoverability_floor,
+            });
+        }
+    } else if intent.recoverability_floor > 8 {
+        return Err(IntentCompileError::InvalidRecoverabilityFloor {
+            value: intent.recoverability_floor,
+        });
+    }
+    Ok(())
+}
+
+fn compile_service_class(intent: &OperatorIntent) -> SemanticServiceClass {
+    if intent.mobility == MobilityPreference::PreferQuiescent {
+        SemanticServiceClass::LeaseRepair
+    } else if intent.latency_objective.is_some() {
+        SemanticServiceClass::ReplyCritical
+    } else if intent.cross_tenant_policy == CrossTenantTrafficPolicy::RequireCertificates
+        || intent.sovereignty == SovereigntyMode::Strict
+        || !matches!(intent.egress_budget.mode, EgressBudgetMode::Balanced)
+    {
+        SemanticServiceClass::DurablePipeline
+    } else {
+        SemanticServiceClass::Interactive
+    }
+}
+
+fn compile_safety_envelope(
+    intent: &OperatorIntent,
+    service_class: SemanticServiceClass,
+) -> SafetyEnvelope {
+    let mut envelope = SafetyEnvelope::default();
+
+    if let Some(latency_objective) = intent.latency_objective {
+        if latency_objective <= Duration::from_millis(250) {
+            envelope.min_stewards = envelope.min_stewards.max(2);
+            envelope.min_redelivery_attempts = envelope.min_redelivery_attempts.max(2);
+            envelope.evidence_threshold = envelope.evidence_threshold.max(0.85);
+        }
+        if latency_objective <= Duration::from_millis(100) {
+            envelope.max_relay_budget = envelope.max_relay_budget.min(1);
+            envelope.rollback_violation_threshold = envelope.rollback_violation_threshold.min(0.2);
+        }
+    }
+
+    match intent.sovereignty {
+        SovereigntyMode::Relaxed => {}
+        SovereigntyMode::PreferLocal => {
+            envelope.max_relay_budget = envelope.max_relay_budget.min(1);
+        }
+        SovereigntyMode::Strict => {
+            envelope.max_relay_budget = 0;
+            envelope.evidence_threshold = envelope.evidence_threshold.max(0.9);
+            envelope.rollback_violation_threshold = envelope.rollback_violation_threshold.min(0.2);
+        }
+    }
+
+    match intent.mobility {
+        MobilityPreference::Balanced => {}
+        MobilityPreference::PreferQuiescent => {
+            envelope.min_delivery_class = DeliveryClass::MobilitySafe;
+            envelope.max_delivery_class = DeliveryClass::MobilitySafe;
+            envelope.min_stewards = envelope.min_stewards.max(2);
+            envelope.min_redelivery_attempts = envelope.min_redelivery_attempts.max(2);
+        }
+        MobilityPreference::PreferRestartFailover => {
+            envelope.max_delivery_class = envelope
+                .max_delivery_class
+                .min(DeliveryClass::ObligationBacked);
+        }
+    }
+
+    match intent.egress_budget.mode {
+        EgressBudgetMode::Balanced => {}
+        EgressBudgetMode::Minimize => {
+            envelope.max_relay_budget = envelope
+                .max_relay_budget
+                .min(intent.egress_budget.max_remote_relays.min(1));
+        }
+        EgressBudgetMode::MinimizeUnlessRecoverabilityDrops => {
+            envelope.max_relay_budget = envelope
+                .max_relay_budget
+                .min(intent.egress_budget.max_remote_relays);
+            if intent.recoverability_floor >= 4 {
+                envelope.min_stewards = envelope.min_stewards.max(2);
+            }
+        }
+    }
+
+    match intent.cross_tenant_policy {
+        CrossTenantTrafficPolicy::AllowTrusted => {}
+        CrossTenantTrafficPolicy::RequireCertificates => {
+            envelope.min_delivery_class = envelope
+                .min_delivery_class
+                .max(DeliveryClass::ObligationBacked);
+            envelope.evidence_threshold = envelope.evidence_threshold.max(0.9);
+        }
+        CrossTenantTrafficPolicy::Deny => {
+            envelope.max_relay_budget = 0;
+        }
+    }
+
+    if service_class == SemanticServiceClass::LeaseRepair {
+        envelope.min_delivery_class = DeliveryClass::MobilitySafe;
+        envelope.max_delivery_class = DeliveryClass::MobilitySafe;
+    }
+
+    envelope
+}
+
+fn compile_delivery_policy(
+    service_class: SemanticServiceClass,
+    envelope: &SafetyEnvelope,
+) -> Result<DeliveryClassPolicy, IntentCompileError> {
+    let (mut default_class, mut admissible_classes) = match service_class {
+        SemanticServiceClass::ControlRecovery => (
+            DeliveryClass::ObligationBacked,
+            vec![DeliveryClass::ObligationBacked, DeliveryClass::MobilitySafe],
+        ),
+        SemanticServiceClass::ReplyCritical => (
+            DeliveryClass::ObligationBacked,
+            vec![
+                DeliveryClass::DurableOrdered,
+                DeliveryClass::ObligationBacked,
+                DeliveryClass::MobilitySafe,
+            ],
+        ),
+        SemanticServiceClass::LeaseRepair => (
+            DeliveryClass::MobilitySafe,
+            vec![DeliveryClass::ObligationBacked, DeliveryClass::MobilitySafe],
+        ),
+        SemanticServiceClass::DurablePipeline => (
+            DeliveryClass::DurableOrdered,
+            vec![
+                DeliveryClass::DurableOrdered,
+                DeliveryClass::ObligationBacked,
+                DeliveryClass::MobilitySafe,
+            ],
+        ),
+        SemanticServiceClass::Interactive => (
+            DeliveryClass::EphemeralInteractive,
+            vec![
+                DeliveryClass::EphemeralInteractive,
+                DeliveryClass::DurableOrdered,
+                DeliveryClass::ObligationBacked,
+            ],
+        ),
+        SemanticServiceClass::ReadModel => (
+            DeliveryClass::DurableOrdered,
+            vec![DeliveryClass::DurableOrdered],
+        ),
+        SemanticServiceClass::LowValueFanout => (
+            DeliveryClass::EphemeralInteractive,
+            vec![
+                DeliveryClass::EphemeralInteractive,
+                DeliveryClass::DurableOrdered,
+            ],
+        ),
+        SemanticServiceClass::ExpensiveReplay => (
+            DeliveryClass::ForensicReplayable,
+            vec![
+                DeliveryClass::ForensicReplayable,
+                DeliveryClass::MobilitySafe,
+            ],
+        ),
+    };
+
+    admissible_classes.retain(|class| {
+        *class >= envelope.min_delivery_class && *class <= envelope.max_delivery_class
+    });
+
+    default_class = default_class.clamp(envelope.min_delivery_class, envelope.max_delivery_class);
+    if !admissible_classes.contains(&default_class) {
+        admissible_classes.push(default_class);
+    }
+
+    DeliveryClassPolicy::new(default_class, admissible_classes).map_err(Into::into)
+}
+
+fn compile_degradation_policy(
+    intent: &OperatorIntent,
+    service_class: SemanticServiceClass,
+) -> DegradationPolicy {
+    let mut total_slots: u32 = if matches!(
+        service_class,
+        SemanticServiceClass::ReplyCritical | SemanticServiceClass::LeaseRepair
+    ) {
+        3
+    } else {
+        4
+    };
+    if !matches!(intent.egress_budget.mode, EgressBudgetMode::Balanced) {
+        total_slots = total_slots.saturating_sub(1).max(1);
+    }
+    let reserved_control_slots = u32::from(
+        matches!(
+            service_class,
+            SemanticServiceClass::ControlRecovery | SemanticServiceClass::LeaseRepair
+        ) || intent.cross_tenant_policy == CrossTenantTrafficPolicy::RequireCertificates,
+    );
+
+    DegradationPolicy::new(total_slots, reserved_control_slots.min(total_slots))
+}
+
+fn compile_mobility_budget(
+    intent: &OperatorIntent,
+    service_class: SemanticServiceClass,
+) -> MobilityBudget {
+    let prefer_quiescent = intent.mobility == MobilityPreference::PreferQuiescent;
+    MobilityBudget {
+        prefer_quiescent,
+        allow_restart_failover: intent.mobility != MobilityPreference::PreferQuiescent,
+        cutover_retry_budget: if service_class == SemanticServiceClass::LeaseRepair {
+            2
+        } else {
+            1
+        },
+        recoverability_floor: intent.recoverability_floor,
+    }
+}
+
+fn compile_federation_constraints(
+    intent: &OperatorIntent,
+    safety_envelope: &SafetyEnvelope,
+) -> FederationConstraints {
+    let mut max_remote_relays = intent.egress_budget.max_remote_relays;
+    if intent.sovereignty == SovereigntyMode::Strict {
+        max_remote_relays = 0;
+    } else if intent.sovereignty == SovereigntyMode::PreferLocal {
+        max_remote_relays = max_remote_relays.min(1);
+    }
+    if intent.cross_tenant_policy == CrossTenantTrafficPolicy::Deny {
+        max_remote_relays = 0;
+    }
+    max_remote_relays = max_remote_relays.min(safety_envelope.max_relay_budget);
+
+    FederationConstraints {
+        preserve_sovereignty: intent.sovereignty != SovereigntyMode::Relaxed,
+        cross_tenant_policy: intent.cross_tenant_policy,
+        require_certificate_edges: intent.cross_tenant_policy
+            == CrossTenantTrafficPolicy::RequireCertificates,
+        allow_cross_tenant: intent.cross_tenant_policy != CrossTenantTrafficPolicy::Deny,
+        max_remote_relays,
+    }
+}
+
+fn compile_control_capsule_policy(
+    intent: &OperatorIntent,
+    envelope: &SafetyEnvelope,
+    federation_constraints: &FederationConstraints,
+) -> ControlCapsulePolicy {
+    ControlCapsulePolicy {
+        evidence_threshold: envelope.evidence_threshold,
+        promotion_approval: if federation_constraints.require_certificate_edges
+            || intent.sovereignty == SovereigntyMode::Strict
+            || intent.mobility == MobilityPreference::PreferQuiescent
+        {
+            PromotionApproval::OperatorApprovalRequired
+        } else {
+            PromotionApproval::Automatic
+        },
+        promotion_evidence: if federation_constraints.require_certificate_edges
+            || intent.latency_objective.is_some()
+        {
+            PromotionEvidence::ReplayBacked
+        } else {
+            PromotionEvidence::Inline
+        },
+        violation_response: ViolationResponse::RollbackToStable,
+        recoverability_override_floor: if matches!(
+            intent.egress_budget.mode,
+            EgressBudgetMode::MinimizeUnlessRecoverabilityDrops
+        ) {
+            Some(intent.recoverability_floor)
+        } else {
+            None
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{from_str, to_string};
 
     fn slice(
         name: &str,
@@ -1261,5 +1854,142 @@ mod tests {
         assert_eq!(rollback.next, baseline);
         assert_eq!(controller.current, baseline);
         assert!(controller.rollback_target().is_none());
+    }
+
+    #[test]
+    fn compiler_maps_latency_plus_sovereignty_to_reply_critical_artifacts() {
+        let intent = OperatorIntent::new("tenant-latency")
+            .with_latency_objective(Duration::from_millis(120))
+            .with_sovereignty(SovereigntyMode::Strict);
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(compiled.service_class, SemanticServiceClass::ReplyCritical);
+        assert_eq!(
+            compiled.delivery_policy.default_class,
+            DeliveryClass::ObligationBacked
+        );
+        assert_eq!(compiled.safety_envelope.max_relay_budget, 0);
+        assert!(compiled.federation_constraints.preserve_sovereignty);
+        assert_eq!(
+            compiled.control_capsule_policy.promotion_approval,
+            PromotionApproval::OperatorApprovalRequired
+        );
+        assert_eq!(
+            compiled.control_capsule_policy.promotion_evidence,
+            PromotionEvidence::ReplayBacked
+        );
+    }
+
+    #[test]
+    fn compiler_prefers_quiescent_mobility_over_restart_failover() {
+        let intent = OperatorIntent::new("quiescent-mobility")
+            .with_mobility(MobilityPreference::PreferQuiescent);
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(compiled.service_class, SemanticServiceClass::LeaseRepair);
+        assert_eq!(
+            compiled.delivery_policy.default_class,
+            DeliveryClass::MobilitySafe
+        );
+        assert_eq!(
+            compiled.safety_envelope.min_delivery_class,
+            DeliveryClass::MobilitySafe
+        );
+        assert_eq!(
+            compiled.safety_envelope.max_delivery_class,
+            DeliveryClass::MobilitySafe
+        );
+        assert!(compiled.mobility_budget.prefer_quiescent);
+        assert!(!compiled.mobility_budget.allow_restart_failover);
+        assert_eq!(
+            compiled.control_capsule_policy.promotion_approval,
+            PromotionApproval::OperatorApprovalRequired
+        );
+    }
+
+    #[test]
+    fn compiler_minimizes_egress_until_recoverability_floor() {
+        let intent = OperatorIntent::new("minimize-egress")
+            .with_egress_budget(EgressBudget::new(
+                EgressBudgetMode::MinimizeUnlessRecoverabilityDrops,
+                0,
+            ))
+            .with_recoverability_floor(5);
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(
+            compiled.service_class,
+            SemanticServiceClass::DurablePipeline
+        );
+        assert_eq!(compiled.federation_constraints.max_remote_relays, 0);
+        assert_eq!(compiled.mobility_budget.recoverability_floor, 5);
+        assert_eq!(
+            compiled
+                .control_capsule_policy
+                .recoverability_override_floor,
+            Some(5)
+        );
+        assert_eq!(compiled.degradation_policy.total_slots, 3);
+    }
+
+    #[test]
+    fn compiler_keeps_federation_relays_within_safety_envelope_budget() {
+        let intent = OperatorIntent::new("relay-alignment")
+            .with_latency_objective(Duration::from_millis(80))
+            .with_egress_budget(EgressBudget::new(EgressBudgetMode::Minimize, 8));
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(compiled.safety_envelope.max_relay_budget, 1);
+        assert_eq!(
+            compiled.federation_constraints.max_remote_relays,
+            compiled.safety_envelope.max_relay_budget
+        );
+    }
+
+    #[test]
+    fn compiler_requires_certificate_edges_for_cross_tenant_traffic() {
+        let intent = OperatorIntent::new("certified-cross-tenant")
+            .with_cross_tenant_policy(CrossTenantTrafficPolicy::RequireCertificates);
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(
+            compiled.service_class,
+            SemanticServiceClass::DurablePipeline
+        );
+        assert!(compiled.federation_constraints.allow_cross_tenant);
+        assert!(compiled.federation_constraints.require_certificate_edges);
+        assert_eq!(
+            compiled.delivery_policy.default_class,
+            DeliveryClass::ObligationBacked
+        );
+        assert_eq!(compiled.degradation_policy.reserved_control_slots, 1);
+        assert_eq!(
+            compiled.control_capsule_policy.promotion_approval,
+            PromotionApproval::OperatorApprovalRequired
+        );
+    }
+
+    #[test]
+    fn intent_round_trip_preserves_compiled_artifacts() {
+        let intent = OperatorIntent::new("round-trip")
+            .with_latency_objective(Duration::from_millis(150))
+            .with_sovereignty(SovereigntyMode::PreferLocal)
+            .with_mobility(MobilityPreference::Balanced)
+            .with_egress_budget(EgressBudget::new(EgressBudgetMode::Minimize, 1))
+            .with_cross_tenant_policy(CrossTenantTrafficPolicy::AllowTrusted);
+
+        let encoded = to_string(&intent).expect("serialize");
+        let decoded: OperatorIntent = from_str(&encoded).expect("deserialize");
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled original");
+        let round_tripped = OperatorIntentCompiler::compile(&decoded).expect("compiled decoded");
+
+        assert_eq!(decoded, intent);
+        assert_eq!(round_tripped, compiled);
     }
 }

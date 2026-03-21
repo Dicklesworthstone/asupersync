@@ -6,7 +6,9 @@
 //! later brokerless beads can build on. It does not attempt to implement the
 //! full distributed data plane, federation, or consumer semantics yet.
 
+use super::capability::FabricCapability;
 use super::class::{AckKind, DeliveryClass};
+use super::control::MembershipRecord;
 pub use super::subject::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
 use crate::cx::Cx;
 use crate::distributed::HashRing;
@@ -2049,6 +2051,764 @@ pub enum FabricError {
     },
 }
 
+/// Bootstrap mode used to start a typed discovery session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryBootstrap {
+    /// Discover peers without any preconfigured seed list.
+    SelfDiscover,
+    /// Start from a deterministic seed list.
+    SeedList(Vec<NodeId>),
+}
+
+impl DiscoveryBootstrap {
+    #[allow(clippy::result_large_err)]
+    fn replay_key(&self) -> Result<String, DiscoveryError> {
+        match self {
+            Self::SelfDiscover => Ok("self-discover".to_owned()),
+            Self::SeedList(seeds) => {
+                if seeds.is_empty() {
+                    return Err(DiscoveryError::EmptySeedList);
+                }
+                if let Some(node) = duplicate_node(seeds) {
+                    return Err(DiscoveryError::DuplicateSeed { node });
+                }
+                Ok(format!(
+                    "seed-list:{}",
+                    seeds
+                        .iter()
+                        .map(NodeId::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+            }
+        }
+    }
+}
+
+/// Signed admission artifact required before a peer is trusted in discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryAdmissionCredential {
+    /// Node identity covered by the admission decision.
+    pub subject: NodeId,
+    /// Authority that issued the admission decision.
+    pub issuer: NodeId,
+    /// Membership epoch in which the credential was minted.
+    pub membership_epoch: u64,
+    /// Exact capability envelopes admitted for the subject.
+    pub admitted_capabilities: Vec<FabricCapability>,
+    /// Opaque signature or proof material.
+    pub signature: String,
+}
+
+impl DiscoveryAdmissionCredential {
+    fn authorizes(&self, capability: &FabricCapability) -> bool {
+        self.admitted_capabilities
+            .iter()
+            .any(|granted| fabric_capability_covers(granted, capability))
+    }
+}
+
+/// Resource budget advertised during discovery negotiation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiscoveryResourceBudget {
+    /// Approximate free storage budget in bytes.
+    pub storage_bytes_available: u64,
+    /// Approximate outbound budget in kibibytes per second.
+    pub uplink_kib_per_sec: u32,
+    /// Number of repair-capable slots the peer can currently offer.
+    pub repair_slots: u16,
+}
+
+/// One interest sample exchanged during discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryInterestSummaryEntry {
+    /// Subject space being summarized.
+    pub subject: SubjectPattern,
+    /// Approximate converged subscriber count.
+    pub subscribers: u64,
+}
+
+/// Capability-scoped or blinded interest disclosure emitted by discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryInterestAdvertisement {
+    /// Raw subject visibility was authorized for the viewer.
+    Scoped {
+        /// Subject space carried verbatim.
+        subject: SubjectPattern,
+        /// Approximate converged subscriber count.
+        subscribers: u64,
+    },
+    /// Raw subject visibility was denied, so only a stable blinded key is sent.
+    Blinded {
+        /// Session-scoped blinded fingerprint for replay and diagnostics.
+        subject_fingerprint: u64,
+        /// Approximate converged subscriber count.
+        subscribers: u64,
+    },
+}
+
+/// Steward-lease evidence advertised during discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryStewardLeaseView {
+    /// Subject cell covered by the steward lease.
+    pub cell_id: CellId,
+    /// Lease the peer claims is still current.
+    pub lease: SequencerLease,
+}
+
+/// Recent control-epoch evidence advertised during discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryControlEpochView {
+    /// Subject cell covered by the control epoch.
+    pub cell_id: CellId,
+    /// Most recent observed control epoch for the cell.
+    pub control_epoch: ControlEpoch,
+}
+
+/// Non-authoritative health and placement hints exchanged during discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiscoveryAdvisoryHints {
+    /// Replica-health snapshot. This is advisory only.
+    pub membership: Option<MembershipRecord>,
+    /// Cells the peer suggests for placement or routing. Advisory only.
+    pub suggested_cells: Vec<CellId>,
+}
+
+/// Typed discovery handshake payload exchanged before session establishment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryHello {
+    /// Identity of the advertising peer.
+    pub node_id: NodeId,
+    /// Bootstrap mode used to reach the peer.
+    pub bootstrap: DiscoveryBootstrap,
+    /// Capability set the peer claims to currently hold.
+    pub capability_set: Vec<FabricCapability>,
+    /// Signed membership and admission credential for the peer.
+    pub credential: DiscoveryAdmissionCredential,
+    /// Policy versions the peer can negotiate.
+    pub supported_policy_versions: BTreeSet<u64>,
+    /// Resource budget the peer advertises for cooperative routing or repair.
+    pub resource_budget: DiscoveryResourceBudget,
+    /// Capability-scoped interest samples.
+    pub interest_summary: Vec<DiscoveryInterestSummaryEntry>,
+    /// Steward-lease claims carried in the handshake.
+    pub stewardship_leases: Vec<DiscoveryStewardLeaseView>,
+    /// Recent control epochs used to distinguish authority from stale gossip.
+    pub recent_control_epochs: Vec<DiscoveryControlEpochView>,
+    /// Health and placement hints that remain advisory even after admission.
+    pub advisory_hints: DiscoveryAdvisoryHints,
+}
+
+impl DiscoveryHello {
+    #[allow(clippy::result_large_err)]
+    fn validate(&self, policy: &DiscoveryNegotiationPolicy) -> Result<(), DiscoveryError> {
+        let _ = self.bootstrap.replay_key()?;
+
+        if self.credential.subject != self.node_id {
+            return Err(DiscoveryError::CredentialSubjectMismatch {
+                expected: self.node_id.clone(),
+                actual: self.credential.subject.clone(),
+            });
+        }
+        if self.credential.signature.trim().is_empty() {
+            return Err(DiscoveryError::MissingCredentialSignature {
+                node: self.node_id.clone(),
+            });
+        }
+        if !policy.trusted_issuers.contains(&self.credential.issuer) {
+            return Err(DiscoveryError::UntrustedCredentialIssuer {
+                issuer: self.credential.issuer.clone(),
+            });
+        }
+        if !self
+            .supported_policy_versions
+            .iter()
+            .any(|version| policy.supported_policy_versions.contains(version))
+        {
+            return Err(DiscoveryError::NoCompatiblePolicyVersion {
+                node: self.node_id.clone(),
+            });
+        }
+        for capability in &self.capability_set {
+            if !self.credential.authorizes(capability) {
+                return Err(DiscoveryError::CapabilityEscalation {
+                    node: self.node_id.clone(),
+                    capability: capability.clone(),
+                });
+            }
+        }
+        self.validate_interest_summary_scope()?;
+        self.validate_authority_membership_epochs()?;
+        self.validate_authoritative_stewardship_consistency()?;
+
+        Ok(())
+    }
+
+    /// Return the interest summary as visible to a viewer with `capabilities`.
+    #[must_use]
+    pub fn interest_advertisements_for(
+        &self,
+        capabilities: &[FabricCapability],
+        session_id: DiscoverySessionId,
+    ) -> Vec<DiscoveryInterestAdvertisement> {
+        self.interest_summary
+            .iter()
+            .map(|entry| {
+                if capabilities_allow_interest_visibility(capabilities, &entry.subject) {
+                    DiscoveryInterestAdvertisement::Scoped {
+                        subject: entry.subject.clone(),
+                        subscribers: entry.subscribers,
+                    }
+                } else {
+                    DiscoveryInterestAdvertisement::Blinded {
+                        subject_fingerprint: stable_hash((
+                            "fabric::discovery::interest",
+                            session_id.raw(),
+                            entry.subject.canonical_key(),
+                        )),
+                        subscribers: entry.subscribers,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Return only stewardship leases backed by the current advertised control epoch.
+    #[must_use]
+    fn authoritative_stewardship(&self) -> Vec<DiscoveryStewardLeaseView> {
+        let mut latest_by_cell = BTreeMap::new();
+        for observed in &self.recent_control_epochs {
+            latest_by_cell
+                .entry(observed.cell_id)
+                .and_modify(|current: &mut ControlEpoch| {
+                    *current = (*current).max(observed.control_epoch);
+                })
+                .or_insert(observed.control_epoch);
+        }
+
+        let mut authoritative_by_cell = BTreeMap::new();
+        self.stewardship_leases.iter().for_each(|lease| {
+            if latest_by_cell
+                .get(&lease.cell_id)
+                .is_some_and(|current| *current == lease.lease.control_epoch)
+            {
+                authoritative_by_cell
+                    .entry(lease.cell_id)
+                    .or_insert_with(|| lease.clone());
+            }
+        });
+        authoritative_by_cell.into_values().collect()
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate_interest_summary_scope(&self) -> Result<(), DiscoveryError> {
+        for entry in &self.interest_summary {
+            if !capabilities_cover_interest_subject(&self.capability_set, &entry.subject) {
+                return Err(DiscoveryError::InterestSummaryOutsideCapabilitySet {
+                    node: self.node_id.clone(),
+                    subject: entry.subject.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate_authority_membership_epochs(&self) -> Result<(), DiscoveryError> {
+        let expected_membership_epoch = self.credential.membership_epoch;
+        for observed in &self.recent_control_epochs {
+            let actual_membership_epoch = observed.control_epoch.cell_epoch.membership_epoch;
+            if actual_membership_epoch != expected_membership_epoch {
+                return Err(DiscoveryError::ControlEpochMembershipMismatch {
+                    node: self.node_id.clone(),
+                    cell_id: observed.cell_id,
+                    expected_membership_epoch,
+                    actual_membership_epoch,
+                });
+            }
+        }
+        for lease in &self.stewardship_leases {
+            let actual_membership_epoch = lease.lease.control_epoch.cell_epoch.membership_epoch;
+            if actual_membership_epoch != expected_membership_epoch {
+                return Err(DiscoveryError::StewardLeaseMembershipMismatch {
+                    node: self.node_id.clone(),
+                    cell_id: lease.cell_id,
+                    expected_membership_epoch,
+                    actual_membership_epoch,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate_authoritative_stewardship_consistency(&self) -> Result<(), DiscoveryError> {
+        let mut latest_by_cell = BTreeMap::new();
+        for observed in &self.recent_control_epochs {
+            latest_by_cell
+                .entry(observed.cell_id)
+                .and_modify(|current: &mut ControlEpoch| {
+                    *current = (*current).max(observed.control_epoch);
+                })
+                .or_insert(observed.control_epoch);
+        }
+
+        let mut authoritative_by_cell = BTreeMap::<CellId, &SequencerLease>::new();
+        for lease in &self.stewardship_leases {
+            if latest_by_cell
+                .get(&lease.cell_id)
+                .is_some_and(|current| *current == lease.lease.control_epoch)
+            {
+                match authoritative_by_cell.entry(lease.cell_id) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(&lease.lease);
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry)
+                        if entry.get() != &&lease.lease =>
+                    {
+                        return Err(DiscoveryError::ConflictingAuthoritativeStewardLease {
+                            node: self.node_id.clone(),
+                            cell_id: lease.cell_id,
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Local policy used while establishing a typed discovery session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryNegotiationPolicy {
+    /// Admission issuers trusted to sign peer credentials.
+    pub trusted_issuers: BTreeSet<NodeId>,
+    /// Policy versions the local node can negotiate.
+    pub supported_policy_versions: BTreeSet<u64>,
+    /// Capabilities that determine how much of the peer's namespace is visible.
+    pub viewer_capabilities: Vec<FabricCapability>,
+    /// Lease TTL to bind into the resulting discovery obligation.
+    pub lease_ttl_millis: u64,
+}
+
+/// Stable replay identifier for one typed discovery session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DiscoverySessionId(u128);
+
+impl DiscoverySessionId {
+    #[allow(clippy::result_large_err)]
+    fn for_handshake(
+        local_node: &NodeId,
+        hello: &DiscoveryHello,
+        policy_version: u64,
+    ) -> Result<Self, DiscoveryError> {
+        let bootstrap_key = hello.bootstrap.replay_key()?;
+        let lower = stable_hash((
+            "fabric::discovery",
+            local_node.as_str(),
+            hello.node_id.as_str(),
+            bootstrap_key.as_str(),
+            policy_version,
+            hello.credential.issuer.as_str(),
+            hello.credential.membership_epoch,
+            hello.credential.signature.as_str(),
+        ));
+        let upper = stable_hash((
+            "fabric::discovery:v2",
+            local_node.as_str(),
+            hello.node_id.as_str(),
+            bootstrap_key.as_str(),
+            policy_version,
+            hello.credential.issuer.as_str(),
+            hello.credential.membership_epoch,
+            hello.credential.signature.as_str(),
+        ));
+        Ok(Self((u128::from(upper) << 64) | u128::from(lower)))
+    }
+
+    /// Return the raw 128-bit identifier.
+    #[must_use]
+    pub const fn raw(self) -> u128 {
+        self.0
+    }
+}
+
+/// Explicit lease obligation attached to a discovery session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryLeaseObligation {
+    /// Stable identifier of the session that owns the obligation.
+    pub session_id: DiscoverySessionId,
+    /// Local node that must renew or release the lease.
+    pub local_node: NodeId,
+    /// Remote peer whose discovery state is being leased.
+    pub peer_node: NodeId,
+    /// Policy version agreed for the session.
+    pub policy_version: u64,
+    /// Time-to-live of the discovery lease.
+    pub ttl_millis: u64,
+}
+
+/// Lifecycle stage of a typed discovery session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoverySessionState {
+    /// The handshake completed and the lease obligation is active.
+    Established,
+}
+
+/// Replayable typed transition in the discovery state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoverySessionTransition {
+    /// Bootstrap mode validated.
+    BootstrapValidated {
+        /// Bootstrap mode that reached the peer.
+        bootstrap: DiscoveryBootstrap,
+    },
+    /// Signed peer identity and capability exchange accepted.
+    PeerAuthenticated {
+        /// Remote peer that was authenticated.
+        peer: NodeId,
+        /// Negotiated policy version.
+        policy_version: u64,
+    },
+    /// Interest disclosures filtered according to namespace visibility.
+    InterestSummaryScoped {
+        /// Count of raw subject disclosures.
+        visible: usize,
+        /// Count of blinded subject disclosures.
+        blinded: usize,
+    },
+    /// Steward authority accepted only where the current control epoch matched.
+    AuthorityValidated {
+        /// Count of authoritative current-epoch steward leases.
+        authoritative_leases: usize,
+        /// Count of recent control epochs carried in the handshake.
+        recent_epochs: usize,
+    },
+    /// Session lease bound explicitly into the transcript.
+    LeaseBound {
+        /// Lease obligation activated for the session.
+        obligation: DiscoveryLeaseObligation,
+    },
+    /// Session is fully established.
+    Established {
+        /// Remote peer bound to the session.
+        peer: NodeId,
+    },
+}
+
+impl DiscoverySessionTransition {
+    /// Stable transition kind for replay and tests.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::BootstrapValidated { .. } => "bootstrap_validated",
+            Self::PeerAuthenticated { .. } => "peer_authenticated",
+            Self::InterestSummaryScoped { .. } => "interest_summary_scoped",
+            Self::AuthorityValidated { .. } => "authority_validated",
+            Self::LeaseBound { .. } => "lease_bound",
+            Self::Established { .. } => "established",
+        }
+    }
+}
+
+/// Typed discovery session established after validating admission and capability scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverySession {
+    /// Stable replay identifier for the session.
+    pub session_id: DiscoverySessionId,
+    /// Local node that established the session.
+    pub local_node: NodeId,
+    /// Remote peer bound into the session.
+    pub peer_node: NodeId,
+    /// Bootstrap path that reached the peer.
+    pub bootstrap: DiscoveryBootstrap,
+    /// Negotiated policy version.
+    pub policy_version: u64,
+    /// Peer capability set accepted by signed admission.
+    pub peer_capabilities: Vec<FabricCapability>,
+    /// Peer resource budget snapshot.
+    pub peer_resource_budget: DiscoveryResourceBudget,
+    /// Interest disclosures visible to the local viewer.
+    pub peer_interest_advertisements: Vec<DiscoveryInterestAdvertisement>,
+    /// Steward-lease claims that remained authoritative after epoch validation.
+    pub authoritative_stewardship: Vec<DiscoveryStewardLeaseView>,
+    /// Current control epochs advertised by the peer.
+    pub recent_control_epochs: Vec<DiscoveryControlEpochView>,
+    /// Non-authoritative hints retained separately from authority artifacts.
+    pub advisory_hints: DiscoveryAdvisoryHints,
+    /// Explicit obligation that keeps the session alive.
+    pub lease_obligation: DiscoveryLeaseObligation,
+    /// Current session state.
+    pub state: DiscoverySessionState,
+    transitions: Vec<DiscoverySessionTransition>,
+}
+
+impl DiscoverySession {
+    /// Establish a typed discovery session from one validated peer hello.
+    #[allow(clippy::result_large_err)]
+    pub fn establish(
+        local_node: NodeId,
+        hello: &DiscoveryHello,
+        policy: &DiscoveryNegotiationPolicy,
+    ) -> Result<Self, DiscoveryError> {
+        hello.validate(policy)?;
+
+        let policy_version = hello
+            .supported_policy_versions
+            .intersection(&policy.supported_policy_versions)
+            .copied()
+            .max()
+            .ok_or_else(|| DiscoveryError::NoCompatiblePolicyVersion {
+                node: hello.node_id.clone(),
+            })?;
+
+        let session_id = DiscoverySessionId::for_handshake(&local_node, hello, policy_version)?;
+        let peer_interest_advertisements =
+            hello.interest_advertisements_for(&policy.viewer_capabilities, session_id);
+        let authoritative_stewardship = hello.authoritative_stewardship();
+        let visible = peer_interest_advertisements
+            .iter()
+            .filter(|entry| matches!(entry, DiscoveryInterestAdvertisement::Scoped { .. }))
+            .count();
+        let blinded = peer_interest_advertisements.len().saturating_sub(visible);
+        let lease_obligation = DiscoveryLeaseObligation {
+            session_id,
+            local_node: local_node.clone(),
+            peer_node: hello.node_id.clone(),
+            policy_version,
+            ttl_millis: policy.lease_ttl_millis.max(1),
+        };
+        let transitions = vec![
+            DiscoverySessionTransition::BootstrapValidated {
+                bootstrap: hello.bootstrap.clone(),
+            },
+            DiscoverySessionTransition::PeerAuthenticated {
+                peer: hello.node_id.clone(),
+                policy_version,
+            },
+            DiscoverySessionTransition::InterestSummaryScoped { visible, blinded },
+            DiscoverySessionTransition::AuthorityValidated {
+                authoritative_leases: authoritative_stewardship.len(),
+                recent_epochs: hello.recent_control_epochs.len(),
+            },
+            DiscoverySessionTransition::LeaseBound {
+                obligation: lease_obligation.clone(),
+            },
+            DiscoverySessionTransition::Established {
+                peer: hello.node_id.clone(),
+            },
+        ];
+
+        Ok(Self {
+            session_id,
+            local_node,
+            peer_node: hello.node_id.clone(),
+            bootstrap: hello.bootstrap.clone(),
+            policy_version,
+            peer_capabilities: hello.capability_set.clone(),
+            peer_resource_budget: hello.resource_budget.clone(),
+            peer_interest_advertisements,
+            authoritative_stewardship,
+            recent_control_epochs: hello.recent_control_epochs.clone(),
+            advisory_hints: hello.advisory_hints.clone(),
+            lease_obligation,
+            state: DiscoverySessionState::Established,
+            transitions,
+        })
+    }
+
+    /// Replayable transition transcript for the session.
+    #[must_use]
+    pub fn transitions(&self) -> &[DiscoverySessionTransition] {
+        &self.transitions
+    }
+}
+
+/// Failures produced while validating a typed discovery handshake.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DiscoveryError {
+    /// Seed-list bootstrap must carry at least one node.
+    #[error("discovery seed-list bootstrap requires at least one seed node")]
+    EmptySeedList,
+    /// Seed-list bootstrap may not repeat nodes.
+    #[error("discovery seed-list bootstrap contains duplicate node `{node}`")]
+    DuplicateSeed {
+        /// Repeated seed node.
+        node: NodeId,
+    },
+    /// Credential subject and peer hello identity must match exactly.
+    #[error(
+        "discovery credential subject `{actual}` does not match peer hello identity `{expected}`"
+    )]
+    CredentialSubjectMismatch {
+        /// Peer identity from the hello.
+        expected: NodeId,
+        /// Credential subject bound into the signature.
+        actual: NodeId,
+    },
+    /// Discovery credentials must carry some signature or proof material.
+    #[error("discovery credential for `{node}` is missing signature material")]
+    MissingCredentialSignature {
+        /// Peer whose credential lacked proof material.
+        node: NodeId,
+    },
+    /// Credential issuer was not trusted by local discovery policy.
+    #[error("discovery credential issuer `{issuer}` is not trusted")]
+    UntrustedCredentialIssuer {
+        /// Issuer that failed trust validation.
+        issuer: NodeId,
+    },
+    /// Discovery requires at least one shared policy version.
+    #[error("peer `{node}` does not share a supported discovery policy version")]
+    NoCompatiblePolicyVersion {
+        /// Peer that failed policy negotiation.
+        node: NodeId,
+    },
+    /// Peer capability exchange exceeded the signed admission envelope.
+    #[error("peer `{node}` advertised capability `{capability}` beyond signed admission")]
+    CapabilityEscalation {
+        /// Peer that attempted the capability escalation.
+        node: NodeId,
+        /// Capability not covered by signed admission.
+        capability: FabricCapability,
+    },
+    /// Interest summaries must stay inside the peer's claimed capability scope.
+    #[error(
+        "peer `{node}` advertised interest summary for `{subject}` outside its claimed capability scope"
+    )]
+    InterestSummaryOutsideCapabilitySet {
+        /// Peer that advertised an out-of-scope interest subject.
+        node: NodeId,
+        /// Interest subject not covered by the peer capability set.
+        subject: SubjectPattern,
+    },
+    /// Advertised control epochs must align with the signed admission epoch.
+    #[error(
+        "peer `{node}` advertised control epoch for cell `{cell_id}` in membership epoch {actual_membership_epoch}, but signed admission is in epoch {expected_membership_epoch}"
+    )]
+    ControlEpochMembershipMismatch {
+        /// Peer carrying the mismatched control epoch.
+        node: NodeId,
+        /// Cell whose epoch evidence was inconsistent.
+        cell_id: CellId,
+        /// Membership epoch bound into the signed admission.
+        expected_membership_epoch: u64,
+        /// Membership epoch carried by the advertised control epoch.
+        actual_membership_epoch: u64,
+    },
+    /// Advertised steward leases must align with the signed admission epoch.
+    #[error(
+        "peer `{node}` advertised steward lease for cell `{cell_id}` in membership epoch {actual_membership_epoch}, but signed admission is in epoch {expected_membership_epoch}"
+    )]
+    StewardLeaseMembershipMismatch {
+        /// Peer carrying the mismatched steward lease.
+        node: NodeId,
+        /// Cell whose steward lease was inconsistent.
+        cell_id: CellId,
+        /// Membership epoch bound into the signed admission.
+        expected_membership_epoch: u64,
+        /// Membership epoch carried by the advertised steward lease.
+        actual_membership_epoch: u64,
+    },
+    /// A cell may not advertise two different current authoritative leases.
+    #[error(
+        "peer `{node}` advertised conflicting authoritative steward leases for cell `{cell_id}`"
+    )]
+    ConflictingAuthoritativeStewardLease {
+        /// Peer that carried contradictory authority evidence.
+        node: NodeId,
+        /// Cell whose authority evidence conflicted.
+        cell_id: CellId,
+    },
+}
+
+fn capabilities_allow_interest_visibility(
+    capabilities: &[FabricCapability],
+    subject: &SubjectPattern,
+) -> bool {
+    capabilities_cover_interest_subject(capabilities, subject)
+}
+
+fn capabilities_cover_interest_subject(
+    capabilities: &[FabricCapability],
+    subject: &SubjectPattern,
+) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| interest_capability_covers_subject(capability, subject))
+}
+
+fn interest_capability_covers_subject(
+    capability: &FabricCapability,
+    subject: &SubjectPattern,
+) -> bool {
+    match capability {
+        FabricCapability::Subscribe { subject: granted }
+        | FabricCapability::CreateStream { subject: granted }
+        | FabricCapability::TransformSpace { subject: granted } => {
+            discovery_pattern_covers_pattern(granted, subject)
+        }
+        FabricCapability::AdminControl => true,
+        FabricCapability::Publish { .. } | FabricCapability::ConsumeStream { .. } => false,
+    }
+}
+
+fn fabric_capability_covers(granted: &FabricCapability, requested: &FabricCapability) -> bool {
+    match (granted, requested) {
+        (
+            FabricCapability::Publish { subject: granted },
+            FabricCapability::Publish { subject: requested },
+        )
+        | (
+            FabricCapability::Subscribe { subject: granted },
+            FabricCapability::Subscribe { subject: requested },
+        )
+        | (
+            FabricCapability::CreateStream { subject: granted },
+            FabricCapability::CreateStream { subject: requested },
+        )
+        | (
+            FabricCapability::TransformSpace { subject: granted },
+            FabricCapability::TransformSpace { subject: requested },
+        ) => discovery_pattern_covers_pattern(granted, requested),
+        (
+            FabricCapability::ConsumeStream { stream: granted },
+            FabricCapability::ConsumeStream { stream: requested },
+        ) => granted == requested,
+        (FabricCapability::AdminControl, FabricCapability::AdminControl) => true,
+        _ => false,
+    }
+}
+
+fn discovery_pattern_covers_pattern(granted: &SubjectPattern, requested: &SubjectPattern) -> bool {
+    discovery_pattern_covers_segments(granted.segments(), requested.segments())
+}
+
+fn discovery_pattern_covers_segments(granted: &[SubjectToken], requested: &[SubjectToken]) -> bool {
+    match (granted.split_first(), requested.split_first()) {
+        (Some((SubjectToken::Tail, _)), _) | (None, None) => true,
+        (None, Some(_))
+        | (Some(_), None)
+        | (
+            Some((SubjectToken::Literal(_), _)),
+            Some((SubjectToken::One | SubjectToken::Tail, _)),
+        )
+        | (Some((SubjectToken::One, _)), Some((SubjectToken::Tail, _))) => false,
+        (
+            Some((SubjectToken::Literal(granted_head), granted_rest)),
+            Some((SubjectToken::Literal(requested_head), requested_rest)),
+        ) => {
+            granted_head == requested_head
+                && discovery_pattern_covers_segments(granted_rest, requested_rest)
+        }
+        (
+            Some((SubjectToken::One, granted_rest)),
+            Some((SubjectToken::Literal(_) | SubjectToken::One, requested_rest)),
+        ) => discovery_pattern_covers_segments(granted_rest, requested_rest),
+    }
+}
+
 impl RebalanceObligationSummary {
     #[allow(clippy::result_large_err)]
     fn validate(&self) -> Result<(), RebalanceError> {
@@ -3044,6 +3804,507 @@ mod tests {
         }
     }
 
+    fn subscribe_capability(subject: &str) -> FabricCapability {
+        FabricCapability::Subscribe {
+            subject: SubjectPattern::parse(subject).expect("capability subject"),
+        }
+    }
+
+    fn discovery_policy(viewer_capabilities: Vec<FabricCapability>) -> DiscoveryNegotiationPolicy {
+        DiscoveryNegotiationPolicy {
+            trusted_issuers: BTreeSet::from([NodeId::new("admission-authority")]),
+            supported_policy_versions: BTreeSet::from([1, 3]),
+            viewer_capabilities,
+            lease_ttl_millis: 30_000,
+        }
+    }
+
+    fn discovery_interest(subject: &str, subscribers: u64) -> DiscoveryInterestSummaryEntry {
+        DiscoveryInterestSummaryEntry {
+            subject: SubjectPattern::parse(subject).expect("interest subject"),
+            subscribers,
+        }
+    }
+
+    fn discovery_credential(
+        node: &str,
+        admitted_capabilities: Vec<FabricCapability>,
+    ) -> DiscoveryAdmissionCredential {
+        DiscoveryAdmissionCredential {
+            subject: NodeId::new(node),
+            issuer: NodeId::new("admission-authority"),
+            membership_epoch: 11,
+            admitted_capabilities,
+            signature: format!("sig:{node}:v1"),
+        }
+    }
+
+    fn discovery_hello(
+        node: &str,
+        bootstrap: DiscoveryBootstrap,
+        capability_set: Vec<FabricCapability>,
+        credential_capabilities: Vec<FabricCapability>,
+        interest_summary: Vec<DiscoveryInterestSummaryEntry>,
+        stewardship_leases: Vec<DiscoveryStewardLeaseView>,
+        recent_control_epochs: Vec<DiscoveryControlEpochView>,
+    ) -> DiscoveryHello {
+        let suggested_cells = recent_control_epochs
+            .iter()
+            .map(|view| view.cell_id)
+            .collect();
+        DiscoveryHello {
+            node_id: NodeId::new(node),
+            bootstrap,
+            capability_set,
+            credential: discovery_credential(node, credential_capabilities),
+            supported_policy_versions: BTreeSet::from([2, 3]),
+            resource_budget: DiscoveryResourceBudget {
+                storage_bytes_available: 64 * 1024 * 1024,
+                uplink_kib_per_sec: 4_096,
+                repair_slots: 3,
+            },
+            interest_summary,
+            stewardship_leases,
+            recent_control_epochs,
+            advisory_hints: DiscoveryAdvisoryHints {
+                membership: Some(MembershipRecord::new(
+                    4,
+                    crate::messaging::control::MembershipState::Healthy,
+                    1_234,
+                    180,
+                )),
+                suggested_cells,
+            },
+        }
+    }
+
+    fn discovery_blinded_fingerprint(session_id: DiscoverySessionId, subject: &str) -> u64 {
+        stable_hash((
+            "fabric::discovery::interest",
+            session_id.raw(),
+            SubjectPattern::parse(subject)
+                .expect("blinded subject")
+                .canonical_key(),
+        ))
+    }
+
+    #[test]
+    fn discovery_session_establishes_handshake_with_explicit_lease_obligation() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        let capability = subscribe_capability("tenant.alpha.>");
+        let hello = discovery_hello(
+            "peer-a",
+            DiscoveryBootstrap::SeedList(vec![NodeId::new("seed-a"), NodeId::new("seed-b")]),
+            vec![capability.clone()],
+            vec![capability.clone()],
+            vec![discovery_interest("tenant.alpha.orders.>", 9)],
+            vec![DiscoveryStewardLeaseView {
+                cell_id: cell.cell_id,
+                lease: cell
+                    .control_capsule
+                    .active_sequencer_lease()
+                    .expect("active lease"),
+            }],
+            vec![DiscoveryControlEpochView {
+                cell_id: cell.cell_id,
+                control_epoch: cell.control_capsule.control_epoch(),
+            }],
+        );
+
+        let session = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![capability]),
+        )
+        .expect("session");
+
+        assert_eq!(session.state, DiscoverySessionState::Established);
+        assert_eq!(session.policy_version, 3);
+        assert_eq!(session.authoritative_stewardship.len(), 1);
+        assert_eq!(session.lease_obligation.peer_node, NodeId::new("peer-a"));
+        assert_eq!(session.lease_obligation.ttl_millis, 30_000);
+        assert_eq!(
+            session
+                .transitions()
+                .iter()
+                .map(DiscoverySessionTransition::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                "bootstrap_validated",
+                "peer_authenticated",
+                "interest_summary_scoped",
+                "authority_validated",
+                "lease_bound",
+                "established",
+            ]
+        );
+    }
+
+    #[test]
+    fn discovery_session_rejects_capability_escalation_outside_signed_admission() {
+        let granted = subscribe_capability("tenant.alpha.orders.>");
+        let escalated = subscribe_capability("tenant.alpha.>");
+        let hello = discovery_hello(
+            "peer-b",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![escalated.clone()],
+            vec![granted],
+            vec![discovery_interest("tenant.alpha.orders.>", 3)],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let err = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![subscribe_capability("tenant.alpha.>")]),
+        )
+        .expect_err("capability escalation must fail");
+
+        assert_eq!(
+            err,
+            DiscoveryError::CapabilityEscalation {
+                node: NodeId::new("peer-b"),
+                capability: escalated,
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_interest_summary_blinds_namespaces_outside_viewer_capability() {
+        let hello = discovery_hello(
+            "peer-c",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![
+                subscribe_capability("tenant.alpha.>"),
+                subscribe_capability("tenant.beta.>"),
+            ],
+            vec![
+                subscribe_capability("tenant.alpha.>"),
+                subscribe_capability("tenant.beta.>"),
+            ],
+            vec![
+                discovery_interest("tenant.alpha.orders.>", 7),
+                discovery_interest("tenant.beta.orders.>", 11),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let session = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![subscribe_capability("tenant.alpha.>")]),
+        )
+        .expect("session");
+
+        assert_eq!(
+            session.peer_interest_advertisements[0],
+            DiscoveryInterestAdvertisement::Scoped {
+                subject: SubjectPattern::parse("tenant.alpha.orders.>").expect("alpha"),
+                subscribers: 7,
+            }
+        );
+        assert_eq!(
+            session.peer_interest_advertisements[1],
+            DiscoveryInterestAdvertisement::Blinded {
+                subject_fingerprint: discovery_blinded_fingerprint(
+                    session.session_id,
+                    "tenant.beta.orders.>",
+                ),
+                subscribers: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_interest_summary_outside_peer_capability_scope() {
+        let capability = subscribe_capability("tenant.alpha.>");
+        let hello = discovery_hello(
+            "peer-c2",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![capability.clone()],
+            vec![capability],
+            vec![discovery_interest("tenant.beta.orders.>", 11)],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let err = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![subscribe_capability("tenant.alpha.>")]),
+        )
+        .expect_err("interest summary outside peer capability scope must fail");
+
+        assert_eq!(
+            err,
+            DiscoveryError::InterestSummaryOutsideCapabilitySet {
+                node: NodeId::new("peer-c2"),
+                subject: SubjectPattern::parse("tenant.beta.orders.>").expect("beta"),
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_namespace_visibility_is_narrower_than_membership() {
+        let hello = discovery_hello(
+            "peer-d",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![discovery_interest("tenant.alpha.orders.>", 5)],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let session = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(Vec::new()),
+        )
+        .expect("session");
+
+        assert!(session.advisory_hints.membership.is_some());
+        assert_eq!(
+            session.peer_interest_advertisements,
+            vec![DiscoveryInterestAdvertisement::Blinded {
+                subject_fingerprint: discovery_blinded_fingerprint(
+                    session.session_id,
+                    "tenant.alpha.orders.>",
+                ),
+                subscribers: 5,
+            }]
+        );
+    }
+
+    #[test]
+    fn discovery_session_blinding_is_not_linkable_across_distinct_credentials() {
+        let hello_v1 = discovery_hello(
+            "peer-d1",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![discovery_interest("tenant.alpha.orders.>", 5)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut hello_v2 = hello_v1.clone();
+        hello_v2.credential.signature = "sig:peer-d1:v2".to_owned();
+
+        let policy = discovery_policy(Vec::new());
+        let session_v1 = DiscoverySession::establish(NodeId::new("local-a"), &hello_v1, &policy)
+            .expect("session v1");
+        let session_v2 = DiscoverySession::establish(NodeId::new("local-a"), &hello_v2, &policy)
+            .expect("session v2");
+
+        assert_ne!(session_v1.session_id, session_v2.session_id);
+        assert_ne!(
+            session_v1.peer_interest_advertisements,
+            session_v2.peer_interest_advertisements
+        );
+    }
+
+    #[test]
+    fn discovery_sybil_resistance_rejects_untrusted_issuer() {
+        let capability = subscribe_capability("tenant.alpha.>");
+        let mut hello = discovery_hello(
+            "peer-e",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![capability.clone()],
+            vec![capability],
+            vec![discovery_interest("tenant.alpha.orders.>", 2)],
+            Vec::new(),
+            Vec::new(),
+        );
+        hello.credential.issuer = NodeId::new("rogue-issuer");
+
+        let err = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![subscribe_capability("tenant.alpha.>")]),
+        )
+        .expect_err("untrusted issuer must fail");
+
+        assert_eq!(
+            err,
+            DiscoveryError::UntrustedCredentialIssuer {
+                issuer: NodeId::new("rogue-issuer"),
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_stale_steward_leases_do_not_become_authoritative() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        let capability = subscribe_capability("tenant.alpha.>");
+        let stale_lease = cell
+            .control_capsule
+            .active_sequencer_lease()
+            .expect("active lease");
+        let hello = discovery_hello(
+            "peer-f",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![capability.clone()],
+            vec![capability.clone()],
+            vec![discovery_interest("tenant.alpha.orders.>", 4)],
+            vec![DiscoveryStewardLeaseView {
+                cell_id: cell.cell_id,
+                lease: stale_lease,
+            }],
+            vec![DiscoveryControlEpochView {
+                cell_id: cell.cell_id,
+                control_epoch: ControlEpoch::new(
+                    cell.epoch,
+                    cell.control_capsule.policy_revision + 1,
+                ),
+            }],
+        );
+
+        let session = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![capability]),
+        )
+        .expect("session");
+
+        assert!(
+            session.authoritative_stewardship.is_empty(),
+            "stale lease should remain advisory until backed by the current control epoch"
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_authority_evidence_from_wrong_membership_epoch() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        let capability = subscribe_capability("tenant.alpha.>");
+        let mut hello = discovery_hello(
+            "peer-h",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![capability.clone()],
+            vec![capability.clone()],
+            vec![discovery_interest("tenant.alpha.orders.>", 4)],
+            vec![DiscoveryStewardLeaseView {
+                cell_id: cell.cell_id,
+                lease: cell
+                    .control_capsule
+                    .active_sequencer_lease()
+                    .expect("active lease"),
+            }],
+            vec![DiscoveryControlEpochView {
+                cell_id: cell.cell_id,
+                control_epoch: cell.control_capsule.control_epoch(),
+            }],
+        );
+        hello.recent_control_epochs[0].control_epoch = ControlEpoch::new(
+            CellEpoch::new(12, cell.epoch.generation),
+            cell.control_capsule.policy_revision,
+        );
+
+        let err = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![capability]),
+        )
+        .expect_err("authority evidence from the wrong membership epoch must fail");
+
+        assert_eq!(
+            err,
+            DiscoveryError::ControlEpochMembershipMismatch {
+                node: NodeId::new("peer-h"),
+                cell_id: cell.cell_id,
+                expected_membership_epoch: 11,
+                actual_membership_epoch: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_conflicting_current_authoritative_leases() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        let capability = subscribe_capability("tenant.alpha.>");
+        let current_control_epoch = cell.control_capsule.control_epoch();
+        let mut conflicting_lease = cell
+            .control_capsule
+            .active_sequencer_lease()
+            .expect("active lease");
+        conflicting_lease.holder = NodeId::new("node-z");
+        let hello = discovery_hello(
+            "peer-i",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![capability.clone()],
+            vec![capability.clone()],
+            vec![discovery_interest("tenant.alpha.orders.>", 4)],
+            vec![
+                DiscoveryStewardLeaseView {
+                    cell_id: cell.cell_id,
+                    lease: cell
+                        .control_capsule
+                        .active_sequencer_lease()
+                        .expect("active lease"),
+                },
+                DiscoveryStewardLeaseView {
+                    cell_id: cell.cell_id,
+                    lease: conflicting_lease,
+                },
+            ],
+            vec![DiscoveryControlEpochView {
+                cell_id: cell.cell_id,
+                control_epoch: current_control_epoch,
+            }],
+        );
+
+        let err = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![capability]),
+        )
+        .expect_err("conflicting current leases must fail");
+
+        assert_eq!(
+            err,
+            DiscoveryError::ConflictingAuthoritativeStewardLease {
+                node: NodeId::new("peer-i"),
+                cell_id: cell.cell_id,
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_session_transcript_is_replayable_for_identical_inputs() {
+        let capability = subscribe_capability("tenant.alpha.>");
+        let hello = discovery_hello(
+            "peer-g",
+            DiscoveryBootstrap::SeedList(vec![NodeId::new("seed-a")]),
+            vec![capability.clone()],
+            vec![capability.clone()],
+            vec![discovery_interest("tenant.alpha.orders.>", 6)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let policy = discovery_policy(vec![capability]);
+
+        let first = DiscoverySession::establish(NodeId::new("local-a"), &hello, &policy)
+            .expect("first session");
+        let second = DiscoverySession::establish(NodeId::new("local-a"), &hello, &policy)
+            .expect("second session");
+
+        assert_eq!(first.session_id, second.session_id);
+        assert_eq!(first.transitions(), second.transitions());
+        assert_eq!(
+            first.peer_interest_advertisements,
+            second.peer_interest_advertisements
+        );
+    }
+
     #[test]
     fn control_capsule_v1_fences_stale_sequencer_leases() {
         let mut capsule = control_capsule();
@@ -3079,6 +4340,27 @@ mod tests {
             .expect("fresh lease should append");
         assert_eq!(certificate.identity.sequence, 1);
         assert_eq!(certificate.sequencer, NodeId::new("node-b"));
+    }
+
+    #[test]
+    fn control_capsule_v1_authoritative_appends_are_monotonic_within_epoch() {
+        let mut capsule = control_capsule();
+        let lease = capsule
+            .active_sequencer_lease()
+            .expect("initial sequencer lease");
+
+        let first = capsule
+            .authoritative_append(&lease)
+            .expect("first append should commit");
+        let second = capsule
+            .authoritative_append(&lease)
+            .expect("second append should commit");
+
+        assert_eq!(first.identity.cell_id, second.identity.cell_id);
+        assert_eq!(first.identity.epoch, second.identity.epoch);
+        assert_eq!(first.identity.sequence, 1);
+        assert_eq!(second.identity.sequence, 2);
+        assert!(first.identity < second.identity);
     }
 
     #[test]

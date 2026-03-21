@@ -5,7 +5,8 @@
 //! caller mints a certificate from the current cell, then applies a lawful
 //! mobility operation that yields a concrete next `SubjectCell`.
 
-use super::fabric::{CellEpoch, CellId, DataCapsule, RepairPolicy, SubjectCell};
+use super::fabric::{CellEpoch, CellId, CellTemperature, DataCapsule, RepairPolicy, SubjectCell};
+use super::policy::{ReliabilityControlError, SafetyEnvelope};
 use crate::remote::NodeId;
 use crate::types::{ObligationId, Time};
 use crate::util::DetHasher;
@@ -945,6 +946,277 @@ impl RehearsalComparison {
             &self.label,
             matches!(self.divergence, RehearsalDivergence::Equivalent),
         ))
+    }
+
+    /// Decide whether a rehearsed policy should be promoted over the current
+    /// baseline under an explicit safety envelope.
+    #[must_use]
+    pub fn evaluate_promotion(
+        &self,
+        baseline: &CounterfactualScore,
+        candidate: &CounterfactualScore,
+        envelope: &CounterfactualPromotionEnvelope,
+    ) -> CounterfactualPromotionDecision {
+        if matches!(self.divergence, RehearsalDivergence::Equivalent) {
+            return CounterfactualPromotionDecision::RejectEquivalent;
+        }
+
+        if let Some(rejection) = validate_counterfactual_score(baseline, "baseline_") {
+            return rejection;
+        }
+        if let Some(rejection) = validate_counterfactual_score(candidate, "") {
+            return rejection;
+        }
+        if let Err(error) = envelope.validate() {
+            return CounterfactualPromotionDecision::RejectInvalidEnvelope { error };
+        }
+
+        if candidate.evidence_confidence < envelope.reliability.evidence_threshold {
+            return CounterfactualPromotionDecision::RejectInsufficientEvidence {
+                observed: candidate.evidence_confidence,
+                required: envelope.reliability.evidence_threshold,
+            };
+        }
+
+        if candidate.violation_rate > envelope.reliability.rollback_violation_threshold {
+            return CounterfactualPromotionDecision::RejectRollbackRisk {
+                observed: candidate.violation_rate,
+                threshold: envelope.reliability.rollback_violation_threshold,
+            };
+        }
+
+        let Some(rehearsed_cell) = self.rehearsed.resulting_cell() else {
+            return CounterfactualPromotionDecision::RejectFailure {
+                divergence: self.divergence.clone(),
+            };
+        };
+
+        let envelope_violations = envelope.evaluate(rehearsed_cell);
+        if !envelope_violations.is_empty() {
+            return CounterfactualPromotionDecision::RejectEnvelopeViolation {
+                reasons: envelope_violations,
+            };
+        }
+
+        if candidate.policy_gain <= baseline.policy_gain {
+            return CounterfactualPromotionDecision::RejectNoImprovement {
+                baseline_gain: baseline.policy_gain,
+                candidate_gain: candidate.policy_gain,
+            };
+        }
+
+        CounterfactualPromotionDecision::Promote {
+            comparison_digest: self.comparison_digest(),
+            policy_description: self.rehearsed.policy_description.clone(),
+        }
+    }
+}
+
+/// Compact scorecard for comparing one rehearsed policy against the baseline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CounterfactualScore {
+    /// Operator-meaningful improvement score; higher is better.
+    pub policy_gain: f64,
+    /// Confidence that the rehearsal used enough evidence to justify a shift.
+    pub evidence_confidence: f64,
+    /// Estimated post-promotion violation rate.
+    pub violation_rate: f64,
+}
+
+/// Safety limits that a promoted rehearsal must remain inside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CounterfactualPromotionEnvelope {
+    /// Shared operator envelope compiled elsewhere in the policy plane.
+    pub reliability: SafetyEnvelope,
+    /// Highest data temperature that may be promoted automatically.
+    pub max_temperature: CellTemperature,
+    /// Maximum retained inline message blocks allowed after promotion.
+    pub max_retained_message_blocks: usize,
+    /// Maximum witness fanout allowed for cold cells after promotion.
+    pub max_cold_witnesses: usize,
+    /// Maximum witness fanout allowed for hot cells after promotion.
+    pub max_hot_witnesses: usize,
+}
+
+impl Default for CounterfactualPromotionEnvelope {
+    fn default() -> Self {
+        Self {
+            reliability: SafetyEnvelope::default(),
+            max_temperature: CellTemperature::Hot,
+            max_retained_message_blocks: usize::MAX,
+            max_cold_witnesses: usize::MAX,
+            max_hot_witnesses: usize::MAX,
+        }
+    }
+}
+
+impl CounterfactualPromotionEnvelope {
+    fn validate(&self) -> Result<(), ReliabilityControlError> {
+        self.reliability.validate()
+    }
+
+    fn evaluate(&self, cell: &SubjectCell) -> Vec<String> {
+        let mut violations = Vec::new();
+        let steward_count = cell.steward_set.len();
+
+        if steward_count < self.reliability.min_stewards
+            || steward_count > self.reliability.max_stewards
+        {
+            violations.push(format!(
+                "steward_count={steward_count} outside [{}, {}]",
+                self.reliability.min_stewards, self.reliability.max_stewards
+            ));
+        }
+
+        let recoverability = u16::from(cell.repair_policy.recoverability_target);
+        if recoverability < self.reliability.min_repair_depth
+            || recoverability > self.reliability.max_repair_depth
+        {
+            violations.push(format!(
+                "recoverability_target={recoverability} outside [{}, {}]",
+                self.reliability.min_repair_depth, self.reliability.max_repair_depth
+            ));
+        }
+
+        if temperature_rank(cell.data_capsule.temperature) > temperature_rank(self.max_temperature)
+        {
+            violations.push(format!(
+                "temperature={:?} exceeds {:?}",
+                cell.data_capsule.temperature, self.max_temperature
+            ));
+        }
+
+        if cell.data_capsule.retained_message_blocks > self.max_retained_message_blocks {
+            violations.push(format!(
+                "retained_message_blocks={} exceeds {}",
+                cell.data_capsule.retained_message_blocks, self.max_retained_message_blocks
+            ));
+        }
+
+        if cell.repair_policy.cold_witnesses > self.max_cold_witnesses {
+            violations.push(format!(
+                "cold_witnesses={} exceeds {}",
+                cell.repair_policy.cold_witnesses, self.max_cold_witnesses
+            ));
+        }
+
+        if cell.repair_policy.hot_witnesses > self.max_hot_witnesses {
+            violations.push(format!(
+                "hot_witnesses={} exceeds {}",
+                cell.repair_policy.hot_witnesses, self.max_hot_witnesses
+            ));
+        }
+
+        violations
+    }
+}
+
+/// Promotion verdict for a rehearsed counterfactual branch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CounterfactualPromotionDecision {
+    /// The rehearsed policy beat the baseline inside the envelope.
+    Promote {
+        /// Deterministic digest of the comparison that justified promotion.
+        comparison_digest: u64,
+        /// Human-readable policy description that was promoted.
+        policy_description: String,
+    },
+    /// No material change relative to the baseline.
+    RejectEquivalent,
+    /// Candidate score contained an invalid numeric value.
+    RejectInvalidScore {
+        /// Invalid field name.
+        field: &'static str,
+        /// Value that was rejected.
+        value: f64,
+    },
+    /// The supplied promotion envelope is not internally consistent.
+    RejectInvalidEnvelope {
+        /// Validation failure explaining which safety bound is malformed.
+        error: ReliabilityControlError,
+    },
+    /// Candidate lacked the evidence required by policy.
+    RejectInsufficientEvidence {
+        /// Candidate confidence.
+        observed: f64,
+        /// Required confidence.
+        required: f64,
+    },
+    /// Candidate would exceed the allowed rollback/violation risk.
+    RejectRollbackRisk {
+        /// Candidate violation rate.
+        observed: f64,
+        /// Maximum permitted rate.
+        threshold: f64,
+    },
+    /// Candidate violates the explicit envelope bounds.
+    RejectEnvelopeViolation {
+        /// Human-readable reasons for the rejection.
+        reasons: Vec<String>,
+    },
+    /// Candidate did not improve on the current baseline.
+    RejectNoImprovement {
+        /// Current baseline score.
+        baseline_gain: f64,
+        /// Candidate score.
+        candidate_gain: f64,
+    },
+    /// Candidate replay failed and is therefore not promotable.
+    RejectFailure {
+        /// Divergence classification explaining the rejection.
+        divergence: RehearsalDivergence,
+    },
+}
+
+fn validate_counterfactual_score(
+    score: &CounterfactualScore,
+    field_prefix: &'static str,
+) -> Option<CounterfactualPromotionDecision> {
+    if !score.policy_gain.is_finite() {
+        return Some(CounterfactualPromotionDecision::RejectInvalidScore {
+            field: invalid_score_field(field_prefix, "policy_gain"),
+            value: score.policy_gain,
+        });
+    }
+
+    if !score.evidence_confidence.is_finite()
+        || score.evidence_confidence < 0.0
+        || score.evidence_confidence > 1.0
+    {
+        return Some(CounterfactualPromotionDecision::RejectInvalidScore {
+            field: invalid_score_field(field_prefix, "evidence_confidence"),
+            value: score.evidence_confidence,
+        });
+    }
+
+    if !score.violation_rate.is_finite() || score.violation_rate < 0.0 || score.violation_rate > 1.0
+    {
+        return Some(CounterfactualPromotionDecision::RejectInvalidScore {
+            field: invalid_score_field(field_prefix, "violation_rate"),
+            value: score.violation_rate,
+        });
+    }
+
+    None
+}
+
+fn invalid_score_field(field_prefix: &'static str, field_name: &'static str) -> &'static str {
+    match (field_prefix, field_name) {
+        ("", "policy_gain") => "policy_gain",
+        ("", "evidence_confidence") => "evidence_confidence",
+        ("", "violation_rate") => "violation_rate",
+        ("baseline_", "policy_gain") => "baseline_policy_gain",
+        ("baseline_", "evidence_confidence") => "baseline_evidence_confidence",
+        ("baseline_", "violation_rate") => "baseline_violation_rate",
+        _ => "invalid_score",
+    }
+}
+
+fn temperature_rank(temperature: CellTemperature) -> u8 {
+    match temperature {
+        CellTemperature::Cold => 0,
+        CellTemperature::Warm => 1,
+        CellTemperature::Hot => 2,
     }
 }
 
@@ -2488,6 +2760,284 @@ mod tests {
             }
             other => panic!("expected CellDrift, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn promotion_accepts_rehearsal_that_beats_failed_original_within_envelope() {
+        let (_, _, snap) = make_snapshot();
+
+        let fork = snap
+            .fork_rehearsal(
+                RehearsalPolicy {
+                    steward_override: Some(vec![
+                        NodeId::new("node-a"),
+                        NodeId::new("node-b"),
+                        NodeId::new("node-d"),
+                    ]),
+                    description: "recover with node-d".to_owned(),
+                    ..Default::default()
+                },
+                CellEpoch::new(10, 1),
+            )
+            .expect("fork");
+
+        let outcome = fork.replay(&MobilityOperation::Evacuate {
+            from: NodeId::new("node-a"),
+            to: NodeId::new("node-d"),
+        });
+        let comparison = RehearsalComparison::compare(&snap, outcome).expect("comparison");
+
+        let decision = comparison.evaluate_promotion(
+            &CounterfactualScore {
+                policy_gain: 0.1,
+                evidence_confidence: 0.9,
+                violation_rate: 0.1,
+            },
+            &CounterfactualScore {
+                policy_gain: 0.8,
+                evidence_confidence: 0.95,
+                violation_rate: 0.1,
+            },
+            &CounterfactualPromotionEnvelope {
+                reliability: SafetyEnvelope {
+                    min_stewards: 2,
+                    max_stewards: 4,
+                    min_repair_depth: 1,
+                    max_repair_depth: 4,
+                    evidence_threshold: 0.8,
+                    rollback_violation_threshold: 0.2,
+                    ..SafetyEnvelope::default()
+                },
+                max_temperature: CellTemperature::Warm,
+                max_retained_message_blocks: 8,
+                max_cold_witnesses: 2,
+                max_hot_witnesses: 4,
+            },
+        );
+
+        assert!(matches!(
+            decision,
+            CounterfactualPromotionDecision::Promote { .. }
+        ));
+    }
+
+    #[test]
+    fn promotion_rejects_candidate_below_evidence_threshold() {
+        let (_, _, snap) = make_snapshot();
+        let fork = snap
+            .fork_rehearsal(RehearsalPolicy::default(), CellEpoch::new(10, 1))
+            .expect("fork");
+        let outcome = fork.replay(&snap.original_operation);
+        let comparison = RehearsalComparison::compare(&snap, outcome).expect("comparison");
+
+        let decision = comparison.evaluate_promotion(
+            &CounterfactualScore {
+                policy_gain: 0.2,
+                evidence_confidence: 0.9,
+                violation_rate: 0.1,
+            },
+            &CounterfactualScore {
+                policy_gain: 0.7,
+                evidence_confidence: 0.4,
+                violation_rate: 0.1,
+            },
+            &CounterfactualPromotionEnvelope {
+                reliability: SafetyEnvelope {
+                    evidence_threshold: 0.8,
+                    ..SafetyEnvelope::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            decision,
+            CounterfactualPromotionDecision::RejectInsufficientEvidence {
+                observed: 0.4,
+                required: 0.8,
+            }
+        );
+    }
+
+    #[test]
+    fn promotion_rejects_candidate_outside_safety_envelope() {
+        let (_, _, snap) = make_snapshot();
+
+        let fork = snap
+            .fork_rehearsal(
+                RehearsalPolicy {
+                    repair_override: Some(RepairPolicy {
+                        recoverability_target: 6,
+                        cold_witnesses: 5,
+                        hot_witnesses: 7,
+                    }),
+                    data_capsule_override: Some(DataCapsule {
+                        temperature: CellTemperature::Hot,
+                        retained_message_blocks: 32,
+                    }),
+                    description: "aggressive unsafe branch".to_owned(),
+                    ..Default::default()
+                },
+                CellEpoch::new(10, 1),
+            )
+            .expect("fork");
+
+        let outcome = fork.replay(&snap.original_operation);
+        let comparison = RehearsalComparison::compare(&snap, outcome).expect("comparison");
+
+        let decision = comparison.evaluate_promotion(
+            &CounterfactualScore {
+                policy_gain: 0.2,
+                evidence_confidence: 0.9,
+                violation_rate: 0.1,
+            },
+            &CounterfactualScore {
+                policy_gain: 0.9,
+                evidence_confidence: 0.95,
+                violation_rate: 0.1,
+            },
+            &CounterfactualPromotionEnvelope {
+                reliability: SafetyEnvelope {
+                    min_repair_depth: 1,
+                    max_repair_depth: 4,
+                    evidence_threshold: 0.8,
+                    rollback_violation_threshold: 0.2,
+                    ..SafetyEnvelope::default()
+                },
+                max_temperature: CellTemperature::Warm,
+                max_retained_message_blocks: 8,
+                max_cold_witnesses: 2,
+                max_hot_witnesses: 4,
+            },
+        );
+
+        match decision {
+            CounterfactualPromotionDecision::RejectEnvelopeViolation { reasons } => {
+                assert!(reasons.iter().any(|r| r.contains("recoverability_target")));
+                assert!(reasons.iter().any(|r| r.contains("temperature")));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| r.contains("retained_message_blocks"))
+                );
+                assert!(reasons.iter().any(|r| r.contains("cold_witnesses")));
+                assert!(reasons.iter().any(|r| r.contains("hot_witnesses")));
+            }
+            other => panic!("expected RejectEnvelopeViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn promotion_rejects_candidate_with_nan_policy_gain() {
+        let (_, _, snap) = make_snapshot();
+        let fork = snap
+            .fork_rehearsal(RehearsalPolicy::default(), CellEpoch::new(10, 1))
+            .expect("fork");
+        let outcome = fork.replay(&MobilityOperation::Failover {
+            failed: NodeId::new("node-a"),
+            promote_to: NodeId::new("node-b"),
+        });
+        let comparison = RehearsalComparison::compare(&snap, outcome).expect("comparison");
+
+        let decision = comparison.evaluate_promotion(
+            &CounterfactualScore {
+                policy_gain: 0.2,
+                evidence_confidence: 0.9,
+                violation_rate: 0.1,
+            },
+            &CounterfactualScore {
+                policy_gain: f64::NAN,
+                evidence_confidence: 0.95,
+                violation_rate: 0.05,
+            },
+            &CounterfactualPromotionEnvelope::default(),
+        );
+
+        assert!(matches!(
+            decision,
+            CounterfactualPromotionDecision::RejectInvalidScore {
+                field: "policy_gain",
+                value,
+            } if value.is_nan()
+        ));
+    }
+
+    #[test]
+    fn promotion_rejects_invalid_envelope_before_threshold_checks() {
+        let (_, _, snap) = make_snapshot();
+        let fork = snap
+            .fork_rehearsal(RehearsalPolicy::default(), CellEpoch::new(10, 1))
+            .expect("fork");
+        let outcome = fork.replay(&MobilityOperation::Failover {
+            failed: NodeId::new("node-a"),
+            promote_to: NodeId::new("node-b"),
+        });
+        let comparison = RehearsalComparison::compare(&snap, outcome).expect("comparison");
+
+        let decision = comparison.evaluate_promotion(
+            &CounterfactualScore {
+                policy_gain: 0.2,
+                evidence_confidence: 0.9,
+                violation_rate: 0.1,
+            },
+            &CounterfactualScore {
+                policy_gain: 0.8,
+                evidence_confidence: 0.95,
+                violation_rate: 0.05,
+            },
+            &CounterfactualPromotionEnvelope {
+                reliability: SafetyEnvelope {
+                    evidence_threshold: f64::NAN,
+                    ..SafetyEnvelope::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            decision,
+            CounterfactualPromotionDecision::RejectInvalidEnvelope {
+                error: ReliabilityControlError::InvalidProbability {
+                    field: "evidence_threshold",
+                    value,
+                },
+            } if value.is_nan()
+        ));
+    }
+
+    #[test]
+    fn promotion_rejects_baseline_with_nan_policy_gain() {
+        let (_, _, snap) = make_snapshot();
+        let fork = snap
+            .fork_rehearsal(RehearsalPolicy::default(), CellEpoch::new(10, 1))
+            .expect("fork");
+        let outcome = fork.replay(&MobilityOperation::Failover {
+            failed: NodeId::new("node-a"),
+            promote_to: NodeId::new("node-b"),
+        });
+        let comparison = RehearsalComparison::compare(&snap, outcome).expect("comparison");
+
+        let decision = comparison.evaluate_promotion(
+            &CounterfactualScore {
+                policy_gain: f64::NAN,
+                evidence_confidence: 0.9,
+                violation_rate: 0.1,
+            },
+            &CounterfactualScore {
+                policy_gain: 0.8,
+                evidence_confidence: 0.95,
+                violation_rate: 0.05,
+            },
+            &CounterfactualPromotionEnvelope::default(),
+        );
+
+        assert!(matches!(
+            decision,
+            CounterfactualPromotionDecision::RejectInvalidScore {
+                field: "baseline_policy_gain",
+                value,
+            } if value.is_nan()
+        ));
     }
 
     // -----------------------------------------------------------------------
