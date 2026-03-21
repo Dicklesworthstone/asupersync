@@ -344,16 +344,17 @@ impl LoadBalancer {
     }
 
     #[inline]
-    fn weighted_endpoint_index_for_slot(available: &[&Arc<Endpoint>], slot: u64) -> usize {
+    fn weighted_endpoint_span_for_slot(available: &[&Arc<Endpoint>], slot: u64) -> (usize, u64) {
         let mut cumulative = 0u64;
         for (idx, endpoint) in available.iter().enumerate() {
             cumulative += u64::from(endpoint.weight);
             if slot < cumulative {
-                return idx;
+                return (idx, cumulative);
             }
         }
 
-        available.len().saturating_sub(1)
+        let last_index = available.len().saturating_sub(1);
+        (last_index, cumulative)
     }
 
     /// Unique weighted round-robin selection for multicast/quorum routing.
@@ -389,19 +390,22 @@ impl LoadBalancer {
             let mut consumed_slots = 0u64;
 
             while consumed_slots < total_weight {
-                let idx = Self::weighted_endpoint_index_for_slot(&available, slot);
-                consumed_slots += 1;
+                let (idx, block_end) = Self::weighted_endpoint_span_for_slot(&available, slot);
+                let span = block_end - slot;
                 if !selected_indices.contains(&idx) {
                     selected_indices.push(idx);
                     selected.push(available[idx]);
                     if selected.len() == n {
+                        consumed_slots += span;
                         break;
                     }
                 }
-                slot = if slot + 1 == total_weight {
+
+                consumed_slots += span;
+                slot = if block_end == total_weight {
                     0
                 } else {
-                    slot + 1
+                    block_end
                 };
             }
 
@@ -2364,6 +2368,23 @@ mod tests {
         assert_eq!(first, vec![heavy.id, medium.id]);
         assert_eq!(second, vec![light.id, heavy.id]);
         assert_eq!(third, vec![heavy.id, medium.id]);
+    }
+
+    #[test]
+    fn test_load_balancer_weighted_round_robin_select_n_handles_extreme_weight_skew() {
+        let lb = LoadBalancer::new(LoadBalanceStrategy::WeightedRoundRobin);
+
+        let heavy = Arc::new(test_endpoint(1).with_weight(u32::MAX));
+        let light = Arc::new(test_endpoint(2).with_weight(1));
+        let endpoints = vec![heavy.clone(), light.clone()];
+
+        let selected: Vec<_> = lb
+            .select_n(&endpoints, 2, None)
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+
+        assert_eq!(selected, vec![heavy.id, light.id]);
     }
 
     // Test 6: Routing table basic operations
