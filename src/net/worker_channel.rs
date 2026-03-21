@@ -829,6 +829,15 @@ impl WorkerCoordinator {
                 Ok(())
             }
             WorkerOp::CancelAcknowledged { job_id } => {
+                if !self.jobs.contains_key(job_id) {
+                    return Err(WorkerChannelError::UnknownJobId(*job_id));
+                }
+                // Once shutdown is in progress, do not emit new job-scoped
+                // control traffic. The pending job will be failed when the
+                // worker reports shutdown completion or the session is reset.
+                if self.shutdown_requested {
+                    return Ok(());
+                }
                 {
                     let job = self
                         .jobs
@@ -839,6 +848,14 @@ impl WorkerCoordinator {
                 self.enqueue_job_message(*job_id, WorkerOp::DrainJob { job_id: *job_id })
             }
             WorkerOp::DrainCompleted { job_id } => {
+                if !self.jobs.contains_key(job_id) {
+                    return Err(WorkerChannelError::UnknownJobId(*job_id));
+                }
+                // Once shutdown is in progress, do not continue the explicit
+                // cancel protocol with new outbound drain/finalize traffic.
+                if self.shutdown_requested {
+                    return Ok(());
+                }
                 {
                     let job = self
                         .jobs
@@ -1741,6 +1758,82 @@ mod tests {
         );
         assert_eq!(coord.job_state(1), Some(JobState::Running));
 
+        let shutdown = coord.drain_outbox().unwrap();
+        assert!(matches!(shutdown.op, WorkerOp::ShutdownWorker { .. }));
+        assert!(coord.drain_outbox().is_none());
+    }
+
+    #[test]
+    fn coordinator_shutdown_supersedes_cancel_acknowledged_follow_up() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.cancel_job(1, "begin cancel".into()).unwrap();
+        let cancel = coord.drain_outbox().unwrap();
+        assert!(matches!(cancel.op, WorkerOp::CancelJob { job_id: 1, .. }));
+        assert_eq!(coord.job_state(1), Some(JobState::CancelRequested));
+
+        coord.request_shutdown("shutdown now".into()).unwrap();
+        assert!(coord.is_shutdown_requested());
+
+        let ack = test_worker_envelope(3, 3, 2, WorkerOp::CancelAcknowledged { job_id: 1 });
+        coord.handle_inbound(&ack).unwrap();
+
+        assert_eq!(coord.job_state(1), Some(JobState::CancelRequested));
+        let shutdown = coord.drain_outbox().unwrap();
+        assert!(matches!(shutdown.op, WorkerOp::ShutdownWorker { .. }));
+        assert!(coord.drain_outbox().is_none());
+    }
+
+    #[test]
+    fn coordinator_shutdown_supersedes_drain_completed_follow_up() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.cancel_job(1, "begin cancel".into()).unwrap();
+        let _ = coord.drain_outbox();
+
+        let ack = test_worker_envelope(3, 3, 2, WorkerOp::CancelAcknowledged { job_id: 1 });
+        coord.handle_inbound(&ack).unwrap();
+        let drain = coord.drain_outbox().unwrap();
+        assert!(matches!(drain.op, WorkerOp::DrainJob { job_id: 1 }));
+        assert_eq!(coord.job_state(1), Some(JobState::Draining));
+
+        coord.request_shutdown("shutdown now".into()).unwrap();
+        assert!(coord.is_shutdown_requested());
+
+        let drain_completed = test_worker_envelope(4, 4, 3, WorkerOp::DrainCompleted { job_id: 1 });
+        coord.handle_inbound(&drain_completed).unwrap();
+
+        assert_eq!(coord.job_state(1), Some(JobState::Draining));
         let shutdown = coord.drain_outbox().unwrap();
         assert!(matches!(shutdown.op, WorkerOp::ShutdownWorker { .. }));
         assert!(coord.drain_outbox().is_none());
