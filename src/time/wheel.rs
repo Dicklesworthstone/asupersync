@@ -468,6 +468,18 @@ impl TimerWheel {
         Time::from_nanos(self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS))
     }
 
+    /// Synchronizes the wheel's internal notion of time to the provided clock.
+    ///
+    /// This advances buckets and overflow promotion without draining ready
+    /// timers, so query/register paths can reason from a current baseline even
+    /// after long idle gaps between `collect_expired` calls.
+    pub(crate) fn synchronize(&mut self, now: Time) {
+        let target_tick = now.as_nanos() / LEVEL0_RESOLUTION_NS;
+        if target_tick > self.current_tick {
+            self.advance_to(target_tick);
+        }
+    }
+
     /// Registers a timer that fires at the given deadline.
     ///
     /// If the timer duration exceeds the configured maximum, the deadline is
@@ -606,12 +618,7 @@ impl TimerWheel {
 
     /// Advances time and returns expired timer wakers.
     pub fn collect_expired(&mut self, now: Time) -> WakerBatch {
-        let now_nanos = now.as_nanos();
-        let target_tick = now_nanos / LEVEL0_RESOLUTION_NS;
-
-        if target_tick > self.current_tick {
-            self.advance_to(target_tick);
-        }
+        self.synchronize(now);
 
         self.drain_ready(now)
     }

@@ -438,7 +438,10 @@ impl<T: TimeSource> TimerDriver<T> {
     /// The waker will be called when `process_timers` is called
     /// and the deadline has passed.
     pub fn register(&self, deadline: Time, waker: Waker) -> TimerHandle {
-        self.wheel.lock().register(deadline, waker)
+        let mut wheel = self.wheel.lock();
+        let now = self.clock.now();
+        wheel.synchronize(now);
+        wheel.register(deadline, waker)
     }
 
     /// Updates an existing timer registration with a new deadline and waker.
@@ -449,6 +452,8 @@ impl<T: TimeSource> TimerDriver<T> {
     /// closed and leaves the wheel unchanged.
     pub fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
         let mut wheel = self.wheel.lock();
+        let now = self.clock.now();
+        wheel.synchronize(now);
         if wheel.cancel(handle) {
             wheel.register(deadline, waker)
         } else {
@@ -466,12 +471,12 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Returns the next deadline that will fire, if any.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
+        let mut wheel = self.wheel.lock();
         let now = self.clock.now();
-        self.wheel.lock().next_deadline().map(
-            |deadline| {
-                if deadline < now { now } else { deadline }
-            },
-        )
+        wheel.synchronize(now);
+        wheel
+            .next_deadline()
+            .map(|deadline| if deadline < now { now } else { deadline })
     }
 
     /// Processes all expired timers, calling their wakers.
@@ -1210,6 +1215,110 @@ mod tests {
     }
 
     #[test]
+    fn timer_driver_register_after_idle_gap_uses_current_clock_baseline() {
+        init_test("timer_driver_register_after_idle_gap_uses_current_clock_baseline");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver::with_clock(clock.clone());
+        let woken = Arc::new(AtomicBool::new(false));
+
+        clock.set(Time::from_secs(8 * 24 * 60 * 60));
+        let deadline = clock.now() + Duration::from_secs(1);
+        driver.register(deadline, waker_that_sets(woken.clone()));
+
+        let next = driver.next_deadline();
+        let expected_next = Some(deadline);
+        crate::assert_with_log!(
+            next == expected_next,
+            "idle-gap registration keeps the true short future deadline",
+            expected_next,
+            next
+        );
+
+        let fired_early = driver.process_timers();
+        crate::assert_with_log!(
+            fired_early == 0,
+            "freshly registered short timer does not fire immediately after idle gap",
+            0usize,
+            fired_early
+        );
+        crate::assert_with_log!(
+            !woken.load(Ordering::SeqCst),
+            "waker not called before the new short deadline",
+            false,
+            woken.load(Ordering::SeqCst)
+        );
+
+        clock.advance(2_000_000_000);
+        let fired = driver.process_timers();
+        crate::assert_with_log!(
+            fired == 1,
+            "timer fires once the real post-idle deadline passes",
+            1usize,
+            fired
+        );
+        crate::assert_with_log!(
+            woken.load(Ordering::SeqCst),
+            "waker called after the real deadline",
+            true,
+            woken.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("timer_driver_register_after_idle_gap_uses_current_clock_baseline");
+    }
+
+    #[test]
+    fn timer_driver_register_resamples_clock_after_waiting_for_wheel_lock() {
+        init_test("timer_driver_register_resamples_clock_after_waiting_for_wheel_lock");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(clock.clone()));
+        let deadline = Time::from_secs(8 * 24 * 60 * 60 + 1);
+
+        let wheel_guard = driver.wheel.lock();
+        let driver_for_thread = Arc::clone(&driver);
+        let register_thread =
+            std::thread::spawn(move || driver_for_thread.register(deadline, futures_waker()));
+
+        clock.set(Time::from_secs(8 * 24 * 60 * 60));
+        drop(wheel_guard);
+
+        let register_handle = register_thread
+            .join()
+            .expect("register thread should complete without panicking");
+        let next = driver.next_deadline();
+        let expected_next = Some(deadline);
+        crate::assert_with_log!(
+            next == expected_next,
+            "register re-samples clock after lock wait so long absolute deadlines are not stale-clamped",
+            expected_next,
+            next
+        );
+
+        let fired_early = driver.process_timers();
+        crate::assert_with_log!(
+            fired_early == 0,
+            "waiting on the wheel lock does not make the newly registered timer immediately due",
+            0usize,
+            fired_early
+        );
+
+        clock.advance(2_000_000_000);
+        let fired = driver.process_timers();
+        crate::assert_with_log!(
+            fired == 1,
+            "timer still fires once the true absolute deadline passes",
+            1usize,
+            fired
+        );
+        let cancelled_after_fire = driver.cancel(&register_handle);
+        crate::assert_with_log!(
+            !cancelled_after_fire,
+            "fired timer is no longer cancellable",
+            false,
+            cancelled_after_fire
+        );
+        crate::test_complete!("timer_driver_register_resamples_clock_after_waiting_for_wheel_lock");
+    }
+
+    #[test]
     fn timer_driver_process_expired() {
         init_test("timer_driver_process_expired");
         let clock = Arc::new(VirtualClock::new());
@@ -1427,6 +1536,68 @@ mod tests {
         crate::test_complete!(
             "timer_driver_update_rejects_stale_handle_without_registering_new_timer"
         );
+    }
+
+    #[test]
+    fn timer_driver_update_after_idle_gap_keeps_future_deadline() {
+        init_test("timer_driver_update_after_idle_gap_keeps_future_deadline");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver::with_clock(clock.clone());
+        let counter = Arc::new(AtomicU64::new(0));
+        let handle = driver.register(Time::from_secs(10), waker_that_increments(counter.clone()));
+
+        clock.set(Time::from_secs(8 * 24 * 60 * 60));
+        let updated_deadline = clock.now() + Duration::from_secs(2);
+        let updated = driver.update(
+            &handle,
+            updated_deadline,
+            waker_that_increments(counter.clone()),
+        );
+        crate::assert_with_log!(
+            updated != handle,
+            "live timer update after idle gap still produces a fresh handle",
+            "different handle",
+            (handle, updated)
+        );
+
+        let expected_next = Some(updated_deadline);
+        let next = driver.next_deadline();
+        crate::assert_with_log!(
+            next == expected_next,
+            "updated deadline remains in the future after idle gap",
+            expected_next,
+            next
+        );
+
+        let fired_early = driver.process_timers();
+        crate::assert_with_log!(
+            fired_early == 0,
+            "updated timer does not fire immediately after idle gap",
+            0usize,
+            fired_early
+        );
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) == 0,
+            "counter not incremented before updated deadline",
+            0u64,
+            counter.load(Ordering::SeqCst)
+        );
+
+        clock.advance(3_000_000_000);
+        let fired = driver.process_timers();
+        crate::assert_with_log!(
+            fired == 1,
+            "updated timer fires after the true future deadline",
+            1usize,
+            fired
+        );
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) == 1,
+            "updated timer fires exactly once",
+            1u64,
+            counter.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("timer_driver_update_after_idle_gap_keeps_future_deadline");
     }
 
     #[test]
