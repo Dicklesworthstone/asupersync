@@ -1113,6 +1113,43 @@ impl SymbolDeduplicator {
         true
     }
 
+    /// Rolls back a previously recorded symbol so a later retransmission can be
+    /// treated as unique again.
+    ///
+    /// Returns `true` when a recorded symbol was actually removed.
+    fn rollback_record(&self, object_id: ObjectId, symbol_id: SymbolId) -> bool {
+        let mut objects = self.objects.write();
+        let mut remove_object = false;
+        {
+            let Some(state) = objects.get_mut(&object_id) else {
+                return false;
+            };
+            if !state.seen.remove(&symbol_id) {
+                return false;
+            }
+            state.first_seen.remove(&symbol_id);
+            state.first_path.remove(&symbol_id);
+
+            if state.seen.is_empty() {
+                remove_object = true;
+            } else {
+                state.last_activity = state
+                    .first_seen
+                    .values()
+                    .copied()
+                    .max()
+                    .unwrap_or(state.created_at);
+            }
+        }
+        if remove_object {
+            objects.remove(&object_id);
+        }
+
+        drop(objects);
+        self.unique_symbols.fetch_sub(1, Ordering::Relaxed);
+        true
+    }
+
     /// Returns the path that first delivered a symbol.
     #[must_use]
     pub fn first_path(&self, object_id: ObjectId, symbol_id: SymbolId) -> Option<PathId> {
@@ -1217,6 +1254,27 @@ struct BufferedSymbol {
     path: PathId,
 }
 
+struct ReorderProcessResult {
+    ready: Vec<Symbol>,
+    rollback_dedup_record: bool,
+}
+
+impl ReorderProcessResult {
+    fn accepted(ready: Vec<Symbol>) -> Self {
+        Self {
+            ready,
+            rollback_dedup_record: false,
+        }
+    }
+
+    fn dropped_due_to_buffer_overflow() -> Self {
+        Self {
+            ready: Vec::new(),
+            rollback_dedup_record: true,
+        }
+    }
+}
+
 /// Per-object reordering state.
 #[derive(Debug)]
 struct ObjectReorderState {
@@ -1276,12 +1334,9 @@ impl SymbolReorderer {
         }
     }
 
-    /// Processes an incoming symbol.
-    ///
-    /// Returns symbols ready for delivery (may be empty, one, or multiple).
-    pub fn process(&self, symbol: Symbol, path: PathId, now: Time) -> Vec<Symbol> {
+    fn process_with_status(&self, symbol: Symbol, path: PathId, now: Time) -> ReorderProcessResult {
         if self.config.immediate_delivery {
-            return vec![symbol];
+            return ReorderProcessResult::accepted(vec![symbol]);
         }
 
         let object_id = symbol.object_id();
@@ -1312,7 +1367,11 @@ impl SymbolReorderer {
                 state.next_expected = state.next_expected.wrapping_add(1);
                 self.reordered_deliveries.fetch_add(1, Ordering::Relaxed);
             }
-        } else if diff > 0 {
+            drop(objects);
+            return ReorderProcessResult::accepted(ready);
+        }
+
+        if diff > 0 {
             // Out of order - buffer it.
             #[allow(clippy::cast_sign_loss)]
             let gap = diff as u64;
@@ -1329,7 +1388,11 @@ impl SymbolReorderer {
                         path,
                     },
                 );
-            } else if gap > u64::from(self.config.max_sequence_gap) {
+                drop(objects);
+                return ReorderProcessResult::accepted(ready);
+            }
+
+            if gap > u64::from(self.config.max_sequence_gap) {
                 // Gap too large: give up waiting on missing sequence and advance.
                 // Deliver all buffered symbols (in sequence order) before resetting.
                 for (_, buffered) in std::mem::take(&mut state.buffer) {
@@ -1340,13 +1403,26 @@ impl SymbolReorderer {
                 state.last_delivery = now;
                 ready.push(symbol);
                 self.in_order_deliveries.fetch_add(1, Ordering::Relaxed);
+                drop(objects);
+                return ReorderProcessResult::accepted(ready);
             }
-            // else: buffer full, drop the symbol
-        }
-        // else: diff < 0 - this is a late duplicate, ignore
 
+            // Buffer full: reject the symbol and let the caller undo any dedup
+            // bookkeeping so a later retransmission can still be admitted.
+            drop(objects);
+            return ReorderProcessResult::dropped_due_to_buffer_overflow();
+        }
+
+        // Late duplicate: ignore it, but keep dedup state intact.
         drop(objects);
-        ready
+        ReorderProcessResult::accepted(ready)
+    }
+
+    /// Processes an incoming symbol.
+    ///
+    /// Returns symbols ready for delivery (may be empty, one, or multiple).
+    pub fn process(&self, symbol: Symbol, path: PathId, now: Time) -> Vec<Symbol> {
+        self.process_with_status(symbol, path, now).ready
     }
 
     /// Flushes timed-out symbols.
@@ -1594,6 +1670,8 @@ impl MultipathAggregator {
     /// Processes an incoming symbol from a path.
     pub fn process(&self, symbol: Symbol, path: PathId, now: Time) -> ProcessResult {
         self.total_processed.fetch_add(1, Ordering::Relaxed);
+        let object_id = symbol.object_id();
+        let symbol_id = symbol.id();
 
         // Record path activity
         if let Some(p) = self.paths.get(path) {
@@ -1616,14 +1694,17 @@ impl MultipathAggregator {
         }
 
         // Process through reorderer if enabled
-        let ready = if self.config.enable_reordering {
-            self.reorderer.process(symbol, path, now)
+        let reorder_result = if self.config.enable_reordering {
+            self.reorderer.process_with_status(symbol, path, now)
         } else {
-            vec![symbol]
+            ReorderProcessResult::accepted(vec![symbol])
         };
+        if reorder_result.rollback_dedup_record {
+            let _ = self.dedup.rollback_record(object_id, symbol_id);
+        }
 
         ProcessResult {
-            ready,
+            ready: reorder_result.ready,
             was_duplicate: false,
             path,
         }
@@ -3435,6 +3516,126 @@ mod tests {
         );
 
         crate::test_complete!("dedup_enforces_max_symbols_per_object");
+    }
+
+    #[test]
+    fn aggregator_retransmission_after_buffer_full_drop_is_accepted() {
+        init_test("aggregator_retransmission_after_buffer_full_drop_is_accepted");
+        let config = AggregatorConfig {
+            reorder: ReordererConfig {
+                immediate_delivery: false,
+                max_buffer_per_object: 1,
+                max_sequence_gap: 10,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let aggregator = MultipathAggregator::new(config);
+        let path = aggregator.paths().create_path(
+            "test",
+            "localhost:8080",
+            PathCharacteristics::default(),
+        );
+
+        // Deliver seq 0, buffer seq 2, then drop seq 3 because the reorder buffer is full.
+        let seq0 = aggregator.process(Symbol::new_for_test(1, 0, 0, &[0]), path, Time::ZERO);
+        crate::assert_with_log!(
+            seq0.ready.len() == 1,
+            "seq0 delivered immediately",
+            1,
+            seq0.ready.len()
+        );
+
+        let seq2 = aggregator.process(
+            Symbol::new_for_test(1, 0, 2, &[2]),
+            path,
+            Time::from_millis(1),
+        );
+        crate::assert_with_log!(
+            seq2.ready.is_empty(),
+            "seq2 buffered with no output",
+            true,
+            seq2.ready.is_empty()
+        );
+
+        let first_seq3 = aggregator.process(
+            Symbol::new_for_test(1, 0, 3, &[3]),
+            path,
+            Time::from_millis(2),
+        );
+        crate::assert_with_log!(
+            !first_seq3.was_duplicate,
+            "buffer-full drop is not classified as duplicate",
+            false,
+            first_seq3.was_duplicate
+        );
+        crate::assert_with_log!(
+            first_seq3.ready.is_empty(),
+            "buffer-full drop produces no output",
+            true,
+            first_seq3.ready.is_empty()
+        );
+
+        // Deliver seq 1, which drains buffered seq 2 and frees space / advances next_expected.
+        let seq1 = aggregator.process(
+            Symbol::new_for_test(1, 0, 1, &[1]),
+            path,
+            Time::from_millis(3),
+        );
+        crate::assert_with_log!(
+            seq1.ready.len() == 2,
+            "seq1 delivery drains buffered seq2",
+            2,
+            seq1.ready.len()
+        );
+        crate::assert_with_log!(
+            seq1.ready[0].esi() == 1 && seq1.ready[1].esi() == 2,
+            "seq1 then seq2 delivered",
+            true,
+            seq1.ready[0].esi() == 1 && seq1.ready[1].esi() == 2
+        );
+
+        // Retransmit seq 3. Because the first attempt rolled back dedup state, this
+        // retransmission must be accepted and delivered instead of rejected as a duplicate.
+        let retried_seq3 = aggregator.process(
+            Symbol::new_for_test(1, 0, 3, &[3]),
+            path,
+            Time::from_millis(4),
+        );
+        crate::assert_with_log!(
+            !retried_seq3.was_duplicate,
+            "retransmitted seq3 is accepted",
+            false,
+            retried_seq3.was_duplicate
+        );
+        crate::assert_with_log!(
+            retried_seq3.ready.len() == 1,
+            "retransmitted seq3 is delivered",
+            1,
+            retried_seq3.ready.len()
+        );
+        crate::assert_with_log!(
+            retried_seq3.ready[0].esi() == 3,
+            "seq3 delivery preserved",
+            3,
+            retried_seq3.ready[0].esi()
+        );
+
+        let stats = aggregator.dedup.stats();
+        crate::assert_with_log!(
+            stats.unique_symbols == 4,
+            "dedup unique count excludes rolled-back drop",
+            4,
+            stats.unique_symbols
+        );
+        crate::assert_with_log!(
+            stats.symbols_tracked == 4,
+            "dedup tracks the four delivered/buffered symbols only",
+            4,
+            stats.symbols_tracked
+        );
+
+        crate::test_complete!("aggregator_retransmission_after_buffer_full_drop_is_accepted");
     }
 
     /// Flush timeout advances next_expected and drains consecutive.
