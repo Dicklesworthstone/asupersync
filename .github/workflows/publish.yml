@@ -154,9 +154,6 @@ jobs:
           cargo publish -p franken-kernel --dry-run --locked
           cargo publish -p franken-evidence --dry-run --locked
           cargo publish -p asupersync-conformance --dry-run --locked
-          cargo package -p franken-decision --locked
-          cargo package -p asupersync --locked
-          cargo package -p frankenlab --locked
 
       - name: Publish crates to crates.io
         run: |
@@ -165,31 +162,41 @@ jobs:
             echo "CARGO_REGISTRY_TOKEN not configured; skipping crates.io publish"
             exit 0
           fi
+          
+          wait_for_version() {
+            local crate="$1"
+            local version="$2"
+            for _ in $(seq 1 24); do
+              if cargo search "$crate" --limit 1 | grep -q "^$crate = \"$version\""; then
+                echo "$crate $version is visible on crates.io"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "Timed out waiting for $crate $version to appear on crates.io"
+            exit 1
+          }
 
           publish_if_needed() {
             local crate="$1"
-            echo "Publishing $crate..."
+            local version="${{ needs.plan.outputs.version }}"
+            echo "Publishing $crate $version..."
             cargo publish -p "$crate" --locked || {
-              if cargo search "$crate" | grep -q "^$crate"; then
-                echo "$crate already published"
+              if cargo search "$crate" --limit 1 | grep -q "^$crate = \"$version\""; then
+                echo "$crate $version already published"
               else
                 exit 1
               fi
             }
+            wait_for_version "$crate" "$version"
           }
 
           publish_if_needed asupersync-macros
-          sleep 30
           publish_if_needed franken-kernel
-          sleep 30
           publish_if_needed franken-evidence
-          sleep 30
           publish_if_needed asupersync-conformance
-          sleep 30
           publish_if_needed franken-decision
-          sleep 30
           publish_if_needed asupersync
-          sleep 30
           publish_if_needed frankenlab
 
       - name: Summary
