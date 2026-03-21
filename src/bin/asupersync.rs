@@ -35,9 +35,20 @@ use asupersync::cli::{
     screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
     validate_core_diagnostics_report_contract,
 };
+use asupersync::lab::dual_run::FinalDivergenceClass;
+use asupersync::lab::replay::{
+    DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
+};
+use asupersync::lab::{
+    CancellationRecord, DualRunHarness, DualRunScenarioIdentity, LiveWitnessCollector,
+    LoserDrainRecord, NormalizedSemantics, ObligationBalanceRecord, RegionCloseRecord,
+    ResourceSurfaceRecord, TerminalOutcome, capture_cancellation, capture_loser_drain,
+    capture_obligation_balance, capture_region_close, run_live_adapter,
+};
 use asupersync::observability::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire,
 };
+use asupersync::test_logging::derive_scenario_seed;
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
     TraceReader, VerificationOptions, verify_trace,
@@ -199,6 +210,8 @@ enum LabCommand {
     Replay(LabReplayArgs),
     /// Explore multiple seeds to find violations
     Explore(LabExploreArgs),
+    /// Run built-in lab-vs-live differential scenario packs
+    Differential(LabDifferentialArgs),
 }
 
 #[derive(Args, Debug)]
@@ -267,6 +280,50 @@ struct LabExploreArgs {
     /// Starting seed for exploration
     #[arg(long = "start-seed", default_value_t = 0)]
     start_seed: u64,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum LabDifferentialProfile {
+    Smoke,
+    Phase1Core,
+    Calibration,
+}
+
+impl LabDifferentialProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Smoke => "smoke",
+            Self::Phase1Core => "phase1-core",
+            Self::Calibration => "calibration",
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct LabDifferentialArgs {
+    /// Named scenario pack / execution profile
+    #[arg(long = "profile", value_enum, default_value_t = LabDifferentialProfile::Smoke)]
+    profile: LabDifferentialProfile,
+
+    /// Restrict execution to one or more scenario ids
+    #[arg(long = "scenario", value_delimiter = ',')]
+    scenarios: Vec<String>,
+
+    /// Root seed used to derive deterministic per-scenario seeds
+    #[arg(long = "seed", default_value_t = 424_242_u64)]
+    seed: u64,
+
+    /// Output directory for summaries, logs, and artifacts
+    #[arg(
+        long = "out-dir",
+        default_value = "target/e2e-results/lab_live_differential"
+    )]
+    out_dir: PathBuf,
 
     /// Output results as JSON
     #[arg(long = "json", action = ArgAction::SetTrue)]
@@ -844,6 +901,7 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
         LabCommand::Validate(validate_args) => lab_validate(&validate_args, output),
         LabCommand::Replay(replay_args) => lab_replay(&replay_args, output),
         LabCommand::Explore(explore_args) => lab_explore(&explore_args, output),
+        LabCommand::Differential(differential_args) => lab_differential(&differential_args, output),
     }
 }
 
@@ -3695,6 +3753,1019 @@ fn lab_explore(args: &LabExploreArgs, output: &mut Output) -> Result<(), CliErro
     Ok(())
 }
 
+const LAB_DIFFERENTIAL_REPORT_SCHEMA_VERSION: &str = "lab-live-differential-runner-report-v1";
+const LAB_DIFFERENTIAL_SUMMARY_SCHEMA_VERSION: &str = "lab-live-differential-run-summary-v1";
+const LAB_DIFFERENTIAL_EVENT_SCHEMA_VERSION: &str = "lab-live-differential-event-v1";
+
+#[derive(Clone, Copy, Debug)]
+enum LabDifferentialExpectation {
+    Pass,
+    Divergence {
+        provisional: &'static str,
+        final_policy: DifferentialPolicyClass,
+    },
+}
+
+impl LabDifferentialExpectation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Divergence { .. } => "expected_divergence",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LabDifferentialScenarioDefinition {
+    id: &'static str,
+    surface_id: &'static str,
+    surface_contract_version: &'static str,
+    description: &'static str,
+    expectation: LabDifferentialExpectation,
+    execute: fn(u64) -> asupersync::lab::DualRunResult,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LabDifferentialScenarioStatus {
+    Pass,
+    ExpectedDivergence,
+    UnexpectedDivergence,
+    MissingExpectedDivergence,
+}
+
+impl LabDifferentialScenarioStatus {
+    fn is_success(self) -> bool {
+        matches!(self, Self::Pass | Self::ExpectedDivergence)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::ExpectedDivergence => "expected_divergence",
+            Self::UnexpectedDivergence => "unexpected_divergence",
+            Self::MissingExpectedDivergence => "missing_expected_divergence",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialScenarioReport {
+    scenario_id: String,
+    surface_id: String,
+    surface_contract_version: String,
+    description: String,
+    status: LabDifferentialScenarioStatus,
+    expectation: String,
+    runner_profile: String,
+    seed_lineage_id: String,
+    passed: bool,
+    observed_provisional_class: String,
+    observed_final_policy_class: Option<String>,
+    expected_provisional_class: Option<String>,
+    expected_final_policy_class: Option<String>,
+    bundle_root: String,
+    summary_path: String,
+    event_log_path: String,
+    lab_normalized_path: String,
+    live_normalized_path: String,
+    failures_path: Option<String>,
+    deviations_path: Option<String>,
+    repro_manifest_path: Option<String>,
+    repro_commands: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabDifferentialOutput {
+    schema_version: String,
+    profile: String,
+    root_seed: u64,
+    success: bool,
+    out_dir: String,
+    runner_summary_path: String,
+    aggregate_event_log_path: String,
+    scenario_count: usize,
+    pass_count: usize,
+    expected_divergence_count: usize,
+    unexpected_divergence_count: usize,
+    missing_expected_divergence_count: usize,
+    scenarios: Vec<LabDifferentialScenarioReport>,
+}
+
+impl Outputtable for LabDifferentialOutput {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Profile: {}", self.profile));
+        lines.push(format!(
+            "Status: {}",
+            if self.success { "pass" } else { "failure" }
+        ));
+        lines.push(format!("Root seed: {}", self.root_seed));
+        lines.push(format!(
+            "Scenarios: {} (pass={}, expected_divergence={}, unexpected_divergence={}, missing_expected_divergence={})",
+            self.scenario_count,
+            self.pass_count,
+            self.expected_divergence_count,
+            self.unexpected_divergence_count,
+            self.missing_expected_divergence_count,
+        ));
+        lines.push(format!("Artifacts: {}", self.runner_summary_path));
+        for scenario in &self.scenarios {
+            lines.push(format!(
+                "- {} {} [{}] -> {}",
+                scenario.status.as_str(),
+                scenario.scenario_id,
+                scenario.seed_lineage_id,
+                scenario.summary_path
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialRunSummary {
+    schema_version: String,
+    scenario_id: String,
+    surface_id: String,
+    surface_contract_version: String,
+    description: String,
+    runner_profile: String,
+    expectation: String,
+    status: LabDifferentialScenarioStatus,
+    seed_lineage_id: String,
+    verdict_summary: String,
+    policy_summary: String,
+    observed_provisional_class: String,
+    observed_final_policy_class: Option<String>,
+    expected_provisional_class: Option<String>,
+    expected_final_policy_class: Option<String>,
+    passed: bool,
+    bundle_root: String,
+    event_log_path: String,
+    lab_normalized_path: String,
+    live_normalized_path: String,
+    failures_path: Option<String>,
+    deviations_path: Option<String>,
+    repro_manifest_path: Option<String>,
+    repro_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialEventLogEntry {
+    schema_version: String,
+    suite_id: String,
+    scenario_id: String,
+    surface_id: String,
+    surface_contract_version: String,
+    description: String,
+    seed_lineage_id: String,
+    runner_profile: String,
+    expectation: String,
+    status: LabDifferentialScenarioStatus,
+    attempt_index: u32,
+    rerun_count: u32,
+    verdict_summary: String,
+    policy_summary: String,
+    provisional_class: String,
+    final_policy_class: Option<String>,
+    summary_path: String,
+    lab_normalized_path: String,
+    live_normalized_path: String,
+    failures_path: Option<String>,
+    deviations_path: Option<String>,
+    repro_manifest_path: Option<String>,
+    lab_terminal_outcome: String,
+    live_terminal_outcome: String,
+    lab_loser_drain: String,
+    live_loser_drain: String,
+    lab_obligation_balanced: bool,
+    live_obligation_balanced: bool,
+    repro_commands: Vec<String>,
+}
+
+fn lab_differential(args: &LabDifferentialArgs, output: &mut Output) -> Result<(), CliError> {
+    let report = run_lab_differential(args)?;
+    let success = report.success;
+
+    if args.json {
+        let pretty = serde_json::to_string_pretty(&report).map_err(output_cli_error)?;
+        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+    } else {
+        output.write(&report).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    if !success {
+        return Err(CliError::new(
+            "lab_differential_failed",
+            "Differential runner observed an unexpected result",
+        )
+        .exit_code(ExitCode::TEST_FAILURE));
+    }
+
+    Ok(())
+}
+
+fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOutput, CliError> {
+    let selected = select_lab_differential_scenarios(args)?;
+    let profile_root = args.out_dir.join(args.profile.as_str());
+    let mut scenario_reports = Vec::new();
+    let mut aggregate_event_log = Vec::new();
+
+    for definition in selected {
+        let canonical_seed = derive_scenario_seed(args.seed, definition.id);
+        let result = (definition.execute)(canonical_seed);
+
+        let observed_final_policy = result
+            .policy
+            .suggested_final_class
+            .map(differential_policy_class_from_final);
+        let observed_final_policy_string =
+            observed_final_policy.map(|policy| policy.as_str().to_string());
+        let observed_provisional = result.policy.provisional_class.to_string();
+
+        let (status, expected_provisional, expected_final_policy) =
+            evaluate_lab_differential_expectation(
+                definition.expectation,
+                result.passed(),
+                &observed_provisional,
+                observed_final_policy,
+            );
+
+        let scenario_root = profile_root
+            .join(sanitize_artifact_component(definition.id))
+            .join(sanitize_artifact_component(
+                &result.seed_lineage.seed_lineage_id,
+            ));
+        fs::create_dir_all(&scenario_root).map_err(|err| {
+            CliError::new(
+                "artifact_output_error",
+                "Failed to create scenario artifact directory",
+            )
+            .detail(err.to_string())
+            .context("path", scenario_root.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+
+        let bundle_root = scenario_root.display().to_string();
+        let summary_path = scenario_root.join("differential_summary.json");
+        let event_log_path = scenario_root.join("differential_event_log.jsonl");
+        let lab_normalized_path = scenario_root.join("lab_normalized.json");
+        let live_normalized_path = scenario_root.join("live_normalized.json");
+
+        write_json_artifact(&lab_normalized_path, &result.lab)?;
+        write_json_artifact(&live_normalized_path, &result.live)?;
+
+        let repro_commands = build_differential_rerun_commands(args, definition.id, &scenario_root);
+
+        let bundle = observed_final_policy
+            .filter(|_| !result.passed())
+            .map(|final_policy| {
+                let entry = DivergenceCorpusEntry::from_dual_run_result(
+                    &result,
+                    args.profile.as_str(),
+                    result.policy.provisional_class.to_string(),
+                    final_policy,
+                    bundle_root.clone(),
+                );
+                DifferentialBundleArtifacts::from_dual_run_result(&entry, &result)
+            });
+
+        if let Some(artifacts) = &bundle {
+            write_json_artifact(
+                &scenario_root.join("differential_failures.json"),
+                &artifacts.failures,
+            )?;
+            write_json_artifact(
+                &scenario_root.join("differential_deviations.json"),
+                &artifacts.deviations,
+            )?;
+            write_json_artifact(
+                &scenario_root.join("differential_repro_manifest.json"),
+                &artifacts.repro_manifest,
+            )?;
+        }
+
+        let summary = LabDifferentialRunSummary {
+            schema_version: LAB_DIFFERENTIAL_SUMMARY_SCHEMA_VERSION.to_string(),
+            scenario_id: definition.id.to_string(),
+            surface_id: definition.surface_id.to_string(),
+            surface_contract_version: definition.surface_contract_version.to_string(),
+            description: definition.description.to_string(),
+            runner_profile: args.profile.as_str().to_string(),
+            expectation: definition.expectation.label().to_string(),
+            status,
+            seed_lineage_id: result.seed_lineage.seed_lineage_id.clone(),
+            verdict_summary: result.verdict.summary(),
+            policy_summary: result.policy.summary(),
+            observed_provisional_class: observed_provisional.clone(),
+            observed_final_policy_class: observed_final_policy_string.clone(),
+            expected_provisional_class: expected_provisional.clone(),
+            expected_final_policy_class: expected_final_policy
+                .as_ref()
+                .map(|policy| policy.as_str().to_string()),
+            passed: result.passed(),
+            bundle_root: bundle_root.clone(),
+            event_log_path: event_log_path.display().to_string(),
+            lab_normalized_path: lab_normalized_path.display().to_string(),
+            live_normalized_path: live_normalized_path.display().to_string(),
+            failures_path: bundle.as_ref().map(|_| {
+                scenario_root
+                    .join("differential_failures.json")
+                    .display()
+                    .to_string()
+            }),
+            deviations_path: bundle.as_ref().map(|_| {
+                scenario_root
+                    .join("differential_deviations.json")
+                    .display()
+                    .to_string()
+            }),
+            repro_manifest_path: bundle.as_ref().map(|_| {
+                scenario_root
+                    .join("differential_repro_manifest.json")
+                    .display()
+                    .to_string()
+            }),
+            repro_commands: repro_commands.clone(),
+        };
+        write_json_artifact(&summary_path, &summary)?;
+
+        let event_entry = LabDifferentialEventLogEntry {
+            schema_version: LAB_DIFFERENTIAL_EVENT_SCHEMA_VERSION.to_string(),
+            suite_id: "lab_live_differential".to_string(),
+            scenario_id: definition.id.to_string(),
+            surface_id: definition.surface_id.to_string(),
+            surface_contract_version: definition.surface_contract_version.to_string(),
+            description: definition.description.to_string(),
+            seed_lineage_id: result.seed_lineage.seed_lineage_id.clone(),
+            runner_profile: args.profile.as_str().to_string(),
+            expectation: definition.expectation.label().to_string(),
+            status,
+            attempt_index: 0,
+            rerun_count: 0,
+            verdict_summary: result.verdict.summary(),
+            policy_summary: result.policy.summary(),
+            provisional_class: observed_provisional,
+            final_policy_class: observed_final_policy_string,
+            summary_path: summary_path.display().to_string(),
+            lab_normalized_path: lab_normalized_path.display().to_string(),
+            live_normalized_path: live_normalized_path.display().to_string(),
+            failures_path: summary.failures_path.clone(),
+            deviations_path: summary.deviations_path.clone(),
+            repro_manifest_path: summary.repro_manifest_path.clone(),
+            lab_terminal_outcome: result.lab.semantics.terminal_outcome.class.to_string(),
+            live_terminal_outcome: result.live.semantics.terminal_outcome.class.to_string(),
+            lab_loser_drain: drain_status_label(result.lab.semantics.loser_drain.status)
+                .to_string(),
+            live_loser_drain: drain_status_label(result.live.semantics.loser_drain.status)
+                .to_string(),
+            lab_obligation_balanced: result.lab.semantics.obligation_balance.balanced,
+            live_obligation_balanced: result.live.semantics.obligation_balance.balanced,
+            repro_commands: repro_commands.clone(),
+        };
+        write_jsonl_artifact(&event_log_path, std::slice::from_ref(&event_entry))?;
+
+        scenario_reports.push(LabDifferentialScenarioReport {
+            scenario_id: definition.id.to_string(),
+            surface_id: definition.surface_id.to_string(),
+            surface_contract_version: definition.surface_contract_version.to_string(),
+            description: definition.description.to_string(),
+            status,
+            expectation: definition.expectation.label().to_string(),
+            runner_profile: args.profile.as_str().to_string(),
+            seed_lineage_id: result.seed_lineage.seed_lineage_id.clone(),
+            passed: result.passed(),
+            observed_provisional_class: event_entry.provisional_class.clone(),
+            observed_final_policy_class: event_entry.final_policy_class.clone(),
+            expected_provisional_class: expected_provisional,
+            expected_final_policy_class: expected_final_policy
+                .map(|policy| policy.as_str().to_string()),
+            bundle_root,
+            summary_path: summary_path.display().to_string(),
+            event_log_path: event_log_path.display().to_string(),
+            lab_normalized_path: lab_normalized_path.display().to_string(),
+            live_normalized_path: live_normalized_path.display().to_string(),
+            failures_path: summary.failures_path.clone(),
+            deviations_path: summary.deviations_path.clone(),
+            repro_manifest_path: summary.repro_manifest_path.clone(),
+            repro_commands,
+        });
+        aggregate_event_log.push(event_entry);
+    }
+
+    let aggregate_event_log_path = profile_root.join("differential_event_log.jsonl");
+    let runner_summary_path = profile_root.join("runner_summary.json");
+    write_jsonl_artifact(&aggregate_event_log_path, &aggregate_event_log)?;
+
+    let pass_count = scenario_reports
+        .iter()
+        .filter(|report| report.status == LabDifferentialScenarioStatus::Pass)
+        .count();
+    let expected_divergence_count = scenario_reports
+        .iter()
+        .filter(|report| report.status == LabDifferentialScenarioStatus::ExpectedDivergence)
+        .count();
+    let unexpected_divergence_count = scenario_reports
+        .iter()
+        .filter(|report| report.status == LabDifferentialScenarioStatus::UnexpectedDivergence)
+        .count();
+    let missing_expected_divergence_count = scenario_reports
+        .iter()
+        .filter(|report| report.status == LabDifferentialScenarioStatus::MissingExpectedDivergence)
+        .count();
+
+    let report = LabDifferentialOutput {
+        schema_version: LAB_DIFFERENTIAL_REPORT_SCHEMA_VERSION.to_string(),
+        profile: args.profile.as_str().to_string(),
+        root_seed: args.seed,
+        success: scenario_reports
+            .iter()
+            .all(|report| report.status.is_success()),
+        out_dir: profile_root.display().to_string(),
+        runner_summary_path: runner_summary_path.display().to_string(),
+        aggregate_event_log_path: aggregate_event_log_path.display().to_string(),
+        scenario_count: scenario_reports.len(),
+        pass_count,
+        expected_divergence_count,
+        unexpected_divergence_count,
+        missing_expected_divergence_count,
+        scenarios: scenario_reports,
+    };
+    write_json_artifact(&runner_summary_path, &report)?;
+
+    Ok(report)
+}
+
+fn select_lab_differential_scenarios(
+    args: &LabDifferentialArgs,
+) -> Result<Vec<LabDifferentialScenarioDefinition>, CliError> {
+    let available: Vec<_> = lab_differential_scenarios()
+        .into_iter()
+        .filter(|definition| {
+            profile_includes_lab_differential_scenario(args.profile, definition.id)
+        })
+        .collect();
+
+    if args.scenarios.is_empty() {
+        return Ok(available);
+    }
+
+    let requested: BTreeSet<String> = args.scenarios.iter().cloned().collect();
+    let selected: Vec<_> = available
+        .iter()
+        .copied()
+        .filter(|definition| requested.contains(definition.id))
+        .collect();
+
+    if selected.len() != requested.len() {
+        let available_ids = available
+            .iter()
+            .map(|definition| definition.id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let missing = requested
+            .iter()
+            .filter(|scenario| {
+                !available
+                    .iter()
+                    .any(|definition| definition.id == scenario.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliError::new(
+            "lab_differential_unknown_scenario",
+            "Unknown differential scenario selection",
+        )
+        .detail(format!(
+            "Requested scenario(s) not in profile '{}': {}. Available: {}",
+            args.profile.as_str(),
+            missing,
+            available_ids
+        ))
+        .exit_code(ExitCode::RUNTIME_ERROR));
+    }
+
+    Ok(selected)
+}
+
+fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
+    vec![
+        LabDifferentialScenarioDefinition {
+            id: "phase1.cancel.protocol.drain_finalize",
+            surface_id: "cancellation.protocol",
+            surface_contract_version: "cancel.protocol.v1",
+            description: "Completed cancellation protocol with balanced cleanup.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_cancel_protocol_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "phase1.combinator.race.one_loser",
+            surface_id: "combinator.race",
+            surface_contract_version: "combinator.race.v1",
+            description: "Winner selection with complete loser drain.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_combinator_race_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "phase1.channel.reserve_send.commit",
+            surface_id: "channel.reserve_send",
+            surface_contract_version: "channel.reserve_send.v1",
+            description: "Committed reserve/send path remains visible and balanced.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_channel_commit_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "phase1.region.close.quiescent",
+            surface_id: "region.close",
+            surface_contract_version: "region.close.v1",
+            description: "Region close reaches quiescence with no leaked obligations.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_region_close_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "calibration.cancellation.cleanup_missing",
+            surface_id: "cancellation.protocol",
+            surface_contract_version: "cancel.protocol.v1",
+            description: "Intentional live-side cleanup gap to prove classifier and report flow.",
+            expectation: LabDifferentialExpectation::Divergence {
+                provisional: "hard_contract_break",
+                final_policy: DifferentialPolicyClass::RuntimeSemanticBug,
+            },
+            execute: run_calibration_cleanup_missing_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "calibration.obligation.leak_detected",
+            surface_id: "obligation.balance",
+            surface_contract_version: "obligation.balance.v1",
+            description: "Intentional live-side obligation leak to prove artifact retention.",
+            expectation: LabDifferentialExpectation::Divergence {
+                provisional: "hard_contract_break",
+                final_policy: DifferentialPolicyClass::RuntimeSemanticBug,
+            },
+            execute: run_calibration_obligation_leak_scenario,
+        },
+    ]
+}
+
+fn profile_includes_lab_differential_scenario(
+    profile: LabDifferentialProfile,
+    scenario_id: &str,
+) -> bool {
+    match profile {
+        LabDifferentialProfile::Smoke => matches!(
+            scenario_id,
+            "phase1.cancel.protocol.drain_finalize"
+                | "phase1.combinator.race.one_loser"
+                | "phase1.channel.reserve_send.commit"
+        ),
+        LabDifferentialProfile::Phase1Core => matches!(
+            scenario_id,
+            "phase1.cancel.protocol.drain_finalize"
+                | "phase1.combinator.race.one_loser"
+                | "phase1.channel.reserve_send.commit"
+                | "phase1.region.close.quiescent"
+        ),
+        LabDifferentialProfile::Calibration => matches!(
+            scenario_id,
+            "phase1.cancel.protocol.drain_finalize"
+                | "calibration.cancellation.cleanup_missing"
+                | "calibration.obligation.leak_detected"
+        ),
+    }
+}
+
+fn evaluate_lab_differential_expectation(
+    expectation: LabDifferentialExpectation,
+    passed: bool,
+    observed_provisional: &str,
+    observed_final_policy: Option<DifferentialPolicyClass>,
+) -> (
+    LabDifferentialScenarioStatus,
+    Option<String>,
+    Option<DifferentialPolicyClass>,
+) {
+    match expectation {
+        LabDifferentialExpectation::Pass => {
+            let status = if passed {
+                LabDifferentialScenarioStatus::Pass
+            } else {
+                LabDifferentialScenarioStatus::UnexpectedDivergence
+            };
+            (status, None, None)
+        }
+        LabDifferentialExpectation::Divergence {
+            provisional,
+            final_policy,
+        } => {
+            if passed {
+                return (
+                    LabDifferentialScenarioStatus::MissingExpectedDivergence,
+                    Some(provisional.to_string()),
+                    Some(final_policy),
+                );
+            }
+
+            let status = if observed_provisional == provisional
+                && observed_final_policy == Some(final_policy)
+            {
+                LabDifferentialScenarioStatus::ExpectedDivergence
+            } else {
+                LabDifferentialScenarioStatus::UnexpectedDivergence
+            };
+            (status, Some(provisional.to_string()), Some(final_policy))
+        }
+    }
+}
+
+fn build_differential_rerun_commands(
+    args: &LabDifferentialArgs,
+    scenario_id: &str,
+    _scenario_root: &Path,
+) -> Vec<String> {
+    vec![
+        format!(
+            "asupersync lab differential --profile {} --scenario {} --seed {} --out-dir {}",
+            args.profile.as_str(),
+            scenario_id,
+            args.seed,
+            args.out_dir.display()
+        ),
+        format!(
+            "scripts/run_lab_live_differential.sh --profile {} --scenario {} --seed {} --out-dir {}",
+            args.profile.as_str(),
+            scenario_id,
+            args.seed,
+            args.out_dir.display()
+        ),
+    ]
+}
+
+fn sanitize_artifact_component(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+}
+
+fn differential_policy_class_from_final(
+    final_class: FinalDivergenceClass,
+) -> DifferentialPolicyClass {
+    match final_class {
+        FinalDivergenceClass::RuntimeSemanticBug => DifferentialPolicyClass::RuntimeSemanticBug,
+        FinalDivergenceClass::LabModelOrMappingBug => DifferentialPolicyClass::LabModelOrMappingBug,
+        FinalDivergenceClass::IrreproducibleDivergence => {
+            DifferentialPolicyClass::IrreproducibleDivergence
+        }
+        FinalDivergenceClass::UnsupportedSurface => DifferentialPolicyClass::UnsupportedSurface,
+        FinalDivergenceClass::ArtifactSchemaViolation => {
+            DifferentialPolicyClass::ArtifactSchemaViolation
+        }
+        FinalDivergenceClass::InsufficientObservability => {
+            DifferentialPolicyClass::InsufficientObservability
+        }
+        FinalDivergenceClass::SchedulerNoiseSuspected => {
+            DifferentialPolicyClass::SchedulerNoiseSuspected
+        }
+    }
+}
+
+fn drain_status_label(status: asupersync::lab::DrainStatus) -> &'static str {
+    match status {
+        asupersync::lab::DrainStatus::NotApplicable => "not_applicable",
+        asupersync::lab::DrainStatus::Complete => "complete",
+        asupersync::lab::DrainStatus::Incomplete => "incomplete",
+    }
+}
+
+fn write_json_artifact<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), CliError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            CliError::new(
+                "artifact_output_error",
+                "Failed to create artifact directory",
+            )
+            .detail(err.to_string())
+            .context("path", parent.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    }
+
+    let payload = serde_json::to_vec_pretty(value).map_err(|err| {
+        CliError::new(
+            "artifact_output_error",
+            "Failed to serialize artifact payload",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    fs::write(path, payload).map_err(|err| {
+        CliError::new("artifact_output_error", "Failed to write artifact payload")
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })
+}
+
+fn write_jsonl_artifact<T: serde::Serialize>(path: &Path, entries: &[T]) -> Result<(), CliError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            CliError::new(
+                "artifact_output_error",
+                "Failed to create artifact directory",
+            )
+            .detail(err.to_string())
+            .context("path", parent.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    }
+
+    let mut file = File::create(path).map_err(|err| {
+        CliError::new("artifact_output_error", "Failed to create jsonl artifact")
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    for entry in entries {
+        serde_json::to_writer(&mut file, entry).map_err(|err| {
+            CliError::new(
+                "artifact_output_error",
+                "Failed to serialize jsonl artifact entry",
+            )
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+        writeln!(file).map_err(|err| {
+            CliError::new(
+                "artifact_output_error",
+                "Failed to write jsonl artifact entry",
+            )
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    }
+
+    Ok(())
+}
+
+fn make_normalized_semantics(
+    surface_scope: &str,
+    terminal_outcome: TerminalOutcome,
+    cancellation: CancellationRecord,
+    loser_drain: LoserDrainRecord,
+    region_close: RegionCloseRecord,
+    obligation_balance: ObligationBalanceRecord,
+    counters: &[(&str, i64)],
+) -> NormalizedSemantics {
+    let resource_surface = counters.iter().fold(
+        ResourceSurfaceRecord::empty(surface_scope),
+        |surface, (name, value)| surface.with_counter(*name, *value),
+    );
+
+    NormalizedSemantics {
+        terminal_outcome,
+        cancellation,
+        loser_drain,
+        region_close,
+        obligation_balance,
+        resource_surface,
+    }
+}
+
+fn run_configured_differential_scenario(
+    canonical_seed: u64,
+    scenario_id: &'static str,
+    surface_id: &'static str,
+    surface_contract_version: &'static str,
+    description: &'static str,
+    lab_semantics: NormalizedSemantics,
+    live_setup: impl FnOnce(&mut LiveWitnessCollector) + 'static,
+) -> asupersync::lab::DualRunResult {
+    let identity = DualRunScenarioIdentity::phase1(
+        scenario_id,
+        surface_id,
+        surface_contract_version,
+        description,
+        canonical_seed,
+    );
+    let live_identity = identity.clone();
+
+    DualRunHarness::from_identity(identity)
+        .lab(move |_| lab_semantics)
+        .live_result(move |_, _| {
+            run_live_adapter(&live_identity, |_, witness| {
+                live_setup(witness);
+            })
+        })
+        .run()
+}
+
+fn run_phase1_cancel_protocol_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    let cancellation = capture_cancellation(true, true, true, true, Some(true));
+    let obligation = capture_obligation_balance(1, 0, 1);
+    let region = capture_region_close(true, true);
+    let lab_semantics = make_normalized_semantics(
+        "cancellation.protocol",
+        TerminalOutcome::cancelled("explicit_cancel"),
+        cancellation.clone(),
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        obligation.clone(),
+        &[("cleanup_steps", 1)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "phase1.cancel.protocol.drain_finalize",
+        "cancellation.protocol",
+        "cancel.protocol.v1",
+        "Completed cancellation protocol with balanced cleanup.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::cancelled("explicit_cancel"));
+            witness.set_cancellation(cancellation);
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("cleanup_steps", 1);
+        },
+    )
+}
+
+fn run_phase1_combinator_race_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    let cancellation = capture_cancellation(true, true, true, true, Some(true));
+    let loser_drain = capture_loser_drain(&[true]);
+    let region = capture_region_close(true, true);
+    let obligation = ObligationBalanceRecord::zero();
+    let lab_semantics = make_normalized_semantics(
+        "combinator.race",
+        TerminalOutcome::ok(),
+        cancellation.clone(),
+        loser_drain.clone(),
+        region.clone(),
+        obligation.clone(),
+        &[("winner_index", 0), ("loser_count", 1)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "phase1.combinator.race.one_loser",
+        "combinator.race",
+        "combinator.race.v1",
+        "Winner selection with complete loser drain.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_cancellation(cancellation);
+            witness.set_loser_drain(loser_drain);
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("winner_index", 0);
+            witness.record_counter("loser_count", 1);
+        },
+    )
+}
+
+fn run_phase1_channel_commit_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    let obligation = capture_obligation_balance(1, 1, 0);
+    let region = capture_region_close(true, true);
+    let lab_semantics = make_normalized_semantics(
+        "channel.reserve_send",
+        TerminalOutcome::ok(),
+        CancellationRecord::none(),
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        obligation.clone(),
+        &[("committed_messages", 1), ("aborted_reservations", 0)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "phase1.channel.reserve_send.commit",
+        "channel.reserve_send",
+        "channel.reserve_send.v1",
+        "Committed reserve/send path remains visible and balanced.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("committed_messages", 1);
+            witness.record_counter("aborted_reservations", 0);
+        },
+    )
+}
+
+fn run_phase1_region_close_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    let region = capture_region_close(true, true);
+    let obligation = capture_obligation_balance(2, 1, 1);
+    let lab_semantics = make_normalized_semantics(
+        "region.close",
+        TerminalOutcome::ok(),
+        CancellationRecord::none(),
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        obligation.clone(),
+        &[("nested_children", 2)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "phase1.region.close.quiescent",
+        "region.close",
+        "region.close.v1",
+        "Region close reaches quiescence with no leaked obligations.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("nested_children", 2);
+        },
+    )
+}
+
+fn run_calibration_cleanup_missing_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    let lab_cancellation = capture_cancellation(true, true, true, true, Some(true));
+    let live_cancellation = capture_cancellation(true, true, false, false, Some(true));
+    let obligation = capture_obligation_balance(1, 0, 1);
+    let region = capture_region_close(true, true);
+    let lab_semantics = make_normalized_semantics(
+        "cancellation.protocol",
+        TerminalOutcome::cancelled("explicit_cancel"),
+        lab_cancellation,
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        obligation.clone(),
+        &[("cleanup_steps", 1)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "calibration.cancellation.cleanup_missing",
+        "cancellation.protocol",
+        "cancel.protocol.v1",
+        "Intentional live-side cleanup gap to prove classifier and report flow.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::cancelled("explicit_cancel"));
+            witness.set_cancellation(live_cancellation);
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("cleanup_steps", 1);
+        },
+    )
+}
+
+fn run_calibration_obligation_leak_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    let lab_obligation = capture_obligation_balance(2, 1, 1);
+    let live_obligation = capture_obligation_balance(2, 1, 0);
+    let region = capture_region_close(true, true);
+    let lab_semantics = make_normalized_semantics(
+        "obligation.balance",
+        TerminalOutcome::ok(),
+        CancellationRecord::none(),
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        lab_obligation,
+        &[("reserved_slots", 2)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "calibration.obligation.leak_detected",
+        "obligation.balance",
+        "obligation.balance.v1",
+        "Intentional live-side obligation leak to prove artifact retention.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_region_close(region);
+            witness.set_obligation_balance(live_obligation);
+            witness.record_counter("reserved_slots", 2);
+        },
+    )
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 struct ReplayWindowSummary {
     start: usize,
@@ -4749,6 +5820,44 @@ mod tests {
     }
 
     #[test]
+    fn lab_differential_args_parse_profile_and_selection() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "lab",
+            "differential",
+            "--profile",
+            "calibration",
+            "--scenario",
+            "calibration.cancellation.cleanup_missing,phase1.cancel.protocol.drain_finalize",
+            "--seed",
+            "77",
+            "--out-dir",
+            "artifacts/diff",
+            "--json",
+        ])
+        .expect("parse differential args");
+
+        let Command::Lab(LabArgs {
+            command: LabCommand::Differential(args),
+        }) = cli.command
+        else {
+            panic!("expected lab differential command");
+        };
+
+        assert_eq!(args.profile, LabDifferentialProfile::Calibration);
+        assert_eq!(
+            args.scenarios,
+            vec![
+                "calibration.cancellation.cleanup_missing".to_string(),
+                "phase1.cancel.protocol.drain_finalize".to_string()
+            ]
+        );
+        assert_eq!(args.seed, 77);
+        assert_eq!(args.out_dir, PathBuf::from("artifacts/diff"));
+        assert!(args.json);
+    }
+
+    #[test]
     fn resolve_replay_window_clamps_to_available_events() {
         let window = resolve_replay_window(5, 7, Some(4));
         assert_eq!(window.start, 5);
@@ -4818,6 +5927,87 @@ mod tests {
         let saved = fs::read_to_string(&output_path).expect("read replay artifact");
         assert!(saved.contains("\"scenario_id\": \"smoke-happy-path\""));
         assert!(saved.contains("\"rerun_commands\""));
+    }
+
+    #[test]
+    fn lab_differential_smoke_profile_writes_summary_and_logs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Smoke,
+            scenarios: vec!["phase1.channel.reserve_send.commit".to_string()],
+            seed: 91,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run differential smoke profile");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+        assert!(Path::new(&scenario.summary_path).exists());
+        assert!(Path::new(&scenario.event_log_path).exists());
+        assert!(Path::new(&scenario.lab_normalized_path).exists());
+        assert!(Path::new(&scenario.live_normalized_path).exists());
+        assert!(Path::new(&report.runner_summary_path).exists());
+        assert!(Path::new(&report.aggregate_event_log_path).exists());
+    }
+
+    #[test]
+    fn lab_differential_calibration_profile_retains_expected_divergence_bundle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: vec!["calibration.cancellation.cleanup_missing".to_string()],
+            seed: 5150,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run differential calibration profile");
+        assert!(report.success);
+        assert_eq!(report.expected_divergence_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(
+            scenario.status,
+            LabDifferentialScenarioStatus::ExpectedDivergence
+        );
+        assert_eq!(
+            scenario.observed_final_policy_class.as_deref(),
+            Some("runtime_semantic_bug")
+        );
+        assert!(Path::new(&scenario.summary_path).exists());
+        assert!(Path::new(&scenario.event_log_path).exists());
+        assert!(
+            Path::new(
+                scenario
+                    .failures_path
+                    .as_deref()
+                    .expect("failures path must exist for calibration divergence")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .deviations_path
+                    .as_deref()
+                    .expect("deviations path must exist for calibration divergence")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .repro_manifest_path
+                    .as_deref()
+                    .expect("repro manifest must exist for calibration divergence")
+            )
+            .exists()
+        );
     }
 
     #[test]

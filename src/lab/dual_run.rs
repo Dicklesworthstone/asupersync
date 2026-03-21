@@ -36,10 +36,36 @@
 //! observables and mismatch bundles.
 
 use crate::lab::config::LabConfig;
-use crate::test_logging::{derive_component_seed, derive_scenario_seed};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+
+// Keep deterministic seed derivation available in normal library builds;
+// `test_logging` is gated behind `test-internals` and is unavailable in wasm.
+fn derive_component_seed(root: u64, component: &str) -> u64 {
+    fnv1a_mix(root, component.as_bytes())
+}
+
+fn derive_scenario_seed(root: u64, scenario: &str) -> u64 {
+    let tag = format!("scenario:{scenario}");
+    fnv1a_mix(root, tag.as_bytes())
+}
+
+fn fnv1a_mix(root: u64, tag: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in root.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for &byte in tag {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
 
 // ============================================================================
 // Seed Mode and Replay Policy
@@ -2590,6 +2616,7 @@ pub fn run_live_adapter(
     let config = LiveRunnerConfig::from_identity(identity);
     let mut witness = LiveWitnessCollector::new(&identity.surface_id);
 
+    #[cfg(feature = "tracing-integration")]
     tracing::info!(
         scenario_id = %identity.scenario_id,
         surface_id = %identity.surface_id,
@@ -2607,6 +2634,7 @@ pub fn run_live_adapter(
     let semantics = witness.finalize();
     let replay = ReplayMetadata::for_live(identity.family_id(), &identity.seed_plan);
 
+    #[cfg(feature = "tracing-integration")]
     tracing::info!(
         scenario_id = %identity.scenario_id,
         outcome = %semantics.terminal_outcome.class,
@@ -3709,6 +3737,7 @@ impl DualRunHarness {
     /// # Panics
     ///
     /// Panics if either `lab` or `live` was not set.
+    #[must_use]
     pub fn run(self) -> DualRunResult {
         let lab_fn = self.lab_fn.expect("DualRunHarness: lab function not set");
         let live_fn = self.live_fn.expect("DualRunHarness: live function not set");
@@ -3751,6 +3780,7 @@ impl DualRunHarness {
         );
 
         // Log result.
+        #[cfg(feature = "tracing-integration")]
         tracing::info!(
             scenario_id = %self.identity.scenario_id,
             surface_id = %self.identity.surface_id,
@@ -5838,6 +5868,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn normalize_lab_report_matches_golden_record() {
         init_test("normalize_lab_report_matches_golden_record");
         let identity = DualRunScenarioIdentity::phase1(
@@ -5952,7 +5983,7 @@ mod tests {
                         "replay_policy": "single_seed",
                     },
                     "effective_seed": 42,
-                    "effective_entropy_seed": crate::test_logging::derive_component_seed(42, "entropy"),
+                    "effective_entropy_seed": derive_component_seed(42, "entropy"),
                     "trace_fingerprint": 43981,
                     "schedule_hash": 22136,
                     "event_hash": 4660,
@@ -6015,6 +6046,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn normalize_live_observable_matches_golden_record_and_manifest() {
         init_test("normalize_live_observable_matches_golden_record_and_manifest");
         let identity = DualRunScenarioIdentity::phase1(
@@ -6163,7 +6195,7 @@ mod tests {
                         "replay_policy": "single_seed",
                     },
                     "effective_seed": 42,
-                    "effective_entropy_seed": crate::test_logging::derive_component_seed(42, "entropy"),
+                    "effective_entropy_seed": derive_component_seed(42, "entropy"),
                 },
             })
         );

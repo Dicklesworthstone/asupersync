@@ -579,7 +579,7 @@ mod tests {
         use std::collections::HashSet;
         let id = rref(0, 5);
         let id2 = id; // Copy
-        let id3 = id;
+        let id3 = id; // Copy (RRefId is Copy)
         assert_eq!(id, id2);
         assert_eq!(id, id3);
         assert_ne!(id, rref(0, 6));

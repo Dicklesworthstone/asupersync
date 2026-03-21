@@ -1757,28 +1757,25 @@ impl LabRuntime {
         // Check for budget exhaustion injection
         let budget_exhaust = chaos_rng.should_inject_budget_exhaust(&chaos_config);
         let skip_poll = cancel | budget_exhaust;
+        self.chaos_stats
+            .record_pre_poll_outcomes(cancel, delay, budget_exhaust);
+
         // Now apply the injections (no more borrowing chaos_rng).
         // Cancel and budget_exhaust are independent — apply both when both fire.
         if cancel {
-            self.chaos_stats.record_cancel();
             self.inject_cancel(task_id);
         }
 
         if let Some(d) = delay {
-            self.chaos_stats.record_delay(d);
             self.advance_time(Self::duration_nanos_saturating(d));
         }
 
         if budget_exhaust {
-            self.chaos_stats.record_budget_exhaust();
             self.inject_budget_exhaust(task_id);
         }
 
-        let injected_anything = cancel || delay.is_some() || budget_exhaust;
         if skip_poll {
             self.reschedule_after_chaos_skip(task_id);
-        } else if !injected_anything {
-            self.chaos_stats.record_no_injection();
         }
 
         skip_poll
@@ -2762,6 +2759,59 @@ mod tests {
         crate::test_complete!(
             "pending_task_without_wakeup_storm_still_counts_chaos_decision_point"
         );
+    }
+
+    #[test]
+    fn pre_poll_multi_injection_counts_one_chaos_decision_point() {
+        init_test("pre_poll_multi_injection_counts_one_chaos_decision_point");
+
+        let config = LabConfig::new(123).with_chaos(
+            ChaosConfig::new(123)
+                .with_cancel_probability(1.0)
+                .with_delay_probability(1.0)
+                .with_delay_range(Duration::ZERO..Duration::from_nanos(2))
+                .with_budget_exhaust_probability(1.0),
+        );
+        let mut runtime = LabRuntime::new(config);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {
+                std::future::pending::<()>().await;
+            })
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+
+        runtime.step_for_test();
+
+        let stats = runtime.chaos_stats();
+        crate::assert_with_log!(
+            stats.decision_points == 1,
+            "multi-injection pre-poll counts once",
+            1u64,
+            stats.decision_points
+        );
+        crate::assert_with_log!(
+            stats.cancellations == 1,
+            "cancel recorded",
+            1u64,
+            stats.cancellations
+        );
+        crate::assert_with_log!(stats.delays == 1, "delay recorded", 1u64, stats.delays);
+        crate::assert_with_log!(
+            stats.budget_exhaustions == 1,
+            "budget exhaust recorded",
+            1u64,
+            stats.budget_exhaustions
+        );
+        crate::assert_with_log!(
+            stats.total_delay == Duration::from_nanos(1),
+            "positive delay preserved",
+            Duration::from_nanos(1),
+            stats.total_delay
+        );
+
+        crate::test_complete!("pre_poll_multi_injection_counts_one_chaos_decision_point");
     }
 
     #[test]

@@ -1973,7 +1973,7 @@ mod tests {
             success_threshold: 2,
             open_duration: Duration::from_millis(100),
             sliding_window: Some(SlidingWindowConfig {
-                window_duration: Duration::from_secs(60),
+                window_duration: Duration::from_mins(1),
                 minimum_calls: 2,
                 failure_rate_threshold: 0.5,
             }),
@@ -2045,7 +2045,7 @@ mod tests {
             success_threshold: 1,
             open_duration: Duration::from_millis(100),
             sliding_window: Some(SlidingWindowConfig {
-                window_duration: Duration::from_secs(60),
+                window_duration: Duration::from_mins(1),
                 minimum_calls: 3,
                 failure_rate_threshold: 0.5,
             }),

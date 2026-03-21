@@ -1448,13 +1448,11 @@ impl ControlCapsuleV1 {
     /// Return the current sequencer lease, if one exists.
     #[must_use]
     pub fn active_sequencer_lease(&self) -> Option<SequencerLease> {
-        self.active_sequencer
-            .clone()
-            .map(|holder| SequencerLease {
-                holder,
-                control_epoch: self.control_epoch(),
-                fence_generation: self.sequencer_lease_generation,
-            })
+        self.active_sequencer.clone().map(|holder| SequencerLease {
+            holder,
+            control_epoch: self.control_epoch(),
+            fence_generation: self.sequencer_lease_generation,
+        })
     }
 
     /// Return the current cursor-authority lease, if one exists.

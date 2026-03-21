@@ -1117,6 +1117,7 @@ impl RoutingTable {
             *default = None;
             pruned += 1;
         }
+        drop(default);
 
         pruned
     }

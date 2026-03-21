@@ -452,21 +452,6 @@ impl<T> OnceCell<T> {
         }
     }
 
-    /// Wakes all async waiters.
-    fn wake_all(&self) {
-        let wakers: SmallVec<[Waker; 4]> = {
-            let mut guard = match self.waiters.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.waiters.drain(..).map(|w| w.waker).collect()
-        };
-
-        for waker in wakers {
-            waker.wake();
-        }
-    }
-
     /// Registers a waker for async waiting with waiter-id tracking to prevent
     /// unbounded queue growth.
     fn register_waker(&self, waker: &Waker, waiter_id: &mut Option<u64>) {
@@ -581,7 +566,7 @@ impl<T> Future for WaitInit<'_, T> {
                 Poll::Pending
             } else {
                 // Do not clear waiter_id here. If state changed after register_waker
-                // but before wake_all drained the queue, Drop must remove it to
+                // but before transition_out_of_initializing drained the queue, Drop must remove it to
                 // prevent memory leaks.
                 Poll::Ready(())
             }
@@ -595,7 +580,7 @@ impl<T> Drop for WaitInit<'_, T> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately so repeated
-            // cancel/drop cycles don't accumulate until wake_all() drains.
+            // cancel/drop cycles don't accumulate until transition_out_of_initializing() drains.
             let mut guard = match self.cell.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),

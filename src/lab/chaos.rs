@@ -732,6 +732,34 @@ impl ChaosStats {
         self.decision_points += 1;
     }
 
+    /// Records the combined outcomes from a single pre-poll chaos decision.
+    ///
+    /// The pre-poll hook can inject multiple chaos types at once (for example,
+    /// cancellation and budget exhaustion on the same task poll boundary). That
+    /// still counts as one decision point, so callers should use this helper
+    /// instead of chaining [`record_cancel`](Self::record_cancel),
+    /// [`record_delay`](Self::record_delay), and
+    /// [`record_budget_exhaust`](Self::record_budget_exhaust), which would
+    /// overcount `decision_points`.
+    pub fn record_pre_poll_outcomes(
+        &mut self,
+        cancel: bool,
+        delay: Option<Duration>,
+        budget_exhaust: bool,
+    ) {
+        if cancel {
+            self.cancellations += 1;
+        }
+        if let Some(delay) = delay {
+            self.delays += 1;
+            self.total_delay += delay;
+        }
+        if budget_exhaust {
+            self.budget_exhaustions += 1;
+        }
+        self.decision_points += 1;
+    }
+
     /// Records a decision point where no chaos was injected.
     pub fn record_no_injection(&mut self) {
         self.decision_points += 1;
@@ -1191,6 +1219,18 @@ mod tests {
         assert_eq!(stats1.io_errors, 1);
         assert_eq!(stats1.delays, 1);
         assert_eq!(stats1.decision_points, 4);
+    }
+
+    #[test]
+    fn pre_poll_outcomes_count_as_one_decision_point() {
+        let mut stats = ChaosStats::new();
+        stats.record_pre_poll_outcomes(true, Some(Duration::from_millis(2)), true);
+
+        assert_eq!(stats.cancellations, 1);
+        assert_eq!(stats.delays, 1);
+        assert_eq!(stats.total_delay, Duration::from_millis(2));
+        assert_eq!(stats.budget_exhaustions, 1);
+        assert_eq!(stats.decision_points, 1);
     }
 
     #[test]

@@ -290,3 +290,41 @@ fn divergence_doc_defines_registry_schema_and_lifecycle() -> std::io::Result<()>
     }
     Ok(())
 }
+
+#[test]
+fn differential_runner_script_exists_and_uses_rch_cli_surface() -> std::io::Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run_lab_live_differential.sh");
+    let script = std::fs::read_to_string(path)?;
+    for token in [
+        "target/debug/asupersync",
+        "lab differential \"$@\"",
+        "rch exec -- cargo run --features cli --bin asupersync -- lab differential",
+    ] {
+        assert!(
+            script.contains(token),
+            "differential runner script missing token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn cli_source_defines_differential_runner_surface() -> std::io::Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/asupersync.rs");
+    let src = std::fs::read_to_string(path)?;
+    for token in [
+        "LabCommand::Differential",
+        "struct LabDifferentialArgs",
+        "run_lab_differential(args)",
+        "differential_event_log.jsonl",
+        "runner_summary.json",
+        "calibration.cancellation.cleanup_missing",
+        "calibration.obligation.leak_detected",
+    ] {
+        assert!(
+            src.contains(token),
+            "CLI differential runner source missing token: {token}"
+        );
+    }
+    Ok(())
+}

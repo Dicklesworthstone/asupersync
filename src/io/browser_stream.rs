@@ -1640,7 +1640,7 @@ impl WasmMessagePortState {
                     )));
             }) as Box<dyn FnMut(MessageEvent)>);
 
-        let target: &EventTarget = port.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(port);
         attach_browser_message_listeners(
             target,
             &on_message,
@@ -1670,7 +1670,7 @@ impl WasmMessagePortState {
     }
 
     fn close(&self) {
-        let target: &EventTarget = self.port.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(&self.port);
         detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
         self.port.close();
     }
@@ -2027,7 +2027,7 @@ impl WasmBroadcastChannelState {
                     )));
             }) as Box<dyn FnMut(MessageEvent)>);
 
-        let target: &EventTarget = channel.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(&channel);
         attach_browser_message_listeners(
             target,
             &on_message,
@@ -2056,7 +2056,7 @@ impl WasmBroadcastChannelState {
     }
 
     fn close(&self) {
-        let target: &EventTarget = self.channel.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(&self.channel);
         detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
         self.channel.close();
     }

@@ -508,11 +508,8 @@ fn cancellation_dual_run_pilot_preserves_request_drain_finalize_semantics() {
     );
 
     let result = DualRunHarness::from_identity(identity.clone())
-        .lab(move |_config| lab_semantics.clone())
-        .live_result({
-            let live_result = live_result.clone();
-            move |_seed, _entropy| live_result.clone()
-        })
+        .lab(move |_config| lab_semantics)
+        .live_result(move |_seed, _entropy| live_result)
         .run();
 
     assert_dual_run_passes(&result);
@@ -532,13 +529,11 @@ fn cancellation_dual_run_pilot_failure_bundle_calls_out_drain_and_finalize_gaps(
     let identity = cancellation_pilot_identity();
     let lab_semantics = cancellation_pilot_semantics(true, true, true, Some(true));
     let live_result = make_cancellation_live_result(&identity, false, false, false, Some(false));
+    let live_result_for_harness = live_result.clone();
 
     let result = DualRunHarness::from_identity(identity.clone())
-        .lab(move |_config| lab_semantics.clone())
-        .live_result({
-            let live_result = live_result.clone();
-            move |_seed, _entropy| live_result.clone()
-        })
+        .lab(move |_config| lab_semantics)
+        .live_result(move |_seed, _entropy| live_result_for_harness)
         .run();
 
     assert!(

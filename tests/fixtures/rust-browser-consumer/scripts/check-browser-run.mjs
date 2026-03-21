@@ -295,8 +295,14 @@ try {
     host_role: "browser_main_thread",
     runtime_context: "browser_main_thread",
     support_class: "direct_runtime_supported",
-    reason_code: "candidate_host_role_mismatch",
+    reason_code: "supported",
   });
+  assertCandidateReason(
+    "preferred dedicated-worker ladder",
+    preferredDedicatedWorker,
+    DEDICATED_WORKER_LANE,
+    "candidate_host_role_mismatch",
+  );
   assert(
     preferredDedicatedWorker?.preferred_lane === DEDICATED_WORKER_LANE,
     `preferred dedicated-worker lane must be requested, got ${preferredDedicatedWorker?.preferred_lane ?? "missing"}`,
@@ -343,8 +349,14 @@ try {
     host_role: "dedicated_worker",
     runtime_context: "dedicated_worker",
     support_class: "direct_runtime_supported",
-    reason_code: "candidate_host_role_mismatch",
+    reason_code: "supported",
   });
+  assertCandidateReason(
+    "preferred main-thread worker ladder",
+    preferredMainThread,
+    MAIN_THREAD_LANE,
+    "candidate_host_role_mismatch",
+  );
   assert(
     preferredMainThread?.preferred_lane === MAIN_THREAD_LANE,
     `preferred main-thread worker lane must be requested, got ${preferredMainThread?.preferred_lane ?? "missing"}`,

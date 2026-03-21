@@ -63,15 +63,15 @@ use core::arch::aarch64::{
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86"))]
 use core::arch::x86::{
-    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
-    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
-    _mm256_xor_si256, _mm_loadu_si128,
+    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
+    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
+    _mm256_storeu_si256, _mm256_xor_si256,
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
-    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
-    _mm256_xor_si256, _mm_loadu_si128,
+    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
+    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
+    _mm256_storeu_si256, _mm256_xor_si256,
 };
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.
@@ -895,10 +895,8 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         decision_artifact_id: PENDING_PROFILE_DECISION_ARTIFACT_ID,
         decision_role: PENDING_PROFILE_DECISION_ROLE,
         decision_evidence_status: PENDING_PROFILE_DECISION_EVIDENCE_STATUS,
-        selected_candidate_summary:
-            "catalog default retained pending same-target aarch64 ablation evidence",
-        rejected_candidate_set_summary:
-            "nonselected aarch64 tuning candidates remain historical offline-tuning rejects",
+        selected_candidate_summary: "catalog default retained pending same-target aarch64 ablation evidence",
+        rejected_candidate_set_summary: "nonselected aarch64 tuning candidates remain historical offline-tuning rejects",
         selected_mul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
         selected_addmul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
         selected_targeted_addmul_average_delta_pct: NA_PROFILE_DELTA_PCT,
@@ -4745,10 +4743,12 @@ mod tests {
             manifest.active_profile_metadata.addmul_min_lane,
             policy.addmul_min_lane
         );
-        assert!(manifest
-            .profile_pack_catalog
-            .iter()
-            .any(|metadata| metadata.profile_pack == policy.profile_pack));
+        assert!(
+            manifest
+                .profile_pack_catalog
+                .iter()
+                .any(|metadata| metadata.profile_pack == policy.profile_pack)
+        );
         let catalog_profile = profile_pack_metadata(policy.profile_pack);
         assert_eq!(
             manifest.active_profile_metadata.architecture_class,

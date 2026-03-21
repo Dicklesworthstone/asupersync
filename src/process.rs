@@ -1960,6 +1960,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::option_if_let_else, clippy::manual_map)]
     fn test_wait_closes_piped_stdin_before_blocking() {
         use std::sync::mpsc;
 
@@ -1978,15 +1979,14 @@ mod tests {
             tx.send(child.wait()).expect("send wait result");
         });
 
-        let status = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
-            Ok(status) => status.expect("wait failed"),
-            Err(_) => {
-                #[allow(clippy::cast_possible_wrap)]
-                let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-                join.join().expect("wait thread panicked after timeout");
-                panic!("wait() should close stdin and finish without hanging");
-            }
-        };
+        let recv = rx.recv_timeout(std::time::Duration::from_secs(1));
+        if recv.is_err() {
+            #[allow(clippy::cast_possible_wrap)]
+            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            join.join().expect("wait thread panicked after timeout");
+            panic!("wait() should close stdin and finish without hanging");
+        }
+        let status = recv.unwrap().expect("wait failed");
         join.join().expect("wait thread panicked");
 
         crate::assert_with_log!(
@@ -2018,16 +2018,15 @@ mod tests {
             tx.send(result).expect("send async wait result");
         });
 
-        let status = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
-            Ok(status) => status.expect("wait_async failed"),
-            Err(_) => {
-                #[allow(clippy::cast_possible_wrap)]
-                let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-                join.join()
-                    .expect("async wait thread panicked after timeout");
-                panic!("wait_async() should close stdin and finish without hanging");
-            }
-        };
+        let recv = rx.recv_timeout(std::time::Duration::from_secs(1));
+        if recv.is_err() {
+            #[allow(clippy::cast_possible_wrap)]
+            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            join.join()
+                .expect("async wait thread panicked after timeout");
+            panic!("wait_async() should close stdin and finish without hanging");
+        }
+        let status = recv.unwrap().expect("wait_async failed");
         join.join().expect("async wait thread panicked");
 
         crate::assert_with_log!(
@@ -2187,7 +2186,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             let mut status = 0;
-            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
             if waited == -1 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {
@@ -2201,12 +2200,14 @@ mod tests {
                 );
                 break;
             }
-            if waited == pid {
-                panic!("kill_on_drop should reap the child before drop returns");
-            }
-            if std::time::Instant::now() >= deadline {
-                panic!("kill_on_drop should reap the child before timeout");
-            }
+            assert!(
+                waited != pid,
+                "kill_on_drop should reap the child before drop returns"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "kill_on_drop should reap the child before timeout"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 

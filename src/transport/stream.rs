@@ -506,8 +506,28 @@ impl Drop for ChannelStream {
         };
 
         waiter.store(false, Ordering::Release);
-        let mut wakers = self.shared.recv_wakers.lock();
-        wakers.retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
+        {
+            let mut wakers = self.shared.recv_wakers.lock();
+            wakers.retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
+        }
+
+        // Pass the baton: if we were woken but dropped before consuming the
+        // symbol, we must wake the next waiter to prevent a lost wakeup.
+        let has_items_or_closed = {
+            let queue = self.shared.queue.lock();
+            !queue.is_empty() || self.shared.closed.load(Ordering::Acquire)
+        };
+
+        if has_items_or_closed {
+            let next_waiter = {
+                let mut wakers = self.shared.recv_wakers.lock();
+                pop_next_queued_waiter(&mut wakers)
+            };
+            if let Some(w) = next_waiter {
+                w.queued.store(false, Ordering::Release);
+                w.waker.wake();
+            }
+        }
     }
 }
 

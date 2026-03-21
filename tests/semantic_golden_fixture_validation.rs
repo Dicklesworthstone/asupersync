@@ -120,6 +120,7 @@ fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::Spo
         .expect("run spork scenario")
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_dual_run_harness_contract_fixture() -> Value {
     let identity = build_contract_identity();
     let scenario = build_contract_scenario(&identity);
@@ -160,7 +161,7 @@ fn build_dual_run_harness_contract_fixture() -> Value {
             "phase": identity.phase,
             "seed_plan": {
                 "canonical_seed": identity.seed_plan.canonical_seed,
-                "seed_lineage_id": identity.seed_plan.seed_lineage_id.clone(),
+                "seed_lineage_id": identity.seed_plan.seed_lineage_id,
                 "lab_seed_mode": identity.seed_plan.lab_seed_mode,
                 "live_seed_mode": identity.seed_plan.live_seed_mode,
                 "replay_policy": identity.seed_plan.replay_policy,
@@ -177,16 +178,16 @@ fn build_dual_run_harness_contract_fixture() -> Value {
             "execution_instance_id": lab_replay.instance.key(),
             "effective_seed": lab_replay.effective_seed,
             "effective_entropy_seed": lab_replay.effective_entropy_seed,
-            "surface_id": lab_replay.family.surface_id.clone(),
-            "surface_contract_version": lab_replay.family.surface_contract_version.clone()
+            "surface_id": lab_replay.family.surface_id,
+            "surface_contract_version": lab_replay.family.surface_contract_version
         },
         "live_context": {
             "adapter": live_ctx.adapter.as_deref().expect("live adapter"),
             "seed": live_ctx.seed,
             "execution_instance_id": live_replay.instance.key(),
-            "surface_id": live_replay.family.surface_id.clone(),
-            "surface_contract_version": live_replay.family.surface_contract_version.clone(),
-            "seed_lineage_id": seed_lineage.seed_lineage_id.clone()
+            "surface_id": live_replay.family.surface_id,
+            "surface_contract_version": live_replay.family.surface_contract_version,
+            "seed_lineage_id": seed_lineage.seed_lineage_id
         },
         "seed_lineage": {
             "seed_lineage_id": seed_lineage.seed_lineage_id.clone(),

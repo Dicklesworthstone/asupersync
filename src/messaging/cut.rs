@@ -705,13 +705,11 @@ impl IncidentSnapshot {
         let forked_signer = if contains_node(&forked_cell.steward_set, &self.certificate.signer) {
             self.certificate.signer.clone()
         } else {
-            forked_cell
-                .steward_set
-                .first()
-                .cloned()
-                .ok_or_else(|| RehearsalError::EmptyStewardOverride {
+            forked_cell.steward_set.first().cloned().ok_or_else(|| {
+                RehearsalError::EmptyStewardOverride {
                     label: self.label.clone(),
-                })?
+                }
+            })?
         };
         let forked_certificate = CutCertificate {
             cell_id: forked_cell.cell_id,

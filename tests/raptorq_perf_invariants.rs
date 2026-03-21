@@ -2305,6 +2305,7 @@ fn e5_simd_ablation_artifact_matches_current_x86_defaults() {
 /// Validate the live GF256 x86 profile-pack metadata stays aligned with the
 /// canonical 2026-03-04 E5 default-contract artifact.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
     let artifact: serde_json::Value = serde_json::from_str(include_str!(
         "../artifacts/raptorq_track_e_gf256_bench_v1.json"

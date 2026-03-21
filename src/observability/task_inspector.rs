@@ -791,6 +791,7 @@ impl crate::console::Render for RawText<'_> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arc_with_non_send_sync)]
 mod tests {
     use super::*;
     use crate::Budget;

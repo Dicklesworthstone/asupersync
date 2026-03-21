@@ -1121,7 +1121,6 @@ fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
             (_, '\\') => {
                 let (_, esc) = chars.next()?;
                 match esc {
-                    '"' | '\\' | '/' => result.push(esc),
                     'b' => result.push('\x08'),
                     'f' => result.push('\x0C'),
                     'n' => result.push('\n'),

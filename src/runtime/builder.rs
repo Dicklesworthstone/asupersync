@@ -1140,6 +1140,59 @@ fn browser_execution_missing_prerequisite_guidance(lane_id: BrowserExecutionLane
     }
 }
 
+fn browser_execution_preferred_lane_mismatch(
+    preferred_lane: BrowserExecutionLane,
+    selected_lane: BrowserExecutionLane,
+    host_role: BrowserExecutionHostRole,
+    direct_lane_for_host: Option<BrowserExecutionLane>,
+    reason_code: BrowserExecutionReasonCode,
+) -> (String, Vec<String>) {
+    if preferred_lane != BrowserExecutionLane::Unsupported
+        && Some(preferred_lane) != direct_lane_for_host
+    {
+        return (
+            format!(
+                "Preferred lane {} is not truthful for host role {}, so Rust Browser Edition stayed on {}.",
+                preferred_lane.as_str(),
+                host_role.as_str(),
+                selected_lane.as_str(),
+            ),
+            vec![format!(
+                "Use {} for this host role, or switch entrypoints before pinning {}.",
+                selected_lane.as_str(),
+                preferred_lane.as_str(),
+            )],
+        );
+    }
+
+    if selected_lane == BrowserExecutionLane::Unsupported {
+        return (
+            format!(
+                "Preferred lane {} could not be selected because Rust Browser Edition currently reports {} and stayed on {}.",
+                preferred_lane.as_str(),
+                reason_code.as_str(),
+                selected_lane.as_str(),
+            ),
+            vec![format!(
+                "Restore the reported Browser Edition prerequisites before pinning {} again.",
+                preferred_lane.as_str(),
+            )],
+        );
+    }
+
+    (
+        format!(
+            "Preferred lane {} is a lower-priority fail-closed fallback, so Rust Browser Edition stayed on {}.",
+            preferred_lane.as_str(),
+            selected_lane.as_str(),
+        ),
+        vec![format!(
+            "Only pin {} when you intentionally want the fail-closed fallback lane.",
+            preferred_lane.as_str(),
+        )],
+    )
+}
+
 struct BrowserExecutionLaneCandidateInput {
     lane_id: BrowserExecutionLane,
     host_role: BrowserExecutionHostRole,
@@ -1244,30 +1297,26 @@ fn build_browser_execution_ladder_from_probe(
 ) -> BrowserExecutionLadderDiagnostics {
     let runtime_support = browser_runtime_support_from_probe(probe);
     let host_role = probe.host_role;
+    let direct_lane_for_host = browser_execution_direct_lane_for_host_role(host_role);
     let selected_lane = runtime_support
         .supported
-        .then(|| browser_execution_direct_lane_for_host_role(host_role))
+        .then_some(direct_lane_for_host)
         .flatten()
         .unwrap_or(BrowserExecutionLane::Unsupported);
-    let mut reason_code = browser_execution_reason_from_support(&runtime_support, host_role);
+    let reason_code = browser_execution_reason_from_support(&runtime_support, host_role);
     let mut message = runtime_support.message.clone();
     let mut guidance = runtime_support.guidance.clone();
 
     if let Some(preferred_lane) = preferred_lane.filter(|lane| *lane != selected_lane) {
-        if reason_code == BrowserExecutionReasonCode::Supported {
-            reason_code = BrowserExecutionReasonCode::CandidateHostRoleMismatch;
-        }
-        message = format!(
-            "{message} Preferred lane {} is not truthful for host role {}, so Rust Browser Edition stayed on {}.",
-            preferred_lane.as_str(),
-            host_role.as_str(),
-            selected_lane.as_str(),
+        let (mismatch_message, mismatch_guidance) = browser_execution_preferred_lane_mismatch(
+            preferred_lane,
+            selected_lane,
+            host_role,
+            direct_lane_for_host,
+            reason_code,
         );
-        guidance.push(format!(
-            "Use {} for this host role, or switch entrypoints before pinning {}.",
-            selected_lane.as_str(),
-            preferred_lane.as_str(),
-        ));
+        message = format!("{message} {mismatch_message}");
+        guidance.extend(mismatch_guidance);
     }
 
     let support_class = runtime_support.support_class;
@@ -3027,6 +3076,11 @@ mod tests {
             BrowserExecutionLane::BrowserMainThreadDirectRuntime,
             "preferred-lane mismatch must not override the truthful selected lane"
         );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::Supported,
+            "preferred-lane mismatch should not rewrite the truthful selected reason"
+        );
         assert!(
             diagnostics
                 .message
@@ -3039,6 +3093,80 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("switch entrypoints")),
             "guidance should explain how to satisfy the preferred lane"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_keeps_prerequisite_reason_when_preferred_lane_fails_closed() {
+        let diagnostics = build_browser_execution_ladder_from_probe(
+            Some(BrowserExecutionLane::BrowserMainThreadDirectRuntime),
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                false,
+            ),
+        );
+
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::Unsupported,
+            "missing prerequisites should still fail closed to lane.unsupported"
+        );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::MissingWebAssembly,
+            "preferred-lane mismatch must preserve the real missing-prerequisite reason"
+        );
+        assert!(
+            diagnostics.message.contains("missing_webassembly"),
+            "message should preserve the real missing-prerequisite reason code"
+        );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("Restore the reported Browser Edition prerequisites")),
+            "guidance should explain how to restore the missing prerequisite"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_distinguishes_intentional_fail_closed_preference() {
+        let diagnostics = build_browser_execution_ladder_from_probe(
+            Some(BrowserExecutionLane::Unsupported),
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                true,
+            ),
+        );
+
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "preferred fallback pin must not override the truthful direct-runtime lane"
+        );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::Supported,
+            "preferred fallback pin should not rewrite the selected reason"
+        );
+        assert!(
+            diagnostics
+                .message
+                .contains("lower-priority fail-closed fallback"),
+            "message should describe the explicit fallback pin instead of a host-role mismatch"
+        );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("Only pin")),
+            "guidance should explain that lane.unsupported is an intentional fail-closed pin"
         );
     }
 

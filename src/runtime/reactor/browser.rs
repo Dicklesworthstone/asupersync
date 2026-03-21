@@ -239,7 +239,7 @@ impl MessagePortBinding {
     }
 
     fn attach(&self) -> io::Result<()> {
-        let target: &EventTarget = self.port.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(&self.port);
         attach_browser_message_listeners(
             target,
             &self.on_message,
@@ -252,7 +252,7 @@ impl MessagePortBinding {
     }
 
     fn detach(self) {
-        let target: &EventTarget = self.port.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(&self.port);
         detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
     }
 }
@@ -285,7 +285,7 @@ impl BroadcastChannelBinding {
     }
 
     fn attach(&self) -> io::Result<()> {
-        let target: &EventTarget = self.channel.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(&self.channel);
         attach_browser_message_listeners(
             target,
             &self.on_message,
@@ -296,7 +296,7 @@ impl BroadcastChannelBinding {
     }
 
     fn detach(self) {
-        let target: &EventTarget = self.channel.as_ref().unchecked_ref();
+        let target: &EventTarget = AsRef::<EventTarget>::as_ref(&self.channel);
         detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
     }
 }

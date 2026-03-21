@@ -1673,6 +1673,7 @@ impl RedisPubSub {
     ///
     /// Redis returns a `pong` event while subscribed.
     pub async fn ping(&mut self, cx: &Cx, payload: Option<&[u8]>) -> Result<(), RedisError> {
+        const MAX_PING_BUFFERED: usize = 4096;
         if let Some(payload) = payload {
             self.conn.write_command(cx, &[b"PING", payload]).await?;
         } else {
@@ -1681,7 +1682,6 @@ impl RedisPubSub {
         // Loop until we receive PONG, buffering any interleaved events so a
         // liveness check cannot silently drop real messages. Cap the buffer
         // to prevent unbounded growth under high publish throughput.
-        const MAX_PING_BUFFERED: usize = 4096;
         loop {
             match self.read_next_event(cx).await? {
                 PubSubEvent::Pong(_) => return Ok(()),
@@ -2252,6 +2252,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn pubsub_reconnect_discards_buffered_events_from_previous_connection() {
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");

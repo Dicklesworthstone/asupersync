@@ -576,6 +576,7 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
     let worker_path = Path::new("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
     let worker_src = std::fs::read_to_string(worker_path)
