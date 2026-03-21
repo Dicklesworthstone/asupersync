@@ -231,6 +231,12 @@ impl TlsConnectorBuilder {
             count = self.root_certs.len(),
             "Loaded native root certificates"
         );
+
+        // Also load custom CA certs from SSL_CERT_FILE / SSL_CERT_DIR if set.
+        // Corporate proxies commonly require a custom CA certificate, and these
+        // env vars are the standard mechanism (supported by OpenSSL, curl, etc.).
+        self.load_env_certs();
+
         Ok(self)
     }
 
@@ -240,6 +246,80 @@ impl TlsConnectorBuilder {
         Err(TlsError::Configuration(
             "tls-native-roots feature not enabled".into(),
         ))
+    }
+
+    /// Load additional CA certificates from `SSL_CERT_FILE` and `SSL_CERT_DIR`
+    /// environment variables. This supports corporate proxy environments where
+    /// a custom CA cert must be trusted.
+    fn load_env_certs(&mut self) {
+        // Check multiple env vars that various tools use for custom CA bundles.
+        // SSL_CERT_FILE is the most standard (OpenSSL), but REQUESTS_CA_BUNDLE
+        // (Python) and CURL_CA_BUNDLE (curl) are also common in corporate envs.
+        let cert_file = std::env::var("SSL_CERT_FILE")
+            .or_else(|_| std::env::var("REQUESTS_CA_BUNDLE"))
+            .or_else(|_| std::env::var("CURL_CA_BUNDLE"));
+        if let Ok(cert_file) = cert_file {
+            let path = std::path::Path::new(&cert_file);
+            if path.exists() {
+                let added = self.load_pem_file(path);
+                #[cfg(feature = "tracing-integration")]
+                if added > 0 {
+                    tracing::debug!(
+                        path = %cert_file,
+                        count = added,
+                        "Loaded CA certificates from SSL_CERT_FILE"
+                    );
+                }
+            }
+        }
+
+        if let Ok(cert_dir) = std::env::var("SSL_CERT_DIR") {
+            let dir = std::path::Path::new(&cert_dir);
+            if dir.is_dir() {
+                let mut added = 0usize;
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map(|e| e == "pem" || e == "crt").unwrap_or(false) {
+                            added += self.load_pem_file(&path);
+                        }
+                    }
+                }
+                #[cfg(feature = "tracing-integration")]
+                if added > 0 {
+                    tracing::debug!(
+                        path = %cert_dir,
+                        count = added,
+                        "Loaded CA certificates from SSL_CERT_DIR"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Parse PEM-encoded certificates from a file and add them to the root store.
+    fn load_pem_file(&mut self, path: &std::path::Path) -> usize {
+        let Ok(pem_data) = std::fs::read(path) else {
+            return 0;
+        };
+
+        let mut added = 0usize;
+        // Simple PEM parser: extract base64 between BEGIN/END CERTIFICATE markers
+        let pem_str = String::from_utf8_lossy(&pem_data);
+        for block in pem_str.split("-----BEGIN CERTIFICATE-----") {
+            if let Some(end_idx) = block.find("-----END CERTIFICATE-----") {
+                let base64_data = &block[..end_idx];
+                let cleaned: String = base64_data
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(&cleaned) {
+                    let _ = self.root_certs.add(&Certificate::from_der(der));
+                    added += 1;
+                }
+            }
+        }
+        added
     }
 
     /// Add the standard webpki root certificates.
