@@ -293,6 +293,21 @@ where
                         }
                         Poll::Ready(Err(e)) => {
                             drop(inner);
+                            // Release the pending slot before transitioning to Error.
+                            // Without this, the pending counter leaks permanently:
+                            // call() increments pending, but Error/Done states don't
+                            // carry `shared` and Drop only decrements for
+                            // WaitingForReady/Active.
+                            {
+                                let mut pending = shared.pending.lock();
+                                *pending = pending.saturating_sub(1);
+                                let wakers =
+                                    std::mem::take(&mut *shared.ready_wakers.lock());
+                                drop(pending);
+                                for w in wakers {
+                                    w.wake();
+                                }
+                            }
                             this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
                             // Loop around to poll Error
                         }
