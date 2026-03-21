@@ -2448,13 +2448,12 @@ impl ThreeLaneWorker {
         };
 
         // Spectral topology override: this makes structural health influence the
-        // live scheduling path when governor mode is enabled.
+        // live scheduling path when governor mode is enabled. Mere wait-graph
+        // fragmentation is not a trapped wait cycle; the SCC path below owns
+        // actual deadlock forcing.
         if let Some(report) = spectral_report.as_ref() {
             let override_suggestion = match report.classification {
-                crate::observability::spectral_health::HealthClassification::Deadlocked {
-                    ..
-                }
-                | crate::observability::spectral_health::HealthClassification::Critical {
+                crate::observability::spectral_health::HealthClassification::Critical {
                     approaching_disconnect: true,
                     ..
                 } => Some(SchedulingSuggestion::DrainObligations),
@@ -5252,6 +5251,30 @@ mod tests {
         assert!(worker.governor.is_some(), "governor enabled");
         let suggestion = worker.governor_suggest();
         assert_eq!(suggestion, SchedulingSuggestion::NoPreference);
+    }
+
+    #[test]
+    fn test_governor_independent_live_tasks_do_not_force_drain_obligations() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        let _ = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task");
+        let _ = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let suggestion = worker.governor_suggest();
+        assert_eq!(
+            suggestion,
+            SchedulingSuggestion::NoPreference,
+            "independent live tasks should not be treated as a trapped wait deadlock"
+        );
     }
 
     #[test]

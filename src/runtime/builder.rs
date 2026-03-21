@@ -2395,6 +2395,14 @@ impl<T> Future for JoinHandle<T> {
         let mut guard = lock_state(&this.state);
         match guard.result.take() {
             None => {
+                if Arc::strong_count(&this.state) == 1 {
+                    // The executor side was dropped without producing a result or panic payload
+                    // (e.g. the runtime was shut down and tasks were force-cancelled).
+                    this.completed = true;
+                    drop(guard);
+                    panic!("task was dropped or cancelled before completion");
+                }
+                
                 if !guard
                     .waker
                     .as_ref()
