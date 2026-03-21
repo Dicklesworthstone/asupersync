@@ -10540,3 +10540,10 @@
 "SOUND"
 0
 "Multi-strategy timing, ReadyWaker pattern correct, timer driver switching handled, proper cleanup"
+{"file":"src/evidence_sink.rs","lines":599,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: u32 overflow in emit_scheduler_evidence depth sum. Fixed with saturating_add."}
+{"file":"src/sync/rwlock.rs","lines":2267,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cancel-aware RwLock, writer-preference fairness, proper baton-passing on abandon. 30+ tests."}
+{"file":"src/encoding.rs","lines":1042,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RaptorQ encoding pipeline, block planning, systematic encoder, pool allocation. 20+ tests."}
+{"file":"src/database/transaction.rs","lines":865,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Transaction helpers with retry, savepoint SQL injection protection, exponential backoff."}
+{"file":"src/net/tcp/listener.rs","lines":710,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TCP listener with accept storm backoff, re-arm race handling, reactor registration."}
+{"file":"src/monitor.rs","lines":1382,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Process monitors, DownNotification, MonitorSet with BTreeMap indexes. Deterministic ordering."}
+{"file":"src/distributed/assignment.rs","lines":628,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Symbol-to-replica assignment: Full/Striped/MinimumK/Weighted strategies. 15+ tests."}

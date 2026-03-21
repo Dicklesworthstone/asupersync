@@ -178,7 +178,12 @@ pub fn emit_scheduler_evidence(
     ready_depth: u32,
     fallback: bool,
 ) {
-    let total = f64::from((cancel_depth + timed_depth + ready_depth).max(1));
+    let total = f64::from(
+        cancel_depth
+            .saturating_add(timed_depth)
+            .saturating_add(ready_depth)
+            .max(1),
+    );
     let posterior = vec![
         f64::from(cancel_depth) / total,
         f64::from(timed_depth) / total,
