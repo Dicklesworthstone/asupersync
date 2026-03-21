@@ -46,6 +46,16 @@ pub const UNIT_LOG_SCHEMA_VERSION: &str = "raptorq-unit-log-v1";
 /// Valid profile markers for E2E test runs.
 pub const VALID_PROFILES: &[&str] = &["fast", "full", "forensics"];
 
+/// Valid outcome markers for unit test log entries.
+pub const VALID_UNIT_OUTCOMES: &[&str] = &[
+    "ok",
+    "fail",
+    "decode_failure",
+    "symbol_mismatch",
+    "error",
+    "cancelled",
+];
+
 /// Required phase marker set for E2E log entries.
 pub const REQUIRED_PHASE_MARKERS: &[&str] = &["encode", "loss", "decode", "proof", "report"];
 
@@ -216,7 +226,7 @@ pub struct UnitLogEntry {
     pub replay_ref: String,
     /// Shell command to reproduce this test case.
     pub repro_command: String,
-    /// Test outcome: `"ok"`, `"fail"`, `"decode_failure"`, `"symbol_mismatch"`.
+    /// Test outcome: one of [`VALID_UNIT_OUTCOMES`].
     pub outcome: String,
     /// Artifact path for forensic artifacts (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,6 +292,21 @@ impl UnitLogEntry {
         repro_command: &str,
         outcome: &str,
     ) -> Self {
+        let scenario_id = scenario_id.trim();
+        assert!(
+            !scenario_id.is_empty(),
+            "UnitLogEntry::new requires a non-empty scenario_id"
+        );
+        let parameter_set = parameter_set.trim();
+        assert!(
+            !parameter_set.is_empty(),
+            "UnitLogEntry::new requires a non-empty parameter_set"
+        );
+        let replay_ref = replay_ref.trim();
+        assert!(
+            !replay_ref.is_empty(),
+            "UnitLogEntry::new requires a non-empty replay_ref"
+        );
         let repro_command = repro_command.trim();
         assert!(
             !repro_command.is_empty(),
@@ -290,6 +315,15 @@ impl UnitLogEntry {
         assert!(
             repro_command.contains("rch exec --"),
             "UnitLogEntry::new requires an rch-backed repro command"
+        );
+        let outcome = outcome.trim();
+        assert!(
+            !outcome.is_empty(),
+            "UnitLogEntry::new requires a non-empty outcome"
+        );
+        assert!(
+            VALID_UNIT_OUTCOMES.contains(&outcome),
+            "UnitLogEntry::new requires a recognized outcome"
         );
         Self {
             schema_version: UNIT_LOG_SCHEMA_VERSION.to_string(),
@@ -574,11 +608,15 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
 
     // Required string fields
     for field in &["scenario_id", "parameter_set", "replay_ref", "outcome"] {
-        match value.get(*field).and_then(|v| v.as_str()) {
-            Some("") => {
+        match value.get(*field) {
+            Some(raw) if raw.as_str().is_some_and(|text| text.trim().is_empty()) => {
                 violations.push(format!("required field '{field}' is empty"));
             }
-            Some(_) => {}
+            Some(raw) if raw.as_str().is_some() => {}
+            Some(raw) if raw.is_null() => {
+                violations.push(format!("missing required field: {field}"));
+            }
+            Some(_) => violations.push(format!("{field} must be a string")),
             None => violations.push(format!("missing required field: {field}")),
         }
     }
@@ -592,27 +630,31 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     }
 
     // Repro command must be present and use rch like the E2E contract.
-    match value.get("repro_command").and_then(|v| v.as_str()) {
-        Some("") => violations.push("required field 'repro_command' is empty".to_string()),
-        Some(cmd) if !cmd.contains("rch exec --") => violations
-            .push("repro_command must include 'rch exec --' for remote execution".to_string()),
-        Some(_) => {}
+    match value.get("repro_command") {
+        Some(cmd) if cmd.as_str().is_some_and(|text| text.trim().is_empty()) => {
+            violations.push("required field 'repro_command' is empty".to_string());
+        }
+        Some(cmd)
+            if cmd
+                .as_str()
+                .is_some_and(|text| !text.contains("rch exec --")) =>
+        {
+            violations
+                .push("repro_command must include 'rch exec --' for remote execution".to_string());
+        }
+        Some(cmd) if cmd.as_str().is_some() => {}
+        Some(cmd) if cmd.is_null() => {
+            violations.push("missing required field: repro_command".to_string());
+        }
+        Some(_) => violations.push("repro_command must be a string".to_string()),
         None => violations.push("missing required field: repro_command".to_string()),
     }
 
     // Outcome must be a recognized value
     if let Some(outcome) = value.get("outcome").and_then(|v| v.as_str()) {
-        let valid_outcomes = [
-            "ok",
-            "fail",
-            "decode_failure",
-            "symbol_mismatch",
-            "error",
-            "cancelled",
-        ];
-        if !valid_outcomes.contains(&outcome) {
+        if !outcome.trim().is_empty() && !VALID_UNIT_OUTCOMES.contains(&outcome) {
             violations.push(format!(
-                "unrecognized outcome '{outcome}': expected one of {valid_outcomes:?}"
+                "unrecognized outcome '{outcome}': expected one of {VALID_UNIT_OUTCOMES:?}"
             ));
         }
     }
@@ -931,6 +973,71 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "UnitLogEntry::new requires a non-empty scenario_id")]
+    fn unit_log_entry_constructor_rejects_empty_scenario_id() {
+        let _ = UnitLogEntry::new(
+            "   ",
+            1,
+            "k=8,symbol_size=32",
+            "replay:rq-u-empty-scenario-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_constructor_rejects_empty_scenario_id -- --nocapture",
+            "ok",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "UnitLogEntry::new requires a non-empty parameter_set")]
+    fn unit_log_entry_constructor_rejects_empty_parameter_set() {
+        let _ = UnitLogEntry::new(
+            "RQ-U-EMPTY-PARAMS",
+            1,
+            "",
+            "replay:rq-u-empty-params-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_constructor_rejects_empty_parameter_set -- --nocapture",
+            "ok",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "UnitLogEntry::new requires a non-empty replay_ref")]
+    fn unit_log_entry_constructor_rejects_empty_replay_ref() {
+        let _ = UnitLogEntry::new(
+            "RQ-U-EMPTY-REPLAY",
+            1,
+            "k=8,symbol_size=32",
+            " ",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_constructor_rejects_empty_replay_ref -- --nocapture",
+            "ok",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "UnitLogEntry::new requires a non-empty outcome")]
+    fn unit_log_entry_constructor_rejects_empty_outcome() {
+        let _ = UnitLogEntry::new(
+            "RQ-U-EMPTY-OUTCOME",
+            1,
+            "k=8,symbol_size=32",
+            "replay:rq-u-empty-outcome-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_constructor_rejects_empty_outcome -- --nocapture",
+            "   ",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "UnitLogEntry::new requires a recognized outcome")]
+    fn unit_log_entry_constructor_rejects_unrecognized_outcome() {
+        let _ = UnitLogEntry::new(
+            "RQ-U-BAD-OUTCOME",
+            1,
+            "k=8,symbol_size=32",
+            "replay:rq-u-bad-outcome-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_constructor_rejects_unrecognized_outcome -- --nocapture",
+            "mystery",
+        );
+    }
+
+    #[test]
     fn validate_unit_log_missing_fields() {
         let json = r#"{"schema_version": "raptorq-unit-log-v1", "seed": 42}"#;
         let violations = validate_unit_log_json(json);
@@ -960,6 +1067,80 @@ mod tests {
             violations.iter().any(|v| v.contains("schema_version")),
             "should flag wrong schema version"
         );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_whitespace_only_required_fields() {
+        let json = r#"{
+            "schema_version": "raptorq-unit-log-v1",
+            "scenario_id": "   ",
+            "seed": 42,
+            "parameter_set": "\t",
+            "replay_ref": " ",
+            "repro_command": "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_whitespace_only_required_fields -- --nocapture",
+            "outcome": " "
+        }"#;
+        let violations = validate_unit_log_json(json);
+        for field in ["scenario_id", "parameter_set", "replay_ref", "outcome"] {
+            assert!(
+                violations.iter().any(|violation| {
+                    violation.contains(&format!("required field '{field}' is empty"))
+                }),
+                "should flag whitespace-only {field}: {violations:?}"
+            );
+        }
+        assert!(
+            !violations
+                .iter()
+                .any(|violation| violation.contains("unrecognized outcome")),
+            "whitespace-only outcome should not also report unrecognized outcome: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_whitespace_only_repro_command() {
+        let json = r#"{
+            "schema_version": "raptorq-unit-log-v1",
+            "scenario_id": "RQ-U-WHITESPACE-REPRO",
+            "seed": 42,
+            "parameter_set": "k=8",
+            "replay_ref": "replay:rq-u-whitespace-repro-v1",
+            "repro_command": "   ",
+            "outcome": "ok"
+        }"#;
+        let violations = validate_unit_log_json(json);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation == "required field 'repro_command' is empty"),
+            "should flag whitespace-only repro command: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_non_string_required_fields() {
+        let json = r#"{
+            "schema_version": "raptorq-unit-log-v1",
+            "scenario_id": 7,
+            "seed": 42,
+            "parameter_set": ["k=8"],
+            "replay_ref": false,
+            "repro_command": {"cmd":"rch exec -- cargo test"},
+            "outcome": {"value":"ok"}
+        }"#;
+        let violations = validate_unit_log_json(json);
+        for expected in [
+            "scenario_id must be a string",
+            "parameter_set must be a string",
+            "replay_ref must be a string",
+            "repro_command must be a string",
+            "outcome must be a string",
+        ] {
+            assert!(
+                violations.iter().any(|violation| violation == expected),
+                "should flag `{expected}`: {violations:?}"
+            );
+        }
     }
 
     #[test]
