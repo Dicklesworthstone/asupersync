@@ -1814,7 +1814,7 @@ mod tests {
             coalescing.coalesce_window == Duration::from_millis(10),
             "coalesce window",
             10,
-            coalescing.coalesce_window.as_millis() as u64
+            u64::try_from(coalescing.coalesce_window.as_millis()).unwrap_or(u64::MAX)
         );
         crate::assert_with_log!(
             coalescing.min_group_size == 5,

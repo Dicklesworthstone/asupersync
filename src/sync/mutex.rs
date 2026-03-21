@@ -190,7 +190,7 @@ impl<T> Mutex<T> {
         let waker_to_wake = {
             let mut state = self.state.lock();
             state.locked = false;
-            state.waiters.pop_front().map(|w| w.waker)
+            state.waiters.front().map(|w| w.waker.clone())
         };
         // Wake outside the lock
         if let Some(waker) = waker_to_wake {

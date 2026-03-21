@@ -104,10 +104,15 @@ impl AdaptiveHedgePolicy {
     /// * `alpha` - Target miscoverage rate (e.g., 0.05 for 95% coverage).
     /// * `min_delay` - The absolute minimum delay before hedging.
     /// * `max_delay` - The absolute maximum delay before hedging.
+    ///
+    /// # Panics
+    /// Panics if `window_size == 0`, if `alpha` is not in `(0, 1)`, or if
+    /// `min_delay > max_delay`.
     #[must_use]
     pub fn new(window_size: usize, alpha: f64, min_delay: Duration, max_delay: Duration) -> Self {
         assert!(window_size > 0, "window size must be positive");
         assert!(alpha > 0.0 && alpha < 1.0, "alpha must be in (0, 1)");
+        assert!(min_delay <= max_delay, "min_delay must be <= max_delay");
         Self {
             history: vec![0; window_size],
             samples_seen: 0,
@@ -1297,5 +1302,16 @@ mod tests {
         }
 
         assert_eq!(policy.config().hedge_delay, policy.next_hedge_delay());
+    }
+
+    #[test]
+    #[should_panic(expected = "min_delay must be <= max_delay")]
+    fn test_adaptive_hedge_policy_rejects_inverted_bounds_at_construction() {
+        let _ = AdaptiveHedgePolicy::new(
+            16,
+            0.1,
+            Duration::from_millis(500),
+            Duration::from_millis(5),
+        );
     }
 }
