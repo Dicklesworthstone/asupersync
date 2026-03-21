@@ -36,11 +36,16 @@ impl<R> BufReader<R> {
     }
 
     /// Returns a mutable reference to the underlying reader.
+    ///
+    /// Note: reading directly from the inner reader may cause data loss if
+    /// the buffer contains unread data.
     pub fn get_mut(&mut self) -> &mut R {
         self.inner.get_mut()
     }
 
     /// Consumes the `BufReader` and returns the underlying reader.
+    ///
+    /// Note: any buffered data that has not been read will be lost.
     pub fn into_inner(self) -> R {
         self.inner.into_inner()
     }
@@ -48,6 +53,12 @@ impl<R> BufReader<R> {
     /// Returns the current buffer contents.
     pub fn buffer(&self) -> &[u8] {
         self.inner.buffer()
+    }
+
+    /// Returns the capacity of the internal buffer.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
     }
 
     /// Returns an iterator over the lines of this reader.
@@ -148,5 +159,14 @@ mod tests {
             crate::assert_with_log!(lines == expected, "lines", expected, lines);
         });
         crate::test_complete!("test_buf_reader_lines_zero_capacity");
+    }
+
+    #[test]
+    fn test_buf_reader_capacity_delegates() {
+        init_test("test_buf_reader_capacity_delegates");
+        let reader = BufReader::with_capacity(32, b"data".as_slice());
+        let capacity = reader.capacity();
+        crate::assert_with_log!(capacity == 32, "capacity", 32, capacity);
+        crate::test_complete!("test_buf_reader_capacity_delegates");
     }
 }
