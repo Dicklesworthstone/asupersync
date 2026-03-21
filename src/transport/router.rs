@@ -396,7 +396,7 @@ impl LoadBalancer {
                     selected_indices.push(idx);
                     selected.push(available[idx]);
                     if selected.len() == n {
-                        consumed_slots += span;
+                        consumed_slots += 1;
                         break;
                     }
                 }
