@@ -470,11 +470,10 @@ impl CallContext {
         now: Instant,
     ) -> Self {
         let timeout = match metadata.get("grpc-timeout") {
-            Some(super::streaming::MetadataValue::Ascii(s)) => {
-                parse_grpc_timeout(s).or(default_timeout)
-            }
-            // Binary metadata is not a valid grpc-timeout; fall back.
-            Some(super::streaming::MetadataValue::Binary(_)) | None => default_timeout,
+            Some(super::streaming::MetadataValue::Ascii(s)) => parse_grpc_timeout(s),
+            // A present but invalid grpc-timeout must fail closed, not impersonate absence.
+            Some(super::streaming::MetadataValue::Binary(_)) => None,
+            None => default_timeout,
         };
         let deadline = timeout.and_then(|t| now.checked_add(t));
         Self {
@@ -987,8 +986,8 @@ mod tests {
     }
 
     #[test]
-    fn test_call_context_malformed_timeout_falls_back_to_default() {
-        init_test("test_call_context_malformed_timeout_falls_back_to_default");
+    fn test_call_context_malformed_timeout_does_not_use_default() {
+        init_test("test_call_context_malformed_timeout_does_not_use_default");
         let now = std::time::Instant::now();
         let fallback = std::time::Duration::from_secs(3);
         let mut metadata = Metadata::new();
@@ -997,12 +996,12 @@ mod tests {
 
         let deadline = ctx.deadline();
         crate::assert_with_log!(
-            deadline == now.checked_add(fallback),
-            "malformed grpc-timeout falls back to default timeout",
-            now.checked_add(fallback),
-            deadline
+            deadline.is_none(),
+            "malformed grpc-timeout does not use the default timeout",
+            true,
+            deadline.is_none()
         );
-        crate::test_complete!("test_call_context_malformed_timeout_falls_back_to_default");
+        crate::test_complete!("test_call_context_malformed_timeout_does_not_use_default");
     }
 
     #[test]
