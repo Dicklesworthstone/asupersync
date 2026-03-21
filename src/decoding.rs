@@ -495,7 +495,8 @@ impl DecodingPipeline {
             return;
         };
         for plan in plans {
-            let _ = self.symbols.set_block_k(plan.sbn, plan.k as u16);
+            let k = u16::try_from(plan.k).unwrap_or(u16::MAX);
+            let _ = self.symbols.set_block_k(plan.sbn, k);
         }
     }
 

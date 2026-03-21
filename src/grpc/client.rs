@@ -75,6 +75,37 @@ impl CompressionEncoding {
     }
 }
 
+fn effective_send_compression(config: &ChannelConfig) -> Option<CompressionEncoding> {
+    match config.send_compression {
+        Some(CompressionEncoding::Identity) => Some(CompressionEncoding::Identity),
+        Some(encoding) if encoding.frame_compressor().is_some() => Some(encoding),
+        _ => None,
+    }
+}
+
+fn effective_accept_compressions(config: &ChannelConfig) -> Vec<CompressionEncoding> {
+    let mut encodings = Vec::new();
+    for encoding in &config.accept_compression {
+        let supported = matches!(encoding, CompressionEncoding::Identity)
+            || encoding.frame_decompressor().is_some();
+        if supported && !encodings.contains(encoding) {
+            encodings.push(*encoding);
+        }
+    }
+    encodings
+}
+
+fn client_framed_codec<C: Codec>(channel: &Channel, codec: C) -> FramedCodec<C> {
+    let send_compression = effective_send_compression(channel.config());
+    let compressor = send_compression.and_then(CompressionEncoding::frame_compressor);
+    let decompressor = effective_accept_compressions(channel.config())
+        .into_iter()
+        .find(|encoding| *encoding != CompressionEncoding::Identity)
+        .and_then(CompressionEncoding::frame_decompressor);
+
+    FramedCodec::new(codec).with_frame_hooks(compressor, decompressor)
+}
+
 /// gRPC channel configuration.
 #[derive(Debug, Clone)]
 pub struct ChannelConfig {
@@ -313,11 +344,7 @@ impl GrpcClient<IdentityCodec> {
     /// Create a new client with an identity codec.
     #[must_use]
     pub fn new(channel: Channel) -> Self {
-        let codec = if channel.config.send_compression.is_some() {
-            FramedCodec::new(IdentityCodec).with_identity_frame_codec()
-        } else {
-            FramedCodec::new(IdentityCodec)
-        };
+        let codec = client_framed_codec(&channel, IdentityCodec);
         Self {
             channel,
             codec,
@@ -330,14 +357,10 @@ impl<C: Codec> GrpcClient<C> {
     /// Create a new client with a custom codec.
     #[must_use]
     pub fn with_codec(channel: Channel, codec: C) -> Self {
-        let codec = if channel.config.send_compression.is_some() {
-            FramedCodec::new(codec).with_identity_frame_codec()
-        } else {
-            FramedCodec::new(codec)
-        };
+        let framed = client_framed_codec(&channel, codec);
         Self {
             channel,
-            codec,
+            codec: framed,
             client_interceptors: Vec::new(),
         }
     }
@@ -409,18 +432,14 @@ impl<C: Codec> GrpcClient<C> {
         }
 
         if metadata.get("grpc-encoding").is_none()
-            && let Some(encoding) = self.channel.config.send_compression
+            && let Some(encoding) = effective_send_compression(self.channel.config())
         {
             metadata.insert("grpc-encoding", encoding.as_header_value());
         }
 
-        if metadata.get("grpc-accept-encoding").is_none()
-            && !self.channel.config.accept_compression.is_empty()
-        {
-            let encodings = self
-                .channel
-                .config
-                .accept_compression
+        let accept_compression = effective_accept_compressions(self.channel.config());
+        if metadata.get("grpc-accept-encoding").is_none() && !accept_compression.is_empty() {
+            let encodings = accept_compression
                 .iter()
                 .map(|encoding| encoding.as_header_value())
                 .collect::<Vec<_>>()
@@ -1328,16 +1347,24 @@ mod tests {
             other => panic!("expected interceptor timeout metadata, got: {other:?}"),
         }
         match metadata.get("grpc-encoding") {
+            #[cfg(feature = "compression")]
             Some(super::super::streaming::MetadataValue::Ascii(value)) => {
                 assert_eq!(value, "gzip");
             }
-            other => panic!("expected grpc-encoding metadata, got: {other:?}"),
+            #[cfg(not(feature = "compression"))]
+            None => {}
+            other => panic!("unexpected grpc-encoding metadata: {other:?}"),
         }
         match metadata.get("grpc-accept-encoding") {
+            #[cfg(feature = "compression")]
             Some(super::super::streaming::MetadataValue::Ascii(value)) => {
                 assert_eq!(value, "identity,gzip");
             }
-            other => panic!("expected grpc-accept-encoding metadata, got: {other:?}"),
+            #[cfg(not(feature = "compression"))]
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "identity");
+            }
+            other => panic!("unexpected grpc-accept-encoding metadata: {other:?}"),
         }
         match metadata.get("x-client-id") {
             Some(super::super::streaming::MetadataValue::Ascii(value)) => {
@@ -1345,6 +1372,85 @@ mod tests {
             }
             other => panic!("expected interceptor metadata, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn grpc_client_identity_send_compression_keeps_uncompressed_frames() {
+        let channel = futures_lite::future::block_on(
+            Channel::builder("http://loopback:80")
+                .send_compression(CompressionEncoding::Identity)
+                .connect(),
+        )
+        .expect("channel");
+
+        let mut client = GrpcClient::new(channel);
+        let mut framed = crate::bytes::BytesMut::new();
+        client
+            .codec
+            .encode_message(&Bytes::from_static(b"hello"), &mut framed)
+            .expect("identity framing must encode");
+
+        assert_eq!(
+            framed[0], 0,
+            "identity send compression must not set compressed flag"
+        );
+        let buf = framed
+            .split_off(crate::grpc::codec::MESSAGE_HEADER_SIZE)
+            .freeze();
+        assert_eq!(buf.as_ref(), b"hello");
+    }
+
+    #[test]
+    #[cfg(not(feature = "compression"))]
+    fn grpc_client_unsupported_gzip_send_compression_stays_uncompressed() {
+        let channel = futures_lite::future::block_on(
+            Channel::builder("http://loopback:80")
+                .send_compression(CompressionEncoding::Gzip)
+                .accept_compression(CompressionEncoding::Gzip)
+                .connect(),
+        )
+        .expect("channel");
+
+        let mut client = GrpcClient::new(channel);
+        let mut framed = crate::bytes::BytesMut::new();
+        client
+            .codec
+            .encode_message(&Bytes::from_static(b"hello"), &mut framed)
+            .expect("unsupported gzip must fall back to uncompressed framing");
+
+        assert_eq!(
+            framed[0], 0,
+            "unsupported gzip config must not set compressed flag"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn grpc_client_gzip_send_compression_uses_gzip_frames() {
+        let channel = futures_lite::future::block_on(
+            Channel::builder("http://loopback:80")
+                .send_compression(CompressionEncoding::Gzip)
+                .accept_compression(CompressionEncoding::Gzip)
+                .connect(),
+        )
+        .expect("channel");
+
+        let mut client = GrpcClient::new(channel);
+        let mut framed = crate::bytes::BytesMut::new();
+        client
+            .codec
+            .encode_message(&Bytes::from_static(b"hello gzip"), &mut framed)
+            .expect("gzip framing must encode");
+
+        assert_eq!(
+            framed[0], 1,
+            "gzip send compression must set compressed flag"
+        );
+        assert_eq!(
+            &framed[crate::grpc::codec::MESSAGE_HEADER_SIZE
+                ..crate::grpc::codec::MESSAGE_HEADER_SIZE + 2],
+            &[0x1f, 0x8b]
+        );
     }
 
     #[test]
