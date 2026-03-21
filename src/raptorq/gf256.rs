@@ -2911,6 +2911,29 @@ mod tests {
         )
     }
 
+    fn x86_profile_pack_policy_fixture() -> DualKernelPolicy {
+        let metadata = profile_pack_metadata(Gf256ProfilePackId::X86Avx2BalancedV1);
+        DualKernelPolicy {
+            profile_pack: metadata.profile_pack,
+            architecture_class: metadata.architecture_class,
+            tuning_corpus_id: metadata.tuning_corpus_id,
+            selected_tuning_candidate_id: metadata.selected_tuning_candidate_id,
+            rejected_tuning_candidate_ids: metadata.rejected_tuning_candidate_ids,
+            fallback_reason: None,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
+            replay_pointer: metadata.replay_pointer,
+            command_bundle: metadata.command_bundle,
+            mode: DualKernelOverride::Auto,
+            override_mask: DualKernelOverrideMask::empty(),
+            mul_min_total: metadata.mul_min_total,
+            mul_max_total: metadata.mul_max_total,
+            addmul_min_total: metadata.addmul_min_total,
+            addmul_max_total: metadata.addmul_max_total,
+            addmul_min_lane: metadata.addmul_min_lane,
+            max_lane_ratio: metadata.max_lane_ratio,
+        }
+    }
+
     // -- Table sanity --
 
     #[test]
@@ -3913,32 +3936,20 @@ mod tests {
             "dual_policy_addmul_lane_floor_gate_behaves_as_expected",
             replay_ref,
         );
-        let policy = DualKernelPolicy {
-            profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
-            architecture_class: Gf256ArchitectureClass::X86Avx2,
-            tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
-            selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
-            rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
-            fallback_reason: None,
-            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
-            replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
-            command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
-            mode: DualKernelOverride::Auto,
-            override_mask: DualKernelOverrideMask::empty(),
-            mul_min_total: 8 * 1024,
-            mul_max_total: 24 * 1024,
-            addmul_min_total: 12 * 1024,
-            addmul_max_total: 16 * 1024,
-            addmul_min_lane: 2 * 1024,
-            max_lane_ratio: 8,
-        };
+        let policy = x86_profile_pack_policy_fixture();
+        let eligible_small = policy.addmul_min_lane;
+        let eligible_large = policy.addmul_min_total - eligible_small;
+        let below_floor_small = policy.addmul_min_lane - 1;
+        let below_floor_large = policy.addmul_min_total - below_floor_small;
         assert_eq!(
-            dual_addmul_decision_detail_with_policy(&policy, 12288, 1536).decision,
+            dual_addmul_decision_detail_with_policy(&policy, below_floor_large, below_floor_small)
+                .decision,
             DualKernelDecision::Sequential,
             "{context}"
         );
         assert_eq!(
-            dual_addmul_decision_detail_with_policy(&policy, 12288, 2048).decision,
+            dual_addmul_decision_detail_with_policy(&policy, eligible_large, eligible_small)
+                .decision,
             DualKernelDecision::Fused,
             "{context}"
         );
@@ -3954,27 +3965,14 @@ mod tests {
             "dual_policy_decision_reasons_cover_forced_and_gate_failures",
             replay_ref,
         );
-        let base = DualKernelPolicy {
-            profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
-            architecture_class: Gf256ArchitectureClass::X86Avx2,
-            tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
-            selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
-            rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
-            fallback_reason: None,
-            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
-            replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
-            command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
-            mode: DualKernelOverride::Auto,
-            override_mask: DualKernelOverrideMask::empty(),
-            mul_min_total: 8 * 1024,
-            mul_max_total: 24 * 1024,
-            addmul_min_total: 12 * 1024,
-            addmul_max_total: 16 * 1024,
-            addmul_min_lane: 2 * 1024,
-            max_lane_ratio: 8,
-        };
+        let base = x86_profile_pack_policy_fixture();
+        let eligible_small = base.addmul_min_lane;
+        let eligible_large = base.addmul_min_total - eligible_small;
+        let below_floor_small = base.addmul_min_lane - 1;
+        let below_floor_large = base.addmul_min_total - below_floor_small;
 
-        let eligible = dual_addmul_decision_detail_with_policy(&base, 12288, 2048);
+        let eligible =
+            dual_addmul_decision_detail_with_policy(&base, eligible_large, eligible_small);
         assert_eq!(eligible.decision, DualKernelDecision::Fused, "{context}");
         assert_eq!(
             eligible.reason,
@@ -3982,7 +3980,8 @@ mod tests {
             "{context}"
         );
 
-        let below_floor = dual_addmul_decision_detail_with_policy(&base, 12288, 1536);
+        let below_floor =
+            dual_addmul_decision_detail_with_policy(&base, below_floor_large, below_floor_small);
         assert_eq!(
             below_floor.decision,
             DualKernelDecision::Sequential,
@@ -4001,7 +4000,11 @@ mod tests {
             "{context}"
         );
 
-        let above_window = dual_addmul_decision_detail_with_policy(&base, 15360, 15360);
+        let above_window = dual_addmul_decision_detail_with_policy(
+            &base,
+            base.addmul_max_total,
+            base.addmul_min_lane,
+        );
         assert_eq!(
             above_window.reason,
             DualKernelDecisionReason::TotalAboveWindow,
@@ -4009,10 +4012,11 @@ mod tests {
         );
 
         let ratio_policy = DualKernelPolicy {
-            addmul_max_total: 32 * 1024,
+            addmul_min_lane: 2 * 1024,
             ..base
         };
-        let ratio_exceeded = dual_addmul_decision_detail_with_policy(&ratio_policy, 22528, 2048);
+        let ratio_exceeded =
+            dual_addmul_decision_detail_with_policy(&ratio_policy, 28 * 1024, 2 * 1024);
         assert_eq!(
             ratio_exceeded.reason,
             DualKernelDecisionReason::LaneRatioExceeded,
@@ -4023,7 +4027,8 @@ mod tests {
             mode: DualKernelOverride::ForceSequential,
             ..base
         };
-        let force_seq_detail = dual_addmul_decision_detail_with_policy(&force_seq, 12288, 12288);
+        let force_seq_detail =
+            dual_addmul_decision_detail_with_policy(&force_seq, eligible_large, eligible_small);
         assert_eq!(
             force_seq_detail.reason,
             DualKernelDecisionReason::ForcedSequentialMode,
@@ -4297,26 +4302,27 @@ mod tests {
 
     #[test]
     fn dual_kernel_policy_snapshot_debug_clone_copy_eq() {
+        let metadata = profile_pack_metadata(Gf256ProfilePackId::X86Avx2BalancedV1);
         let snap = DualKernelPolicySnapshot {
-            profile_schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
-            profile_pack: Gf256ProfilePackId::ScalarConservativeV1,
-            architecture_class: Gf256ArchitectureClass::GenericScalar,
+            profile_schema_version: metadata.schema_version,
+            profile_pack: metadata.profile_pack,
+            architecture_class: metadata.architecture_class,
             kernel: Gf256Kernel::Scalar,
-            tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
-            selected_tuning_candidate_id: SCALAR_SELECTED_TUNING_CANDIDATE,
-            rejected_tuning_candidate_ids: SCALAR_REJECTED_TUNING_CANDIDATES,
+            tuning_corpus_id: metadata.tuning_corpus_id,
+            selected_tuning_candidate_id: metadata.selected_tuning_candidate_id,
+            rejected_tuning_candidate_ids: metadata.rejected_tuning_candidate_ids,
             fallback_reason: None,
-            rejected_candidates: &[],
-            replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
-            command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
+            replay_pointer: metadata.replay_pointer,
+            command_bundle: metadata.command_bundle,
             mode: DualKernelMode::Auto,
             override_mask: DualKernelOverrideMask::empty(),
-            mul_min_total: 8192,
-            mul_max_total: 24576,
-            addmul_min_total: 12288,
-            addmul_max_total: 16384,
-            addmul_min_lane: 2048,
-            max_lane_ratio: 8,
+            mul_min_total: metadata.mul_min_total,
+            mul_max_total: metadata.mul_max_total,
+            addmul_min_total: metadata.addmul_min_total,
+            addmul_max_total: metadata.addmul_max_total,
+            addmul_min_lane: metadata.addmul_min_lane,
+            max_lane_ratio: metadata.max_lane_ratio,
         };
         let copied = snap;
         let cloned = snap;

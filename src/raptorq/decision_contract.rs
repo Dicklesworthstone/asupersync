@@ -276,7 +276,17 @@ impl DecisionContract for RaptorQDecisionContract {
         if posterior.len() != state::COUNT {
             return self.fallback_action();
         }
-        self.losses.bayes_action(posterior)
+        // G7 uses a conservative deterministic tie-breaker:
+        // fallback > rollback > canary_hold > continue.
+        (0..action::COUNT)
+            .min_by(|&a, &b| {
+                self.losses
+                    .expected_loss(posterior, a)
+                    .partial_cmp(&self.losses.expected_loss(posterior, b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.cmp(&a))
+            })
+            .unwrap_or(action::FALLBACK)
     }
 
     fn fallback_action(&self) -> usize {
@@ -1030,6 +1040,25 @@ mod tests {
                 assert!(loss >= 0.0, "loss({s},{a}) must be non-negative");
             }
         }
+    }
+
+    #[test]
+    fn choose_action_uses_conservative_tie_breaker() {
+        let contract = RaptorQDecisionContract::new();
+
+        let continue_vs_hold = Posterior::new(vec![0.75, 0.25, 0.0, 0.0]).unwrap();
+        assert_eq!(
+            contract.choose_action(&continue_vs_hold),
+            action::CANARY_HOLD,
+            "equal expected loss between continue/canary_hold must prefer canary_hold"
+        );
+
+        let rollback_vs_fallback = Posterior::new(vec![0.25, 0.0, 0.75, 0.0]).unwrap();
+        assert_eq!(
+            contract.choose_action(&rollback_vs_fallback),
+            action::FALLBACK,
+            "equal expected loss between rollback/fallback must prefer fallback"
+        );
     }
 
     #[test]
