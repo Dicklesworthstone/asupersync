@@ -316,10 +316,13 @@ impl<V: Ord + Clone> Merge for ORSet<V> {
             }
         }
 
-        // Clean up our own entries that are in the merged tombstones
-        for tags in self.entries.values_mut() {
+        // Clean up our own entries that are in the merged tombstones, and
+        // remove values whose tag sets are now empty to prevent unbounded
+        // memory growth from accumulated phantom entries.
+        self.entries.retain(|_, tags| {
             tags.retain(|tag| !self.tombstones.contains(tag));
-        }
+            !tags.is_empty()
+        });
 
         // Merge sequence counters (take max per node).
         for (node, &seq) in &other.sequences {

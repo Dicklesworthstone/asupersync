@@ -635,21 +635,17 @@ struct RegistryMirror {
 }
 
 impl RegistryMirror {
-    fn unregister(
-        &self,
-        id: ObligationId,
-        object_id: ObjectId,
-        holder: TaskId,
-        region: RegionId,
-    ) {
+    fn unregister(&self, id: ObligationId, object_id: ObjectId, holder: TaskId, region: RegionId) {
         self.by_id.write().remove(&id);
 
         let mut by_object = self.by_object.write();
+        let mut remove_object_entry = false;
         if let Some(ids) = by_object.get_mut(&object_id) {
             ids.retain(|current| *current != id);
-            if ids.is_empty() {
-                by_object.remove(&object_id);
-            }
+            remove_object_entry = ids.is_empty();
+        }
+        if remove_object_entry {
+            by_object.remove(&object_id);
         }
         drop(by_object);
 
@@ -714,11 +710,11 @@ pub struct SymbolicObligationRegistry {
     /// Obligations by ID.
     by_id: Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>,
     /// Obligations by object ID.
-    by_object: RwLock<HashMap<ObjectId, Vec<ObligationId>>>,
+    by_object: Arc<RwLock<HashMap<ObjectId, Vec<ObligationId>>>>,
     /// Obligations by holder task (arena-slot indexed, generation-safe).
-    by_holder: RwLock<Vec<HolderSlot>>,
+    by_holder: Arc<RwLock<Vec<HolderSlot>>>,
     /// Obligations by region (arena-slot indexed, generation-safe).
-    by_region: RwLock<Vec<RegionSlot>>,
+    by_region: Arc<RwLock<Vec<RegionSlot>>>,
     /// Next obligation ID.
     next_id: AtomicU64,
 }
@@ -729,10 +725,19 @@ impl SymbolicObligationRegistry {
     pub fn new() -> Self {
         Self {
             by_id: Arc::new(RwLock::new(HashMap::new())),
-            by_object: RwLock::new(HashMap::new()),
-            by_holder: RwLock::new(Vec::new()),
-            by_region: RwLock::new(Vec::new()),
+            by_object: Arc::new(RwLock::new(HashMap::new())),
+            by_holder: Arc::new(RwLock::new(Vec::new())),
+            by_region: Arc::new(RwLock::new(Vec::new())),
             next_id: AtomicU64::new(1),
+        }
+    }
+
+    fn registry_mirror(&self) -> RegistryMirror {
+        RegistryMirror {
+            by_id: Arc::clone(&self.by_id),
+            by_object: Arc::clone(&self.by_object),
+            by_holder: Arc::clone(&self.by_holder),
+            by_region: Arc::clone(&self.by_region),
         }
     }
 
@@ -753,7 +758,7 @@ impl SymbolicObligationRegistry {
             holder,
             region,
             now,
-            Some(Arc::clone(&self.by_id)),
+            Some(self.registry_mirror()),
         );
         self.register(
             id,
@@ -781,7 +786,7 @@ impl SymbolicObligationRegistry {
             holder,
             region,
             now,
-            Some(Arc::clone(&self.by_id)),
+            Some(self.registry_mirror()),
         );
         self.register(
             id,
@@ -811,7 +816,7 @@ impl SymbolicObligationRegistry {
             holder,
             region,
             now,
-            Some(Arc::clone(&self.by_id)),
+            Some(self.registry_mirror()),
         );
         self.register(
             id,
@@ -841,7 +846,7 @@ impl SymbolicObligationRegistry {
             holder,
             region,
             now,
-            Some(Arc::clone(&self.by_id)),
+            Some(self.registry_mirror()),
         );
         self.register(
             id,
@@ -1245,6 +1250,9 @@ mod tests {
         // Commit resolves - update registry state.
         obligation.commit();
 
+        assert!(registry.obligations_for_region(region).is_empty());
+        assert!(registry.obligations_for_task(holder).is_empty());
+        assert!(registry.obligations_for_object(object).is_empty());
         assert!(!registry.has_pending_in_region(region));
         assert!(registry.pending_in_region(region).is_empty());
     }
@@ -1267,11 +1275,13 @@ mod tests {
 
         o1.commit();
 
+        assert_eq!(registry.obligations_for_object(object), vec![o2.id()]);
         // Still has pending because o2 is unresolved.
         assert!(registry.has_pending_in_region(region));
 
         o2.abort();
 
+        assert!(registry.obligations_for_object(object).is_empty());
         assert!(!registry.has_pending_in_region(region));
         assert!(registry.pending_in_region(region).is_empty());
     }
