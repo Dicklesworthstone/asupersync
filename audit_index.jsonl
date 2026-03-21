@@ -363,3 +363,6 @@
 "SOUND"
 0
 "Deregister retry correct, disarmed Cell prevents double-dereg, !Sync prevents races"
+{"file":"src/messaging/federation.rs","lines":2585,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Federation bridges, capability scoping, replication transfer, replay trimming. Clean."}
+{"file":"src/messaging/stream.rs","lines":812,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Quiescent streams, retention, byte accounting, lifecycle. Clean."}
+{"file":"src/messaging/policy.rs","lines":2017,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Priority scoring, degradation planning, bounded-regret controller, safety envelope. Clean."}
