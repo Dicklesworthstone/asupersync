@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# bead: asupersync-4l9iw.2
+# beads: asupersync-4l9iw.2, asupersync-4l9iw.8
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -65,6 +65,8 @@ done
 
 mkdir -p "${CONSUMER_DIR}"
 cp -R "${FIXTURE_DIR}/." "${CONSUMER_DIR}/"
+mkdir -p "${CONSUMER_DIR}/pkg"
+cp -R "${PKG_DIR}/." "${CONSUMER_DIR}/pkg/"
 
 (
   cd "${CONSUMER_DIR}"
@@ -112,6 +114,24 @@ summary = {
         "capabilities_has_window": browser_run["capabilities"]["has_window"] is True,
         "capabilities_has_document": browser_run["capabilities"]["has_document"] is True,
         "capabilities_has_webassembly": browser_run["capabilities"]["has_webassembly"] is True,
+        "main_thread_selected_lane": browser_run["main_thread_selected_lane"],
+        "main_thread_preferred_worker_selected_lane": browser_run["main_thread_preferred_worker_selected_lane"],
+        "main_thread_preferred_worker_reason_code": browser_run["main_thread_preferred_worker_reason_code"],
+        "downgrade_selected_lane": browser_run["downgrade_selected_lane"],
+        "downgrade_reason_code": browser_run["downgrade_reason_code"],
+        "dedicated_worker_ready_phase_is_ready": browser_run["dedicated_worker_ready_phase"] == "ready",
+        "dedicated_worker_disposed_phase_is_disposed": browser_run["dedicated_worker_disposed_phase"] == "disposed",
+        "dedicated_worker_completed_task_outcome_is_ok": browser_run["dedicated_worker_completed_task_outcome"] == "ok",
+        "dedicated_worker_cancel_event_count_is_one": browser_run["dedicated_worker_cancel_event_count"] == 1,
+        "dedicated_worker_selected_lane": browser_run["dedicated_worker_selected_lane"],
+        "dedicated_worker_preferred_main_thread_selected_lane": browser_run["dedicated_worker_preferred_main_thread_selected_lane"],
+        "dedicated_worker_preferred_main_thread_reason_code": browser_run["dedicated_worker_preferred_main_thread_reason_code"],
+        "main_thread_local_storage_available": browser_run["main_thread_local_storage"] is True,
+        "dedicated_worker_local_storage_unavailable": browser_run["dedicated_worker_local_storage"] is False,
+        "main_thread_indexed_db_flag": browser_run["main_thread_indexed_db"],
+        "dedicated_worker_indexed_db_flag": browser_run["dedicated_worker_indexed_db"],
+        "main_thread_web_transport_flag": browser_run["main_thread_web_transport"],
+        "dedicated_worker_web_transport_flag": browser_run["dedicated_worker_web_transport"],
     },
 }
 summary_path.write_text(json.dumps(summary, indent=2) + "\n")

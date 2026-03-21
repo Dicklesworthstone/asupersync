@@ -6,6 +6,9 @@ import { chromium } from "playwright-core";
 const distDir = path.resolve("dist");
 const outputPath = process.argv[2] ? path.resolve(process.argv[2]) : null;
 const REQUIRED_EVENT_SYMBOLS = ["task_spawn", "task_join", "task_cancel"];
+const MAIN_THREAD_LANE = "lane.browser.main_thread.direct_runtime";
+const DEDICATED_WORKER_LANE = "lane.browser.dedicated_worker.direct_runtime";
+const UNSUPPORTED_LANE = "lane.unsupported";
 
 function detectChromiumExecutable() {
   const explicit = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
@@ -70,6 +73,94 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+function assertLifecycle(label, lifecycle, expectedCapabilities) {
+  assert(
+    lifecycle?.support_lane === "repository_maintained_rust_browser_fixture",
+    `${label} must preserve the repository-maintained support lane`,
+  );
+  assert(lifecycle?.diagnostics_clean === true, `${label} diagnostics must stay clean`);
+  assert(lifecycle?.ready_phase === "ready", `${label} must reach ready phase`);
+  assert(lifecycle?.disposed_phase === "disposed", `${label} must reach disposed phase`);
+  assert(
+    lifecycle?.child_scope_count_before_unmount === 1,
+    `${label} must create exactly one child scope before unmount`,
+  );
+  assert(
+    lifecycle?.active_task_count_before_unmount === 1,
+    `${label} must retain exactly one active task before unmount`,
+  );
+  assert(
+    lifecycle?.completed_task_outcome === "ok",
+    `${label} completed task must resolve with ok`,
+  );
+  assert(
+    lifecycle?.cancel_event_count === 1,
+    `${label} must emit exactly one cancellation event`,
+  );
+  assert(
+    Number.isInteger(lifecycle?.dispatch_count) && lifecycle.dispatch_count >= 6,
+    `${label} dispatch count must stay >= 6`,
+  );
+  assert(Array.isArray(lifecycle?.event_symbols), `${label} event_symbols must be an array`);
+  for (const symbol of REQUIRED_EVENT_SYMBOLS) {
+    assert(
+      lifecycle.event_symbols.includes(symbol),
+      `${label} event log missing required symbol: ${symbol}`,
+    );
+  }
+  assert(
+    lifecycle?.capabilities?.has_window === expectedCapabilities.has_window,
+    `${label} window capability drifted`,
+  );
+  assert(
+    lifecycle?.capabilities?.has_document === expectedCapabilities.has_document,
+    `${label} document capability drifted`,
+  );
+  assert(
+    lifecycle?.capabilities?.has_webassembly === expectedCapabilities.has_webassembly,
+    `${label} WebAssembly capability drifted`,
+  );
+}
+
+function assertLadder(label, ladder, expected) {
+  assert(ladder?.supported === expected.supported, `${label} supported flag drifted`);
+  assert(
+    ladder?.selected_lane === expected.selected_lane,
+    `${label} selected unexpected lane: ${ladder?.selected_lane ?? "missing"}`,
+  );
+  assert(
+    ladder?.host_role === expected.host_role,
+    `${label} host role drifted: ${ladder?.host_role ?? "missing"}`,
+  );
+  assert(
+    ladder?.runtime_context === expected.runtime_context,
+    `${label} runtime context drifted: ${ladder?.runtime_context ?? "missing"}`,
+  );
+  assert(
+    ladder?.support_class === expected.support_class,
+    `${label} support class drifted: ${ladder?.support_class ?? "missing"}`,
+  );
+  assert(
+    ladder?.reason_code === expected.reason_code,
+    `${label} reason code drifted: ${ladder?.reason_code ?? "missing"}`,
+  );
+  assert(
+    Array.isArray(ladder?.candidates),
+    `${label} candidates must remain an array`,
+  );
+}
+
+function assertCandidateReason(label, ladder, laneId, reasonCode) {
+  const candidate = Array.isArray(ladder?.candidates)
+    ? ladder.candidates.find((value) => value.lane_id === laneId)
+    : undefined;
+  assert(candidate, `${label} missing candidate ${laneId}`);
+  assert(
+    candidate.reason_code === reasonCode,
+    `${label} candidate ${laneId} expected reason ${reasonCode}, got ${candidate.reason_code ?? "missing"}`,
+  );
 }
 
 function startStaticServer() {
@@ -157,55 +248,122 @@ try {
   if (parsed.support_lane !== "repository_maintained_rust_browser_fixture") {
     throw new Error(`unexpected support lane: ${parsed.support_lane ?? "missing"}`);
   }
-  if (parsed.diagnostics_clean !== true) {
-    throw new Error("fixture diagnostics were not clean");
-  }
-  assert(parsed.ready_phase === "ready", `expected ready_phase=ready, got ${parsed.ready_phase ?? "missing"}`);
+  assert(parsed.harness_mode === "matrix", `unexpected harness mode: ${parsed.harness_mode ?? "missing"}`);
+  assert(parsed.matrix_version === 2, `unexpected matrix version: ${parsed.matrix_version ?? "missing"}`);
+
+  const mainThread = parsed.main_thread;
+  const dedicatedWorker = parsed.dedicated_worker;
+  const mainThreadLifecycle = mainThread?.lifecycle;
+  const workerLifecycle = dedicatedWorker?.lifecycle;
+  const mainThreadLadder = mainThread?.ladder;
+  const workerLadder = dedicatedWorker?.ladder;
+  const preferredDedicatedWorker = mainThread?.preferred_dedicated_worker;
+  const preferredMainThread = dedicatedWorker?.preferred_main_thread;
+  const downgrade = mainThread?.downgrade_without_webassembly;
+  const downgradeSimulation = mainThread?.downgrade_simulation;
+  const guardedCapabilities = parsed.guarded_capabilities;
+
+  assertLifecycle("main-thread lifecycle", mainThreadLifecycle, {
+    has_window: true,
+    has_document: true,
+    has_webassembly: true,
+  });
+  assertLifecycle("dedicated-worker lifecycle", workerLifecycle, {
+    has_window: false,
+    has_document: false,
+    has_webassembly: true,
+  });
+
+  assertLadder("main-thread ladder", mainThreadLadder, {
+    supported: true,
+    selected_lane: MAIN_THREAD_LANE,
+    host_role: "browser_main_thread",
+    runtime_context: "browser_main_thread",
+    support_class: "direct_runtime_supported",
+    reason_code: "supported",
+  });
+  assertCandidateReason(
+    "main-thread ladder",
+    mainThreadLadder,
+    DEDICATED_WORKER_LANE,
+    "candidate_host_role_mismatch",
+  );
+
+  assertLadder("preferred dedicated-worker ladder", preferredDedicatedWorker, {
+    supported: true,
+    selected_lane: MAIN_THREAD_LANE,
+    host_role: "browser_main_thread",
+    runtime_context: "browser_main_thread",
+    support_class: "direct_runtime_supported",
+    reason_code: "candidate_host_role_mismatch",
+  });
   assert(
-    parsed.disposed_phase === "disposed",
-    `expected disposed_phase=disposed, got ${parsed.disposed_phase ?? "missing"}`,
+    preferredDedicatedWorker?.preferred_lane === DEDICATED_WORKER_LANE,
+    `preferred dedicated-worker lane must be requested, got ${preferredDedicatedWorker?.preferred_lane ?? "missing"}`,
+  );
+
+  assert(downgradeSimulation?.simulated === true, "main-thread downgrade simulation must run");
+  assert(
+    downgradeSimulation?.skipped_reason === null,
+    `main-thread downgrade simulation unexpectedly skipped: ${downgradeSimulation?.skipped_reason ?? "missing"}`,
+  );
+  assertLadder("downgrade ladder", downgrade, {
+    supported: false,
+    selected_lane: UNSUPPORTED_LANE,
+    host_role: "browser_main_thread",
+    runtime_context: "browser_main_thread",
+    support_class: "unsupported",
+    reason_code: "missing_webassembly",
+  });
+  assertCandidateReason(
+    "downgrade ladder",
+    downgrade,
+    MAIN_THREAD_LANE,
+    "candidate_prerequisite_missing",
+  );
+
+  assertLadder("dedicated-worker ladder", workerLadder, {
+    supported: true,
+    selected_lane: DEDICATED_WORKER_LANE,
+    host_role: "dedicated_worker",
+    runtime_context: "dedicated_worker",
+    support_class: "direct_runtime_supported",
+    reason_code: "supported",
+  });
+  assertCandidateReason(
+    "dedicated-worker ladder",
+    workerLadder,
+    MAIN_THREAD_LANE,
+    "candidate_host_role_mismatch",
+  );
+
+  assertLadder("preferred main-thread worker ladder", preferredMainThread, {
+    supported: true,
+    selected_lane: DEDICATED_WORKER_LANE,
+    host_role: "dedicated_worker",
+    runtime_context: "dedicated_worker",
+    support_class: "direct_runtime_supported",
+    reason_code: "candidate_host_role_mismatch",
+  });
+  assert(
+    preferredMainThread?.preferred_lane === MAIN_THREAD_LANE,
+    `preferred main-thread worker lane must be requested, got ${preferredMainThread?.preferred_lane ?? "missing"}`,
+  );
+
+  assert(
+    guardedCapabilities?.main_thread_local_storage === true,
+    "main-thread guarded capability snapshot must confirm localStorage availability",
   );
   assert(
-    parsed.child_scope_count_before_unmount === 1,
-    `expected exactly one child scope before unmount, got ${parsed.child_scope_count_before_unmount ?? "missing"}`,
+    guardedCapabilities?.dedicated_worker_local_storage === false,
+    "dedicated worker guarded capability snapshot must keep localStorage unavailable",
   );
   assert(
-    parsed.active_task_count_before_unmount === 1,
-    `expected exactly one active task before unmount, got ${parsed.active_task_count_before_unmount ?? "missing"}`,
-  );
-  assert(
-    parsed.completed_task_outcome === "ok",
-    `expected completed_task_outcome=ok, got ${parsed.completed_task_outcome ?? "missing"}`,
-  );
-  assert(
-    parsed.cancel_event_count === 1,
-    `expected cancel_event_count=1, got ${parsed.cancel_event_count ?? "missing"}`,
-  );
-  assert(
-    Number.isInteger(parsed.dispatch_count) && parsed.dispatch_count >= 6,
-    `expected dispatch_count >= 6, got ${parsed.dispatch_count ?? "missing"}`,
-  );
-  assert(
-    Array.isArray(parsed.event_symbols),
-    "fixture must report event_symbols as an array",
-  );
-  for (const symbol of REQUIRED_EVENT_SYMBOLS) {
-    assert(
-      parsed.event_symbols.includes(symbol),
-      `fixture event log missing required symbol: ${symbol}`,
-    );
-  }
-  assert(
-    parsed.capabilities?.has_window === true,
-    "fixture must confirm browser window capability availability",
-  );
-  assert(
-    parsed.capabilities?.has_document === true,
-    "fixture must confirm browser document capability availability",
-  );
-  assert(
-    parsed.capabilities?.has_webassembly === true,
-    "fixture must confirm browser WebAssembly capability availability",
+    typeof guardedCapabilities?.main_thread_indexed_db === "boolean"
+      && typeof guardedCapabilities?.dedicated_worker_indexed_db === "boolean"
+      && typeof guardedCapabilities?.main_thread_web_transport === "boolean"
+      && typeof guardedCapabilities?.dedicated_worker_web_transport === "boolean",
+    "guarded capability snapshot must preserve boolean advanced-capability fields",
   );
 
   result = {
@@ -214,16 +372,34 @@ try {
     executable_path: executablePath,
     scenario_id: parsed.scenario_id,
     support_lane: parsed.support_lane,
-    diagnostics_clean: parsed.diagnostics_clean,
-    ready_phase: parsed.ready_phase,
-    disposed_phase: parsed.disposed_phase,
-    child_scope_count_before_unmount: parsed.child_scope_count_before_unmount,
-    active_task_count_before_unmount: parsed.active_task_count_before_unmount,
-    completed_task_outcome: parsed.completed_task_outcome,
-    cancel_event_count: parsed.cancel_event_count,
-    dispatch_count: parsed.dispatch_count,
-    event_symbols: parsed.event_symbols,
-    capabilities: parsed.capabilities,
+    diagnostics_clean: mainThreadLifecycle.diagnostics_clean,
+    ready_phase: mainThreadLifecycle.ready_phase,
+    disposed_phase: mainThreadLifecycle.disposed_phase,
+    child_scope_count_before_unmount: mainThreadLifecycle.child_scope_count_before_unmount,
+    active_task_count_before_unmount: mainThreadLifecycle.active_task_count_before_unmount,
+    completed_task_outcome: mainThreadLifecycle.completed_task_outcome,
+    cancel_event_count: mainThreadLifecycle.cancel_event_count,
+    dispatch_count: mainThreadLifecycle.dispatch_count,
+    event_symbols: mainThreadLifecycle.event_symbols,
+    capabilities: mainThreadLifecycle.capabilities,
+    main_thread_selected_lane: mainThreadLadder.selected_lane,
+    main_thread_preferred_worker_selected_lane: preferredDedicatedWorker.selected_lane,
+    main_thread_preferred_worker_reason_code: preferredDedicatedWorker.reason_code,
+    downgrade_selected_lane: downgrade.selected_lane,
+    downgrade_reason_code: downgrade.reason_code,
+    dedicated_worker_ready_phase: workerLifecycle.ready_phase,
+    dedicated_worker_disposed_phase: workerLifecycle.disposed_phase,
+    dedicated_worker_completed_task_outcome: workerLifecycle.completed_task_outcome,
+    dedicated_worker_cancel_event_count: workerLifecycle.cancel_event_count,
+    dedicated_worker_selected_lane: workerLadder.selected_lane,
+    dedicated_worker_preferred_main_thread_selected_lane: preferredMainThread.selected_lane,
+    dedicated_worker_preferred_main_thread_reason_code: preferredMainThread.reason_code,
+    main_thread_local_storage: guardedCapabilities.main_thread_local_storage,
+    dedicated_worker_local_storage: guardedCapabilities.dedicated_worker_local_storage,
+    main_thread_indexed_db: guardedCapabilities.main_thread_indexed_db,
+    dedicated_worker_indexed_db: guardedCapabilities.dedicated_worker_indexed_db,
+    main_thread_web_transport: guardedCapabilities.main_thread_web_transport,
+    dedicated_worker_web_transport: guardedCapabilities.dedicated_worker_web_transport,
   };
 } catch (error) {
   caughtError = error;
