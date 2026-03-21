@@ -505,7 +505,7 @@ impl ChaosRng {
             start_nanos
         };
         if end_nanos <= min_nanos {
-            return range.start;
+            return nanos_to_duration_saturating(min_nanos);
         }
         let delta = end_nanos - min_nanos;
         let rand = (u128::from(self.inner.next_u64()) << 64) | u128::from(self.inner.next_u64());
@@ -565,7 +565,7 @@ impl ChaosRng {
             range.start
         };
         if range.end <= min_count {
-            return range.start;
+            return min_count;
         }
         let delta = range.end - min_count;
         min_count + self.inner.next_usize(delta)

@@ -643,11 +643,22 @@ pub fn export_metadata_summary(
         });
     }
 
-    let privacy_budget_spent = if let Some(epsilon) = policy.noise_budget {
+    // Differential privacy composition: we release 3 independent noised
+    // quantities (message_count, byte_count, error_count). By basic
+    // composition, the total privacy cost is 3×per-field-epsilon. We
+    // charge the full epsilon from the budget and divide by 3 for each
+    // field so the aggregate cost stays within the charged budget.
+    // Differential privacy composition: we release 3 independent noised
+    // quantities (message_count, byte_count, error_count). By basic
+    // composition, the total privacy cost is 3×per-field-epsilon. We
+    // charge the full epsilon from the budget and divide by 3 for each
+    // field so the aggregate cost stays within the charged budget.
+    const NOISED_FIELD_COUNT: f64 = 3.0;
+    let (per_field_epsilon, privacy_budget_spent) = if let Some(epsilon) = policy.noise_budget {
         ledger.spend(epsilon)?;
-        Some(epsilon)
+        (Some(epsilon / NOISED_FIELD_COUNT), Some(epsilon))
     } else {
-        None
+        (None, None)
     };
 
     let subject_token = blind_subject(
@@ -659,15 +670,15 @@ pub fn export_metadata_summary(
 
     let message_noise = laplace_noise(
         noise_seed(policy, summary, "message_count", disclosure_nonce),
-        privacy_budget_spent,
+        per_field_epsilon,
     );
     let byte_noise = laplace_noise(
         noise_seed(policy, summary, "byte_count", disclosure_nonce),
-        privacy_budget_spent,
+        per_field_epsilon,
     );
     let error_noise = laplace_noise(
         noise_seed(policy, summary, "error_count", disclosure_nonce),
-        privacy_budget_spent,
+        per_field_epsilon,
     );
 
     Ok(ExportedMetadataSummary {
