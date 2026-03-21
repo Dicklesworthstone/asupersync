@@ -1,0 +1,50 @@
+[
+  {
+    "id": "asupersync-8w83i.2.1",
+    "title": "[FABRIC][P1.1] Build Sublist trie-based routing engine",
+    "description": "## Overview\nBuild a trie-based subject matching engine in src/messaging/subject.rs (routing portion), inspired by NATS server/sublist.go.\n\n## Requirements\n\n### Subject Matching\n- Subjects are dot-separated token paths (e.g., `foo.bar.baz`)\n- Support literal match: exact token equality at each level\n- Support single-token wildcard (`*`): matches exactly one token at that position\n- Support tail wildcard (`>`): matches one or more tokens from that position to end of subject\n- Examples: `foo.*` matches `foo.bar` but not `foo.bar.baz`; `foo.>` matches `foo.bar` and `foo.bar.baz`\n\n### Trie Structure\n- Internal trie nodes keyed by token string\n- Each node has: children map, wildcard child (`*`), tail-wildcard child (`>`), and subscriber set\n- Insert/remove operations maintain structural invariants (prune empty branches on remove)\n- Lookup walks the trie, collecting all matching subscribers across literal, wildcard, and tail-wildcard branches\n\n### Caching\n- Generation-invalidated literal-subject hot caches: cache full match results for literal (no-wildcard) subjects\n- Per-link hot caches: each link (connection/session) maintains its own cache of recently resolved subjects\n- Cache entries tagged with a generation counter; any mutation to the trie bumps the generation, invalidating all caches\n- Cache hit path should be sub-microsecond (simple HashMap lookup + generation check)\n\n### Concurrency\n- Thread-safe concurrent reads with write-serialized mutations\n- Read path: lock-free for cached lookups (AtomicU64 generation check + cached result)\n- Write path: single writer at a time (Mutex or similar), bumps generation after mutation\n- No reader starvation: writes must not block reads for extended periods\n\n### Cancel-Correctness\n- Interest registration is cancel-correct: when a subscriber is cancelled (Cx cancelled, task dropped), its interest MUST be removed from the trie\n- No ghost interest: a cancelled subscriber must never appear in match results\n- Implementation: tie subscriber lifetime to a guard/handle that removes interest on drop\n- Test: subscribe, cancel the subscriber's Cx, verify the subscriber no longer appears in any match results\n\n### Queue Groups\n- Multiple subscribers can register under the same subject with a queue group name\n- For a given message, only ONE subscriber per queue group receives delivery\n- Queue group selection should be round-robin or random (not always the same subscriber)\n- A subscriber can be in at most one queue group per subject\n\n### Performance\n- O(tokens) lookup where tokens = number of dot-separated segments in the subject\n- Cache hit should be sub-microsecond\n- Benchmark: 1M lookups/sec for cached literal subjects on modern hardware\n\n## File Location\nsrc/messaging/subject.rs (routing portion)\n\n## Tests (in this file or tests/)\n- Literal match: exact match, no match, partial match\n- Single wildcard: `*` at various positions, multiple wildcards\n- Tail wildcard: `>` at various depths, `>` alone matches everything\n- Combined: `foo.*.>`, `*.bar.>`, etc.\n- Edge cases: empty subject, single token, very deep nesting (100+ levels)\n- Queue groups: single group delivery, multiple groups, group removal\n- Cache: hit/miss, invalidation on mutation, generation rollover\n- Concurrency: concurrent subscribe/unsubscribe/lookup from multiple threads\n- Cancel-correctness: subscribe, drop guard, verify removal\n- At least 20+ test cases total",
+    "status": "in_progress",
+    "priority": 1,
+    "issue_type": "task",
+    "assignee": "DustyBear",
+    "created_at": "2026-03-17T07:20:40.601661558Z",
+    "created_by": "ubuntu",
+    "updated_at": "2026-03-19T23:11:03.889931130Z",
+    "source_repo": ".",
+    "compaction_level": 0,
+    "original_size": 0,
+    "labels": [
+      "fabric",
+      "routing",
+      "subject"
+    ],
+    "dependencies": [
+      {
+        "id": "asupersync-8w83i.2",
+        "title": "[FABRIC][P1] Core Subject Fabric",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "parent-child"
+      }
+    ],
+    "dependents": [
+      {
+        "id": "asupersync-8w83i.2.4",
+        "title": "[FABRIC][P1.4] Unit tests for subject fabric",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      }
+    ],
+    "comments": [
+      {
+        "id": 2525,
+        "issue_id": "asupersync-8w83i.2.1",
+        "author": "Dicklesworthstone",
+        "text": "NATS implementation reference: server/sublist.go implements the trie-based matching. Key patterns to adapt: (1) the Sublist struct with Insert/Match/Remove operations, (2) result caching with generation-based invalidation, (3) queue group handling where one subscriber per group receives each message, (4) the SublistResult type with subscription lists. The Asupersync version must additionally make interest registration cancel-correct — NATS doesn't have this because Go's GC handles cleanup. In Asupersync, a cancelled subscriber MUST NOT leave ghost interest behind, which means interest removal must participate in the cancel/drain/finalize protocol.",
+        "created_at": "2026-03-17T16:48:55Z"
+      }
+    ],
+    "parent": "asupersync-8w83i.2"
+  }
+]

@@ -10456,3 +10456,6 @@
 "FIXED"
 2
 "2 MEDIUM: validate_unique_keys untrimmed dedup, estimate constructors accept non-monotone"
+{"file":"src/messaging/cut.rs","lines":3207,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cut-certified mobility, incident rehearsal, CutLatticeIndex, BranchRegistry. 55 tests. Clean."}
+{"file":"src/messaging/fabric.rs","lines":3633,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"SubjectCell, ControlCapsule, FabricState, thermal hysteresis, rebalance budget, repair bindings. 55+ tests. Clean."}
+{"file":"src/messaging/consumer.rs","lines":4583,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FabricConsumer, cursor, pull requests, lease fencing, adaptive kernel. 1 LOW noted (revoked_tickets unbounded). 40+ tests. Clean."}
