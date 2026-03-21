@@ -126,6 +126,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: ${{ !contains(needs.plan.outputs.tag, '-') }}
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -157,11 +159,13 @@ jobs:
           cargo package -p frankenlab --locked
 
       - name: Publish crates to crates.io
-        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -e
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "CARGO_REGISTRY_TOKEN not configured; skipping crates.io publish"
+            exit 0
+          fi
+
           publish_if_needed() {
             local crate="$1"
             echo "Publishing $crate..."
@@ -192,7 +196,7 @@ jobs:
         run: |
           echo "## Crates.io Publish" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [[ -n "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]]; then
+          if [[ -n "${CARGO_REGISTRY_TOKEN:-}" ]]; then
             echo "Published asupersync v${{ needs.plan.outputs.version }} plus supporting workspace crates to crates.io" >> $GITHUB_STEP_SUMMARY
           else
             echo "Skipped - CARGO_REGISTRY_TOKEN not configured" >> $GITHUB_STEP_SUMMARY
