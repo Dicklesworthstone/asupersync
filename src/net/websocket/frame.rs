@@ -168,13 +168,22 @@ impl Frame {
     ///
     /// # Panics
     ///
-    /// Panics if `code` is not valid for wire transmission per RFC 6455 §7.4.
+    /// Panics if `code` is not valid for wire transmission per RFC 6455 §7.4,
+    /// or if the total close payload (2-byte code + reason) exceeds the
+    /// 125-byte control frame limit (RFC 6455 §5.5).
     #[must_use]
     pub fn close(code: Option<u16>, reason: Option<&str>) -> Self {
         if let Some(c) = code {
             assert!(
                 CloseCode::is_valid_code(c),
                 "close code {c} must not be sent in a Close frame (RFC 6455 §7.4.1)"
+            );
+        }
+        if let Some(r) = reason {
+            let total = 2 + r.len();
+            assert!(
+                total <= 125,
+                "close frame payload ({total} bytes) exceeds 125-byte control frame limit (RFC 6455 §5.5)"
             );
         }
         let payload = match (code, reason) {
@@ -802,7 +811,7 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), WsError> {
         1 => Err(WsError::InvalidClosePayload),
         _ => {
             let code = u16::from_be_bytes([payload[0], payload[1]]);
-            if !CloseCode::is_valid_code(code) {
+            if !CloseCode::is_valid_received_code(code) {
                 return Err(WsError::InvalidClosePayload);
             }
             if payload.len() > 2 {
@@ -897,6 +906,20 @@ impl CloseCode {
     #[must_use]
     pub fn is_valid_code(code: u16) -> bool {
         matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
+    }
+
+    /// Check if a raw code value is valid when received from a peer.
+    ///
+    /// The receive side is more permissive than the send side per RFC 6455
+    /// §7.4.2: codes 1016-2999 are reserved for future revisions and
+    /// extensions, and a conforming endpoint must accept them even if it
+    /// does not recognise the specific value.
+    ///
+    /// Codes that must never appear on the wire (1004-1006, 1015) and
+    /// out-of-range values (0-999, 5000+) are still rejected.
+    #[must_use]
+    pub fn is_valid_received_code(code: u16) -> bool {
+        matches!(code, 1000..=1003 | 1007..=4999)
     }
 }
 
