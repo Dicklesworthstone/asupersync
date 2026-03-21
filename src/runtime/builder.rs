@@ -2379,7 +2379,7 @@ impl<T> JoinHandle<T> {
             return true;
         }
         let guard = lock_state(&self.state);
-        guard.result.is_some()
+        guard.result.is_some() || Arc::strong_count(&self.state) == 1
     }
 }
 
@@ -2402,7 +2402,7 @@ impl<T> Future for JoinHandle<T> {
                     drop(guard);
                     panic!("task was dropped or cancelled before completion");
                 }
-                
+
                 if !guard
                     .waker
                     .as_ref()
@@ -4146,6 +4146,37 @@ worker_threads = 16
         assert!(
             join.as_ref().get_ref().is_finished(),
             "join handle should remain finished after post-completion misuse"
+        );
+    }
+
+    #[test]
+    fn join_handle_is_finished_after_executor_side_disappears() {
+        init_test_logging();
+
+        let state = Arc::new(Mutex::new(JoinState::<u8>::new()));
+        let mut join = std::pin::pin!(JoinHandle::new(Arc::clone(&state)));
+        drop(state);
+
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should report terminal dropped-task state as finished"
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let poll_after_drop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = join.as_mut().poll(&mut cx);
+        }));
+        let message = panic_payload_to_string(
+            poll_after_drop.expect_err("poll after executor-side disappearance must panic"),
+        );
+        assert!(
+            message.contains("task was dropped or cancelled before completion"),
+            "poll after executor-side disappearance should preserve dropped-task panic, got {message}"
+        );
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should remain finished after the terminal dropped-task poll"
         );
     }
 }
