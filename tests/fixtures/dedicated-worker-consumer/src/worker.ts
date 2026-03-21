@@ -43,6 +43,8 @@ const WORKER_LANE_HEALTH_RETRYING_MARKER = "worker-lane-health-retrying";
 const WORKER_EXECUTION_LADDER_RETRYING_MARKER = "worker-execution-ladder-retrying";
 const WORKER_LANE_HEALTH_DEMOTION_MARKER = "worker-lane-health-demotion";
 const WORKER_RUNTIME_SELECTION_DEMOTED_MARKER = "worker-runtime-selection-demoted";
+const WORKER_RUNTIME_SELECTION_PREREQUISITE_LOSS_MARKER =
+  "worker-runtime-selection-prerequisite-loss";
 const WORKER_LANE_HEALTH_RESET_MARKER = "worker-lane-health-reset";
 const WORKER_RUNTIME_SELECTION_RECOVERED_MARKER = "worker-runtime-selection-recovered";
 const WORKER_STORAGE_SUPPORT_MARKER = "worker-storage-support";
@@ -179,6 +181,43 @@ function errorReason(error: unknown): string | null {
   return typeof diagnostics?.reason === "string" ? diagnostics.reason : null;
 }
 
+async function withShadowedGlobalProperty<T>(
+  globalObject: Record<string, unknown>,
+  key: string,
+  operation: (shadowGlobalObject: Record<string, unknown>) => Promise<T> | T,
+): Promise<{
+  simulated: boolean;
+  skippedReason: string | null;
+  value: T | null;
+}> {
+  const shadowGlobalObject = new Proxy(globalObject, {
+    get(target, property, receiver) {
+      if (property === key) {
+        return undefined;
+      }
+      return Reflect.get(target, property, receiver);
+    },
+    has(target, property) {
+      if (property === key) {
+        return false;
+      }
+      return Reflect.has(target, property);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      if (property === key) {
+        return undefined;
+      }
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  }) as Record<string, unknown>;
+
+  return {
+    simulated: true,
+    skippedReason: null,
+    value: await operation(shadowGlobalObject),
+  };
+}
+
 async function bootstrap(): Promise<void> {
   const workerGlobalObject = self as unknown as Record<string, unknown>;
   const laneHealthPolicy = {
@@ -231,6 +270,18 @@ async function bootstrap(): Promise<void> {
     healthScopeKey: WORKER_LANE_HEALTH_SCOPE_KEY,
     healthPolicy: laneHealthPolicy,
   });
+  const prerequisiteLossSimulation = await withShadowedGlobalProperty(
+    workerGlobalObject,
+    "WebAssembly",
+    async (shadowGlobalObject) =>
+      createBrowserRuntimeSelection({
+        globalObject: shadowGlobalObject,
+        preferredLane: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+        healthScopeKey: WORKER_LANE_HEALTH_SCOPE_KEY,
+        healthPolicy: laneHealthPolicy,
+      }),
+  );
+  const runtimeSelectionPrerequisiteLoss = prerequisiteLossSimulation.value;
   const laneHealthReset = resetBrowserLaneHealth({
     globalObject: workerGlobalObject,
     laneId: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
@@ -247,6 +298,9 @@ async function bootstrap(): Promise<void> {
   closeRuntimeSelection(runtimeSelectionBaseline);
   closeScopeSelection(scopeSelectionPreferredMainThread);
   closeRuntimeSelection(runtimeSelectionDemoted);
+  if (runtimeSelectionPrerequisiteLoss !== null) {
+    closeRuntimeSelection(runtimeSelectionPrerequisiteLoss);
+  }
   closeRuntimeSelection(runtimeSelectionRecovered);
 
   let storageExercise: Record<string, unknown> | null = null;
@@ -431,6 +485,21 @@ async function bootstrap(): Promise<void> {
         runtimeSelectionDemoted.runtime !== null,
         false,
       ),
+      prerequisiteLossSimulation: {
+        marker: WORKER_RUNTIME_SELECTION_PREREQUISITE_LOSS_MARKER,
+        simulated: prerequisiteLossSimulation.simulated,
+        skippedReason: prerequisiteLossSimulation.skippedReason,
+      },
+      runtimeSelectionPrerequisiteLoss:
+        runtimeSelectionPrerequisiteLoss === null
+          ? null
+          : summarizeSelection(
+              WORKER_RUNTIME_SELECTION_PREREQUISITE_LOSS_MARKER,
+              runtimeSelectionPrerequisiteLoss.executionLadder,
+              runtimeSelectionPrerequisiteLoss.outcome,
+              runtimeSelectionPrerequisiteLoss.runtime !== null,
+              false,
+            ),
       laneHealthReset: summarizeLaneHealth(
         WORKER_LANE_HEALTH_RESET_MARKER,
         laneHealthReset,

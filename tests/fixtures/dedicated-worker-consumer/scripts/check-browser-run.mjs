@@ -162,6 +162,10 @@ try {
   const preferredCandidate = bootstrap.runtimeSelectionDemoted.candidateReasons.find(
     (candidate) => candidate.laneId === DEDICATED_WORKER_LANE,
   );
+  const prerequisiteLossCandidate =
+    bootstrap.runtimeSelectionPrerequisiteLoss?.candidateReasons.find(
+      (candidate) => candidate.laneId === DEDICATED_WORKER_LANE,
+    );
 
   assert(parsed.phase === "shutdown_complete", `expected final phase shutdown_complete, got ${parsed.phase}`);
   assert(parsed.shutdown_reason === "fixture-handoff-complete", `unexpected shutdown_reason: ${parsed.shutdown_reason ?? "missing"}`);
@@ -276,6 +280,42 @@ try {
   );
   assert(preferredCandidate?.reasonCode === "candidate_lane_unhealthy", "demoted candidate matrix must preserve candidate_lane_unhealthy for the worker lane");
   assert(
+    bootstrap.prerequisiteLossSimulation?.simulated === true,
+    `prerequisite-loss simulation must run, got ${bootstrap.prerequisiteLossSimulation?.simulated ?? "missing"}`,
+  );
+  assert(
+    bootstrap.prerequisiteLossSimulation?.skippedReason === null,
+    `prerequisite-loss simulation unexpectedly skipped: ${bootstrap.prerequisiteLossSimulation?.skippedReason ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionPrerequisiteLoss?.supported === false,
+    "prerequisite-loss runtime selection must fail closed to unsupported",
+  );
+  assert(
+    bootstrap.runtimeSelectionPrerequisiteLoss?.selectedLane === UNSUPPORTED_LANE,
+    `prerequisite-loss runtime selection chose unexpected lane: ${bootstrap.runtimeSelectionPrerequisiteLoss?.selectedLane ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionPrerequisiteLoss?.reasonCode === "missing_webassembly",
+    `prerequisite-loss runtime selection reason mismatch: ${bootstrap.runtimeSelectionPrerequisiteLoss?.reasonCode ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionPrerequisiteLoss?.outcome === null,
+    `prerequisite-loss runtime selection must stay on the no-throw path, got ${bootstrap.runtimeSelectionPrerequisiteLoss?.outcome ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionPrerequisiteLoss?.health?.status === "demoted",
+    `prerequisite-loss runtime selection must preserve the stale demoted health snapshot, got ${bootstrap.runtimeSelectionPrerequisiteLoss?.health?.status ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger === "worker_bootstrap_timeout",
+    `prerequisite-loss runtime selection must preserve the stale worker_bootstrap_timeout trigger, got ${bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger ?? "missing"}`,
+  );
+  assert(
+    prerequisiteLossCandidate?.reasonCode === "candidate_prerequisite_missing",
+    "prerequisite-loss candidate matrix must preserve candidate_prerequisite_missing for the worker lane",
+  );
+  assert(
     bootstrap.laneHealthReset.status === "healthy",
     `lane health reset must report healthy, got ${bootstrap.laneHealthReset.status ?? "missing"}`,
   );
@@ -328,6 +368,19 @@ try {
     demoted_reason_code: bootstrap.runtimeSelectionDemoted.reasonCode,
     demoted_outcome: bootstrap.runtimeSelectionDemoted.outcome,
     demoted_worker_candidate_reason: preferredCandidate?.reasonCode ?? null,
+    prerequisite_loss_simulated: bootstrap.prerequisiteLossSimulation?.simulated ?? false,
+    prerequisite_loss_skipped_reason:
+      bootstrap.prerequisiteLossSimulation?.skippedReason ?? null,
+    prerequisite_loss_selected_lane:
+      bootstrap.runtimeSelectionPrerequisiteLoss?.selectedLane ?? null,
+    prerequisite_loss_reason_code:
+      bootstrap.runtimeSelectionPrerequisiteLoss?.reasonCode ?? null,
+    prerequisite_loss_health_status:
+      bootstrap.runtimeSelectionPrerequisiteLoss?.health?.status ?? null,
+    prerequisite_loss_health_last_trigger:
+      bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger ?? null,
+    prerequisite_loss_worker_candidate_reason:
+      prerequisiteLossCandidate?.reasonCode ?? null,
     recovered_status: bootstrap.laneHealthReset.status,
     recovered_selected_lane: bootstrap.runtimeSelectionRecovered.selectedLane,
     recovered_outcome: bootstrap.runtimeSelectionRecovered.outcome,

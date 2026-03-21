@@ -128,6 +128,7 @@ markers = {
     "worker_execution_ladder_retrying_marker": False,
     "worker_lane_health_demotion_marker": False,
     "worker_runtime_selection_demoted_marker": False,
+    "worker_runtime_selection_prerequisite_loss_marker": False,
     "worker_lane_health_reset_marker": False,
     "worker_runtime_selection_recovered_marker": False,
     "worker_storage_support_marker": False,
@@ -154,6 +155,9 @@ for asset in asset_files:
     )
     markers["worker_lane_health_demotion_marker"] |= "worker-lane-health-demotion" in content
     markers["worker_runtime_selection_demoted_marker"] |= "worker-runtime-selection-demoted" in content
+    markers["worker_runtime_selection_prerequisite_loss_marker"] |= (
+        "worker-runtime-selection-prerequisite-loss" in content
+    )
     markers["worker_lane_health_reset_marker"] |= "worker-lane-health-reset" in content
     markers["worker_runtime_selection_recovered_marker"] |= "worker-runtime-selection-recovered" in content
     markers["worker_storage_support_marker"] |= "worker-storage-support" in content
@@ -199,6 +203,13 @@ summary = {
         "browser_demoted_reason_code": browser_run["demoted_reason_code"],
         "browser_demoted_outcome_is_null": browser_run["demoted_outcome"] is None,
         "browser_demoted_worker_candidate_reason": browser_run["demoted_worker_candidate_reason"],
+        "browser_prerequisite_loss_simulated": browser_run["prerequisite_loss_simulated"],
+        "browser_prerequisite_loss_skipped_reason": browser_run["prerequisite_loss_skipped_reason"],
+        "browser_prerequisite_loss_selected_lane": browser_run["prerequisite_loss_selected_lane"],
+        "browser_prerequisite_loss_reason_code": browser_run["prerequisite_loss_reason_code"],
+        "browser_prerequisite_loss_health_status": browser_run["prerequisite_loss_health_status"],
+        "browser_prerequisite_loss_health_last_trigger": browser_run["prerequisite_loss_health_last_trigger"],
+        "browser_prerequisite_loss_worker_candidate_reason": browser_run["prerequisite_loss_worker_candidate_reason"],
         "browser_recovered_status": browser_run["recovered_status"],
         "browser_recovered_selected_lane": browser_run["recovered_selected_lane"],
         "browser_recovered_outcome_is_ok": browser_run["recovered_outcome"] == "ok",

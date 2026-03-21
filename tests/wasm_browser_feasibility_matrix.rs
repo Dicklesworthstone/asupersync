@@ -400,6 +400,7 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
         "worker-execution-ladder-retrying",
         "worker-lane-health-demotion",
         "worker-runtime-selection-demoted",
+        "worker-runtime-selection-prerequisite-loss",
         "worker-lane-health-reset",
         "worker-runtime-selection-recovered",
         "worker-storage-support",
@@ -427,9 +428,14 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
         "browser_retrying_retry_budget_remaining",
         "browser_demotion_failure_count",
         "browser_demoted_selected_lane",
+        "browser_prerequisite_loss_simulated",
+        "browser_prerequisite_loss_reason_code",
+        "browser_prerequisite_loss_health_status",
+        "browser_prerequisite_loss_worker_candidate_reason",
         "browser_recovered_selected_lane",
         "worker_lane_health_retrying_marker",
         "worker_execution_ladder_retrying_marker",
+        "worker_runtime_selection_prerequisite_loss_marker",
         "worker_storage_support_marker",
         "worker_storage_roundtrip_marker",
         "storage_artifact_marker",
@@ -451,12 +457,27 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
         "lane.browser.dedicated_worker.direct_runtime",
         "lane.browser.main_thread.direct_runtime",
         "lane.unsupported",
+        "missing_webassembly",
         "candidate_lane_unhealthy",
+        "candidate_prerequisite_missing",
+        "prerequisite_loss_reason_code",
         "shutdown_complete",
     ] {
         assert!(
             browser_check.contains(marker),
             "dedicated-worker browser-run checker must preserve marker: {marker}"
+        );
+    }
+
+    let bundle_check =
+        read_file("tests/fixtures/dedicated-worker-consumer/scripts/check-bundle.mjs");
+    for marker in [
+        "worker-runtime-selection-prerequisite-loss",
+        "sawRuntimeSelectionPrerequisiteLossMarker",
+    ] {
+        assert!(
+            bundle_check.contains(marker),
+            "dedicated-worker bundle checker must preserve marker: {marker}"
         );
     }
 }

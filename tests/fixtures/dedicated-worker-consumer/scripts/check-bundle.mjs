@@ -35,6 +35,7 @@ let sawLaneHealthRetryingMarker = false;
 let sawExecutionLadderRetryingMarker = false;
 let sawLaneHealthDemotionMarker = false;
 let sawRuntimeSelectionDemotedMarker = false;
+let sawRuntimeSelectionPrerequisiteLossMarker = false;
 let sawLaneHealthResetMarker = false;
 let sawRuntimeSelectionRecoveredMarker = false;
 let sawStorageSupportMarker = false;
@@ -58,6 +59,9 @@ for (const assetName of jsAssets) {
   sawExecutionLadderRetryingMarker ||= content.includes("worker-execution-ladder-retrying");
   sawLaneHealthDemotionMarker ||= content.includes("worker-lane-health-demotion");
   sawRuntimeSelectionDemotedMarker ||= content.includes("worker-runtime-selection-demoted");
+  sawRuntimeSelectionPrerequisiteLossMarker ||= content.includes(
+    "worker-runtime-selection-prerequisite-loss",
+  );
   sawLaneHealthResetMarker ||= content.includes("worker-lane-health-reset");
   sawRuntimeSelectionRecoveredMarker ||= content.includes("worker-runtime-selection-recovered");
   sawStorageSupportMarker ||= content.includes("worker-storage-support");
@@ -106,6 +110,12 @@ if (!sawLaneHealthRetryingMarker) {
 
 if (!sawRuntimeSelectionDemotedMarker) {
   throw new Error("Built worker bundle must retain the worker-runtime-selection-demoted marker");
+}
+
+if (!sawRuntimeSelectionPrerequisiteLossMarker) {
+  throw new Error(
+    "Built worker bundle must retain the worker-runtime-selection-prerequisite-loss marker",
+  );
 }
 
 if (!sawExecutionLadderRetryingMarker) {
@@ -166,6 +176,7 @@ console.log(
       sawScopeSelectionPreferredMainThreadMarker,
       sawLaneHealthDemotionMarker,
       sawRuntimeSelectionDemotedMarker,
+      sawRuntimeSelectionPrerequisiteLossMarker,
       sawLaneHealthResetMarker,
       sawRuntimeSelectionRecoveredMarker,
       sawStorageSupportMarker,
