@@ -566,6 +566,39 @@ fn browser_message_wrappers_use_non_clobbering_event_listeners() {
     }
 }
 
+#[test]
+fn browser_reactor_message_bindings_use_non_clobbering_event_listeners() {
+    let reactor_src = read_file("src/runtime/reactor/browser.rs");
+    for marker in [
+        "EventTarget",
+        "attach_browser_message_listeners",
+        "detach_browser_message_listeners",
+        "add_event_listener_with_callback",
+        "remove_event_listener_with_callback",
+    ] {
+        assert!(
+            reactor_src.contains(marker),
+            "browser reactor must preserve non-clobbering listener marker: {marker}"
+        );
+    }
+
+    for legacy in [
+        "port.set_onmessage(Some(",
+        "port.set_onmessageerror(Some(",
+        "self.port.set_onmessage(None)",
+        "self.port.set_onmessageerror(None)",
+        "channel.set_onmessage(Some(",
+        "channel.set_onmessageerror(Some(",
+        "self.channel.set_onmessage(None)",
+        "self.channel.set_onmessageerror(None)",
+    ] {
+        assert!(
+            !reactor_src.contains(legacy),
+            "browser reactor bindings must not clobber host handler slot: {legacy}"
+        );
+    }
+}
+
 // ── Impossible for direct browser runtime ────────────────────────────
 
 #[test]

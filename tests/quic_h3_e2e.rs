@@ -614,7 +614,7 @@ fn graceful_close_drain_transition() {
         .expect_err("should fail after close");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 }
 
