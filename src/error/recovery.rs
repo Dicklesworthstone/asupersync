@@ -199,7 +199,7 @@ impl CircuitBreaker {
     }
 
     fn state(&self) -> CircuitState {
-        match self.state.load(Ordering::Relaxed) {
+        match self.state.load(Ordering::Acquire) {
             0 => CircuitState::Closed,
             2 => CircuitState::HalfOpen,
             _ => CircuitState::Open,
@@ -208,7 +208,7 @@ impl CircuitBreaker {
 
     fn transition(&self, from: CircuitState, to: CircuitState) -> bool {
         self.state
-            .compare_exchange(from as u8, to as u8, Ordering::Release, Ordering::Relaxed)
+            .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 

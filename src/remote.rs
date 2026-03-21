@@ -1488,8 +1488,13 @@ impl Default for Saga {
 impl Drop for Saga {
     fn drop(&mut self) {
         if self.state == SagaState::Running {
-            // Unwind or early return: execute compensations to prevent leaks.
-            // If we are already panicking, running compensations that panic will abort the process.
+            if std::thread::panicking() {
+                // Already unwinding — running user closures that might panic
+                // would abort the process.  Mark as aborted without running
+                // compensations; the caller is already handling an error.
+                self.state = SagaState::Aborted;
+                return;
+            }
             self.run_compensations();
         }
     }
