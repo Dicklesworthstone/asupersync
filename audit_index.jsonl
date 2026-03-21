@@ -10524,3 +10524,19 @@
 "SOUND"
 0
 "Arena generation prevents ABA, parent-child rollback correct, lock ordering respected"
+"src/obligation/ledger.rs"
+1283
+403
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Clean linear token tracking, checked_add prevents overflow, BTreeMap for determinism, reset preserves generation"
+"src/time/sleep.rs"
+1547
+403
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Multi-strategy timing, ReadyWaker pattern correct, timer driver switching handled, proper cleanup"
