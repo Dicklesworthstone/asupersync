@@ -589,3 +589,5 @@
 "FIXED"
 1
 "1 LOW: HEAD response overwrites handler Content-Length, violating RFC 9110 §9.3.2"
+{"file":"src/service/buffer.rs","lines":901,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 HIGH: pending counter leak when inner poll_ready returns Err. After capacity errors, buffer permanently full (deadlock). Fixed by decrementing pending before Error state transition."}
+{"file":"src/grpc/streaming.rs","lines":800,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"gRPC streaming: request/response types, waker management, close semantics. Clean."}
