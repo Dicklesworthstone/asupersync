@@ -410,3 +410,19 @@
 "SOUND"
 0
 "Positional waiter waking correct, RAII slot reservation, health check guard, cancel-safe acquire with baton passing"
+"src/service/load_balance.rs"
+1919
+404
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"SWRR weights safe, P2C correct, LoadMetricGuard RAII for in-flight, call_balanced readiness fallback correct"
+"src/signal/graceful.rs"
+901
+404
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Race semantics correct, pre-check for already-shutdown, proper grace period with timeout"
