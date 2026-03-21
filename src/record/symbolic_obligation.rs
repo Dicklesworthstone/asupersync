@@ -215,6 +215,8 @@ struct ObligationInner {
     kind: SymbolicObligationKind,
     /// The object this obligation relates to.
     object_id: ObjectId,
+    /// Exact symbol identity when this obligation targets a single symbol.
+    expected_symbol: Option<SymbolId>,
     /// The task holding this obligation.
     holder: TaskId,
     /// The region owning this obligation.
@@ -227,8 +229,8 @@ struct ObligationInner {
     created_at: Time,
     /// Description for debugging.
     description: Option<String>,
-    /// Optional registry mirror for state synchronization.
-    registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
+    /// Optional registry mirror for state synchronization and deregistration.
+    registry: Option<RegistryMirror>,
 }
 
 // ─── SymbolicObligation ─────────────────────────────────────────────────────
@@ -264,7 +266,7 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
-        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
+        registry: Option<RegistryMirror>,
     ) -> Self {
         let total_symbols = params.total_source_symbols();
 
@@ -273,13 +275,14 @@ impl SymbolicObligation {
                 id,
                 kind: SymbolicObligationKind::SendObject,
                 object_id,
+                expected_symbol: None,
                 holder,
                 region,
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(total_symbols),
                 created_at,
                 description: None,
-                registry_by_id,
+                registry,
             }),
             resolved: false,
         }
@@ -293,20 +296,21 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
-        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
+        registry: Option<RegistryMirror>,
     ) -> Self {
         Self {
             state: Arc::new(ObligationInner {
                 id,
                 kind: SymbolicObligationKind::SendSymbol,
                 object_id: symbol_id.object_id(),
+                expected_symbol: Some(symbol_id),
                 holder,
                 region,
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(1),
                 created_at,
                 description: Some(format!("symbol {symbol_id}")),
-                registry_by_id,
+                registry,
             }),
             resolved: false,
         }
@@ -321,20 +325,21 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
-        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
+        registry: Option<RegistryMirror>,
     ) -> Self {
         Self {
             state: Arc::new(ObligationInner {
                 id,
                 kind: SymbolicObligationKind::AcknowledgeReceipt,
                 object_id,
+                expected_symbol: None,
                 holder,
                 region,
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(expected_count),
                 created_at,
                 description: None,
-                registry_by_id,
+                registry,
             }),
             resolved: false,
         }
@@ -349,20 +354,21 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
-        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
+        registry: Option<RegistryMirror>,
     ) -> Self {
         Self {
             state: Arc::new(ObligationInner {
                 id,
                 kind: SymbolicObligationKind::DecodeObject,
                 object_id,
+                expected_symbol: None,
                 holder,
                 region,
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(min_symbols),
                 created_at,
                 description: None,
-                registry_by_id,
+                registry,
             }),
             resolved: false,
         }
@@ -423,8 +429,10 @@ impl SymbolicObligation {
     }
 
     fn sync_registry_state(&self, state: SymbolicObligationState) {
-        if let Some(by_id) = &self.state.registry_by_id {
-            if let Some(entry) = by_id.write().get_mut(&self.id()) {
+        if let Some(registry) = &self.state.registry {
+            if state.is_terminal() {
+                registry.unregister(self.id(), self.object_id(), self.holder(), self.region());
+            } else if let Some(entry) = registry.by_id.write().get_mut(&self.id()) {
                 entry.state = state;
             }
         }
@@ -435,10 +443,27 @@ impl SymbolicObligation {
         self.sync_registry_state(state);
     }
 
+    fn validate_fulfilled_symbol(&self, symbol_id: SymbolId) {
+        assert_eq!(
+            symbol_id.object_id(),
+            self.object_id(),
+            "fulfilled symbol object mismatch: expected {}, got {}",
+            self.object_id(),
+            symbol_id.object_id()
+        );
+        if let Some(expected_symbol) = self.state.expected_symbol {
+            assert_eq!(
+                symbol_id, expected_symbol,
+                "fulfilled symbol mismatch: expected {expected_symbol}, got {symbol_id}"
+            );
+        }
+    }
+
     /// Marks progress on partial fulfillment.
     ///
     /// Call this as symbols are sent/received to track progress.
-    pub fn fulfill_one(&self, _symbol_id: SymbolId) {
+    pub fn fulfill_one(&self, symbol_id: SymbolId) {
+        self.validate_fulfilled_symbol(symbol_id);
         self.state.progress.increment();
 
         // Transition to InProgress if still Reserved
@@ -452,6 +477,10 @@ impl SymbolicObligation {
 
     /// Marks multiple symbols as fulfilled.
     pub fn fulfill_many(&self, count: u32) {
+        assert!(
+            self.state.expected_symbol.is_none(),
+            "fulfill_many is invalid for single-symbol obligations; use fulfill_one with the expected SymbolId"
+        );
         self.state.progress.add(count);
 
         let mut state = self.state.state.write();
@@ -513,13 +542,14 @@ impl SymbolicObligation {
                 id: ObligationId::from_arena(ArenaIndex::new(id as u32, 0)),
                 kind: SymbolicObligationKind::SendObject,
                 object_id,
+                expected_symbol: None,
                 holder: TaskId::from_arena(ArenaIndex::new(0, 0)),
                 region: RegionId::from_arena(ArenaIndex::new(0, 0)),
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(total),
                 created_at: Time::ZERO,
                 description: None,
-                registry_by_id: None,
+                registry: None,
             }),
             resolved: false,
         }
@@ -596,9 +626,85 @@ pub(crate) struct ObligationEntry {
     state: SymbolicObligationState,
 }
 
+#[derive(Clone)]
+struct RegistryMirror {
+    by_id: Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>,
+    by_object: Arc<RwLock<HashMap<ObjectId, Vec<ObligationId>>>>,
+    by_holder: Arc<RwLock<Vec<HolderSlot>>>,
+    by_region: Arc<RwLock<Vec<RegionSlot>>>,
+}
+
+impl RegistryMirror {
+    fn unregister(
+        &self,
+        id: ObligationId,
+        object_id: ObjectId,
+        holder: TaskId,
+        region: RegionId,
+    ) {
+        self.by_id.write().remove(&id);
+
+        let mut by_object = self.by_object.write();
+        if let Some(ids) = by_object.get_mut(&object_id) {
+            ids.retain(|current| *current != id);
+            if ids.is_empty() {
+                by_object.remove(&object_id);
+            }
+        }
+        drop(by_object);
+
+        remove_obligation_from_holder_slot(&self.by_holder, holder, id);
+        remove_obligation_from_region_slot(&self.by_region, region, id);
+    }
+}
+
 type ObligationIds = SmallVec<[ObligationId; 4]>;
 type HolderSlot = SmallVec<[(TaskId, ObligationIds); 1]>;
 type RegionSlot = SmallVec<[(RegionId, ObligationIds); 1]>;
+
+fn remove_obligation_from_holder_slot(
+    by_holder: &Arc<RwLock<Vec<HolderSlot>>>,
+    holder: TaskId,
+    id: ObligationId,
+) {
+    let holder_slot = holder.arena_index().index() as usize;
+    let mut guard = by_holder.write();
+    let Some(entries) = guard.get_mut(holder_slot) else {
+        return;
+    };
+    let Some(position) = entries
+        .iter()
+        .position(|(stored_holder, _)| *stored_holder == holder)
+    else {
+        return;
+    };
+    entries[position].1.retain(|current| *current != id);
+    if entries[position].1.is_empty() {
+        entries.remove(position);
+    }
+}
+
+fn remove_obligation_from_region_slot(
+    by_region: &Arc<RwLock<Vec<RegionSlot>>>,
+    region: RegionId,
+    id: ObligationId,
+) {
+    let region_slot = region.arena_index().index() as usize;
+    let mut guard = by_region.write();
+    let Some(entries) = guard.get_mut(region_slot) else {
+        return;
+    };
+    let Some(position) = entries
+        .iter()
+        .position(|(stored_region, _)| *stored_region == region)
+    else {
+        return;
+    };
+    entries[position].1.retain(|current| *current != id);
+    if entries[position].1.is_empty() {
+        entries.remove(position);
+    }
+}
 
 /// Registry that tracks all active symbolic obligations.
 ///
@@ -1263,6 +1369,56 @@ mod tests {
 
         obligation.abort();
         assert!(!registry.has_pending_in_region(region));
+    }
+
+    #[test]
+    #[should_panic(expected = "fulfilled symbol mismatch")]
+    fn send_symbol_obligation_rejects_wrong_symbol_progress() {
+        let object = test_object_id();
+        let expected = SymbolId::new(object, 0, 0);
+        let wrong = SymbolId::new(object, 0, 1);
+        let obligation = SymbolicObligation::new_send_symbol(
+            ObligationId::from_arena(ArenaIndex::new(99, 0)),
+            expected,
+            test_task_id(),
+            test_region_id(),
+            Time::ZERO,
+            None,
+        );
+
+        obligation.fulfill_one(wrong);
+    }
+
+    #[test]
+    #[should_panic(expected = "fulfilled symbol object mismatch")]
+    fn send_object_obligation_rejects_wrong_object_progress() {
+        let obligation = SymbolicObligation::new_send_object(
+            ObligationId::from_arena(ArenaIndex::new(100, 0)),
+            test_object_id(),
+            &test_params(),
+            test_task_id(),
+            test_region_id(),
+            Time::ZERO,
+            None,
+        );
+        let wrong_object_symbol = SymbolId::new(ObjectId::new_for_test(99), 0, 0);
+
+        obligation.fulfill_one(wrong_object_symbol);
+    }
+
+    #[test]
+    #[should_panic(expected = "fulfill_many is invalid for single-symbol obligations")]
+    fn send_symbol_obligation_rejects_bulk_progress_without_symbol_identity() {
+        let obligation = SymbolicObligation::new_send_symbol(
+            ObligationId::from_arena(ArenaIndex::new(101, 0)),
+            SymbolId::new(test_object_id(), 0, 0),
+            test_task_id(),
+            test_region_id(),
+            Time::ZERO,
+            None,
+        );
+
+        obligation.fulfill_many(1);
     }
 
     #[test]
