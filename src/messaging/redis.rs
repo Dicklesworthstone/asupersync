@@ -8,6 +8,7 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::sync::{GenericPool, Pool as _, PoolConfig, PoolError, PooledResource};
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -1318,6 +1319,7 @@ pub struct RedisPubSub {
     config: RedisConfig,
     channels: Vec<String>,
     patterns: Vec<String>,
+    pending_events: VecDeque<PubSubEvent>,
 }
 
 impl RedisPubSub {
@@ -1329,6 +1331,7 @@ impl RedisPubSub {
             config,
             channels: Vec::new(),
             patterns: Vec::new(),
+            pending_events: VecDeque::new(),
         })
     }
 
@@ -1509,6 +1512,11 @@ impl RedisPubSub {
         list.retain(|existing| existing != value);
     }
 
+    async fn read_next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
+        let response = self.conn.read_response(cx).await?;
+        Self::parse_event(response)
+    }
+
     /// Subscribe to one or more channels.
     pub async fn subscribe(&mut self, cx: &Cx, channels: &[&str]) -> Result<(), RedisError> {
         if channels.is_empty() {
@@ -1655,8 +1663,10 @@ impl RedisPubSub {
 
     /// Receive the next Pub/Sub event on this connection.
     pub async fn next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
-        let response = self.conn.read_response(cx).await?;
-        Self::parse_event(response)
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(event);
+        }
+        self.read_next_event(cx).await
     }
 
     /// PING the Pub/Sub connection.
@@ -1668,13 +1678,13 @@ impl RedisPubSub {
         } else {
             self.conn.write_command(cx, &[b"PING"]).await?;
         }
-        // Loop until we receive PONG, since subscription messages can
-        // interleave between PING and its response.
+        // Loop until we receive PONG, buffering any interleaved events so a
+        // liveness check cannot silently drop real messages.
         loop {
-            match self.next_event(cx).await? {
+            match self.read_next_event(cx).await? {
                 PubSubEvent::Pong(_) => return Ok(()),
-                PubSubEvent::Message(_) | PubSubEvent::Subscription { .. } => {
-                    // Discard interleaved messages while waiting for PONG.
+                event @ (PubSubEvent::Message(_) | PubSubEvent::Subscription { .. }) => {
+                    self.pending_events.push_back(event);
                 }
             }
         }
@@ -1690,6 +1700,7 @@ impl RedisPubSub {
         self.conn = conn;
         self.channels.clear();
         self.patterns.clear();
+        self.pending_events.clear();
 
         if !channels.is_empty() {
             let channel_refs: Vec<&str> = channels.iter().map(String::as_str).collect();
@@ -1718,6 +1729,58 @@ impl RedisPubSub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{assert_completes_within, run_test_with_cx};
+    use std::io::{Read, Write};
+    use std::net::TcpListener as StdTcpListener;
+    use std::thread;
+
+    fn read_resp_frame(stream: &mut std::net::TcpStream) -> RespValue {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            if let Some((value, consumed)) =
+                RespValue::try_decode(&buf).expect("test server should decode RESP command")
+            {
+                assert_eq!(
+                    consumed,
+                    buf.len(),
+                    "test server expected exactly one RESP frame per phase"
+                );
+                return value;
+            }
+            let n = stream.read(&mut chunk).expect("read client command");
+            assert!(n > 0, "client closed before sending full RESP command");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    fn assert_resp_command(frame: RespValue, expected: &[&[u8]]) {
+        let items = match frame {
+            RespValue::Array(Some(items)) => items,
+            other => {
+                assert!(
+                    matches!(other, RespValue::Array(Some(_))),
+                    "expected RESP array command frame, got {other:?}"
+                );
+                return;
+            }
+        };
+        let actual: Vec<Vec<u8>> = items
+            .into_iter()
+            .map(|item| match item {
+                RespValue::BulkString(Some(bytes)) => bytes,
+                other => {
+                    assert!(
+                        matches!(other, RespValue::BulkString(Some(_))),
+                        "expected bulk-string command arg, got {other:?}"
+                    );
+                    Vec::new()
+                }
+            })
+            .collect();
+        let expected: Vec<Vec<u8>> = expected.iter().map(|arg| arg.to_vec()).collect();
+        assert_eq!(actual, expected, "unexpected RESP command");
+    }
 
     #[test]
     fn test_resp_encode_simple_string() {
@@ -2098,6 +2161,205 @@ mod tests {
         .expect_err("unknown event should fail");
 
         assert!(matches!(err, RedisError::Protocol(_)));
+    }
+
+    #[test]
+    fn pubsub_ping_preserves_interleaved_messages() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let subscribe = read_resp_frame(&mut stream);
+            assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
+            let subscribe_ack = RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::Integer(1),
+            ]))
+            .encode();
+            stream
+                .write_all(&subscribe_ack)
+                .expect("write subscribe ack");
+            stream.flush().expect("flush subscribe ack");
+
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING"]);
+            let mut outbound = Vec::new();
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"message".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::BulkString(Some(b"payload".to_vec())),
+            ]))
+            .encode_into(&mut outbound);
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(b"pong".to_vec()))]))
+                .encode_into(&mut outbound);
+            stream
+                .write_all(&outbound)
+                .expect("write interleaved message and pong");
+            stream.flush().expect("flush interleaved message and pong");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut pubsub = RedisPubSub::connect(&cx, config)
+                .await
+                .expect("connect pubsub client");
+            pubsub
+                .subscribe(&cx, &["chan"])
+                .await
+                .expect("subscribe should succeed");
+
+            assert_completes_within(
+                Duration::from_secs(2),
+                "redis pubsub ping preserves interleaved messages",
+                || {
+                    Box::pin(async {
+                        pubsub.ping(&cx, None).await.expect("ping should succeed");
+                        let event = pubsub
+                            .next_event(&cx)
+                            .await
+                            .expect("interleaved message should remain visible");
+                        assert_eq!(
+                            event,
+                            PubSubEvent::Message(PubSubMessage {
+                                channel: "chan".to_string(),
+                                pattern: None,
+                                payload: b"payload".to_vec(),
+                            })
+                        );
+                    })
+                },
+            )
+            .await;
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn pubsub_reconnect_discards_buffered_events_from_previous_connection() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut first_stream, _) = listener.accept().expect("accept first client");
+            first_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set first read timeout");
+
+            let subscribe = read_resp_frame(&mut first_stream);
+            assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
+            let subscribe_ack = RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::Integer(1),
+            ]))
+            .encode();
+            first_stream
+                .write_all(&subscribe_ack)
+                .expect("write first subscribe ack");
+            first_stream.flush().expect("flush first subscribe ack");
+
+            let ping = read_resp_frame(&mut first_stream);
+            assert_resp_command(ping, &[b"PING"]);
+            let mut outbound = Vec::new();
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"message".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::BulkString(Some(b"stale".to_vec())),
+            ]))
+            .encode_into(&mut outbound);
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(b"pong".to_vec()))]))
+                .encode_into(&mut outbound);
+            first_stream
+                .write_all(&outbound)
+                .expect("write buffered stale message and pong");
+            first_stream
+                .flush()
+                .expect("flush buffered stale message and pong");
+            drop(first_stream);
+
+            let (mut second_stream, _) = listener.accept().expect("accept second client");
+            second_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set second read timeout");
+
+            let subscribe = read_resp_frame(&mut second_stream);
+            assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
+            let subscribe_ack = RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::Integer(1),
+            ]))
+            .encode();
+            second_stream
+                .write_all(&subscribe_ack)
+                .expect("write second subscribe ack");
+            let fresh = RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"message".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::BulkString(Some(b"fresh".to_vec())),
+            ]))
+            .encode();
+            second_stream
+                .write_all(&fresh)
+                .expect("write fresh message after reconnect");
+            second_stream
+                .flush()
+                .expect("flush second subscribe ack and fresh message");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut pubsub = RedisPubSub::connect(&cx, config)
+                .await
+                .expect("connect pubsub client");
+            pubsub
+                .subscribe(&cx, &["chan"])
+                .await
+                .expect("subscribe should succeed");
+
+            pubsub.ping(&cx, None).await.expect("ping should succeed");
+            pubsub
+                .reconnect(&cx)
+                .await
+                .expect("reconnect should succeed");
+
+            assert_completes_within(
+                Duration::from_secs(2),
+                "redis pubsub reconnect clears stale buffered events",
+                || {
+                    Box::pin(async {
+                        let event = pubsub
+                            .next_event(&cx)
+                            .await
+                            .expect("fresh message should be visible after reconnect");
+                        assert_eq!(
+                            event,
+                            PubSubEvent::Message(PubSubMessage {
+                                channel: "chan".to_string(),
+                                pattern: None,
+                                payload: b"fresh".to_vec(),
+                            })
+                        );
+                    })
+                },
+            )
+            .await;
+        });
+
+        server.join().expect("server join");
     }
 
     #[test]
