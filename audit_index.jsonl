@@ -366,3 +366,8 @@
 {"file":"src/messaging/federation.rs","lines":2585,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Federation bridges, capability scoping, replication transfer, replay trimming. Clean."}
 {"file":"src/messaging/stream.rs","lines":812,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Quiescent streams, retention, byte accounting, lifecycle. Clean."}
 {"file":"src/messaging/policy.rs","lines":2017,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Priority scoring, degradation planning, bounded-regret controller, safety envelope. Clean."}
+{"file":"src/messaging/kafka.rs","lines":1588,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka client wrapper: rdkafka integration, delivery channel, cancel-safety. Clean."}
+{"file":"src/messaging/class.rs","lines":495,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery classes, cost vectors, policy validation. Clean."}
+{"file":"src/messaging/capability/mod.rs","lines":604,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability registry, pattern coverage, fail-closed checks. Clean."}
+{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear tokens, session advance, cursor authority lease. Clean."}
+{"file":"src/messaging/capability/routing.rs","lines":796,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Routing programs, subject rewriting, capability authorization. Clean."}
