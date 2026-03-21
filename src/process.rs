@@ -799,6 +799,11 @@ impl Child {
     /// println!("Exit code: {:?}", status.code());
     /// ```
     pub fn wait(&mut self) -> Result<ExitStatus, ProcessError> {
+        // Match std::process::Child::wait semantics: close the parent write end
+        // first so children blocked on stdin EOF can terminate instead of
+        // deadlocking the wait.
+        drop(self.stdin.take());
+
         // Use kernel blocking wait for the common "wait until exit" path.
         // This avoids a user-space poll/sleep loop while still preserving
         // ownership on errors (non-destructive wait semantics).
@@ -819,6 +824,10 @@ impl Child {
     /// Uses `try_wait()` + cooperative yielding to avoid blocking the runtime
     /// worker thread while waiting for process completion.
     pub async fn wait_async(&mut self) -> Result<ExitStatus, ProcessError> {
+        // Match the synchronous wait path and std semantics so async wait does
+        // not keep the child's stdin pipe open indefinitely.
+        drop(self.stdin.take());
+
         // Use exponential backoff to avoid busy-looping the executor.
         // Starts at 1ms, doubles up to 50ms between checks.
         let mut backoff_ms = 1u64;
@@ -1909,6 +1918,86 @@ mod tests {
             String::from_utf8_lossy(&output.stdout)
         );
         crate::test_complete!("test_command_stdin_pipe");
+    }
+
+    #[test]
+    fn test_wait_closes_piped_stdin_before_blocking() {
+        use std::sync::mpsc;
+
+        init_test("test_wait_closes_piped_stdin_before_blocking");
+
+        let child = Command::new("cat")
+            .stdin(Stdio::Pipe)
+            .stdout(Stdio::Null)
+            .spawn()
+            .expect("spawn failed");
+        let pid = child.id().expect("child pid missing");
+        let (tx, rx) = mpsc::channel();
+
+        let join = std::thread::spawn(move || {
+            let mut child = child;
+            tx.send(child.wait()).expect("send wait result");
+        });
+
+        let status = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(status) => status.expect("wait failed"),
+            Err(_) => {
+                #[allow(clippy::cast_possible_wrap)]
+                let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                join.join().expect("wait thread panicked after timeout");
+                panic!("wait() should close stdin and finish without hanging");
+            }
+        };
+        join.join().expect("wait thread panicked");
+
+        crate::assert_with_log!(
+            status.success(),
+            "wait closes piped stdin",
+            true,
+            status.success()
+        );
+        crate::test_complete!("test_wait_closes_piped_stdin_before_blocking");
+    }
+
+    #[test]
+    fn test_wait_async_closes_piped_stdin_before_blocking() {
+        use std::sync::mpsc;
+
+        init_test("test_wait_async_closes_piped_stdin_before_blocking");
+
+        let child = Command::new("cat")
+            .stdin(Stdio::Pipe)
+            .stdout(Stdio::Null)
+            .spawn()
+            .expect("spawn failed");
+        let pid = child.id().expect("child pid missing");
+        let (tx, rx) = mpsc::channel();
+
+        let join = std::thread::spawn(move || {
+            let mut child = child;
+            let result = futures_lite::future::block_on(child.wait_async());
+            tx.send(result).expect("send async wait result");
+        });
+
+        let status = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(status) => status.expect("wait_async failed"),
+            Err(_) => {
+                #[allow(clippy::cast_possible_wrap)]
+                let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                join.join()
+                    .expect("async wait thread panicked after timeout");
+                panic!("wait_async() should close stdin and finish without hanging");
+            }
+        };
+        join.join().expect("async wait thread panicked");
+
+        crate::assert_with_log!(
+            status.success(),
+            "wait_async closes piped stdin",
+            true,
+            status.success()
+        );
+        crate::test_complete!("test_wait_async_closes_piped_stdin_before_blocking");
     }
 
     #[test]
