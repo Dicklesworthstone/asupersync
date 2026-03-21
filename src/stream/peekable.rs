@@ -112,12 +112,14 @@ impl<S: Stream> Stream for Peekable<S> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (lo, hi) = self.stream.size_hint();
-        let peek_len = usize::from(matches!(self.peeked, PeekSlot::Item(_)));
-        (
-            lo.saturating_add(peek_len),
-            hi.map(|h| h.saturating_add(peek_len)),
-        )
+        match self.peeked {
+            PeekSlot::Exhausted => (0, Some(0)),
+            PeekSlot::Empty => self.stream.size_hint(),
+            PeekSlot::Item(_) => {
+                let (lo, hi) = self.stream.size_hint();
+                (lo.saturating_add(1), hi.map(|h| h.saturating_add(1)))
+            }
+        }
     }
 }
 
@@ -136,6 +138,20 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct StaleExhaustedHintStream;
+
+    impl Stream for StaleExhaustedHintStream {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(None)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (1, Some(1))
+        }
     }
 
     fn init_test(name: &str) {
@@ -314,5 +330,19 @@ mod tests {
         let stream = Peekable::new(iter(vec![1, 2, 3]));
         let dbg = format!("{stream:?}");
         assert!(dbg.contains("Peekable"));
+    }
+
+    #[test]
+    fn size_hint_fail_closed_after_cached_exhaustion() {
+        init_test("size_hint_fail_closed_after_cached_exhaustion");
+        let mut stream = Peekable::new(StaleExhaustedHintStream);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_peek(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        crate::test_complete!("size_hint_fail_closed_after_cached_exhaustion");
     }
 }
