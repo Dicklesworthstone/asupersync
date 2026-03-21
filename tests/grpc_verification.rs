@@ -1532,12 +1532,18 @@ fn grpc_verify_049_channel_compression_metadata() {
     .expect("unary call should succeed");
 
     match response.metadata().get("grpc-encoding") {
+        #[cfg(feature = "compression")]
         Some(MetadataValue::Ascii(value)) => assert_eq!(value, "gzip"),
-        other => panic!("expected grpc-encoding metadata, got: {other:?}"),
+        #[cfg(not(feature = "compression"))]
+        None => {}
+        other => panic!("unexpected grpc-encoding metadata, got: {other:?}"),
     }
     match response.metadata().get("grpc-accept-encoding") {
+        #[cfg(feature = "compression")]
         Some(MetadataValue::Ascii(value)) => assert_eq!(value, "identity,gzip"),
-        other => panic!("expected grpc-accept-encoding metadata, got: {other:?}"),
+        #[cfg(not(feature = "compression"))]
+        Some(MetadataValue::Ascii(value)) => assert_eq!(value, "identity"),
+        other => panic!("unexpected grpc-accept-encoding metadata, got: {other:?}"),
     }
 
     test_complete!("grpc_verify_049_channel_compression_metadata");

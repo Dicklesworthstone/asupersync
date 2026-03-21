@@ -517,3 +517,35 @@
 {"file":"src/messaging/capability/tokens.rs","lines":718,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
 {"file":"src/messaging/session/contract.rs","lines":1257,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
 {"file":"src/messaging/session/synthesis.rs","lines":1459,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+"src/net/quic_native/streams.rs"
+1721
+406
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Flow control accounting correct, two-phase connection/stream credit, recv range merging, RR cursor resilient"
+"src/net/tcp/split.rs"
+1665
+406
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"CombinedWaker prevents lost wakeups, interest narrowing on drop, registration held during driver.register"
+"src/runtime/reactor/epoll.rs"
+1518
+406
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Duplicate detection, stale fd cleanup on ENOENT/EBADF, fcntl validity check before register"
+"src/runtime/scheduler/worker.rs"
+1457
+406
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"TaskExecutionGuard panic safety, work steal order correct, spin/yield/park backoff"

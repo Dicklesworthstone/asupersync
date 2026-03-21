@@ -174,13 +174,13 @@ impl Metadata {
 
     /// Insert an ASCII value.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.entries
-            .push((key.into(), MetadataValue::Ascii(value.into())));
+        let key = key.into().to_ascii_lowercase();
+        self.entries.push((key, MetadataValue::Ascii(value.into())));
     }
 
     /// Insert a binary value.
     pub fn insert_bin(&mut self, key: impl Into<String>, value: Bytes) {
-        let mut key = key.into();
+        let mut key = key.into().to_ascii_lowercase();
         if !key.ends_with("-bin") {
             key.push_str("-bin");
         }
@@ -720,6 +720,66 @@ mod tests {
         let has = metadata.get("x-key").is_some();
         crate::assert_with_log!(has, "reserved metadata insert", true, has);
         crate::test_complete!("test_metadata_reserve_preserves_behavior");
+    }
+
+    #[test]
+    fn test_metadata_insert_normalizes_ascii_key_case() {
+        init_test("test_metadata_insert_normalizes_ascii_key_case");
+        let mut metadata = Metadata::new();
+        metadata.insert("X-Request-ID", "abc-123");
+
+        let stored_key = metadata
+            .iter()
+            .next()
+            .map(|(key, _)| key)
+            .expect("metadata entry");
+        crate::assert_with_log!(
+            stored_key == "x-request-id",
+            "ascii metadata key normalized to lowercase",
+            "x-request-id",
+            stored_key
+        );
+
+        let has_upper = metadata.get("X-REQUEST-ID").is_some();
+        crate::assert_with_log!(
+            has_upper,
+            "uppercase lookup remains supported after normalization",
+            true,
+            has_upper
+        );
+        crate::test_complete!("test_metadata_insert_normalizes_ascii_key_case");
+    }
+
+    #[test]
+    fn test_metadata_insert_bin_normalizes_key_case_and_suffix() {
+        init_test("test_metadata_insert_bin_normalizes_key_case_and_suffix");
+        let mut metadata = Metadata::new();
+        metadata.insert_bin("Trace-Context-BIN", Bytes::from_static(b"\x01\x02"));
+
+        let stored_key = metadata
+            .iter()
+            .next()
+            .map(|(key, _)| key)
+            .expect("metadata entry");
+        crate::assert_with_log!(
+            stored_key == "trace-context-bin",
+            "binary metadata key normalized to lowercase with single -bin suffix",
+            "trace-context-bin",
+            stored_key
+        );
+
+        match metadata.get("TRACE-CONTEXT-BIN") {
+            Some(MetadataValue::Binary(v)) => {
+                crate::assert_with_log!(
+                    v.as_ref() == [1, 2],
+                    "binary lookup after normalization",
+                    &[1, 2],
+                    v.as_ref()
+                );
+            }
+            _ => panic!("expected binary value"),
+        }
+        crate::test_complete!("test_metadata_insert_bin_normalizes_key_case_and_suffix");
     }
 
     // =========================================================================

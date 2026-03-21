@@ -344,10 +344,10 @@ impl GrpcClient<IdentityCodec> {
     /// Create a new client with an identity codec.
     #[must_use]
     pub fn new(channel: Channel) -> Self {
-        let codec = client_framed_codec(&channel, IdentityCodec);
+        let framed_codec = client_framed_codec(&channel, IdentityCodec);
         Self {
             channel,
-            codec,
+            codec: framed_codec,
             client_interceptors: Vec::new(),
         }
     }
@@ -357,10 +357,10 @@ impl<C: Codec> GrpcClient<C> {
     /// Create a new client with a custom codec.
     #[must_use]
     pub fn with_codec(channel: Channel, codec: C) -> Self {
-        let framed = client_framed_codec(&channel, codec);
+        let framed_codec = client_framed_codec(&channel, codec);
         Self {
             channel,
-            codec: framed,
+            codec: framed_codec,
             client_interceptors: Vec::new(),
         }
     }

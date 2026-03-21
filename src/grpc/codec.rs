@@ -312,14 +312,11 @@ impl<C: Codec> FramedCodec<C> {
     /// The hooks are stateless functions used per message frame.
     #[must_use]
     pub fn with_frame_codec(
-        mut self,
+        self,
         compressor: FrameCompressor,
         decompressor: FrameDecompressor,
     ) -> Self {
-        self.use_compression = true;
-        self.compressor = Some(compressor);
-        self.decompressor = Some(decompressor);
-        self
+        self.with_frame_hooks(Some(compressor), Some(decompressor))
     }
 
     /// Configure gzip frame compression/decompression.
