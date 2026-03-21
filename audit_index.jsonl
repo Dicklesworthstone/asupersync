@@ -10440,3 +10440,19 @@
 "SOUND"
 0
 ""
+"src/messaging/consumer.rs"
+4582
+402
+"2026-03-21"
+"SapphireHill"
+"FIXED"
+3
+"1 HIGH: max_deliver unenforced in Stable mode; 2 MEDIUM: ReplaceLowestPriority ignored in Stable, global counter as retry counter"
+"src/messaging/ir.rs"
+3225
+402
+"2026-03-21"
+"SapphireHill"
+"FIXED"
+2
+"2 MEDIUM: validate_unique_keys untrimmed dedup, estimate constructors accept non-monotone"
