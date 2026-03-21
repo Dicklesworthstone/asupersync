@@ -6,18 +6,196 @@
 #![allow(missing_docs)]
 #![cfg(feature = "messaging-fabric")]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::sync::Arc;
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use futures_lite::future::block_on;
+use std::future::Future;
+use std::hint::black_box;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use asupersync::Cx;
+use asupersync::channel::mpsc;
+use asupersync::config::RaptorQConfig;
+use asupersync::cx::Scope;
+use asupersync::gen_server::{CallError, GenServer, Reply, SystemMsg};
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::messaging::SubjectTransform;
+use asupersync::messaging::capability::EventFamily;
+use asupersync::messaging::capability::routing::{
+    RoutingOperationKind, RoutingProgram, RoutingRequest,
+};
+use asupersync::messaging::class::{AckKind, DeliveryClass};
+use asupersync::messaging::consumer::{
+    FabricConsumer, FabricConsumerConfig, RecoverableCapsule, SequenceWindow,
+};
 use asupersync::messaging::control::{
     CursorCheckpoint, CursorMark, InterestSummary, JoinSemilattice, LagSketch, MembershipRecord,
     MembershipState, MembershipView,
 };
+use asupersync::messaging::fabric::{
+    CellEpoch, CellTemperature, DataCapsule, Fabric, NodeRole, PlacementPolicy, RepairPolicy,
+    StewardCandidate, StorageClass, SubjectCell,
+};
+use asupersync::messaging::ir::{
+    CapabilityPermission, CapabilityTokenSchema, MorphismPlan, MorphismTransform, SubjectFamily,
+};
+use asupersync::messaging::service::ServiceObligation;
 use asupersync::messaging::subject::{
     ShardedSublist, Subject, SubjectPattern, Sublist, SublistLinkCache,
 };
+use asupersync::obligation::ledger::ObligationLedger;
+use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::remote::NodeId;
+use asupersync::transport::mock::{SimTransportConfig, sim_channel};
+use asupersync::types::policy::FailFast;
+use asupersync::types::{Budget, ObjectId, ObjectParams, RegionId, TaskId, Time};
+
+const FABRIC_BENCH_PAYLOAD: &[u8] = b"fabric benchmark payload";
+
+fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed.wrapping_add(1);
+    let mut out = vec![0u8; len];
+    for byte in &mut out {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        let value = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        *byte = (value & 0xFF) as u8;
+    }
+    out
+}
+
+fn fabric_capability_schema() -> CapabilityTokenSchema {
+    CapabilityTokenSchema {
+        name: "fabric.bench.publish".to_owned(),
+        families: vec![SubjectFamily::Event],
+        delivery_classes: vec![DeliveryClass::EphemeralInteractive],
+        permissions: vec![CapabilityPermission::Publish],
+    }
+}
+
+fn fabric_routing_program() -> RoutingProgram {
+    let plan = MorphismPlan {
+        name: "fabric-bench-routing".to_owned(),
+        source_pattern: SubjectPattern::new("orders.>"),
+        target_prefix: "fabric.orders".to_owned(),
+        allowed_families: vec![SubjectFamily::Event],
+        transforms: vec![MorphismTransform::RenamePrefix {
+            from: "orders".to_owned(),
+            to: "fabric.orders".to_owned(),
+        }],
+    };
+
+    RoutingProgram::compile_export(&plan, RoutingOperationKind::Publish)
+        .expect("routing program should compile")
+}
+
+fn bench_fabric_candidate(name: &str, domain: &str) -> StewardCandidate {
+    StewardCandidate::new(NodeId::new(name), domain)
+        .with_role(NodeRole::Steward)
+        .with_role(NodeRole::RepairWitness)
+        .with_storage_class(StorageClass::Durable)
+}
+
+fn bench_fabric_cell() -> SubjectCell {
+    SubjectCell::new(
+        &SubjectPattern::parse("orders.created").expect("pattern"),
+        CellEpoch::new(7, 11),
+        &[
+            bench_fabric_candidate("node-a", "rack-a"),
+            bench_fabric_candidate("node-b", "rack-b"),
+            bench_fabric_candidate("node-c", "rack-c"),
+        ],
+        &PlacementPolicy {
+            cold_stewards: 3,
+            warm_stewards: 3,
+            hot_stewards: 3,
+            ..PlacementPolicy::default()
+        },
+        RepairPolicy::default(),
+        DataCapsule {
+            temperature: CellTemperature::Warm,
+            retained_message_blocks: 4,
+        },
+    )
+    .expect("cell")
+}
+
+fn connect_bench_fabric(cx: &Cx, lane: &str, counter: &mut u64) -> Fabric {
+    *counter = counter.saturating_add(1);
+    let endpoint = format!("bench://fabric/{lane}/{}", *counter);
+    block_on(Fabric::connect(cx, &endpoint)).expect("connect")
+}
+
+fn allocate_bench_service_obligation(
+    ledger: &mut ObligationLedger,
+    delivery_class: DeliveryClass,
+) -> ServiceObligation {
+    ServiceObligation::allocate(
+        ledger,
+        "bench-request",
+        "caller",
+        "callee",
+        "svc.fabric",
+        delivery_class,
+        TaskId::new_for_test(1, 0),
+        RegionId::new_for_test(1, 0),
+        Time::from_nanos(1),
+        Some(Duration::from_secs(5)),
+    )
+    .expect("allocate")
+}
+
+fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
+    let mut config = RaptorQConfig::default();
+    if size > config.encoding.max_block_size {
+        config.encoding.max_block_size = size;
+    }
+    config
+}
+
+fn object_params_for(config: &RaptorQConfig, size: usize) -> ObjectParams {
+    let symbol_size = usize::from(config.encoding.symbol_size);
+    let symbols_per_block = ((size + symbol_size.saturating_sub(1)) / symbol_size) as u16;
+    ObjectParams::new(
+        ObjectId::new_for_test(1),
+        size as u64,
+        config.encoding.symbol_size,
+        1,
+        symbols_per_block,
+    )
+}
+
+struct BenchCounter {
+    count: u64,
+}
+
+enum BenchCall {
+    Add(u64),
+}
+
+impl GenServer for BenchCounter {
+    type Call = BenchCall;
+    type Reply = u64;
+    type Cast = ();
+    type Info = SystemMsg;
+
+    fn handle_call(
+        &mut self,
+        _cx: &Cx,
+        request: BenchCall,
+        reply: Reply<u64>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        match request {
+            BenchCall::Add(n) => {
+                self.count += n;
+                let _ = reply.send(self.count);
+            }
+        }
+        Box::pin(async {})
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Subject lookup benchmarks
@@ -453,6 +631,306 @@ fn bench_scaled_lookup(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Capability and routing benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_capability_checks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fabric_capability_checks");
+
+    let cx = Cx::for_testing();
+    let schema = fabric_capability_schema();
+    let token = cx
+        .grant_publish_capability::<EventFamily>(
+            SubjectPattern::new("orders.>"),
+            &schema,
+            DeliveryClass::EphemeralInteractive,
+        )
+        .expect("grant publish capability");
+    let program = fabric_routing_program();
+    let request = RoutingRequest::Publish(Subject::new("orders.created"));
+
+    group.bench_function("in_process_token", |b| {
+        b.iter(|| {
+            black_box(
+                program
+                    .authorize_in_process(&token, SubjectFamily::Event, &request)
+                    .expect("in-process authorization"),
+            )
+        });
+    });
+
+    group.bench_function("distributed_cx_check", |b| {
+        b.iter(|| {
+            black_box(
+                program
+                    .authorize_distributed(&cx, SubjectFamily::Event, &request)
+                    .expect("distributed authorization"),
+            )
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Publish and request/reply benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_publish_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fabric_publish");
+
+    let cx = Cx::for_testing();
+    let mut endpoint_counter = 0u64;
+
+    group.bench_function("ephemeral_public_api", |b| {
+        b.iter_batched(
+            || connect_bench_fabric(&cx, "publish", &mut endpoint_counter),
+            |fabric| {
+                black_box(
+                    block_on(fabric.publish(&cx, "orders.created", FABRIC_BENCH_PAYLOAD.to_vec()))
+                        .expect("publish"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // The public Fabric surface currently exposes only the cheap ephemeral
+    // publish API. For the stronger-guarantee comparison, benchmark the
+    // existing obligation-backed service admission/commit path as the current
+    // tracked publish surrogate.
+    group.bench_function("tracked_publish_surrogate", |b| {
+        b.iter_batched(
+            ObligationLedger::new,
+            |mut ledger| {
+                let mut obligation =
+                    allocate_bench_service_obligation(&mut ledger, DeliveryClass::ObligationBacked);
+                black_box(
+                    obligation
+                        .commit_with_reply(
+                            &mut ledger,
+                            Time::from_nanos(2),
+                            FABRIC_BENCH_PAYLOAD.to_vec(),
+                            AckKind::Served,
+                            false,
+                        )
+                        .expect("tracked publish surrogate commit"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_request_reply_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fabric_request_reply");
+
+    let cx = Cx::for_testing();
+    let mut endpoint_counter = 0u64;
+
+    group.bench_function("ephemeral_loopback", |b| {
+        b.iter_batched(
+            || connect_bench_fabric(&cx, "request", &mut endpoint_counter),
+            |fabric| {
+                black_box(
+                    block_on(fabric.request(&cx, "svc.lookup", FABRIC_BENCH_PAYLOAD.to_vec()))
+                        .expect("request"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("obligation_backed_roundtrip", |b| {
+        b.iter_batched(
+            ObligationLedger::new,
+            |mut ledger| {
+                let mut obligation =
+                    allocate_bench_service_obligation(&mut ledger, DeliveryClass::ObligationBacked);
+                let committed = obligation
+                    .commit_with_reply(
+                        &mut ledger,
+                        Time::from_nanos(2),
+                        FABRIC_BENCH_PAYLOAD.to_vec(),
+                        AckKind::Received,
+                        true,
+                    )
+                    .expect("obligation-backed commit");
+                let reply = committed.reply_obligation.expect("reply obligation");
+                black_box(reply.commit_delivery(&mut ledger, Time::from_nanos(3)));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Consumer and RaptorQ benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_consumer_ack(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fabric_consumer");
+
+    group.bench_function("dispatch_push_plus_ack", |b| {
+        b.iter_batched(
+            || {
+                let cell = bench_fabric_cell();
+                let consumer =
+                    FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+                let window = SequenceWindow::new(10, 10).expect("window");
+                let capsule =
+                    RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+                (consumer, window, capsule)
+            },
+            |(mut consumer, window, capsule)| {
+                let delivery = consumer
+                    .dispatch_push(window, &capsule, None)
+                    .expect("dispatch");
+                black_box(
+                    consumer
+                        .acknowledge_delivery(&delivery.attempt)
+                        .expect("ack"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_raptorq_data_capsule(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fabric_raptorq_data_capsule");
+    let cx = Cx::for_testing();
+
+    for size in [1024usize, 4096usize] {
+        let data = deterministic_bytes(size, size as u64);
+        let config = raptorq_config_for_size(size);
+        let params = object_params_for(&config, size);
+        let object_id = params.object_id;
+
+        let symbol_size = usize::from(config.encoding.symbol_size);
+        let source_symbols = size.div_ceil(symbol_size);
+        let total_with_overhead =
+            (source_symbols as f64 * config.encoding.repair_overhead).ceil() as usize;
+        let transport_capacity = total_with_overhead + total_with_overhead / 4;
+
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("encode_decode_roundtrip", size),
+            &size,
+            |b, _| {
+                b.iter_batched(
+                    || {
+                        let mut transport_config = SimTransportConfig::reliable();
+                        transport_config.capacity = transport_capacity;
+                        let (sink, stream) = sim_channel(transport_config);
+                        let sender = RaptorQSenderBuilder::new()
+                            .config(config.clone())
+                            .transport(sink)
+                            .build()
+                            .expect("build sender");
+                        let receiver = RaptorQReceiverBuilder::new()
+                            .config(config.clone())
+                            .source(stream)
+                            .build()
+                            .expect("build receiver");
+                        (sender, receiver)
+                    },
+                    |(mut sender, mut receiver)| {
+                        black_box(
+                            sender
+                                .send_object(&cx, object_id, &data)
+                                .expect("send object"),
+                        );
+                        black_box(
+                            receiver
+                                .receive_object(&cx, &params)
+                                .expect("receive object"),
+                        );
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Baseline comparisons
+// ---------------------------------------------------------------------------
+
+fn bench_baseline_compare(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fabric_baseline_compare");
+
+    group.bench_function("direct_mpsc_send_recv", |b| {
+        b.iter_batched(
+            || mpsc::channel::<u64>(1),
+            |(tx, mut rx)| {
+                tx.try_send(1).expect("send");
+                black_box(rx.try_recv().expect("recv"));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("gen_server_call_roundtrip", |b| {
+        b.iter(|| {
+            let budget = Budget::new().with_poll_quota(100_000);
+            let mut runtime = LabRuntime::new(LabConfig::new(42));
+            let region = runtime.state.create_root_region(budget);
+            let cx = Cx::for_testing();
+            let scope = Scope::<FailFast>::new(region, budget);
+
+            let (handle, stored) = scope
+                .spawn_gen_server(&mut runtime.state, &cx, BenchCounter { count: 0 }, 32)
+                .expect("spawn server");
+            let server_task_id = handle.task_id();
+            runtime.state.store_spawned_task(server_task_id, stored);
+
+            let server_ref = handle.server_ref();
+            let result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
+            let result_clone = Arc::clone(&result);
+
+            let (client_handle, client_stored) = scope
+                .spawn(&mut runtime.state, &cx, move |cx| async move {
+                    let call_result = server_ref.call(&cx, BenchCall::Add(1)).await;
+                    *result_clone.lock().expect("result mutex") = Some(call_result);
+                })
+                .expect("spawn client");
+            let client_task_id = client_handle.task_id();
+            runtime
+                .state
+                .store_spawned_task(client_task_id, client_stored);
+
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                scheduler.schedule(server_task_id, 0);
+                scheduler.schedule(client_task_id, 0);
+            }
+            runtime.run_until_idle();
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                scheduler.schedule(server_task_id, 0);
+                scheduler.schedule(client_task_id, 0);
+            }
+            runtime.run_until_idle();
+
+            let guard = result.lock().expect("result mutex");
+            black_box(guard.as_ref().expect("call result").is_ok());
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Criterion harness
 // ---------------------------------------------------------------------------
 
@@ -470,6 +948,12 @@ criterion_group!(
     bench_pattern_matching,
     bench_subscribe_unsubscribe,
     bench_scaled_lookup,
+    bench_capability_checks,
+    bench_publish_paths,
+    bench_request_reply_paths,
+    bench_consumer_ack,
+    bench_raptorq_data_capsule,
+    bench_baseline_compare,
 );
 
 criterion_main!(benches);
