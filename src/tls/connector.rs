@@ -3,6 +3,7 @@
 //! This module provides `TlsConnector` and `TlsConnectorBuilder` for establishing
 //! TLS connections from the client side.
 
+use base64::Engine as _;
 use super::error::TlsError;
 use super::stream::TlsStream;
 use super::types::{Certificate, CertificateChain, PrivateKey, RootCertStore};
