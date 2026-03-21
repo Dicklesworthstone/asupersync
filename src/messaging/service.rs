@@ -825,7 +825,7 @@ impl ChunkedReplyObligation {
             }
         }
         let index = self.received_chunks;
-        self.received_chunks += 1;
+        self.received_chunks = self.received_chunks.saturating_add(1);
         Ok(index)
     }
 
