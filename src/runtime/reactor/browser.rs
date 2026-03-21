@@ -44,15 +44,15 @@ use parking_lot::{Mutex, MutexGuard};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{JsCast, closure::Closure};
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 #[cfg(target_arch = "wasm32")]
-use web_sys::{BroadcastChannel, MessageEvent, MessagePort};
+use web_sys::{BroadcastChannel, EventTarget, MessageEvent, MessagePort};
 
 /// Browser reactor configuration.
 #[derive(Debug, Clone)]
@@ -123,6 +123,11 @@ impl BrowserHostBindingKind {
 static NEXT_BROWSER_REACTOR_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(target_arch = "wasm32")]
+const BROWSER_MESSAGE_EVENT: &str = "message";
+#[cfg(target_arch = "wasm32")]
+const BROWSER_MESSAGE_ERROR_EVENT: &str = "messageerror";
+
+#[cfg(target_arch = "wasm32")]
 thread_local! {
     static BROWSER_HOST_BINDINGS: RefCell<BTreeMap<(u64, Token), BrowserHostBinding>> =
         RefCell::new(BTreeMap::new());
@@ -143,7 +148,7 @@ impl BrowserHostBinding {
         }
     }
 
-    fn attach(&self) {
+    fn attach(&self) -> io::Result<()> {
         match self {
             Self::MessagePort(binding) => binding.attach(),
             Self::BroadcastChannel(binding) => binding.attach(),
@@ -156,6 +161,54 @@ impl BrowserHostBinding {
             Self::BroadcastChannel(binding) => binding.detach(),
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_host_listener_error(err: &JsValue, op: &str) -> io::Error {
+    let detail = err.as_string().unwrap_or_else(|| format!("{err:?}"));
+    io::Error::other(format!("{op} failed: {detail}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn attach_browser_message_listeners(
+    target: &EventTarget,
+    on_message: &Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: &Closure<dyn FnMut(MessageEvent)>,
+    message_op: &str,
+    message_error_op: &str,
+) -> io::Result<()> {
+    target
+        .add_event_listener_with_callback(
+            BROWSER_MESSAGE_EVENT,
+            on_message.as_ref().unchecked_ref(),
+        )
+        .map_err(|err| browser_host_listener_error(&err, message_op))?;
+
+    if let Err(err) = target.add_event_listener_with_callback(
+        BROWSER_MESSAGE_ERROR_EVENT,
+        on_message_error.as_ref().unchecked_ref(),
+    ) {
+        detach_browser_message_listeners(target, on_message, on_message_error);
+        return Err(browser_host_listener_error(&err, message_error_op));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn detach_browser_message_listeners(
+    target: &EventTarget,
+    on_message: &Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: &Closure<dyn FnMut(MessageEvent)>,
+) {
+    let _ = target.remove_event_listener_with_callback(
+        BROWSER_MESSAGE_EVENT,
+        on_message.as_ref().unchecked_ref(),
+    );
+    let _ = target.remove_event_listener_with_callback(
+        BROWSER_MESSAGE_ERROR_EVENT,
+        on_message_error.as_ref().unchecked_ref(),
+    );
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -185,16 +238,22 @@ impl MessagePortBinding {
         }
     }
 
-    fn attach(&self) {
-        self.port
-            .set_onmessage(Some(self.on_message.as_ref().unchecked_ref()));
-        self.port
-            .set_onmessageerror(Some(self.on_message_error.as_ref().unchecked_ref()));
+    fn attach(&self) -> io::Result<()> {
+        let target: &EventTarget = self.port.as_ref().unchecked_ref();
+        attach_browser_message_listeners(
+            target,
+            &self.on_message,
+            &self.on_message_error,
+            "MessagePort.addEventListener(message)",
+            "MessagePort.addEventListener(messageerror)",
+        )?;
+        self.port.start();
+        Ok(())
     }
 
     fn detach(self) {
-        self.port.set_onmessage(None);
-        self.port.set_onmessageerror(None);
+        let target: &EventTarget = self.port.as_ref().unchecked_ref();
+        detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
     }
 }
 
@@ -225,16 +284,20 @@ impl BroadcastChannelBinding {
         }
     }
 
-    fn attach(&self) {
-        self.channel
-            .set_onmessage(Some(self.on_message.as_ref().unchecked_ref()));
-        self.channel
-            .set_onmessageerror(Some(self.on_message_error.as_ref().unchecked_ref()));
+    fn attach(&self) -> io::Result<()> {
+        let target: &EventTarget = self.channel.as_ref().unchecked_ref();
+        attach_browser_message_listeners(
+            target,
+            &self.on_message,
+            &self.on_message_error,
+            "BroadcastChannel.addEventListener(message)",
+            "BroadcastChannel.addEventListener(messageerror)",
+        )
     }
 
     fn detach(self) {
-        self.channel.set_onmessage(None);
-        self.channel.set_onmessageerror(None);
+        let target: &EventTarget = self.channel.as_ref().unchecked_ref();
+        detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
     }
 }
 
@@ -537,7 +600,7 @@ impl BrowserReactor {
                     format!("token {token:?} already has a browser host binding"),
                 ));
             }
-            binding.attach();
+            binding.attach()?;
             bindings.insert(key, binding);
             Ok(())
         })
@@ -599,9 +662,9 @@ impl BrowserReactor {
 
     /// Register a [`MessagePort`] with real browser host listener wiring.
     ///
-    /// This explicitly claims the port's `onmessage` and `onmessageerror`
-    /// handlers for the lifetime of the registration. Supported interests are
-    /// limited to `READABLE` and `ERROR`.
+    /// This attaches non-clobbering `message` / `messageerror` listeners for
+    /// the lifetime of the registration. Supported interests are limited to
+    /// `READABLE` and `ERROR`.
     #[cfg(target_arch = "wasm32")]
     pub fn register_message_port(
         &self,
@@ -623,9 +686,9 @@ impl BrowserReactor {
 
     /// Register a [`BroadcastChannel`] with real browser host listener wiring.
     ///
-    /// This explicitly claims the channel's `onmessage` and `onmessageerror`
-    /// handlers for the lifetime of the registration. Supported interests are
-    /// limited to `READABLE` and `ERROR`.
+    /// This attaches non-clobbering `message` / `messageerror` listeners for
+    /// the lifetime of the registration. Supported interests are limited to
+    /// `READABLE` and `ERROR`.
     #[cfg(target_arch = "wasm32")]
     pub fn register_broadcast_channel(
         &self,
@@ -843,11 +906,9 @@ mod tests {
             "wake must not mark readiness pending without host events"
         );
 
-        assert!(
-            reactor
-                .notify_ready(Token::new(1), Interest::READABLE)
-                .unwrap()
-        );
+        assert!(reactor
+            .notify_ready(Token::new(1), Interest::READABLE)
+            .unwrap());
         assert!(
             reactor.wake_pending(),
             "host readiness should mark wake_pending"
@@ -944,16 +1005,12 @@ mod tests {
             .register(&source, Token::new(2), Interest::READABLE)
             .unwrap();
 
-        assert!(
-            reactor
-                .notify_ready(Token::new(1), Interest::READABLE)
-                .unwrap()
-        );
-        assert!(
-            reactor
-                .notify_ready(Token::new(2), Interest::READABLE)
-                .unwrap()
-        );
+        assert!(reactor
+            .notify_ready(Token::new(1), Interest::READABLE)
+            .unwrap());
+        assert!(reactor
+            .notify_ready(Token::new(2), Interest::READABLE)
+            .unwrap());
         let mut events = Events::with_capacity(4);
         let first = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         assert_eq!(first, 1);
