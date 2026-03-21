@@ -4426,8 +4426,11 @@ mod tests {
     #[test]
     fn fabric_consumer_redelivery_mints_new_obligation_and_supersedes_old_attempt() {
         let cell = test_cell();
-        let mut consumer =
-            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let config = FabricConsumerConfig {
+            max_deliver: 3,
+            ..FabricConsumerConfig::default()
+        };
+        let mut consumer = FabricConsumer::new(&cell, config).expect("consumer");
         let window = SequenceWindow::new(8, 9).expect("window");
         let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
 
