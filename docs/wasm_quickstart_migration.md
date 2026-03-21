@@ -121,8 +121,9 @@ the scope honest:
 - it keeps the contract honest about the remaining blocker: `src/runtime/builder.rs`
   still assumes `std::thread`-backed worker and deadline-monitor startup, so
   this fixture does not pretend a public browser bootstrap API already exists
-- it proves lifecycle semantics through a real browser run (`ready` ->
-  `disposed`, one completed task, one cancellation on unmount)
+- it proves lifecycle semantics plus truthful execution-ladder diagnostics
+  through a real browser matrix on both browser main-thread and
+  dedicated-worker entrypoints
 - it does **not** widen the public contract beyond what `docs/WASM.md`,
   `tests/wasm_browser_feasibility_matrix.rs`, and
   `tests/wasm_rust_browser_example_contract.rs` already enforce
@@ -132,7 +133,7 @@ Supported and unsupported contexts for this workflow:
 | Context / surface | Status for Rust-authored guidance | What to do |
 |---|---|---|
 | Browser main thread with `window`, `document`, and `WebAssembly` | Maintained repository workflow | Use the fixture pattern and validate it with `scripts/validate_rust_browser_consumer.sh` |
-| Dedicated worker | Supported for the shipped JS/TS Browser Edition, but not yet the maintained Rust fixture | Treat dedicated-worker Rust authoring as future follow-on work; if you need it today, use the JS/TS package lane that already validates `DedicatedWorkerGlobalScope` |
+| Dedicated worker | Maintained repository workflow inside the Rust browser matrix, still not a public Rust browser constructor | Use the same fixture workflow and read it as proof of truthful dedicated-worker diagnostics plus lifecycle behavior, not as broad external `RuntimeBuilder` parity |
 | Service worker / shared worker | Deferred / not shipped | Keep them on explicit message/data boundaries until host contracts and docs are promoted together |
 | Next.js server components, route handlers, edge runtimes, or plain Node.js | Bridge-only or native-only | Keep direct runtime creation in the browser/client boundary and move Rust server logic behind explicit RPC/API seams |
 | `SharedArrayBuffer` worker pools / multi-threaded WASM | Guarded optional, not shipped | Do not treat SAB-based parallelism as a default migration target |

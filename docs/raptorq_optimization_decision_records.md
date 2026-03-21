@@ -95,7 +95,7 @@ Current artifact summary (`coverage_summary` in JSON):
 
 Closure blockers for `asupersync-3ltrv`:
 
-1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` now widens the checked-in evidence surface to the broader `RQ-E-GF256-DUAL-*` corpus and records targeted uplift for the current x86 default contract, but its `confidence_contract = short_window_directional_not_closure_grade`, so raw-sample or longer-window multi-scenario evidence is still required before `asupersync-36m6p` can be treated as closure-complete for G3. Any future closure attempt must publish a new artifact/schema version rather than silently repurposing the narrowed `highconf_v1` packet.
+1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` now widens the checked-in evidence surface to the broader `RQ-E-GF256-DUAL-*` corpus and records targeted uplift for the current x86 default contract, but its `confidence_contract = short_window_directional_not_closure_grade`, so raw-sample or longer-window multi-scenario evidence is still required before `asupersync-36m6p` can be treated as closure-complete for G3. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` now supplies that broader longer-window read across `RQ-E-GF256-DUAL-001..008`, but it remains a negative guardrail rather than a closure packet: `confidence_contract = longer_window_interval_proxy_negative_guardrail`, `ready_for_e5_closure = false`, and the broader auto percentile proxies still regress versus the scalar conservative baseline. Any future closure attempt must publish a new artifact/schema version rather than silently repurposing the narrowed `highconf_v1` packet.
 
 `F7` and `F8` remain resolved and are no longer current blockers.
 
@@ -198,3 +198,17 @@ Recent evidence alignment updates (2026-03-15):
   - `scope_contract = same_target_multi_scenario_directional_corpus`
   - `confidence_contract = short_window_directional_not_closure_grade`
 - This packet complements rather than replaces `highconf_v1`: the narrowed guardrail still owns `ready_for_e5_closure = false`, while the broader refresh records the seven-scenario directional corpus, the selected `candidate_addmul_window_only` default, and the remaining blocker that closure-grade raw-sample or longer-window multi-scenario evidence is still missing.
+
+Recent evidence alignment updates (2026-03-21):
+
+- Published `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` as the broader longer-window successor packet for the now eight-scenario `RQ-E-GF256-DUAL-*` corpus.
+- The new packet keeps the negative result machine-checkable instead of leaving it implicit in raw logs:
+  - `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v3`
+  - `evidence_role = broader_multiscenario_longer_window_guardrail`
+  - `scope_contract = same_target_multi_scenario_longer_window_corpus`
+  - `confidence_contract = longer_window_interval_proxy_negative_guardrail`
+- Broader longer-window closure still fails for the current x86 defaults:
+  - overall broader-corpus percentile proxies regress under auto: `p50 = 0.5034 us` vs `0.3857 us` baseline
+  - overall `p95/p99 = 1.1657 us` vs `1.0449 us` baseline
+  - `mul_slices2_auto` stays slightly favorable on average, but `addmul_slices2_auto` regresses on six of eight scenarios
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the historical broader directional packet, while `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` is now the current broader negative-evidence guardrail complementing `highconf_v1`.

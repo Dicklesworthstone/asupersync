@@ -133,20 +133,28 @@ Current closure-readiness status (2026-03-21 refresh):
 `ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
 `closed`.
 
-The E5 dependency is intentionally modeled as a two-part evidence contract:
+The E5 dependency is intentionally modeled as a three-part evidence contract:
 
 - `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` remains the narrowed
   negative guardrail for the current not-ready state.
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the
-  broader short-window directional refresh and is still not closure-grade.
+  historical broader short-window directional refresh and is still not closure-grade.
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` is now the
+  current broader longer-window negative guardrail. It expands the corpus to
+  `RQ-E-GF256-DUAL-001..008` and still keeps `ready_for_e5_closure = false`.
 
 In invariant-test terms, the current E5 evidence posture is
 `confidence_contract = short_window_directional_not_closure_grade`: the
 directional refresh is informative for rollout posture, but it is not sufficient
-to close the dependency on its own.
+to close the dependency on its own. The broader successor packet now carries
+`confidence_contract = longer_window_interval_proxy_negative_guardrail`, which
+means the longer-window broader read exists but still lands as negative
+evidence rather than closure-grade proof.
 
-That means Track-G still needs raw-sample or longer-window broader E5 evidence
-before G7 can truthfully flip `ready_to_close` to `true`.
+That means Track-G still needs a broader positive E5 packet before G7 can
+truthfully flip `ready_to_close` to `true`. The longer-window packet now exists,
+but it remains a negative guardrail; the next closure attempt should prefer
+raw-sample capture or materially better broader interval-proxy results.
 
 Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `residual_risk_register`, `go_no_go_decision`) are now attached in

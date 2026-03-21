@@ -249,6 +249,37 @@ No Phase 2 surface should be allowed to claim stronger differential closure
 while any of the Phase 1 rows still lack their minimum `T0`, `T2/T3`, and `T4`
 evidence.
 
+### Core Pilot Refinement Matrix (`asupersync-2a6k9.6.6`)
+
+`asupersync-2a6k9.6.6` exists to turn the Phase 1 floor into an
+implementation-facing matrix. Pilot beads should not be allowed to say "we hit
+the cancellation surface" or "we ran one channel scenario" without naming which
+invariants, scenario families, and retained fields were actually covered.
+
+The rows below refine the minimum matrix above. They do not replace it. A Phase
+1 pilot bead is incomplete if its notes, tests, or retained bundles cannot be
+mapped back to every applicable row here.
+
+| Surface | Required `T0` unit-contract checks | Required shared `T2/T3` scenario families | Required `T4` adversarial witnesses | Required invariant-log focus |
+|---|---|---|---|---|
+| `cancellation` | `cancel_request_recorded`, `checkpoint_acknowledged`, `cleanup_finalized`, `repeat_cancel_idempotent` | `cancel_before_first_poll`, `cancel_during_child_await`, `cancel_during_cleanup_budget` | `missing_cleanup_ack_hard_failure`, `cleanup_budget_exhausted`, `late_cancel_after_finalize_rejected` | `cancellation.requested`, `cancellation.acknowledged`, `cancellation.finalized`, `terminal_outcome`, `repro_command` |
+| `combinators` | `join_loser_drain`, `race_winner_commit_boundary`, `severity_aggregation_stable`, `nested_join_race_outcome_visibility` | `join_all_success`, `race_single_winner`, `mixed_success_failure_aggregation`, `nested_join_race_chain` | `loser_not_drained_hard_failure`, `winner_masked_by_late_failure`, `aggregate_severity_misclassified` | `loser_drain`, `terminal_outcome`, `policy_class`, `artifact_bundle`, `normalized_record_path` |
+| `channels` | `reserve_abort_invisible_to_receiver`, `reserve_commit_visible_once`, `fifo_sender_order_preserved`, `sender_cancel_after_reserve_balanced` | `single_sender_commit`, `reserve_then_abort`, `multi_sender_fifo`, `receiver_retry_after_pending` | `committed_message_missing_hard_failure`, `aborted_message_delivered`, `permit_leak_forces_failure` | `resource_surface`, `obligation_balance`, `terminal_outcome`, `artifact_bundle`, `repro_command` |
+| `obligations` | `balanced_after_commit_and_abort`, `unresolved_obligation_reported`, `recovery_path_preserves_lineage`, `close_boundary_obligation_snapshot` | `commit_abort_mix_at_surface_boundary`, `recovery_after_interrupted_flow`, `close_with_no_live_obligations` | `leaked_obligation_forces_failure`, `stale_recovery_overwrite_rejected`, `unresolved_on_close_hard_failure` | `obligation_balance`, `policy_class`, `normalized_record_path`, `artifact_bundle`, `repro_command` |
+| `region_close` / `quiescence` | `close_boundary_rejects_new_children`, `quiescent_after_last_child`, `finalizer_completion_counted`, `nested_region_close_visibility` | `close_with_nested_children`, `close_after_child_cancel`, `close_after_finalizer_completion` | `late_spawn_after_close_rejected`, `non_quiescent_close_hard_failure`, `stuck_finalizer_retained` | `region_close`, `terminal_outcome`, `artifact_bundle`, `normalized_record_path`, `repro_command` |
+
+Interpretation rules for the refinement matrix:
+
+- every Phase 1 pilot surface must name at least one concrete scenario family
+  for each row it claims to satisfy; "misc smoke coverage" is not enough
+- every retained bundle must make the required invariant-log focus discoverable
+  either directly in the scenario result record or through a stable referenced
+  artifact path
+- a pilot may reuse the same executable scenario across multiple rows only if
+  the scenario result explicitly reports all required invariant-log focus fields
+- `asupersync-2a6k9.6.6` should be treated as the checklist upgrade that future
+  `2a6k9.6.*` implementation beads must point at when they claim closure
+
 ## Structured Logging Standard
 
 Every executable differential bead must emit structured logs or records with a
