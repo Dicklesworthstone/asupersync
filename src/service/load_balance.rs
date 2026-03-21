@@ -285,6 +285,7 @@ pub struct Weighted {
 struct WeightedState {
     weights: Vec<u32>,
     current_weights: Vec<i64>,
+    active_backend_count: usize,
 }
 
 impl fmt::Debug for WeightedState {
@@ -292,6 +293,7 @@ impl fmt::Debug for WeightedState {
         f.debug_struct("WeightedState")
             .field("weights", &self.weights)
             .field("current_weights", &self.current_weights)
+            .field("active_backend_count", &self.active_backend_count)
             .finish()
     }
 }
@@ -308,6 +310,7 @@ impl Weighted {
             state: Mutex::new(WeightedState {
                 weights,
                 current_weights: vec![0; len],
+                active_backend_count: len,
             }),
         }
     }
@@ -320,11 +323,11 @@ impl Strategy for Weighted {
         }
 
         let mut state = self.state.lock();
-        if state.weights.is_empty() {
+        let len = loads.len().min(state.active_backend_count);
+        if len == 0 || state.weights.is_empty() {
             return None;
         }
 
-        let len = loads.len().min(state.weights.len());
         let total_weight: i64 = state.weights[..len].iter().map(|&w| i64::from(w)).sum();
 
         if total_weight == 0 {
@@ -360,8 +363,12 @@ impl Strategy for Weighted {
             return false;
         }
 
-        self.state
-            .lock()
+        let state = self.state.lock();
+        if index >= state.active_backend_count {
+            return false;
+        }
+
+        state
             .weights
             .get(index)
             .copied()
@@ -373,20 +380,27 @@ impl Strategy for Weighted {
         if state.weights.len() < count {
             state.weights.resize(count, 1);
         }
-        if state.current_weights.len() < count {
-            state.current_weights.resize(count, 0);
-        }
+        state.current_weights.resize(count, 0);
+        state.active_backend_count = count;
     }
 
     fn on_backend_inserted(&self, index: usize) {
         let mut state = self.state.lock();
-        let index = index.min(state.weights.len());
-        state.weights.insert(index, 1);
+        let index = index.min(state.active_backend_count);
+        if index < state.active_backend_count || index >= state.weights.len() {
+            state.weights.insert(index, 1);
+        }
         state.current_weights.insert(index, 0);
+        state.active_backend_count += 1;
     }
 
     fn on_backend_removed(&self, index: usize) {
         let mut state = self.state.lock();
+        if index >= state.active_backend_count {
+            return;
+        }
+
+        state.active_backend_count -= 1;
         if index < state.weights.len() {
             state.weights.remove(index);
         }
@@ -480,6 +494,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     /// Create an empty load balancer.
     #[must_use]
     pub fn empty(strategy: T) -> Self {
+        strategy.sync_backend_count(0);
         Self {
             backends: Mutex::new(Vec::new()),
             strategy,
@@ -1272,6 +1287,42 @@ mod tests {
     }
 
     #[test]
+    fn lb_empty_preserves_weighted_configuration_for_future_backends() {
+        init_test("lb_empty_preserves_weighted_configuration_for_future_backends");
+        let lb = LoadBalancer::<String, _>::empty(Weighted::new(vec![3, 1]));
+
+        let state = lb.strategy().state.lock();
+        assert!(
+            state.current_weights.is_empty(),
+            "empty balancer must not retain live SWRR state without live backends"
+        );
+        assert_eq!(
+            state.weights,
+            vec![3, 1],
+            "empty balancer must preserve deferred configured weights for later insertions"
+        );
+        assert_eq!(
+            state.active_backend_count, 0,
+            "empty balancer should report zero live weighted backends"
+        );
+        drop(state);
+
+        lb.push("backend-a".to_string());
+        lb.push("backend-b".to_string());
+
+        let loads = lb.loads();
+        let pattern: Vec<_> = (0..4)
+            .map(|_| {
+                lb.strategy()
+                    .pick(&loads)
+                    .expect("weighted strategy should use preserved deferred weights")
+            })
+            .collect();
+        assert_eq!(pattern, vec![0, 0, 1, 0]);
+        crate::test_complete!("lb_empty_preserves_weighted_configuration_for_future_backends");
+    }
+
+    #[test]
     fn lb_push() {
         let lb = LoadBalancer::<MockService, _>::empty(RoundRobin::new());
         lb.push(MockService::new(1));
@@ -1732,6 +1783,42 @@ mod tests {
             .collect();
         assert_eq!(pattern, vec![0, 1, 0, 1]);
         crate::test_complete!("lb_new_syncs_weighted_strategy_state_for_initial_backends");
+    }
+
+    #[test]
+    fn lb_new_preserves_deferred_weight_for_later_backend_insert() {
+        init_test("lb_new_preserves_deferred_weight_for_later_backend_insert");
+        let lb = LoadBalancer::new(Weighted::new(vec![9, 4]), vec!["backend-a".to_string()]);
+
+        let state = lb.strategy().state.lock();
+        assert_eq!(
+            state.weights,
+            vec![9, 4],
+            "constructor reconciliation must preserve caller-supplied deferred weights"
+        );
+        assert_eq!(
+            state.current_weights,
+            vec![0],
+            "constructor reconciliation must keep only live SWRR state for materialized backends"
+        );
+        assert_eq!(
+            state.active_backend_count, 1,
+            "constructor reconciliation must track the live backend count separately"
+        );
+        drop(state);
+
+        lb.push("backend-b".to_string());
+        let loads = lb.loads();
+        let picks: Vec<_> = (0..13)
+            .map(|_| {
+                lb.strategy()
+                    .pick(&loads)
+                    .expect("weighted strategy should activate the preserved deferred weight")
+            })
+            .collect();
+        assert_eq!(picks.iter().filter(|&&idx| idx == 0).count(), 9);
+        assert_eq!(picks.iter().filter(|&&idx| idx == 1).count(), 4);
+        crate::test_complete!("lb_new_preserves_deferred_weight_for_later_backend_insert");
     }
 
     #[test]
