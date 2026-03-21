@@ -568,10 +568,18 @@ export const BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID =
 export const BROWSER_SERVICE_WORKER_BROKER_LANE =
   "lane.browser.service_worker.broker";
 export const BROWSER_BRIDGE_ONLY_FALLBACK_TARGET = "bridge_fallback";
+export const BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID =
+  "wasm-shared-worker-tenancy-lifecycle-v1";
+export const BROWSER_SHARED_WORKER_COORDINATOR_LANE =
+  "lane.browser.shared_worker.coordinator";
+export const BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL =
+  "asupersync.browser.shared_worker.handshake.v1";
 export const BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED_CODE =
   "ASUPERSYNC_BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED";
 export const BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE =
   "ASUPERSYNC_BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED";
+export const BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE =
+  "ASUPERSYNC_BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED";
 
 export type BrowserServiceWorkerBrokerRequestedLane =
   typeof BROWSER_SERVICE_WORKER_BROKER_LANE;
@@ -779,6 +787,167 @@ export interface BrowserServiceWorkerBrokerOperationDiagnostics {
   capabilities: BrowserCapabilitySnapshot;
 }
 
+export type BrowserSharedWorkerCoordinatorRequestedLane =
+  typeof BROWSER_SHARED_WORKER_COORDINATOR_LANE;
+
+export type BrowserSharedWorkerCoordinatorFallbackTarget =
+  | typeof BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
+  | typeof BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE
+  | typeof BROWSER_BRIDGE_ONLY_FALLBACK_TARGET;
+
+export type BrowserSharedWorkerCoordinatorLifecycleState =
+  | "bootstrapping"
+  | "joining"
+  | "active"
+  | "draining"
+  | "quiescent"
+  | "terminated";
+
+export type BrowserSharedWorkerCoordinatorSupportReason =
+  | "supported"
+  | "shared_worker_api_missing"
+  | "origin_not_same_origin_or_opaque"
+  | "app_namespace_mismatch"
+  | "app_version_major_mismatch"
+  | "coordinator_protocol_version_mismatch"
+  | "durable_store_unavailable_for_recovery_required_profile"
+  | "registration_schema_mismatch"
+  | "coordinator_bootstrap_failure"
+  | "coordinator_crash_or_browser_reclaim"
+  | "operator_policy_disabled_shared_worker_lane"
+  | "lane_health_demoted";
+
+export interface BrowserSharedWorkerCoordinatorAdmissionTuple {
+  origin: string;
+  appNamespace: string;
+  appVersionMajor: number;
+  coordinatorProtocolVersion: number;
+  runProfile: string;
+}
+
+export interface BrowserSharedWorkerClientRegistration {
+  clientInstanceId: string;
+  clientEpoch: number;
+  clientKind: string;
+  clientStartedAtMs: number;
+  clientCapabilitySummary: Record<string, unknown> | null;
+  clientArtifactNamespace: string;
+}
+
+export interface BrowserSharedWorkerCoordinatorFeatureRequest {
+  required: string[];
+  optional: string[];
+}
+
+export type BrowserSharedWorkerFactory = (
+  scriptUrl: string,
+  workerName: string | null,
+) => BrowserSharedWorkerLike;
+
+export interface BrowserSharedWorkerCoordinatorSupportOptions {
+  allowBrowserMainThreadFallback?: boolean;
+  allowDedicatedWorkerFallback?: boolean;
+  appNamespace?: string | null;
+  appVersionMajor?: number | null;
+  backend?: BrowserStorageBackend;
+  coordinatorProtocolVersion?: number | null;
+  globalObject?: Record<string, unknown>;
+  operatorEnabled?: boolean;
+  origin?: string | null;
+  runProfile?: string | null;
+  scriptUrl?: string | URL | null;
+  workerFactory?: BrowserSharedWorkerFactory | null;
+  workerName?: string | null;
+}
+
+export interface BrowserSharedWorkerCoordinatorSelectionOptions
+  extends BrowserRuntimeOptions, BrowserSharedWorkerCoordinatorSupportOptions {
+  clientArtifactNamespace: string;
+  clientCapabilitySummary?: Record<string, unknown> | null;
+  clientEpoch?: number;
+  clientInstanceId?: string | null;
+  clientKind?: string | null;
+  clientStartedAtMs?: number;
+  handshakeTimeoutMs?: number;
+  optionalCoordinatorFeatures?: string[];
+  requiredCoordinatorFeatures?: string[];
+}
+
+export interface BrowserSharedWorkerCoordinatorSupportDiagnostics {
+  supported: boolean;
+  contractId: typeof BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID;
+  requestedLane: BrowserSharedWorkerCoordinatorRequestedLane;
+  fallbackTarget: BrowserSharedWorkerCoordinatorFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+  downgradeOrder: BrowserSharedWorkerCoordinatorFallbackTarget[];
+  backend: BrowserStorageBackend;
+  hostRole: BrowserExecutionHostRole;
+  runtimeContext: BrowserRuntimeContext;
+  reason: BrowserSharedWorkerCoordinatorSupportReason;
+  message: string;
+  guidance: string[];
+  origin: string | null;
+  appNamespace: string | null;
+  appVersionMajor: number | null;
+  coordinatorProtocolVersion: number | null;
+  runProfile: string;
+  scriptUrl: string | null;
+  workerName: string | null;
+  directRuntimeReason: BrowserRuntimeSupportReason;
+  directExecutionReasonCode: BrowserExecutionReasonCode;
+  runtimeSupport: BrowserRuntimeSupportDiagnostics;
+  capabilities: BrowserCapabilitySnapshot;
+}
+
+export interface BrowserSharedWorkerCoordinatorAttachDiagnostics {
+  contractId: typeof BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID;
+  requestedLane: BrowserSharedWorkerCoordinatorRequestedLane;
+  fallbackTarget: BrowserSharedWorkerCoordinatorFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+  admission: BrowserSharedWorkerCoordinatorAdmissionTuple;
+  client: BrowserSharedWorkerClientRegistration;
+  directExecutionLadder: BrowserExecutionLadderDiagnostics;
+  lifecycleState: BrowserSharedWorkerCoordinatorLifecycleState;
+  coordinatorFeatures: string[];
+  scriptUrl: string;
+  workerName: string | null;
+}
+
+export interface BrowserSharedWorkerCoordinatorHandshakeRequest {
+  type: "asupersync.browser.shared_worker.handshake.request";
+  protocol: typeof BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL;
+  contractId: typeof BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID;
+  admission: BrowserSharedWorkerCoordinatorAdmissionTuple;
+  client: BrowserSharedWorkerClientRegistration;
+  requestedFeatures: BrowserSharedWorkerCoordinatorFeatureRequest;
+}
+
+export interface BrowserSharedWorkerCoordinatorHandshakeResponse {
+  type: "asupersync.browser.shared_worker.handshake.response";
+  protocol: typeof BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL;
+  contractId: typeof BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID;
+  accepted: boolean;
+  reason?: BrowserSharedWorkerCoordinatorSupportReason;
+  message?: string;
+  guidance?: string[];
+  coordinatorFeatures?: string[];
+  coordinatorProtocolVersion?: number;
+  lifecycleState?: BrowserSharedWorkerCoordinatorLifecycleState;
+}
+
+export interface BrowserSharedWorkerCoordinatorSelectionResult {
+  selectedMode: "shared_worker" | "fallback";
+  support: BrowserSharedWorkerCoordinatorSupportDiagnostics;
+  executionLadder: BrowserExecutionLadderDiagnostics;
+  reason: BrowserSharedWorkerCoordinatorSupportReason | BrowserExecutionReasonCode;
+  message: string;
+  guidance: string[];
+  coordinator: BrowserSharedWorkerCoordinatorClient | null;
+  runtimeSelection: BrowserRuntimeSelectionResult | null;
+  fallbackTarget: BrowserSharedWorkerCoordinatorFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+}
+
 const DEDICATED_WORKER_GLOBAL_SCOPE_TAG = "[object DedicatedWorkerGlobalScope]";
 const INDEXEDDB_STORAGE_KEY_PREFIX = "asupersync:indexeddb:v1:";
 const LOCAL_STORAGE_KEY_PREFIX = "asupersync:storage:v1:";
@@ -815,6 +984,31 @@ interface BrowserArtifactIndex {
   nextSequence: number;
   retention: BrowserArtifactRetentionPolicy;
   entries: BrowserArtifactIndexEntry[];
+}
+
+interface BrowserSharedWorkerPortLike {
+  addEventListener(type: string, listener: (event: { data?: unknown }) => void): void;
+  close?(): void;
+  postMessage(message: unknown): void;
+  removeEventListener(type: string, listener: (event: { data?: unknown }) => void): void;
+  start?(): void;
+}
+
+interface BrowserSharedWorkerLike {
+  port: BrowserSharedWorkerPortLike;
+}
+
+interface BrowserSharedWorkerConstructorLike {
+  new (
+    scriptUrl: string,
+    options?: string | { name?: string },
+  ): BrowserSharedWorkerLike;
+}
+
+interface BrowserSharedWorkerCoordinatorSelectionFailure {
+  reason: BrowserSharedWorkerCoordinatorSupportReason;
+  message: string;
+  guidance: string[];
 }
 
 interface BrowserWebTransportReadableLike {
@@ -891,6 +1085,7 @@ const BROWSER_LANE_HEALTH_REGISTRY = new Map<
   string,
   Map<BrowserExecutionLane, BrowserLaneHealthSnapshot>
 >();
+let BROWSER_SHARED_WORKER_CLIENT_SEQUENCE = 0;
 
 function browserCapabilitySnapshot(
   globalObject: Record<string, unknown> | undefined,
@@ -2563,6 +2758,369 @@ export function createBrowserServiceWorkerBrokerOperationError(
   error.code = BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE;
   error.diagnostics = diagnostics;
   return error;
+}
+
+function browserSharedWorkerCoordinatorFallbackTargets(
+  hostRole: BrowserExecutionHostRole,
+  allowDedicatedWorkerFallback: boolean | undefined,
+  allowBrowserMainThreadFallback: boolean | undefined,
+): BrowserSharedWorkerCoordinatorFallbackTarget[] {
+  const targets: BrowserSharedWorkerCoordinatorFallbackTarget[] = [];
+  if (hostRole === "dedicated_worker") {
+    targets.push(BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE);
+  }
+  if (hostRole === "browser_main_thread") {
+    targets.push(BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE);
+  }
+  if (allowDedicatedWorkerFallback !== false) {
+    targets.push(BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE);
+  }
+  if (allowBrowserMainThreadFallback !== false) {
+    targets.push(BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE);
+  }
+  targets.push(BROWSER_BRIDGE_ONLY_FALLBACK_TARGET);
+  return Array.from(new Set(targets));
+}
+
+function browserSharedWorkerCoordinatorFallbackLaneId(
+  target: BrowserSharedWorkerCoordinatorFallbackTarget,
+): BrowserExecutionLane | null {
+  return target === BROWSER_BRIDGE_ONLY_FALLBACK_TARGET ? null : target;
+}
+
+function normalizeBrowserSharedWorkerCoordinatorString(
+  value: string,
+  label: string,
+): string {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new TypeError(`${label} must not be empty`);
+  }
+  return normalized;
+}
+
+function normalizeOptionalBrowserSharedWorkerCoordinatorString(
+  value: string | null | undefined,
+): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length === 0 ? null : normalized;
+}
+
+function normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+  value: number | null | undefined,
+): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(value)) {
+    throw new TypeError("shared-worker coordinator version fields must be finite numbers");
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function normalizeBrowserSharedWorkerCoordinatorFeatures(
+  values: string[] | null | undefined,
+): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0),
+    ),
+  ).sort();
+}
+
+function normalizeBrowserSharedWorkerCoordinatorLifecycleState(
+  value: string,
+): BrowserSharedWorkerCoordinatorLifecycleState {
+  switch (value) {
+    case "bootstrapping":
+    case "joining":
+    case "active":
+    case "draining":
+    case "quiescent":
+    case "terminated":
+      return value;
+    default:
+      throw new TypeError("shared-worker coordinator lifecycle_state is invalid");
+  }
+}
+
+function browserSharedWorkerConstructor(
+  globalObject: Record<string, unknown> | undefined,
+): BrowserSharedWorkerConstructorLike | null {
+  if (typeof globalObject?.SharedWorker !== "function") {
+    return null;
+  }
+  return globalObject.SharedWorker as BrowserSharedWorkerConstructorLike;
+}
+
+function browserSharedWorkerCoordinatorOrigin(
+  globalObject: Record<string, unknown> | undefined,
+): string | null {
+  return browserServiceWorkerBrokerOrigin(globalObject);
+}
+
+function browserSharedWorkerCoordinatorResolvedScriptUrl(
+  scriptUrl: string | URL | null | undefined,
+  globalObject: Record<string, unknown> | undefined,
+): string | null {
+  if (scriptUrl === null || scriptUrl === undefined) {
+    return null;
+  }
+  const raw =
+    scriptUrl instanceof URL ? scriptUrl.toString() : scriptUrl.trim();
+  if (!raw) {
+    return null;
+  }
+  const hrefCandidate = (
+    globalObject as {
+      location?: {
+        href?: unknown;
+      };
+    } | undefined
+  )?.location?.href;
+  try {
+    if (typeof hrefCandidate === "string" && hrefCandidate.length > 0) {
+      return new URL(raw, hrefCandidate).toString();
+    }
+    return new URL(raw).toString();
+  } catch {
+    return null;
+  }
+}
+
+function browserSharedWorkerCoordinatorScriptOrigin(
+  scriptUrl: string | null,
+): string | null {
+  if (scriptUrl === null) {
+    return null;
+  }
+  try {
+    return new URL(scriptUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
+function browserSharedWorkerCoordinatorGuidance(
+  reason: BrowserSharedWorkerCoordinatorSupportReason,
+  fallbackTarget: BrowserSharedWorkerCoordinatorFallbackTarget,
+): string[] {
+  switch (reason) {
+    case "shared_worker_api_missing":
+      return [
+        "Call the bounded SharedWorker coordinator helper only from a browser main-thread or dedicated-worker host that exposes globalThis.SharedWorker.",
+        "Fall back to the current truthful direct-runtime lane when the coordinator surface is unavailable.",
+      ];
+    case "origin_not_same_origin_or_opaque":
+      return [
+        "Keep the SharedWorker script same-origin with the calling page or worker and avoid opaque origins.",
+        "Downgrade immediately instead of guessing across cross-origin or opaque-origin boundaries.",
+      ];
+    case "app_namespace_mismatch":
+      return [
+        "Keep the coordinator admission tuple scoped to one app_namespace and fail closed on drift.",
+        "Start a fresh coordinator or downgrade instead of mixing tenants under one worker name.",
+      ];
+    case "app_version_major_mismatch":
+      return [
+        "Treat app_version_major drift as a restart boundary and attach a new coordinator explicitly.",
+        "Do not guess forward across major-version changes when joining a shared coordinator.",
+      ];
+    case "coordinator_protocol_version_mismatch":
+      return [
+        "Keep the coordinator_protocol_version exact on both sides of the handshake.",
+        "Downgrade instead of attaching to a coordinator that reports a different protocol contract.",
+      ];
+    case "durable_store_unavailable_for_recovery_required_profile":
+      return [
+        "Use IndexedDB-backed or localStorage-backed durability before claiming recovery-required SharedWorker reuse.",
+        "Switch to the ephemeral profile or downgrade immediately when no durable substrate is available.",
+      ];
+    case "registration_schema_mismatch":
+      return [
+        "Send a complete admission tuple plus client registration record before treating a SharedWorker attach as admitted.",
+        "Fail closed when required handshake fields or features drift.",
+      ];
+    case "coordinator_bootstrap_failure":
+      return [
+        "Provide a same-origin SharedWorker script URL or a custom workerFactory before attempting attach.",
+        "Treat coordinator creation failure as a downgrade trigger, not as partial success.",
+      ];
+    case "coordinator_crash_or_browser_reclaim":
+      return [
+        "Downgrade immediately when the SharedWorker crashes or the browser reclaims it.",
+        "Re-establish any capability-bearing handles explicitly after coordinator loss.",
+      ];
+    case "operator_policy_disabled_shared_worker_lane":
+      return [
+        "Leave the SharedWorker lane opt-in and policy-controlled rather than silently widening Browser Edition behavior.",
+        "Keep runtime creation on the fallback lane while this policy flag is disabled.",
+      ];
+    case "lane_health_demoted":
+      return [
+        "Honor the current lane-health demotion and stay on the truthful fallback lane until it is reset.",
+        "Do not keep attempting SharedWorker attach while the fallback lane is already in a fail-closed state.",
+      ];
+    default:
+      return [
+        `Use ${fallbackTarget} as the next truthful downgrade target when SharedWorker attach is denied or lost.`,
+        "Keep direct BrowserRuntime creation fail-closed inside the shared-worker host itself.",
+      ];
+  }
+}
+
+export function detectBrowserSharedWorkerCoordinatorSupport(
+  options: BrowserSharedWorkerCoordinatorSupportOptions = {},
+): BrowserSharedWorkerCoordinatorSupportDiagnostics {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
+  const hostRole = browserExecutionHostRole(
+    globalObject,
+    runtimeSupport.capabilities,
+  );
+  const fallbackTargets = browserSharedWorkerCoordinatorFallbackTargets(
+    hostRole,
+    options.allowDedicatedWorkerFallback,
+    options.allowBrowserMainThreadFallback,
+  );
+  const fallbackTarget = fallbackTargets[0];
+  const fallbackLaneId = browserSharedWorkerCoordinatorFallbackLaneId(
+    fallbackTarget,
+  );
+  const origin = normalizeOptionalBrowserSharedWorkerCoordinatorString(
+    options.origin ?? browserSharedWorkerCoordinatorOrigin(globalObject),
+  );
+  const appNamespace = normalizeOptionalBrowserSharedWorkerCoordinatorString(
+    options.appNamespace,
+  );
+  const appVersionMajor =
+    normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+      options.appVersionMajor,
+    );
+  const coordinatorProtocolVersion =
+    normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+      options.coordinatorProtocolVersion,
+    );
+  const runProfile =
+    normalizeOptionalBrowserSharedWorkerCoordinatorString(options.runProfile)
+    ?? "ephemeral";
+  const backend = options.backend ?? "indexeddb";
+  const workerName = normalizeOptionalBrowserSharedWorkerCoordinatorString(
+    options.workerName,
+  );
+  const scriptUrl = browserSharedWorkerCoordinatorResolvedScriptUrl(
+    options.scriptUrl,
+    globalObject,
+  );
+  const scriptOrigin = browserSharedWorkerCoordinatorScriptOrigin(scriptUrl);
+  const sharedWorkerCtor = options.workerFactory
+    ? null
+    : browserSharedWorkerConstructor(globalObject);
+
+  let reason: BrowserSharedWorkerCoordinatorSupportReason = "supported";
+  if (options.operatorEnabled === false) {
+    reason = "operator_policy_disabled_shared_worker_lane";
+  } else if (
+    hostRole !== "browser_main_thread"
+    && hostRole !== "dedicated_worker"
+  ) {
+    reason = "shared_worker_api_missing";
+  } else if (!options.workerFactory && sharedWorkerCtor === null) {
+    reason = "shared_worker_api_missing";
+  } else if (!options.workerFactory && scriptUrl === null) {
+    reason = "coordinator_bootstrap_failure";
+  } else if (origin === null || origin === "null") {
+    reason = "origin_not_same_origin_or_opaque";
+  } else if (scriptOrigin !== null && scriptOrigin !== origin) {
+    reason = "origin_not_same_origin_or_opaque";
+  } else if (
+    appNamespace === null
+    || appVersionMajor === null
+    || coordinatorProtocolVersion === null
+  ) {
+    reason = "registration_schema_mismatch";
+  } else if (
+    runProfile !== "ephemeral"
+    && (
+      (backend === "indexeddb" && browserIndexedDbFactory(globalObject) === null)
+      || (backend === "localstorage"
+        && browserLocalStorage(globalObject) === null)
+    )
+  ) {
+    reason = "durable_store_unavailable_for_recovery_required_profile";
+  }
+
+  const guidance = browserSharedWorkerCoordinatorGuidance(
+    reason,
+    fallbackTarget,
+  );
+  const directExecutionReasonCode = browserExecutionReasonCodeFromRuntimeSupport(
+    runtimeSupport.reason,
+  );
+  const message =
+    reason === "supported"
+      ? "@asupersync/browser shared-worker coordinator prerequisites are available; direct BrowserRuntime creation remains fail-closed inside the shared-worker host and attach must downgrade explicitly on denial or loss."
+      : `@asupersync/browser shared-worker coordinator prerequisites are not satisfied: ${reason}.`;
+
+  return {
+    supported: reason === "supported",
+    contractId: BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
+    requestedLane: BROWSER_SHARED_WORKER_COORDINATOR_LANE,
+    fallbackTarget,
+    fallbackLaneId,
+    downgradeOrder: fallbackTargets,
+    backend,
+    hostRole,
+    runtimeContext: runtimeSupport.runtimeContext,
+    reason,
+    message,
+    guidance,
+    origin,
+    appNamespace,
+    appVersionMajor,
+    coordinatorProtocolVersion,
+    runProfile,
+    scriptUrl,
+    workerName,
+    directRuntimeReason: runtimeSupport.reason,
+    directExecutionReasonCode,
+    runtimeSupport,
+    capabilities: runtimeSupport.capabilities,
+  };
+}
+
+export function createBrowserSharedWorkerCoordinatorUnsupportedError(
+  diagnostics: BrowserSharedWorkerCoordinatorSupportDiagnostics,
+): Error & {
+  code: typeof BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE;
+  diagnostics: BrowserSharedWorkerCoordinatorSupportDiagnostics;
+} {
+  const error = new Error(
+    `${BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE}: ${diagnostics.message} ${diagnostics.guidance.join(" ")}`.trim(),
+  ) as Error & {
+    code: typeof BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE;
+    diagnostics: BrowserSharedWorkerCoordinatorSupportDiagnostics;
+  };
+  error.code = BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE;
+  error.diagnostics = diagnostics;
+  return error;
+}
+
+export function assertBrowserSharedWorkerCoordinatorSupport(
+  diagnostics: BrowserSharedWorkerCoordinatorSupportDiagnostics = detectBrowserSharedWorkerCoordinatorSupport(),
+): BrowserSharedWorkerCoordinatorSupportDiagnostics {
+  if (!diagnostics.supported) {
+    throw createBrowserSharedWorkerCoordinatorUnsupportedError(diagnostics);
+  }
+  return diagnostics;
 }
 
 function browserStorageFailureReason(
@@ -6092,6 +6650,569 @@ export class CancellationToken {
       message: this.message ?? null,
       truncated: false,
     };
+  }
+}
+
+function createBrowserSharedWorkerCoordinatorAdmission(
+  support: BrowserSharedWorkerCoordinatorSupportDiagnostics,
+): BrowserSharedWorkerCoordinatorAdmissionTuple {
+  return {
+    origin: normalizeBrowserSharedWorkerCoordinatorString(
+      support.origin ?? "",
+      "shared-worker coordinator origin",
+    ),
+    appNamespace: normalizeBrowserSharedWorkerCoordinatorString(
+      support.appNamespace ?? "",
+      "shared-worker coordinator app_namespace",
+    ),
+    appVersionMajor: normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+      support.appVersionMajor,
+    ) ?? 0,
+    coordinatorProtocolVersion:
+      normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+        support.coordinatorProtocolVersion,
+      ) ?? 0,
+    runProfile: normalizeBrowserSharedWorkerCoordinatorString(
+      support.runProfile,
+      "shared-worker coordinator run_profile",
+    ),
+  };
+}
+
+function createBrowserSharedWorkerClientRegistration(
+  options: BrowserSharedWorkerCoordinatorSelectionOptions,
+  executionLadder: BrowserExecutionLadderDiagnostics,
+): BrowserSharedWorkerClientRegistration {
+  const now = options.now ?? (() => Date.now());
+  BROWSER_SHARED_WORKER_CLIENT_SEQUENCE += 1;
+  const clientInstanceId =
+    normalizeOptionalBrowserSharedWorkerCoordinatorString(
+      options.clientInstanceId,
+    )
+    ?? `browser-shared-worker-client-${Math.max(0, Math.trunc(now()))}-${BROWSER_SHARED_WORKER_CLIENT_SEQUENCE}`;
+  const clientKind =
+    normalizeOptionalBrowserSharedWorkerCoordinatorString(options.clientKind)
+    ?? (
+      executionLadder.hostRole === "dedicated_worker"
+        ? "dedicated_worker"
+        : "browser_tab"
+    );
+  const clientCapabilitySummary =
+    options.clientCapabilitySummary ?? { ...executionLadder.capabilities };
+  return {
+    clientInstanceId: normalizeBrowserSharedWorkerCoordinatorString(
+      clientInstanceId,
+      "shared-worker coordinator client_instance_id",
+    ),
+    clientEpoch:
+      normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+        options.clientEpoch,
+      ) ?? 0,
+    clientKind: normalizeBrowserSharedWorkerCoordinatorString(
+      clientKind,
+      "shared-worker coordinator client_kind",
+    ),
+    clientStartedAtMs: Math.max(
+      0,
+      Math.trunc(options.clientStartedAtMs ?? now()),
+    ),
+    clientCapabilitySummary,
+    clientArtifactNamespace: normalizeBrowserSharedWorkerCoordinatorString(
+      options.clientArtifactNamespace,
+      "shared-worker coordinator client_artifact_namespace",
+    ),
+  };
+}
+
+function createBrowserSharedWorkerInstance(
+  support: BrowserSharedWorkerCoordinatorSupportDiagnostics,
+  options: BrowserSharedWorkerCoordinatorSelectionOptions,
+  globalObject: Record<string, unknown> | undefined,
+): BrowserSharedWorkerLike {
+  const workerName = support.workerName;
+  if (options.workerFactory) {
+    return options.workerFactory(support.scriptUrl ?? "", workerName);
+  }
+  const ctor = browserSharedWorkerConstructor(globalObject);
+  if (!ctor || support.scriptUrl === null) {
+    throw {
+      reason: "coordinator_bootstrap_failure",
+      message:
+        "SharedWorker coordinator attach requires either a same-origin scriptUrl or a custom workerFactory.",
+      guidance: browserSharedWorkerCoordinatorGuidance(
+        "coordinator_bootstrap_failure",
+        support.fallbackTarget,
+      ),
+    } satisfies BrowserSharedWorkerCoordinatorSelectionFailure;
+  }
+  return workerName === null
+    ? new ctor(support.scriptUrl)
+    : new ctor(support.scriptUrl, { name: workerName });
+}
+
+function isBrowserSharedWorkerCoordinatorSelectionFailure(
+  error: unknown,
+): error is BrowserSharedWorkerCoordinatorSelectionFailure {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "reason" in error
+    && "message" in error
+    && "guidance" in error
+  );
+}
+
+function isBrowserSharedWorkerCoordinatorHandshakeResponse(
+  value: unknown,
+): value is BrowserSharedWorkerCoordinatorHandshakeResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<BrowserSharedWorkerCoordinatorHandshakeResponse>;
+  return (
+    candidate.type === "asupersync.browser.shared_worker.handshake.response"
+    && candidate.protocol === BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL
+    && candidate.contractId === BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID
+    && typeof candidate.accepted === "boolean"
+  );
+}
+
+function browserSharedWorkerMissingRequiredFeatures(
+  required: string[],
+  available: string[],
+): string[] {
+  const availableSet = new Set(available);
+  return required.filter((feature) => !availableSet.has(feature));
+}
+
+async function awaitBrowserSharedWorkerCoordinatorHandshake(
+  port: BrowserSharedWorkerPortLike,
+  request: BrowserSharedWorkerCoordinatorHandshakeRequest,
+  timeoutMs: number,
+  fallbackTarget: BrowserSharedWorkerCoordinatorFallbackTarget,
+): Promise<BrowserSharedWorkerCoordinatorHandshakeResponse> {
+  return new Promise((resolve, reject) => {
+    const fail = (
+      reason: BrowserSharedWorkerCoordinatorSupportReason,
+      message: string,
+      guidance: string[],
+    ) => {
+      reject({
+        reason,
+        message,
+        guidance,
+      } satisfies BrowserSharedWorkerCoordinatorSelectionFailure);
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      fail(
+        "coordinator_bootstrap_failure",
+        `SharedWorker coordinator attach timed out after ${timeoutMs}ms.`,
+        [
+          "Keep the SharedWorker attach timeout bounded and deterministic.",
+          `Downgrade immediately to ${fallbackTarget} when the coordinator does not answer in time.`,
+        ],
+      );
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      port.removeEventListener("message", onMessage);
+      port.removeEventListener("messageerror", onMessageError);
+    };
+
+    const onMessage = (event: { data?: unknown }) => {
+      if (!isBrowserSharedWorkerCoordinatorHandshakeResponse(event.data)) {
+        return;
+      }
+      cleanup();
+      resolve(event.data);
+    };
+
+    const onMessageError = () => {
+      cleanup();
+      fail(
+        "registration_schema_mismatch",
+        "SharedWorker coordinator handshake payload could not be decoded cleanly.",
+        [
+          "Keep handshake payloads JSON-serializable and pinned to the shared-worker coordinator contract schema.",
+          "Fail closed rather than treating an unreadable handshake as partial success.",
+        ],
+      );
+    };
+
+    port.addEventListener("message", onMessage);
+    port.addEventListener("messageerror", onMessageError);
+    port.start?.();
+
+    try {
+      port.postMessage(request);
+    } catch (error) {
+      cleanup();
+      fail(
+        "coordinator_bootstrap_failure",
+        `SharedWorker coordinator attach failed before the handshake could start: ${errorMessage(error)}`,
+        browserSharedWorkerCoordinatorGuidance(
+          "coordinator_bootstrap_failure",
+          fallbackTarget,
+        ),
+      );
+    }
+  });
+}
+
+async function createBrowserSharedWorkerFallbackSelection(
+  options: BrowserSharedWorkerCoordinatorSelectionOptions,
+  support: BrowserSharedWorkerCoordinatorSupportDiagnostics,
+  reason: BrowserSharedWorkerCoordinatorSupportReason | BrowserExecutionReasonCode,
+  message: string,
+  guidance: string[],
+): Promise<BrowserSharedWorkerCoordinatorSelectionResult> {
+  const runtimeSelection = await createBrowserRuntimeSelection({
+    wasmInput: options.wasmInput,
+    consumerVersion: options.consumerVersion,
+    eagerInit: options.eagerInit,
+    globalObject: options.globalObject,
+    preferredLane: options.preferredLane,
+    healthPolicy: options.healthPolicy,
+    healthScopeKey: options.healthScopeKey,
+    now: options.now,
+  });
+
+  const finalGuidance = [...guidance];
+  let finalMessage = message;
+  if (!runtimeSelection.executionLadder.supported) {
+    finalMessage =
+      `${finalMessage} Fallback runtime selection stayed on ${runtimeSelection.executionLadder.selectedLane} because Browser Edition currently reports ${runtimeSelection.executionLadder.reasonCode}.`;
+    finalGuidance.push(...runtimeSelection.executionLadder.guidance);
+    if (runtimeSelection.executionLadder.reasonCode === "demote_due_to_lane_health") {
+      finalGuidance.push(
+        ...browserSharedWorkerCoordinatorGuidance(
+          "lane_health_demoted",
+          support.fallbackTarget,
+        ),
+      );
+    }
+  }
+
+  return {
+    selectedMode: "fallback",
+    support,
+    executionLadder: runtimeSelection.executionLadder,
+    reason,
+    message: finalMessage,
+    guidance: Array.from(new Set(finalGuidance)),
+    coordinator: null,
+    runtimeSelection,
+    fallbackTarget: support.fallbackTarget,
+    fallbackLaneId: support.fallbackLaneId,
+  };
+}
+
+export class BrowserSharedWorkerCoordinatorClient {
+  private readonly attachDiagnosticsSnapshot: Omit<
+    BrowserSharedWorkerCoordinatorAttachDiagnostics,
+    "lifecycleState"
+  >;
+  private readonly portHandle: BrowserSharedWorkerPortLike;
+  private readonly workerHandle: BrowserSharedWorkerLike;
+  private lifecycleStateValue: BrowserSharedWorkerCoordinatorLifecycleState;
+
+  constructor(
+    worker: BrowserSharedWorkerLike,
+    port: BrowserSharedWorkerPortLike,
+    attachDiagnostics: BrowserSharedWorkerCoordinatorAttachDiagnostics,
+  ) {
+    this.attachDiagnosticsSnapshot = {
+      contractId: attachDiagnostics.contractId,
+      requestedLane: attachDiagnostics.requestedLane,
+      fallbackTarget: attachDiagnostics.fallbackTarget,
+      fallbackLaneId: attachDiagnostics.fallbackLaneId,
+      admission: { ...attachDiagnostics.admission },
+      client: {
+        ...attachDiagnostics.client,
+        clientCapabilitySummary:
+          attachDiagnostics.client.clientCapabilitySummary === null
+            ? null
+            : { ...attachDiagnostics.client.clientCapabilitySummary },
+      },
+      directExecutionLadder: attachDiagnostics.directExecutionLadder,
+      coordinatorFeatures: [...attachDiagnostics.coordinatorFeatures],
+      scriptUrl: attachDiagnostics.scriptUrl,
+      workerName: attachDiagnostics.workerName,
+    };
+    this.lifecycleStateValue = attachDiagnostics.lifecycleState;
+    this.portHandle = port;
+    this.workerHandle = worker;
+  }
+
+  get lifecycleState(): BrowserSharedWorkerCoordinatorLifecycleState {
+    return this.lifecycleStateValue;
+  }
+
+  diagnostics(): BrowserSharedWorkerCoordinatorAttachDiagnostics {
+    return {
+      ...this.attachDiagnosticsSnapshot,
+      admission: { ...this.attachDiagnosticsSnapshot.admission },
+      client: {
+        ...this.attachDiagnosticsSnapshot.client,
+        clientCapabilitySummary:
+          this.attachDiagnosticsSnapshot.client.clientCapabilitySummary === null
+            ? null
+            : { ...this.attachDiagnosticsSnapshot.client.clientCapabilitySummary },
+      },
+      coordinatorFeatures: [...this.attachDiagnosticsSnapshot.coordinatorFeatures],
+      lifecycleState: this.lifecycleStateValue,
+    };
+  }
+
+  postMessage(message: unknown): void {
+    this.portHandle.postMessage(message);
+  }
+
+  updateLifecycleState(
+    lifecycleState: BrowserSharedWorkerCoordinatorLifecycleState,
+  ): BrowserSharedWorkerCoordinatorAttachDiagnostics {
+    this.lifecycleStateValue =
+      normalizeBrowserSharedWorkerCoordinatorLifecycleState(lifecycleState);
+    return this.diagnostics();
+  }
+
+  close(): void {
+    if (this.lifecycleStateValue === "terminated") {
+      return;
+    }
+    if (this.lifecycleStateValue !== "quiescent") {
+      this.lifecycleStateValue = "draining";
+    }
+    try {
+      this.portHandle.postMessage({
+        type: "asupersync.browser.shared_worker.detach",
+        protocol: BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL,
+        contractId: BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
+        clientInstanceId: this.attachDiagnosticsSnapshot.client.clientInstanceId,
+        clientEpoch: this.attachDiagnosticsSnapshot.client.clientEpoch,
+      });
+    } catch {
+      // Closing the client must stay best-effort because the browser may have
+      // already reclaimed the coordinator or detached the port.
+    }
+    this.portHandle.close?.();
+    void this.workerHandle;
+    this.lifecycleStateValue = "terminated";
+  }
+}
+
+export async function createBrowserSharedWorkerCoordinatorSelection(
+  options: BrowserSharedWorkerCoordinatorSelectionOptions,
+): Promise<BrowserSharedWorkerCoordinatorSelectionResult> {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const executionLadder = detectBrowserExecutionLadder({
+    globalObject,
+    preferredLane: options.preferredLane,
+    healthPolicy: options.healthPolicy,
+    healthScopeKey: options.healthScopeKey,
+    now: options.now,
+  });
+  const support = detectBrowserSharedWorkerCoordinatorSupport({
+    allowBrowserMainThreadFallback: options.allowBrowserMainThreadFallback,
+    allowDedicatedWorkerFallback: options.allowDedicatedWorkerFallback,
+    appNamespace: options.appNamespace,
+    appVersionMajor: options.appVersionMajor,
+    backend: options.backend,
+    coordinatorProtocolVersion: options.coordinatorProtocolVersion,
+    globalObject,
+    operatorEnabled: options.operatorEnabled,
+    origin: options.origin,
+    runProfile: options.runProfile,
+    scriptUrl: options.scriptUrl,
+    workerFactory: options.workerFactory,
+    workerName: options.workerName,
+  });
+
+  if (!support.supported) {
+    return createBrowserSharedWorkerFallbackSelection(
+      options,
+      support,
+      support.reason,
+      support.message,
+      support.guidance,
+    );
+  }
+
+  const admission = createBrowserSharedWorkerCoordinatorAdmission(support);
+  const client = createBrowserSharedWorkerClientRegistration(
+    options,
+    executionLadder,
+  );
+  const requestedFeatures = {
+    required: normalizeBrowserSharedWorkerCoordinatorFeatures(
+      options.requiredCoordinatorFeatures,
+    ),
+    optional: normalizeBrowserSharedWorkerCoordinatorFeatures(
+      options.optionalCoordinatorFeatures,
+    ),
+  } satisfies BrowserSharedWorkerCoordinatorFeatureRequest;
+  const handshakeTimeoutMs = Math.max(
+    1,
+    Math.trunc(options.handshakeTimeoutMs ?? 2_000),
+  );
+
+  try {
+    const worker = createBrowserSharedWorkerInstance(
+      support,
+      options,
+      globalObject,
+    );
+    const port = worker.port;
+    if (
+      !port
+      || typeof port.postMessage !== "function"
+      || typeof port.addEventListener !== "function"
+      || typeof port.removeEventListener !== "function"
+    ) {
+      throw {
+        reason: "coordinator_bootstrap_failure",
+        message:
+          "SharedWorker coordinator did not expose a usable MessagePort for attach.",
+        guidance: browserSharedWorkerCoordinatorGuidance(
+          "coordinator_bootstrap_failure",
+          support.fallbackTarget,
+        ),
+      } satisfies BrowserSharedWorkerCoordinatorSelectionFailure;
+    }
+
+    const request: BrowserSharedWorkerCoordinatorHandshakeRequest = {
+      type: "asupersync.browser.shared_worker.handshake.request",
+      protocol: BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL,
+      contractId: BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
+      admission,
+      client,
+      requestedFeatures,
+    };
+    const response = await awaitBrowserSharedWorkerCoordinatorHandshake(
+      port,
+      request,
+      handshakeTimeoutMs,
+      support.fallbackTarget,
+    );
+    const responseReason = response.reason ?? "registration_schema_mismatch";
+    if (!response.accepted) {
+      port.close?.();
+      return createBrowserSharedWorkerFallbackSelection(
+        options,
+        support,
+        responseReason,
+        response.message
+          ?? `SharedWorker coordinator rejected attach with ${responseReason}.`,
+        response.guidance
+          ?? browserSharedWorkerCoordinatorGuidance(
+            responseReason,
+            support.fallbackTarget,
+          ),
+      );
+    }
+
+    if (
+      response.coordinatorProtocolVersion !== undefined
+      && response.coordinatorProtocolVersion !== admission.coordinatorProtocolVersion
+    ) {
+      port.close?.();
+      return createBrowserSharedWorkerFallbackSelection(
+        options,
+        support,
+        "coordinator_protocol_version_mismatch",
+        `SharedWorker coordinator reported protocol ${response.coordinatorProtocolVersion}, expected ${admission.coordinatorProtocolVersion}.`,
+        browserSharedWorkerCoordinatorGuidance(
+          "coordinator_protocol_version_mismatch",
+          support.fallbackTarget,
+        ),
+      );
+    }
+
+    const coordinatorFeatures =
+      normalizeBrowserSharedWorkerCoordinatorFeatures(
+        response.coordinatorFeatures,
+      );
+    const missingRequiredFeatures =
+      browserSharedWorkerMissingRequiredFeatures(
+        requestedFeatures.required,
+        coordinatorFeatures,
+      );
+    if (missingRequiredFeatures.length > 0) {
+      port.close?.();
+      return createBrowserSharedWorkerFallbackSelection(
+        options,
+        support,
+        "registration_schema_mismatch",
+        `SharedWorker coordinator is missing required features: ${missingRequiredFeatures.join(", ")}.`,
+        browserSharedWorkerCoordinatorGuidance(
+          "registration_schema_mismatch",
+          support.fallbackTarget,
+        ),
+      );
+    }
+
+    const lifecycleState =
+      response.lifecycleState === undefined
+        ? "active"
+        : normalizeBrowserSharedWorkerCoordinatorLifecycleState(
+          response.lifecycleState,
+        );
+    const coordinator = new BrowserSharedWorkerCoordinatorClient(
+      worker,
+      port,
+      {
+        contractId: BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
+        requestedLane: BROWSER_SHARED_WORKER_COORDINATOR_LANE,
+        fallbackTarget: support.fallbackTarget,
+        fallbackLaneId: support.fallbackLaneId,
+        admission,
+        client,
+        directExecutionLadder: executionLadder,
+        lifecycleState,
+        coordinatorFeatures,
+        scriptUrl: support.scriptUrl ?? "<custom-worker-factory>",
+        workerName: support.workerName,
+      },
+    );
+
+    return {
+      selectedMode: "shared_worker",
+      support,
+      executionLadder,
+      reason: "supported",
+      message:
+        `@asupersync/browser attached a SharedWorker coordinator and preserved ${support.fallbackTarget} as the truthful downgrade lane.`,
+      guidance: [
+        "Treat the SharedWorker coordinator as an optional optimization over the current direct-runtime lane, not as a new ambient authority boundary.",
+        "Downgrade immediately to the fallback lane whenever the coordinator denies attach, crashes, or is reclaimed by the browser.",
+      ],
+      coordinator,
+      runtimeSelection: null,
+      fallbackTarget: support.fallbackTarget,
+      fallbackLaneId: support.fallbackLaneId,
+    };
+  } catch (error) {
+    const failure: BrowserSharedWorkerCoordinatorSelectionFailure =
+      isBrowserSharedWorkerCoordinatorSelectionFailure(error)
+        ? error
+        : {
+          reason: "coordinator_bootstrap_failure",
+          message: `SharedWorker coordinator attach failed: ${errorMessage(error)}`,
+          guidance: browserSharedWorkerCoordinatorGuidance(
+            "coordinator_bootstrap_failure",
+            support.fallbackTarget,
+          ),
+        };
+    return createBrowserSharedWorkerFallbackSelection(
+      options,
+      support,
+      failure.reason,
+      failure.message,
+      failure.guidance,
+    );
   }
 }
 
