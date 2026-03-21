@@ -209,7 +209,7 @@ fn run_scenario(seed: u64, record: bool) -> SeedOutcome {
 
     let leak_count = detected_leak_count(&runtime);
     let event_count = runtime.replay_recorder().event_count();
-    let wall_ms = start.elapsed().as_millis() as u64;
+    let wall_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     SeedOutcome {
         leak_count,
@@ -407,7 +407,7 @@ fn main() {
         }
     }
 
-    let search_ms = search_start.elapsed().as_millis() as u64;
+    let search_ms = search_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     eprintln!("  demo_search_attempts_total={attempts}");
     eprintln!("  demo_search_duration_ms={search_ms}");
 

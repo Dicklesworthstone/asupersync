@@ -309,7 +309,7 @@ impl<'a, R: RuntimeInterface> BenchRunner<'a, R> {
             summary.results.push(result);
         }
 
-        summary.duration_ms = start.elapsed().as_millis() as u64;
+        summary.duration_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         match &self.config.output {
             BenchOutput::None => {}
@@ -648,7 +648,7 @@ pub fn run_benchmark_comparison<RTA: RuntimeInterface, RTB: RuntimeInterface>(
         });
     }
 
-    summary.duration_ms = start.elapsed().as_millis() as u64;
+    summary.duration_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     summary
 }
 

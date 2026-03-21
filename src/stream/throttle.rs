@@ -248,13 +248,21 @@ mod tests {
             Poll::Ready(Some(1))
         );
 
-        set_test_time(Duration::from_millis(5).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(5)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
 
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),
             Poll::Ready(Some(2))
         );
-        set_test_time(Duration::from_millis(10).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(10)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),
             Poll::Ready(Some(3))

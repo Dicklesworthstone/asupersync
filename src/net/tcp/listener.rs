@@ -595,7 +595,11 @@ mod tests {
             "first would-block should start the storm counter"
         );
 
-        set_test_time(Duration::from_millis(5).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(5)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         assert_eq!(
             listener.note_accept_would_block(),
             REARMED_ACCEPT_BACKOFF_BASE
@@ -606,7 +610,11 @@ mod tests {
             "within-window would-block should increment the storm counter"
         );
 
-        set_test_time(Duration::from_millis(50).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(50)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         assert_eq!(
             listener.note_accept_would_block(),
             REARMED_ACCEPT_BACKOFF_BASE
@@ -641,7 +649,11 @@ mod tests {
             REARMED_ACCEPT_BACKOFF_BASE
         );
 
-        clock.advance(Duration::from_millis(5).as_nanos() as u64);
+        clock.advance(
+            Duration::from_millis(5)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         assert_eq!(
             listener.note_accept_would_block(),
             REARMED_ACCEPT_BACKOFF_BASE
@@ -652,7 +664,11 @@ mod tests {
             "from_std should use Cx timer-driver time when available"
         );
 
-        clock.advance(Duration::from_millis(50).as_nanos() as u64);
+        clock.advance(
+            Duration::from_millis(50)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         assert_eq!(
             listener.note_accept_would_block(),
             REARMED_ACCEPT_BACKOFF_BASE
@@ -672,7 +688,11 @@ mod tests {
 
         let mut backoff = Duration::ZERO;
         for idx in 0..65 {
-            set_test_time(Duration::from_millis(idx).as_nanos() as u64);
+            set_test_time(
+                Duration::from_millis(idx)
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
             backoff = listener.note_accept_would_block();
         }
 

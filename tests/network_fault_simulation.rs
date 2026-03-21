@@ -422,7 +422,9 @@ fn jitter_variable_delivery_times() {
     assert_with_log!(has_variance, "delivery time variance", true, has_variance);
 
     // Check that some packets have jitter > base latency
-    let base_nanos = Duration::from_millis(5).as_nanos() as u64;
+    let base_nanos = Duration::from_millis(5)
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
     let has_jitter = times.iter().any(|&t| t > base_nanos);
     assert_with_log!(has_jitter, "jitter applied", true, has_jitter);
 

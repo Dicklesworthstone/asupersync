@@ -206,7 +206,7 @@ pub fn cancel_003_nested_timeout<RT: RuntimeInterface + Sync>() -> ConformanceTe
                 checkpoint(
                     "nested_timeout",
                     serde_json::json!({
-                        "elapsed_ms": elapsed.as_millis() as u64,
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                         "outer_timed_out": outer_result.is_err(),
                         "inner_timed_out": matches!(&outer_result, Ok(Err(_)))
                     }),
@@ -397,9 +397,9 @@ pub fn cancel_006_multiple_timeouts<RT: RuntimeInterface + Sync>() -> Conformanc
                 checkpoint(
                     "timeout_results",
                     serde_json::json!({
-                        "short": {"timed_out": r1.is_err(), "elapsed_ms": elapsed1.as_millis() as u64},
-                        "medium": {"timed_out": r2.is_err(), "elapsed_ms": elapsed2.as_millis() as u64},
-                        "long": {"timed_out": r3.is_err(), "elapsed_ms": elapsed3.as_millis() as u64}
+                        "short": {"timed_out": r1.is_err(), "elapsed_ms": elapsed1.as_millis().min(u128::from(u64::MAX)) as u64},
+                        "medium": {"timed_out": r2.is_err(), "elapsed_ms": elapsed2.as_millis().min(u128::from(u64::MAX)) as u64},
+                        "long": {"timed_out": r3.is_err(), "elapsed_ms": elapsed3.as_millis().min(u128::from(u64::MAX)) as u64}
                     }),
                 );
 

@@ -156,7 +156,7 @@ fn neg_rg_002_spawn_returns_immediately<RT: RuntimeInterface>() -> ConformanceTe
 
                 checkpoint(
                     "spawn_returned",
-                    serde_json::json!({"spawn_time_us": spawn_time.as_micros() as u64}),
+                    serde_json::json!({"spawn_time_us": spawn_time.as_micros().min(u128::from(u64::MAX)) as u64}),
                 );
 
                 // Spawn should be nearly instant (< 10ms)
@@ -499,7 +499,7 @@ fn neg_ch_005_empty_channel_recv<RT: RuntimeInterface>() -> ConformanceTest<RT> 
                     "recv_result",
                     serde_json::json!({
                         "timed_out": result.is_err(),
-                        "elapsed_ms": elapsed.as_millis() as u64
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64
                     }),
                 );
 
@@ -566,7 +566,7 @@ fn neg_bd_001_zero_poll_quota<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     "zero_timeout",
                     serde_json::json!({
                         "result": format!("{:?}", result),
-                        "elapsed_us": elapsed.as_micros() as u64
+                        "elapsed_us": elapsed.as_micros().min(u128::from(u64::MAX)) as u64
                     }),
                 );
 
@@ -615,7 +615,7 @@ fn neg_bd_002_expired_deadline<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     "expired_deadline",
                     serde_json::json!({
                         "timed_out": result.is_err(),
-                        "elapsed_ms": elapsed.as_millis() as u64
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64
                     }),
                 );
 
@@ -730,7 +730,7 @@ fn neg_tm_001_negative_duration<RT: RuntimeInterface>() -> ConformanceTest<RT> {
 
                 checkpoint(
                     "zero_sleep",
-                    serde_json::json!({"elapsed_us": elapsed.as_micros() as u64}),
+                    serde_json::json!({"elapsed_us": elapsed.as_micros().min(u128::from(u64::MAX)) as u64}),
                 );
 
                 // Should be essentially instant
@@ -774,7 +774,7 @@ fn neg_tm_002_very_long_timeout<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 checkpoint(
                     "long_timeout_fast_future",
                     serde_json::json!({
-                        "elapsed_ms": elapsed.as_millis() as u64,
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                         "result": format!("{:?}", result)
                     }),
                 );
@@ -826,7 +826,7 @@ fn neg_tm_003_immediate_timeout_priority<RT: RuntimeInterface>() -> ConformanceT
                 checkpoint(
                     "immediate_timeout",
                     serde_json::json!({
-                        "elapsed_us": elapsed.as_micros() as u64,
+                        "elapsed_us": elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
                         "is_err": result.is_err(),
                         "result": format!("{:?}", result)
                     }),
@@ -908,7 +908,7 @@ fn perf_001_spawn_latency<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     "spawn_latency",
                     serde_json::json!({
                         "num_spawns": NUM_SPAWNS,
-                        "total_ms": elapsed.as_millis() as u64,
+                        "total_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                         "avg_latency_us": avg_latency_us as u64
                     }),
                 );
@@ -999,7 +999,7 @@ fn perf_002_channel_throughput<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     "channel_throughput",
                     serde_json::json!({
                         "messages": final_count,
-                        "elapsed_ms": elapsed.as_millis() as u64,
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                         "throughput_msg_per_sec": throughput as u64
                     }),
                 );
@@ -1079,8 +1079,8 @@ fn perf_003_concurrent_spawn_overhead<RT: RuntimeInterface>() -> ConformanceTest
                     "concurrent_spawn",
                     serde_json::json!({
                         "num_tasks": NUM_TASKS,
-                        "spawn_time_ms": spawn_time.as_millis() as u64,
-                        "total_time_ms": total_time.as_millis() as u64,
+                        "spawn_time_ms": spawn_time.as_millis().min(u128::from(u64::MAX)) as u64,
+                        "total_time_ms": total_time.as_millis().min(u128::from(u64::MAX)) as u64,
                         "completed": final_count
                     }),
                 );
@@ -1137,8 +1137,8 @@ fn perf_004_timeout_precision<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 checkpoint(
                     "timeout_precision",
                     serde_json::json!({
-                        "target_ms": target.as_millis() as u64,
-                        "elapsed_ms": elapsed.as_millis() as u64,
+                        "target_ms": target.as_millis().min(u128::from(u64::MAX)) as u64,
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                         "is_timeout": result.is_err()
                     }),
                 );
@@ -1203,8 +1203,8 @@ fn perf_005_sleep_precision<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 checkpoint(
                     "sleep_precision",
                     serde_json::json!({
-                        "target_ms": target.as_millis() as u64,
-                        "elapsed_ms": elapsed.as_millis() as u64
+                        "target_ms": target.as_millis().min(u128::from(u64::MAX)) as u64,
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64
                     }),
                 );
 

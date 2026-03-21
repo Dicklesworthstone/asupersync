@@ -479,7 +479,7 @@ fn run_pipeline(trace_dir: &str) -> BenchmarkResult {
             break;
         }
     }
-    let search_ms = search_start.elapsed().as_millis() as u64;
+    let search_ms = search_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     let seed = failing_seed.expect("no failing seed found");
     eprintln!("    seed={seed}, attempts={attempts}, time={search_ms}ms");
@@ -505,7 +505,10 @@ fn run_pipeline(trace_dir: &str) -> BenchmarkResult {
     let elements = extract_elements(seed);
     let minimize_start = Instant::now();
     let report = TraceMinimizer::minimize(&elements, check_for_leak);
-    let minimize_ms = minimize_start.elapsed().as_millis() as u64;
+    let minimize_ms = minimize_start
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
 
     // Hash the minimized elements (canonical string representation).
     let minimized_str = report
@@ -567,7 +570,7 @@ fn main() {
 
     let total_start = Instant::now();
     let result = run_pipeline(&trace_dir);
-    let total_ms = total_start.elapsed().as_millis() as u64;
+    let total_ms = total_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     eprintln!("  total_wall_time_ms={total_ms}");
 

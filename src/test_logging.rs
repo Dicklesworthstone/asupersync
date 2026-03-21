@@ -2172,7 +2172,7 @@ impl TestEnvironment {
             let elapsed = entry.started_at.elapsed();
             tracing::debug!(
                 service = %entry.service.name(),
-                elapsed_ms = elapsed.as_millis() as u64,
+                elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                 "stopping fixture service"
             );
             if let Err(e) = entry.service.stop() {
@@ -2251,7 +2251,7 @@ pub fn wait_until_healthy(
             let elapsed = start.elapsed();
             tracing::info!(
                 service = %service.name(),
-                elapsed_ms = elapsed.as_millis() as u64,
+                elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                 "service healthy"
             );
             return Ok(elapsed);

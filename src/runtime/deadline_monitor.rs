@@ -851,7 +851,11 @@ mod tests {
             guard.checkpoint_state.last_message = Some("checkpointed again".to_string());
         }
 
-        set_test_time(Duration::from_millis(2).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(2)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         monitor.check(Time::from_secs(5), std::iter::once(&task));
 
         let recorded = warnings.lock().clone();
@@ -989,7 +993,11 @@ mod tests {
             first_count
         );
 
-        set_test_time(Duration::from_millis(10).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(10)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         monitor.check(Time::from_secs(0), std::iter::once(&task));
         let recorded = warnings.lock().clone();
         crate::assert_with_log!(

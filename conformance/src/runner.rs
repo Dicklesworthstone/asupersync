@@ -398,7 +398,7 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
         }
 
         summary.total = summary.results.len();
-        summary.duration_ms = start.elapsed().as_millis() as u64;
+        summary.duration_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         summary
     }
@@ -421,7 +421,7 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
         }
 
         summary.total = summary.results.len();
-        summary.duration_ms = start.elapsed().as_millis() as u64;
+        summary.duration_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         summary
     }
 
@@ -437,7 +437,8 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
 
         match result {
             Ok(mut test_result) => {
-                test_result.duration_ms = Some(duration.as_millis() as u64);
+                test_result.duration_ms =
+                    Some(duration.as_millis().min(u128::from(u64::MAX)) as u64);
                 test_result
             }
             Err(panic) => {
@@ -450,7 +451,7 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
                 };
 
                 TestResult::failed(format!("Test panicked: {message}"))
-                    .with_duration(duration.as_millis() as u64)
+                    .with_duration(duration.as_millis().min(u128::from(u64::MAX)) as u64)
             }
         }
     }
@@ -471,7 +472,8 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
 
         let mut test_result = match result {
             Ok(mut test_result) => {
-                test_result.duration_ms = Some(duration.as_millis() as u64);
+                test_result.duration_ms =
+                    Some(duration.as_millis().min(u128::from(u64::MAX)) as u64);
                 test_result
             }
             Err(panic) => {
@@ -484,13 +486,13 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
                 };
 
                 TestResult::failed(format!("Test panicked: {message}"))
-                    .with_duration(duration.as_millis() as u64)
+                    .with_duration(duration.as_millis().min(u128::from(u64::MAX)) as u64)
             }
         };
 
         // Ensure duration is always set.
         if test_result.duration_ms.is_none() {
-            test_result.duration_ms = Some(duration.as_millis() as u64);
+            test_result.duration_ms = Some(duration.as_millis().min(u128::from(u64::MAX)) as u64);
         }
 
         let events = logger.events();
@@ -670,7 +672,7 @@ pub fn run_comparison<RTA: RuntimeInterface, RTB: RuntimeInterface>(
         }
     }
 
-    summary.duration_ms = start.elapsed().as_millis() as u64;
+    summary.duration_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     summary
 }
 

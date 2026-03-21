@@ -54,7 +54,7 @@ impl ScenarioLog {
         self.entries.push(LogEntry {
             scenario_id: self.scenario_id,
             phase,
-            timestamp_ms: self.start.elapsed().as_millis() as u64,
+            timestamp_ms: self.start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             resource,
             action,
             outcome,

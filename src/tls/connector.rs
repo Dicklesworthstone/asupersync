@@ -280,7 +280,11 @@ impl TlsConnectorBuilder {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if path.extension().map(|e| e == "pem" || e == "crt").unwrap_or(false) {
+                        if path
+                            .extension()
+                            .map(|e| e == "pem" || e == "crt")
+                            .unwrap_or(false)
+                        {
                             added += self.load_pem_file(&path);
                         }
                     }
@@ -309,10 +313,7 @@ impl TlsConnectorBuilder {
         for block in pem_str.split("-----BEGIN CERTIFICATE-----") {
             if let Some(end_idx) = block.find("-----END CERTIFICATE-----") {
                 let base64_data = &block[..end_idx];
-                let cleaned: String = base64_data
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect();
+                let cleaned: String = base64_data.chars().filter(|c| !c.is_whitespace()).collect();
                 if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(&cleaned) {
                     let _ = self.root_certs.add(&Certificate::from_der(der));
                     added += 1;

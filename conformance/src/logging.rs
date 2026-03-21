@@ -120,7 +120,7 @@ impl LogCollector {
             .start_time
             .lock()
             .unwrap()
-            .map(|start| start.elapsed().as_millis() as u64)
+            .map(|start| start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
             .unwrap_or(0);
 
         let entry = LogEntry::new(level, message).with_timestamp_ms(timestamp_ms);
@@ -138,7 +138,7 @@ impl LogCollector {
             .start_time
             .lock()
             .unwrap()
-            .map(|start| start.elapsed().as_millis() as u64)
+            .map(|start| start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
             .unwrap_or(0);
 
         let entry = LogEntry::new(level, message)
@@ -341,7 +341,11 @@ impl ConformanceTestLogger {
 
     fn record(&self, kind: TestEventKind, name: &str, details: serde_json::Value) {
         let mut guard = self.inner.lock().expect("conformance log lock poisoned");
-        let timestamp_ms = guard.start_time.elapsed().as_millis() as u64;
+        let timestamp_ms = guard
+            .start_time
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         guard
             .events
             .push(TestEvent::new(kind, name, timestamp_ms, details));

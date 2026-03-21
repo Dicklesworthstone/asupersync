@@ -546,7 +546,11 @@ mod tests {
         crate::assert_with_log!(stats.size == 1, "negative cache size", 1, stats.size);
         crate::assert_with_log!(stats.hits == 2, "negative cache hits", 2, stats.hits);
 
-        set_test_time(Duration::from_millis(11).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(11)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         let expired = cache.get_ip_result("missing.example");
         crate::assert_with_log!(
             expired.is_none(),
@@ -597,7 +601,11 @@ mod tests {
         );
 
         // Advance deterministically beyond the cached TTL.
-        set_test_time(Duration::from_millis(10).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(10)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
 
         // Should be expired
         let expired = cache.get_ip("example.com");
@@ -630,7 +638,11 @@ mod tests {
             cache.stats().size
         );
 
-        set_test_time(Duration::from_millis(10).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(10)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         cache.evict_expired();
 
         let stats = cache.stats();
@@ -760,7 +772,11 @@ mod tests {
         );
         cache.put_ip("floor.example", &lookup);
 
-        set_test_time(Duration::from_millis(5).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(5)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         let before_floor = cache.get_ip("floor.example");
         crate::assert_with_log!(
             before_floor.is_some(),
@@ -769,7 +785,11 @@ mod tests {
             before_floor.is_some()
         );
 
-        set_test_time(Duration::from_millis(11).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(11)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         let after_floor = cache.get_ip("floor.example");
         crate::assert_with_log!(
             after_floor.is_none(),

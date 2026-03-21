@@ -996,7 +996,11 @@ mod tests {
             true
         );
 
-        set_test_time(Duration::from_millis(60).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(60)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
 
         let poll = drain.as_mut().poll(&mut cx);
         let completed = matches!(poll, Poll::Ready(_));

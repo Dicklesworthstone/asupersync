@@ -152,7 +152,8 @@ impl E2eLabHarness {
 
     /// Advance virtual time by duration.
     pub fn advance_time_duration(&mut self, dur: std::time::Duration) {
-        self.runtime.advance_time(dur.as_nanos() as u64);
+        self.runtime
+            .advance_time(dur.as_nanos().min(u128::from(u64::MAX)) as u64);
     }
 
     /// Cancel a region with a reason.

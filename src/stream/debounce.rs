@@ -398,7 +398,7 @@ mod tests {
             "timer should be re-armed for the remaining period so there is a wake source"
         );
 
-        set_test_time(Duration::from_mins(1).as_nanos() as u64);
+        set_test_time(Duration::from_mins(1).as_nanos().min(u128::from(u64::MAX)) as u64);
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),
             Poll::Ready(Some(7))
@@ -422,7 +422,7 @@ mod tests {
         assert!(stream.pending.is_some(), "item should still be buffered");
         assert!(stream.timer.is_some(), "timer should be armed");
 
-        set_test_time(Duration::from_secs(5).as_nanos() as u64);
+        set_test_time(Duration::from_secs(5).as_nanos().min(u128::from(u64::MAX)) as u64);
 
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),

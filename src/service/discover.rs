@@ -1081,12 +1081,12 @@ mod tests {
         assert!(!first.is_empty());
         assert_eq!(discovery.resolve_count(), 1);
 
-        set_test_time(Duration::from_secs(10).as_nanos() as u64);
+        set_test_time(Duration::from_secs(10).as_nanos().min(u128::from(u64::MAX)) as u64);
         let second = discovery.poll_discover().unwrap();
         assert!(second.is_empty());
         assert_eq!(discovery.resolve_count(), 1);
 
-        set_test_time(Duration::from_secs(30).as_nanos() as u64);
+        set_test_time(Duration::from_secs(30).as_nanos().min(u128::from(u64::MAX)) as u64);
         let third = discovery.poll_discover().unwrap();
         assert!(third.is_empty());
         assert_eq!(discovery.resolve_count(), 2);
@@ -1107,12 +1107,12 @@ mod tests {
         assert!(discovery.poll_discover().is_err());
         assert_eq!(discovery.error_count(), 1);
 
-        set_test_time(Duration::from_secs(10).as_nanos() as u64);
+        set_test_time(Duration::from_secs(10).as_nanos().min(u128::from(u64::MAX)) as u64);
         let second = discovery.poll_discover().unwrap();
         assert!(second.is_empty());
         assert_eq!(discovery.error_count(), 1);
 
-        set_test_time(Duration::from_secs(30).as_nanos() as u64);
+        set_test_time(Duration::from_secs(30).as_nanos().min(u128::from(u64::MAX)) as u64);
         assert!(discovery.poll_discover().is_err());
         assert_eq!(discovery.error_count(), 2);
         crate::test_complete!("dns_discovery_time_getter_controls_failed_resolution_cooldown");

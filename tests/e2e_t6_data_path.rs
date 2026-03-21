@@ -447,7 +447,7 @@ fn e2e_dp_08_retry_delay_formula() {
     for (i, &expected) in expected_ms.iter().enumerate() {
         let attempt = (i + 1) as u32;
         let delay = calculate_delay(&policy, attempt, None);
-        let delay_ms = delay.as_millis() as u64;
+        let delay_ms = delay.as_millis().min(u128::from(u64::MAX)) as u64;
         tracing::info!(
             correlation_id = %cid,
             attempt,

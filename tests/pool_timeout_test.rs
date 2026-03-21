@@ -47,7 +47,11 @@ fn pool_creation_respects_acquire_timeout() {
     let poll1 = fut.as_mut().poll(&mut ctx);
     assert!(poll1.is_pending());
 
-    clock.advance(Duration::from_millis(60).as_nanos() as u64);
+    clock.advance(
+        Duration::from_millis(60)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64,
+    );
     let _ = timer.process_timers();
 
     let poll2 = fut.as_mut().poll(&mut ctx);

@@ -333,7 +333,7 @@ pub fn rt_006_timeout_expiration<RT: RuntimeInterface>() -> ConformanceTest<RT> 
                 checkpoint(
                     "timeout_elapsed",
                     serde_json::json!({
-                        "elapsed_ms": elapsed.as_millis() as u64,
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                         "result": format!("{:?}", result)
                     }),
                 );
@@ -410,7 +410,7 @@ pub fn rt_007_race_first_wins<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 checkpoint(
                     "race_completed",
                     serde_json::json!({
-                        "elapsed_ms": elapsed.as_millis() as u64,
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
                         "result": format!("{:?}", timeout_result)
                     }),
                 );
@@ -621,7 +621,7 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     "all_spawned",
                     serde_json::json!({
                         "count": NUM_TASKS,
-                        "elapsed_ms": start.elapsed().as_millis() as u64
+                        "elapsed_ms": start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
                     }),
                 );
 
@@ -642,7 +642,7 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     serde_json::json!({
                         "final_count": final_count,
                         "final_completed": final_completed,
-                        "elapsed_ms": elapsed.as_millis() as u64
+                        "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64
                     }),
                 );
 

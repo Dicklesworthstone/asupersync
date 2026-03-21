@@ -1424,7 +1424,11 @@ mod tests {
             format!("{cached:?}")
         );
 
-        set_test_time(Duration::from_millis(11).as_nanos() as u64);
+        set_test_time(
+            Duration::from_millis(11)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         let refreshed = future::block_on(async { resolver.lookup_ip("localhost").await });
         crate::assert_with_log!(
             refreshed.is_ok(),

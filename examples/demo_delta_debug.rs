@@ -310,7 +310,7 @@ fn main() {
         }
     }
 
-    let search_ms = search_start.elapsed().as_millis() as u64;
+    let search_ms = search_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     eprintln!("  demo_search_duration_ms={search_ms}");
 
     let Some(seed) = failure_seed else {
@@ -327,7 +327,10 @@ fn main() {
 
     let minimize_start = Instant::now();
     let report = TraceMinimizer::minimize(&elements, check_for_leak);
-    let minimize_ms = minimize_start.elapsed().as_millis() as u64;
+    let minimize_ms = minimize_start
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
 
     eprintln!(
         "  minimized: {}/{} elements ({:.1}% reduction), replays={}, \
