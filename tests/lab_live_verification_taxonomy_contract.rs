@@ -115,6 +115,34 @@ fn doc_locks_phase1_surface_coverage_matrix() -> std::io::Result<()> {
 }
 
 #[test]
+fn doc_refines_phase1_matrix_for_core_pilot_bead() -> std::io::Result<()> {
+    let doc = load_doc()?;
+    for token in [
+        "Core Pilot Refinement Matrix (`asupersync-2a6k9.6.6`)",
+        "cancel_before_first_poll",
+        "cancel_during_cleanup_budget",
+        "missing_cleanup_ack_hard_failure",
+        "join_loser_drain",
+        "race_winner_commit_boundary",
+        "loser_not_drained_hard_failure",
+        "reserve_abort_invisible_to_receiver",
+        "committed_message_missing_hard_failure",
+        "balanced_after_commit_and_abort",
+        "leaked_obligation_forces_failure",
+        "close_with_nested_children",
+        "late_spawn_after_close_rejected",
+        "stuck_finalizer_retained",
+        "every Phase 1 pilot surface must name at least one concrete scenario family",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing refined phase-1 matrix token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn doc_defines_external_surface_gate_requirements() -> std::io::Result<()> {
     let doc = load_doc()?;
     for token in [

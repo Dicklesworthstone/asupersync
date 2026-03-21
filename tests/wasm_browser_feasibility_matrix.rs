@@ -1200,6 +1200,25 @@ fn browser_sdk_execution_ladder_surfaces_service_and_shared_worker_as_unavailabl
 }
 
 #[test]
+fn browser_sdk_exposes_bounded_shared_worker_coordinator_scaffolding() {
+    let src = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID",
+        "BROWSER_SHARED_WORKER_COORDINATOR_LANE",
+        "lane.browser.shared_worker.coordinator",
+        "export function detectBrowserSharedWorkerCoordinatorSupport(",
+        "export async function createBrowserSharedWorkerCoordinatorSelection(",
+        "export class BrowserSharedWorkerCoordinatorClient",
+        "direct BrowserRuntime creation remains fail-closed inside the shared-worker host",
+    ] {
+        assert!(
+            src.contains(marker),
+            "browser SDK must preserve bounded shared-worker coordinator marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_core_does_not_silently_add_new_host_bindings() {
     // browser-core must NOT add WebTransport, IndexedDB, or
     // SharedArrayBuffer host bindings without deliberate bead work.

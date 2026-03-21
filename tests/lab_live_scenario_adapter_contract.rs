@@ -7,15 +7,21 @@
 
 mod common;
 
+use asupersync::lab::replay::{
+    DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
+};
 use asupersync::lab::{
-    ChaosSection, DualRunScenarioIdentity, LabSection, NetworkSection, Scenario, ScenarioRunner,
-    SeedPlan, SporkScenarioConfig, SporkScenarioRunner, SporkScenarioSpec,
+    ChaosSection, DualRunHarness, DualRunScenarioIdentity, LabSection, LiveRunResult,
+    NetworkSection, NormalizedSemantics, Scenario, ScenarioRunner, SeedPlan, SporkScenarioConfig,
+    SporkScenarioRunner, SporkScenarioSpec, TerminalOutcome, assert_dual_run_passes,
+    capture_cancellation, capture_loser_drain, capture_obligation_balance, capture_region_close,
+    run_live_adapter,
 };
 use asupersync::runtime::yield_now;
 use asupersync::spork::prelude::AppSpec;
 use asupersync::test_logging::{LIVE_CURRENT_THREAD_ADAPTER, ReproManifest, TestContext};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 fn load_doc() -> String {
@@ -292,6 +298,77 @@ fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::Spo
         .expect("run spork scenario")
 }
 
+fn cancellation_pilot_identity() -> DualRunScenarioIdentity {
+    let seed_plan = SeedPlan::inherit(0xCA11_CE11, "seed.phase1.cancel.protocol.drain_finalize.v1")
+        .with_live_override(0xCA11_CE12)
+        .with_entropy_seed(0xCA11_CE13);
+    DualRunScenarioIdentity::phase1(
+        "phase1.cancel.protocol.drain_finalize",
+        "cancellation.protocol",
+        "cancellation.protocol.v1",
+        "Cancellation pilot preserves request, drain, finalize, and loser-drain semantics",
+        seed_plan.canonical_seed,
+    )
+    .with_seed_plan(seed_plan)
+}
+
+fn cancellation_pilot_semantics(
+    loser_joined: bool,
+    cleanup_completed: bool,
+    finalization_completed: bool,
+    checkpoint_observed: Option<bool>,
+) -> NormalizedSemantics {
+    NormalizedSemantics {
+        terminal_outcome: TerminalOutcome::cancelled("timeout"),
+        cancellation: capture_cancellation(
+            true,
+            true,
+            cleanup_completed,
+            finalization_completed,
+            checkpoint_observed,
+        ),
+        loser_drain: capture_loser_drain(&[loser_joined]),
+        region_close: capture_region_close(cleanup_completed, finalization_completed),
+        obligation_balance: capture_obligation_balance(1, 0, 1),
+        resource_surface: asupersync::lab::ResourceSurfaceRecord::empty("cancellation.protocol")
+            .with_counter("cancel_requests", 1)
+            .with_counter("cancel_acks", 1)
+            .with_counter("cleanup_callbacks", i64::from(cleanup_completed))
+            .with_counter("finalizers_completed", i64::from(finalization_completed)),
+    }
+}
+
+fn make_cancellation_live_result(
+    identity: &DualRunScenarioIdentity,
+    loser_joined: bool,
+    cleanup_completed: bool,
+    finalization_completed: bool,
+    checkpoint_observed: Option<bool>,
+) -> LiveRunResult {
+    run_live_adapter(identity, |config, witness| {
+        assert_eq!(config.scenario_id, identity.scenario_id);
+        assert_eq!(config.surface_id, identity.surface_id);
+        witness.set_outcome(TerminalOutcome::cancelled("timeout"));
+        witness.set_cancellation(capture_cancellation(
+            true,
+            true,
+            cleanup_completed,
+            finalization_completed,
+            checkpoint_observed,
+        ));
+        witness.set_loser_drain(capture_loser_drain(&[loser_joined]));
+        witness.set_region_close(capture_region_close(
+            cleanup_completed,
+            finalization_completed,
+        ));
+        witness.set_obligation_balance(capture_obligation_balance(1, 0, 1));
+        witness.record_counter("cancel_requests", 1);
+        witness.record_counter("cancel_acks", 1);
+        witness.record_counter("cleanup_callbacks", i64::from(cleanup_completed));
+        witness.record_counter("finalizers_completed", i64::from(finalization_completed));
+    })
+}
+
 fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
     if actual != expected {
         let actual_pretty =
@@ -411,5 +488,123 @@ fn dual_run_failure_manifest_keeps_readable_provenance() {
             .as_str()
             .is_some_and(|cmd| cmd.contains("cargo test")),
         "failure manifest should retain a replay command instead of opaque diagnostics"
+    );
+}
+
+#[test]
+fn cancellation_dual_run_pilot_preserves_request_drain_finalize_semantics() {
+    let identity = cancellation_pilot_identity();
+    let lab_semantics = cancellation_pilot_semantics(true, true, true, Some(true));
+    let live_result = make_cancellation_live_result(&identity, true, true, true, Some(true));
+
+    assert_eq!(
+        live_result
+            .metadata
+            .capture_manifest
+            .describe_field_capture("semantics.cancellation.finalization_completed")
+            .as_deref(),
+        Some("observed via witness.set_cancellation"),
+        "live adapter should retain explicit cancellation capture provenance"
+    );
+
+    let result = DualRunHarness::from_identity(identity.clone())
+        .lab(move |_config| lab_semantics.clone())
+        .live_result({
+            let live_result = live_result.clone();
+            move |_seed, _entropy| live_result.clone()
+        })
+        .run();
+
+    assert_dual_run_passes(&result);
+    assert_eq!(
+        result.verdict.seed_lineage.seed_lineage_id,
+        identity.seed_plan.seed_lineage_id
+    );
+    assert_eq!(result.lab.surface_id, "cancellation.protocol");
+    assert_eq!(
+        result.live.surface_contract_version,
+        "cancellation.protocol.v1"
+    );
+}
+
+#[test]
+fn cancellation_dual_run_pilot_failure_bundle_calls_out_drain_and_finalize_gaps() {
+    let identity = cancellation_pilot_identity();
+    let lab_semantics = cancellation_pilot_semantics(true, true, true, Some(true));
+    let live_result = make_cancellation_live_result(&identity, false, false, false, Some(false));
+
+    let result = DualRunHarness::from_identity(identity.clone())
+        .lab(move |_config| lab_semantics.clone())
+        .live_result({
+            let live_result = live_result.clone();
+            move |_seed, _entropy| live_result.clone()
+        })
+        .run();
+
+    assert!(
+        !result.passed(),
+        "incomplete loser-drain/finalize evidence should fail the cancellation pilot"
+    );
+
+    let mismatch_fields = result
+        .verdict
+        .mismatches
+        .iter()
+        .map(|mismatch| mismatch.field.as_str())
+        .collect::<BTreeSet<_>>();
+    for field in [
+        "semantics.cancellation.cleanup_completed",
+        "semantics.cancellation.finalization_completed",
+        "semantics.cancellation.terminal_phase",
+        "semantics.cancellation.checkpoint_observed",
+        "semantics.loser_drain.drained_losers",
+        "semantics.loser_drain.status",
+        "semantics.region_close.quiescent",
+    ] {
+        assert!(
+            mismatch_fields.contains(field),
+            "expected retained mismatch field: {field}"
+        );
+    }
+
+    let entry = DivergenceCorpusEntry::from_dual_run_result(
+        &result,
+        "smoke",
+        "cancellation_protocol_mismatch",
+        DifferentialPolicyClass::RuntimeSemanticBug,
+        "artifacts/lab_live/phase1.cancel.protocol.drain_finalize",
+    );
+    let bundle = DifferentialBundleArtifacts::from_dual_run_result(&entry, &result);
+
+    assert_eq!(bundle.summary.scenario_id, identity.scenario_id);
+    assert_eq!(bundle.summary.surface_id, identity.surface_id);
+    assert_eq!(
+        bundle.repro_manifest.seed_lineage.seed_lineage_id,
+        identity.seed_plan.seed_lineage_id
+    );
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.cancellation.finalization_completed"),
+        "retained bundle should name the finalize mismatch explicitly"
+    );
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.loser_drain.status"),
+        "retained bundle should name the loser-drain mismatch explicitly"
+    );
+    assert_eq!(
+        live_result
+            .metadata
+            .capture_manifest
+            .describe_field_capture("semantics.loser_drain.status")
+            .as_deref(),
+        Some("observed via witness.set_loser_drain"),
+        "live failure path should preserve loser-drain capture provenance"
     );
 }

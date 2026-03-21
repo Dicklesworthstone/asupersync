@@ -722,6 +722,49 @@ fn browser_src_index_requires_actionable_guidance_and_structured_error_payloads(
 }
 
 #[test]
+fn browser_package_exports_shared_worker_coordinator_helpers_without_promoting_direct_runtime() {
+    let src = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID",
+        "BROWSER_SHARED_WORKER_COORDINATOR_LANE",
+        "BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL",
+        "BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE",
+        "export interface BrowserSharedWorkerCoordinatorSupportDiagnostics",
+        "export interface BrowserSharedWorkerCoordinatorSelectionResult",
+        "export function detectBrowserSharedWorkerCoordinatorSupport(",
+        "export function createBrowserSharedWorkerCoordinatorUnsupportedError(",
+        "export function assertBrowserSharedWorkerCoordinatorSupport(",
+        "export class BrowserSharedWorkerCoordinatorClient",
+        "export async function createBrowserSharedWorkerCoordinatorSelection(",
+    ] {
+        assert!(
+            src.contains(marker),
+            "browser src/index.ts must preserve shared-worker coordinator export marker: {marker}"
+        );
+    }
+
+    let dts = read_source("packages/browser/dist/index.d.ts");
+    for marker in [
+        "BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID",
+        "BROWSER_SHARED_WORKER_COORDINATOR_LANE",
+        "BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL",
+        "BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE",
+        "export interface BrowserSharedWorkerCoordinatorSupportDiagnostics",
+        "export interface BrowserSharedWorkerCoordinatorSelectionResult",
+        "export declare function detectBrowserSharedWorkerCoordinatorSupport(",
+        "export declare function createBrowserSharedWorkerCoordinatorUnsupportedError(",
+        "export declare function assertBrowserSharedWorkerCoordinatorSupport(",
+        "export declare class BrowserSharedWorkerCoordinatorClient",
+        "export declare function createBrowserSharedWorkerCoordinatorSelection(",
+    ] {
+        assert!(
+            dts.contains(marker),
+            "browser dist/index.d.ts must preserve shared-worker coordinator marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_core_fetch_bridge_supports_window_or_worker_hosts() {
     let content = read_source("asupersync-browser-core/src/lib.rs");
     for marker in [

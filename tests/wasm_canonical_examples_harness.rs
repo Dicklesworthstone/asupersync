@@ -526,6 +526,9 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
         "RUST-BROWSER-CONSUMER",
         "repository_maintained_rust_browser_fixture",
         "L6-RUST-BROWSER-CONSUMER",
+        "candidate_host_role_mismatch",
+        "missing_webassembly",
+        "tests/fixtures/rust-browser-consumer/src/worker.ts",
         "TS-TYPE-VANILLA",
         "react_ref.task_group_cancel",
         "next_ref.template_deploy",
@@ -720,6 +723,9 @@ fn rust_browser_fixture_is_cataloged_as_a_maintained_end_user_example() {
         "ready_phase === \"ready\"",
         "disposed_phase === \"disposed\"",
         "cancel_event_count === 1",
+        "candidate_host_role_mismatch",
+        "missing_webassembly",
+        "dedicated_worker_local_storage === false",
     ] {
         assert!(
             browser_check.contains(marker),

@@ -24,6 +24,7 @@ fn rust_browser_consumer_fixture_exists_with_required_files() {
         "index.html",
         "vite.config.ts",
         "src/main.ts",
+        "src/worker.ts",
         "scripts/check-bundle.mjs",
         "scripts/check-browser-run.mjs",
         "crate/Cargo.toml",
@@ -67,6 +68,11 @@ fn rust_browser_fixture_source_uses_provider_helpers_and_structured_teardown() {
         ".unmount()",
         "WasmAbiSymbol::TaskCancel",
         "repository_maintained_rust_browser_fixture",
+        "RuntimeBuilder::new()",
+        "inspect_browser_execution_ladder",
+        "inspect_browser_execution_ladder_with_preferred_lane",
+        "BrowserExecutionLane::DedicatedWorkerDirectRuntime",
+        "missing_webassembly",
     ] {
         assert!(
             content.contains(marker),
@@ -84,6 +90,11 @@ fn rust_browser_fixture_frontend_imports_generated_pkg() {
     for marker in [
         "../pkg/asupersync_rust_browser_consumer_fixture.js",
         "run_rust_browser_consumer_demo",
+        "inspect_rust_browser_execution_ladder",
+        "inspect_rust_browser_execution_ladder_preferred_dedicated_worker",
+        "new Worker(new URL(\"./worker.ts\", import.meta.url)",
+        "\"WebAssembly\"",
+        "\"matrix\"",
         "\"rust-browser-consumer\"",
     ] {
         assert!(
@@ -110,6 +121,7 @@ fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
         "CARGO_TARGET_DIR=\"${RUN_DIR}/cargo-target\"",
         "BROWSER_RUN_FILE=\"${RUN_DIR}/browser-run.json\"",
         "rch exec -- env CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR}\" wasm-pack build",
+        "cp -R \"${PKG_DIR}/.\" \"${CONSUMER_DIR}/pkg/\"",
         "npm install",
         "npm run build",
         "npm run check:bundle",
@@ -119,10 +131,14 @@ fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
         "\"disposed_phase_is_disposed\": browser_run[\"disposed_phase\"] == \"disposed\"",
         "\"completed_task_outcome_is_ok\": browser_run[\"completed_task_outcome\"] == \"ok\"",
         "\"cancel_event_count_is_one\": browser_run[\"cancel_event_count\"] == 1",
+        "\"main_thread_selected_lane\": browser_run[\"main_thread_selected_lane\"]",
+        "\"downgrade_reason_code\": browser_run[\"downgrade_reason_code\"]",
+        "\"dedicated_worker_selected_lane\": browser_run[\"dedicated_worker_selected_lane\"]",
+        "\"dedicated_worker_local_storage_unavailable\": browser_run[\"dedicated_worker_local_storage\"] is False",
         "\"event_symbols_include_task_cancel\": \"task_cancel\" in browser_run[\"event_symbols\"]",
         "\"capabilities_has_webassembly\": browser_run[\"capabilities\"][\"has_webassembly\"] is True",
         "L6-RUST-BROWSER-CONSUMER",
-        "asupersync-4l9iw.2",
+        "asupersync-4l9iw.8",
     ] {
         assert!(
             content.contains(needle),
@@ -145,10 +161,17 @@ fn rust_browser_fixture_uses_relative_vite_base_and_portable_bundle_checks() {
         repo_root().join("tests/fixtures/rust-browser-consumer/scripts/check-bundle.mjs");
     let bundle_content = std::fs::read_to_string(&bundle_check)
         .unwrap_or_else(|_| panic!("missing {}", bundle_check.display()));
-    assert!(
-        bundle_content.contains("(?:\\.\\/)?assets\\/"),
-        "bundle check must accept relative hashed asset references"
-    );
+    for marker in [
+        "(?:\\.\\/)?assets\\/",
+        "Expected at least two JavaScript assets in dist/assets for main-thread + worker bundles",
+        "rust-browser-worker-ready",
+        "rust-browser-downgrade-missing-webassembly",
+    ] {
+        assert!(
+            bundle_content.contains(marker),
+            "bundle check missing expected marker: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -177,22 +200,45 @@ fn rust_browser_fixture_declares_browser_run_check_and_headless_contract() {
         "#status",
         "RUST-BROWSER-CONSUMER",
         "repository_maintained_rust_browser_fixture",
-        "diagnostics_clean",
+        "harness_mode === \"matrix\"",
         "ready_phase === \"ready\"",
         "disposed_phase === \"disposed\"",
         "child_scope_count_before_unmount === 1",
         "active_task_count_before_unmount === 1",
         "completed_task_outcome === \"ok\"",
         "cancel_event_count === 1",
-        "parsed.event_symbols.includes(symbol)",
-        "parsed.capabilities?.has_window === true",
-        "parsed.capabilities?.has_document === true",
-        "parsed.capabilities?.has_webassembly === true",
+        "main_thread_local_storage === true",
+        "dedicated_worker_local_storage === false",
+        "main_thread_selected_lane",
+        "dedicated_worker_selected_lane",
+        "missing_webassembly",
+        "candidate_host_role_mismatch",
         "status: \"error\"",
     ] {
         assert!(
             browser_content.contains(marker),
             "browser-run checker missing expected marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn rust_browser_worker_fixture_source_preserves_dedicated_worker_matrix_markers() {
+    let path = repo_root().join("tests/fixtures/rust-browser-consumer/src/worker.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+
+    for marker in [
+        "/// <reference lib=\"webworker\" />",
+        "run_rust_browser_consumer_demo",
+        "inspect_rust_browser_execution_ladder",
+        "inspect_rust_browser_execution_ladder_preferred_main_thread",
+        "rust-browser-worker-ready",
+        "rust-browser-worker-bootstrap",
+    ] {
+        assert!(
+            content.contains(marker),
+            "worker source missing expected marker: {marker}"
         );
     }
 }
