@@ -661,3 +661,27 @@
 "SOUND"
 0
 "Clean combinator library with standard delegation, comprehensive StreamExt"
+"src/stream/debounce.rs"
+310
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Cooperative budget, flush-on-end, dual-clock pattern (wall for wakes, custom for readiness)"
+"src/stream/buffered.rs"
+450
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Order preservation, round-robin polling, cooperative admission+poll budgets, rotate pattern"
+"src/service/steer.rs"
+726
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Out-of-range fails closed, lazy poll_ready, clean state machine, lock released before return"
