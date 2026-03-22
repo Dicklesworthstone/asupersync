@@ -1,11 +1,11 @@
 [package]
 name = "asupersync-browser-core"
-version = "0.1.0"
+version = "0.2.9"
 edition = "2024"
 license-file = "../LICENSE"
 description = "WASM/JS bindings for the Asupersync async runtime (Browser Edition). Exposes the v1 ABI symbol surface via wasm-bindgen."
 repository = "https://github.com/Dicklesworthstone/asupersync"
-keywords = ["async", "wasm", "browser", "bindings", "structured-concurrency"]
+keywords = ["async", "wasm", "browser", "bindings", "structured"]
 categories = ["asynchronous", "wasm", "web-programming"]
 
 [package.metadata.asupersync_wasm_policy]
@@ -18,7 +18,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Core Asupersync runtime (no wasm-bindgen in core paths).
-asupersync = { version = "0.2.8", path = "..", default-features = false }
+asupersync = { version = "0.2.9", path = "..", default-features = false }
 
 # WASM boundary tooling.
 wasm-bindgen = "0.2"
