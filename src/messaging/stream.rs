@@ -713,6 +713,216 @@ mod tests {
     }
 
     #[test]
+    fn limits_retention_prunes_by_byte_budget() {
+        let mut config = stream_config("orders.>");
+        config.max_bytes = 7;
+        let mut stream = Stream::new(
+            "orders",
+            test_region(2),
+            Time::ZERO,
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+
+        stream
+            .append(
+                Subject::new("orders.created"),
+                b"four".to_vec(),
+                Time::from_secs(1),
+            )
+            .expect("append first");
+        stream
+            .append(
+                Subject::new("orders.updated"),
+                b"five!".to_vec(),
+                Time::from_secs(2),
+            )
+            .expect("append second");
+
+        assert_eq!(stream.state().msg_count, 1);
+        assert_eq!(stream.state().byte_count, 5);
+        assert_eq!(stream.state().first_seq, 2);
+        assert_eq!(stream.state().last_seq, 2);
+        assert!(stream.get(1).is_none());
+        assert_eq!(
+            stream.get(2).expect("retained second").payload,
+            b"five!".to_vec()
+        );
+    }
+
+    #[test]
+    fn limits_retention_prunes_only_after_age_boundary_is_exceeded() {
+        let mut config = stream_config("orders.>");
+        config.max_age = Some(Duration::from_secs(5));
+        let mut stream = Stream::new(
+            "orders",
+            test_region(3),
+            Time::ZERO,
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+
+        stream
+            .append(
+                Subject::new("orders.created"),
+                b"first".to_vec(),
+                Time::from_secs(1),
+            )
+            .expect("append first");
+        stream
+            .append(
+                Subject::new("orders.updated"),
+                b"second".to_vec(),
+                Time::from_secs(6),
+            )
+            .expect("append boundary");
+
+        assert_eq!(stream.state().msg_count, 2);
+        assert!(
+            stream.get(1).is_some(),
+            "age equal to limit should be retained"
+        );
+
+        stream
+            .append(
+                Subject::new("orders.cancelled"),
+                b"third".to_vec(),
+                Time::from_secs(7),
+            )
+            .expect("append past boundary");
+
+        assert_eq!(stream.state().msg_count, 2);
+        assert_eq!(stream.state().first_seq, 2);
+        assert_eq!(stream.state().last_seq, 3);
+        assert!(
+            stream.get(1).is_none(),
+            "age above limit should prune oldest"
+        );
+        assert!(stream.get(2).is_some());
+        assert!(stream.get(3).is_some());
+    }
+
+    #[test]
+    fn non_limits_retention_modes_preserve_records_even_with_limits_set() {
+        for retention in [RetentionPolicy::WorkQueue, RetentionPolicy::Interest] {
+            let mut config = stream_config("orders.>");
+            config.retention = retention;
+            config.max_msgs = 1;
+            config.max_bytes = 1;
+            config.max_age = Some(Duration::from_secs(1));
+            let mut stream = Stream::new(
+                "orders",
+                test_region(4),
+                Time::ZERO,
+                config,
+                InMemoryStorageBackend::default(),
+            )
+            .expect("stream");
+
+            stream
+                .append(
+                    Subject::new("orders.created"),
+                    b"first".to_vec(),
+                    Time::from_secs(1),
+                )
+                .expect("append first");
+            stream
+                .append(
+                    Subject::new("orders.updated"),
+                    b"second".to_vec(),
+                    Time::from_secs(10),
+                )
+                .expect("append second");
+
+            assert_eq!(stream.state().msg_count, 2, "retention={retention:?}");
+            assert_eq!(stream.state().first_seq, 1, "retention={retention:?}");
+            assert_eq!(stream.state().last_seq, 2, "retention={retention:?}");
+            assert!(stream.get(1).is_some(), "retention={retention:?}");
+            assert!(stream.get(2).is_some(), "retention={retention:?}");
+        }
+    }
+
+    #[test]
+    fn stream_rejects_appends_after_begin_close_and_after_close() {
+        let mut stream = Stream::new(
+            "orders",
+            test_region(5),
+            Time::ZERO,
+            stream_config("orders.>"),
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+
+        stream.begin_close();
+        let closing_error = stream
+            .append(
+                Subject::new("orders.created"),
+                b"late".to_vec(),
+                Time::from_secs(1),
+            )
+            .expect_err("closing stream must reject append");
+        assert_eq!(
+            closing_error,
+            StreamError::NotAcceptingAppends {
+                name: "orders".to_owned(),
+                lifecycle: StreamLifecycle::Closing,
+            }
+        );
+
+        let mut closed_stream = Stream::new(
+            "payments",
+            test_region(6),
+            Time::ZERO,
+            stream_config("payments.>"),
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+        closed_stream.close().expect("close");
+
+        let closed_error = closed_stream
+            .append(
+                Subject::new("payments.created"),
+                b"late".to_vec(),
+                Time::from_secs(1),
+            )
+            .expect_err("closed stream must reject append");
+        assert_eq!(
+            closed_error,
+            StreamError::NotAcceptingAppends {
+                name: "payments".to_owned(),
+                lifecycle: StreamLifecycle::Closed,
+            }
+        );
+    }
+
+    #[test]
+    fn consumer_ids_are_monotonic_and_unknown_detach_is_ignored() {
+        let mut stream = Stream::new(
+            "orders",
+            test_region(7),
+            Time::ZERO,
+            stream_config("orders.>"),
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+
+        let first = stream.attach_consumer();
+        let second = stream.attach_consumer();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(stream.state().consumer_count, 2);
+        assert!(!stream.detach_consumer(999));
+        assert_eq!(stream.state().consumer_count, 2);
+        assert!(stream.detach_consumer(first));
+        assert_eq!(stream.state().consumer_count, 1);
+        assert!(stream.detach_consumer(second));
+        assert_eq!(stream.state().consumer_count, 0);
+    }
+
+    #[test]
     fn close_waits_for_child_regions_and_consumers_to_drain() {
         let mut stream = Stream::new(
             "orders",

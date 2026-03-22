@@ -1,11 +1,18 @@
 //! Federation-role definitions for FABRIC interconnects.
 
 use super::control::{ControlBudget, SystemSubjectFamily};
-use super::morphism::{FabricCapability, Morphism, MorphismClass, MorphismValidationError};
-use super::subject::SubjectPattern;
+use super::morphism::{
+    FabricCapability, Morphism, MorphismClass, MorphismEvaluationError, MorphismValidationError,
+};
+use super::subject::{
+    NamespaceComponent, NamespaceKernel, NamespaceKernelError, Subject, SubjectPattern,
+    SubjectPatternError,
+};
 use crate::distributed::{RegionBridge, RegionSnapshot, SnapshotError};
+use crate::remote::NodeId;
+use crate::supervision::{RestartConfig, SupervisionStrategy};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 use std::time::Duration;
 use thiserror::Error;
@@ -1240,6 +1247,680 @@ fn ensure_capability_scope(
     Ok(())
 }
 
+/// Deterministic restart envelope for distributed supervision planning.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DistributedRestartEnvelope {
+    /// Stop the distributed worker when it fails.
+    #[default]
+    Stop,
+    /// Restart the worker with an explicit bounded restart budget.
+    Restart {
+        /// Maximum number of restarts permitted in the rolling window.
+        max_restarts: u32,
+        /// Rolling time window used for restart accounting.
+        window: Duration,
+        /// Budget cost charged per restart attempt.
+        restart_cost: u64,
+        /// Minimum remaining time budget required to attempt a restart.
+        min_remaining_for_restart: Option<Duration>,
+        /// Minimum remaining poll budget required to attempt a restart.
+        min_polls_for_restart: u32,
+    },
+    /// Escalate the failure to the next distributed supervision boundary.
+    Escalate,
+}
+
+impl DistributedRestartEnvelope {
+    /// Construct a bounded restart envelope.
+    #[must_use]
+    pub fn restart(max_restarts: u32, window: Duration) -> Self {
+        Self::Restart {
+            max_restarts,
+            window,
+            restart_cost: 0,
+            min_remaining_for_restart: None,
+            min_polls_for_restart: 0,
+        }
+    }
+
+    /// Add per-restart cost accounting.
+    #[must_use]
+    pub fn with_restart_cost(self, restart_cost: u64) -> Self {
+        match self {
+            Self::Restart {
+                max_restarts,
+                window,
+                min_remaining_for_restart,
+                min_polls_for_restart,
+                ..
+            } => Self::Restart {
+                max_restarts,
+                window,
+                restart_cost,
+                min_remaining_for_restart,
+                min_polls_for_restart,
+            },
+            other => other,
+        }
+    }
+
+    /// Require a minimum remaining time budget before restarting.
+    #[must_use]
+    pub fn with_min_remaining(self, min_remaining_for_restart: Duration) -> Self {
+        match self {
+            Self::Restart {
+                max_restarts,
+                window,
+                restart_cost,
+                min_polls_for_restart,
+                ..
+            } => Self::Restart {
+                max_restarts,
+                window,
+                restart_cost,
+                min_remaining_for_restart: Some(min_remaining_for_restart),
+                min_polls_for_restart,
+            },
+            other => other,
+        }
+    }
+
+    /// Require a minimum remaining poll budget before restarting.
+    #[must_use]
+    pub fn with_min_polls(self, min_polls_for_restart: u32) -> Self {
+        match self {
+            Self::Restart {
+                max_restarts,
+                window,
+                restart_cost,
+                min_remaining_for_restart,
+                ..
+            } => Self::Restart {
+                max_restarts,
+                window,
+                restart_cost,
+                min_remaining_for_restart,
+                min_polls_for_restart,
+            },
+            other => other,
+        }
+    }
+
+    fn lease_ttl(&self) -> Duration {
+        match self {
+            Self::Restart { window, .. } if !window.is_zero() => *window,
+            Self::Stop | Self::Escalate | Self::Restart { .. } => Duration::from_secs(30),
+        }
+    }
+
+    fn to_supervision_strategy(&self) -> Result<SupervisionStrategy, FederationError> {
+        match self {
+            Self::Stop => Ok(SupervisionStrategy::Stop),
+            Self::Escalate => Ok(SupervisionStrategy::Escalate),
+            Self::Restart {
+                max_restarts,
+                window,
+                restart_cost,
+                min_remaining_for_restart,
+                min_polls_for_restart,
+            } => {
+                if *max_restarts == 0 {
+                    return Err(FederationError::ZeroRestartBudget);
+                }
+                if window.is_zero() {
+                    return Err(FederationError::ZeroDuration {
+                        field: "distributed_supervision.restart.window".to_owned(),
+                    });
+                }
+                if min_remaining_for_restart.is_some_and(|duration| duration.is_zero()) {
+                    return Err(FederationError::ZeroDuration {
+                        field: "distributed_supervision.restart.min_remaining_for_restart"
+                            .to_owned(),
+                    });
+                }
+
+                let mut config = RestartConfig::new(*max_restarts, *window)
+                    .with_restart_cost(*restart_cost)
+                    .with_min_polls(*min_polls_for_restart);
+                if let Some(min_remaining) = min_remaining_for_restart {
+                    config = config.with_min_remaining(*min_remaining);
+                }
+                Ok(SupervisionStrategy::Restart(config))
+            }
+        }
+    }
+}
+
+/// Declarative node specification for distributed supervision planning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DistributedSupervisionNodeSpec {
+    /// Stable node identifier used across mailbox, monitor, and handoff plans.
+    pub node_id: NodeId,
+    /// Canonical tenant/service namespace for this node's mailbox and telemetry.
+    pub namespace: NamespaceKernel,
+    /// Mailbox component within the namespace.
+    pub mailbox_component: NamespaceComponent,
+    /// Failure domain identifier used for failover validation.
+    pub failure_domain: NamespaceComponent,
+    /// Logical mailbox capacity used by remote routing plans.
+    pub mailbox_capacity: usize,
+    /// Restart envelope compiled into a concrete supervision strategy.
+    pub restart_envelope: DistributedRestartEnvelope,
+    /// Export morphisms applied when routing this node's mailbox outward.
+    pub export_morphisms: Vec<Morphism>,
+    /// Import morphisms applied when routing traffic into this node's mailbox.
+    pub import_morphisms: Vec<Morphism>,
+    /// Remote nodes this node monitors.
+    pub monitor_targets: Vec<NodeId>,
+    /// Remote nodes this node links bidirectionally.
+    pub link_targets: Vec<NodeId>,
+    /// Eligible failover targets for this node.
+    pub failover_targets: Vec<NodeId>,
+}
+
+impl DistributedSupervisionNodeSpec {
+    /// Build a validated distributed-supervision node specification.
+    pub fn new(
+        node_id: impl Into<String>,
+        tenant: impl AsRef<str>,
+        service: impl AsRef<str>,
+        failure_domain: impl AsRef<str>,
+        mailbox_capacity: usize,
+        restart_envelope: DistributedRestartEnvelope,
+    ) -> Result<Self, FederationError> {
+        if mailbox_capacity == 0 {
+            return Err(FederationError::ZeroMailboxCapacity);
+        }
+
+        let node_id = NodeId::new(node_id.into());
+        let mailbox_component = NamespaceComponent::parse(node_id.as_str())?;
+        let failure_domain = NamespaceComponent::parse(failure_domain)?;
+
+        Ok(Self {
+            node_id,
+            namespace: NamespaceKernel::new(tenant, service)?,
+            mailbox_component,
+            failure_domain,
+            mailbox_capacity,
+            restart_envelope,
+            export_morphisms: Vec::new(),
+            import_morphisms: Vec::new(),
+            monitor_targets: Vec::new(),
+            link_targets: Vec::new(),
+            failover_targets: Vec::new(),
+        })
+    }
+
+    /// Install export morphisms for the node's mailbox route.
+    #[must_use]
+    pub fn with_export_morphisms(mut self, export_morphisms: Vec<Morphism>) -> Self {
+        self.export_morphisms = export_morphisms;
+        self
+    }
+
+    /// Install import morphisms for the node's mailbox route.
+    #[must_use]
+    pub fn with_import_morphisms(mut self, import_morphisms: Vec<Morphism>) -> Self {
+        self.import_morphisms = import_morphisms;
+        self
+    }
+
+    /// Declare nodes this node monitors.
+    #[must_use]
+    pub fn with_monitor_targets<I, S>(mut self, monitor_targets: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.monitor_targets = monitor_targets
+            .into_iter()
+            .map(|target| NodeId::new(target.into()))
+            .collect();
+        self
+    }
+
+    /// Declare bidirectional link relationships.
+    #[must_use]
+    pub fn with_link_targets<I, S>(mut self, link_targets: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.link_targets = link_targets
+            .into_iter()
+            .map(|target| NodeId::new(target.into()))
+            .collect();
+        self
+    }
+
+    /// Declare eligible failover targets.
+    #[must_use]
+    pub fn with_failover_targets<I, S>(mut self, failover_targets: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.failover_targets = failover_targets
+            .into_iter()
+            .map(|target| NodeId::new(target.into()))
+            .collect();
+        self
+    }
+
+    fn mailbox_subject(&self) -> Result<Subject, FederationError> {
+        Ok(self
+            .namespace
+            .mailbox_subject(self.mailbox_component.as_str())?)
+    }
+
+    fn registry_subject(&self) -> SubjectPattern {
+        SubjectPattern::from(&self.namespace.service_discovery_subject())
+    }
+
+    fn observability_subject(&self) -> Result<SubjectPattern, FederationError> {
+        Ok(SubjectPattern::from(
+            &self.namespace.observability_subject(format!(
+                "supervision-{}",
+                self.mailbox_component.as_str()
+            ))?,
+        ))
+    }
+}
+
+/// Compiled supervision state for one distributed node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledDistributedSupervisionNode {
+    /// Stable node identifier.
+    pub node_id: NodeId,
+    /// Failure domain attached to this node.
+    pub failure_domain: String,
+    /// Mailbox capacity compiled into the remote routing surface.
+    pub mailbox_capacity: usize,
+    /// Canonical mailbox subject before morphism application.
+    pub mailbox_subject: SubjectPattern,
+    /// Mailbox subject after export morphisms are applied.
+    pub exported_mailbox_subject: SubjectPattern,
+    /// Mailbox subject after import morphisms are applied.
+    pub imported_mailbox_subject: SubjectPattern,
+    /// Concrete supervision strategy derived from the restart envelope.
+    pub supervision_strategy: SupervisionStrategy,
+}
+
+/// Compiled mailbox-routing plan for one distributed node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedMailboxRoute {
+    /// Node owning the mailbox.
+    pub node_id: NodeId,
+    /// Canonical mailbox subject.
+    pub mailbox_subject: SubjectPattern,
+    /// Exported mailbox subject after namespace rewriting.
+    pub exported_mailbox_subject: SubjectPattern,
+    /// Imported mailbox subject after namespace rewriting.
+    pub imported_mailbox_subject: SubjectPattern,
+    /// Morphism classes participating in export routing.
+    pub export_classes: Vec<MorphismClass>,
+    /// Morphism classes participating in import routing.
+    pub import_classes: Vec<MorphismClass>,
+}
+
+/// Compiled monitor relationship between two distributed nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedMonitorPlan {
+    /// Monitoring node.
+    pub watcher: NodeId,
+    /// Monitored node.
+    pub monitored: NodeId,
+    /// Subject carrying deterministic down notifications.
+    pub notification_subject: SubjectPattern,
+    /// Mailbox subject for the monitored node.
+    pub monitored_mailbox_subject: SubjectPattern,
+}
+
+/// Compiled bidirectional link contract between two distributed nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedLinkPlan {
+    /// First endpoint in canonical lexical order.
+    pub left_node: NodeId,
+    /// Second endpoint in canonical lexical order.
+    pub right_node: NodeId,
+    /// Control-plane subject carrying link lifecycle signals.
+    pub control_subject: SubjectPattern,
+    /// System family reserved for the link lifecycle.
+    pub family: SystemSubjectFamily,
+}
+
+/// Registry-lease management plan for one distributed node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedRegistryLeasePlan {
+    /// Node covered by the lease.
+    pub node_id: NodeId,
+    /// Failure domain owning the lease.
+    pub failure_domain: String,
+    /// Service-discovery subject guarded by the lease.
+    pub registry_subject: SubjectPattern,
+    /// System subject used to renew or revoke the lease.
+    pub lease_subject: SubjectPattern,
+    /// Deterministic lease TTL.
+    pub lease_ttl: Duration,
+}
+
+/// Compiled drain and handoff contract for cross-domain failover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedFailoverHandoffContract {
+    /// Failing source node.
+    pub source_node: NodeId,
+    /// Replacement target node.
+    pub target_node: NodeId,
+    /// Source node failure domain.
+    pub source_failure_domain: String,
+    /// Target node failure domain.
+    pub target_failure_domain: String,
+    /// Subject used to initiate a quiescent handoff.
+    pub handoff_subject: SubjectPattern,
+    /// Subject used to drain in-flight work during failover.
+    pub drain_subject: SubjectPattern,
+    /// Lease surface the target must claim before cutover.
+    pub registry_lease_subject: SubjectPattern,
+    /// Replay/evidence surface for this failover contract.
+    pub evidence_subject: SubjectPattern,
+    /// Strategy that governs the target after cutover.
+    pub target_strategy: SupervisionStrategy,
+}
+
+/// Evidence-routing hooks emitted for one distributed node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedEvidenceHook {
+    /// Node producing evidence.
+    pub node_id: NodeId,
+    /// Namespace-local observability subject for the node.
+    pub observability_subject: SubjectPattern,
+    /// Replay/control-plane subject for durable evidence shipping.
+    pub replay_subject: SubjectPattern,
+    /// Control-plane family used for replay shipping.
+    pub family: SystemSubjectFamily,
+}
+
+/// Deterministic distributed-supervision compilation output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedSupervisionPlan {
+    /// Compiled node-local supervision state.
+    pub nodes: Vec<CompiledDistributedSupervisionNode>,
+    /// Mailbox-routing plans for every node.
+    pub mailbox_routes: Vec<DistributedMailboxRoute>,
+    /// Remote monitor relationships.
+    pub monitor_plans: Vec<DistributedMonitorPlan>,
+    /// Remote link relationships.
+    pub link_plans: Vec<DistributedLinkPlan>,
+    /// Registry-lease plans for mailbox discovery and failover.
+    pub registry_leases: Vec<DistributedRegistryLeasePlan>,
+    /// Cross-domain failover contracts.
+    pub failover_handoffs: Vec<DistributedFailoverHandoffContract>,
+    /// Evidence hooks for replay and observability.
+    pub evidence_hooks: Vec<DistributedEvidenceHook>,
+}
+
+/// Deterministic compiler for distributed supervision plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DistributedSupervisionCompiler;
+
+impl DistributedSupervisionCompiler {
+    /// Compile a distributed supervision graph into mailbox, monitor, link,
+    /// lease, failover, and evidence plans.
+    pub fn compile(
+        nodes: &[DistributedSupervisionNodeSpec],
+    ) -> Result<DistributedSupervisionPlan, FederationError> {
+        if nodes.is_empty() {
+            return Err(FederationError::EmptyDistributedSupervisionGraph);
+        }
+
+        let mut by_id = BTreeMap::new();
+        for node in nodes {
+            if by_id
+                .insert(node.node_id.as_str().to_owned(), node)
+                .is_some()
+            {
+                return Err(FederationError::DuplicateDistributedSupervisionNode {
+                    node_id: node.node_id.as_str().to_owned(),
+                });
+            }
+            if node.mailbox_capacity == 0 {
+                return Err(FederationError::ZeroMailboxCapacity);
+            }
+            for morphism in node
+                .export_morphisms
+                .iter()
+                .chain(node.import_morphisms.iter())
+            {
+                morphism.validate()?;
+            }
+        }
+
+        let mut compiled_nodes = Vec::new();
+        let mut mailbox_routes = Vec::new();
+        let mut registry_leases = Vec::new();
+        let mut evidence_hooks = Vec::new();
+
+        for node in by_id.values() {
+            let mailbox_subject = node.mailbox_subject()?;
+            let mailbox_pattern = SubjectPattern::from(&mailbox_subject);
+            let exported_mailbox_subject =
+                apply_morphisms_to_subject(&mailbox_subject, &node.export_morphisms)?;
+            let imported_mailbox_subject =
+                apply_morphisms_to_subject(&mailbox_subject, &node.import_morphisms)?;
+            let supervision_strategy = node.restart_envelope.to_supervision_strategy()?;
+            let lease_subject = system_subject_pattern(
+                SystemSubjectFamily::Route,
+                &["registry-lease", node.mailbox_component.as_str()],
+            )?;
+            let replay_subject = system_subject_pattern(
+                SystemSubjectFamily::Replay,
+                &["supervision", node.mailbox_component.as_str()],
+            )?;
+
+            compiled_nodes.push(CompiledDistributedSupervisionNode {
+                node_id: node.node_id.clone(),
+                failure_domain: node.failure_domain.as_str().to_owned(),
+                mailbox_capacity: node.mailbox_capacity,
+                mailbox_subject: mailbox_pattern.clone(),
+                exported_mailbox_subject: exported_mailbox_subject.clone(),
+                imported_mailbox_subject: imported_mailbox_subject.clone(),
+                supervision_strategy: supervision_strategy.clone(),
+            });
+
+            mailbox_routes.push(DistributedMailboxRoute {
+                node_id: node.node_id.clone(),
+                mailbox_subject: mailbox_pattern,
+                exported_mailbox_subject,
+                imported_mailbox_subject,
+                export_classes: node.export_morphisms.iter().map(|m| m.class).collect(),
+                import_classes: node.import_morphisms.iter().map(|m| m.class).collect(),
+            });
+
+            registry_leases.push(DistributedRegistryLeasePlan {
+                node_id: node.node_id.clone(),
+                failure_domain: node.failure_domain.as_str().to_owned(),
+                registry_subject: node.registry_subject(),
+                lease_subject,
+                lease_ttl: node.restart_envelope.lease_ttl(),
+            });
+
+            evidence_hooks.push(DistributedEvidenceHook {
+                node_id: node.node_id.clone(),
+                observability_subject: node.observability_subject()?,
+                replay_subject,
+                family: SystemSubjectFamily::Replay,
+            });
+        }
+
+        let mut monitor_plans = Vec::new();
+        let mut link_plans = Vec::new();
+        let mut failover_handoffs = Vec::new();
+        let mut link_pairs = BTreeSet::new();
+
+        for node in by_id.values() {
+            for target_id in dedup_node_targets(&node.monitor_targets) {
+                let target = resolve_distributed_target(&by_id, node, &target_id, "monitor")?;
+                monitor_plans.push(DistributedMonitorPlan {
+                    watcher: node.node_id.clone(),
+                    monitored: target.node_id.clone(),
+                    notification_subject: system_subject_pattern(
+                        SystemSubjectFamily::Drain,
+                        &[
+                            "monitor",
+                            node.mailbox_component.as_str(),
+                            target.mailbox_component.as_str(),
+                        ],
+                    )?,
+                    monitored_mailbox_subject: SubjectPattern::from(&target.mailbox_subject()?),
+                });
+            }
+
+            for target_id in dedup_node_targets(&node.link_targets) {
+                let target = resolve_distributed_target(&by_id, node, &target_id, "link")?;
+                let (left, right) = canonical_node_pair(&node.node_id, &target.node_id);
+                if link_pairs.insert((left.as_str().to_owned(), right.as_str().to_owned())) {
+                    link_plans.push(DistributedLinkPlan {
+                        left_node: left.clone(),
+                        right_node: right.clone(),
+                        control_subject: system_subject_pattern(
+                            SystemSubjectFamily::Drain,
+                            &["link", node_component(&left)?, node_component(&right)?],
+                        )?,
+                        family: SystemSubjectFamily::Drain,
+                    });
+                }
+            }
+
+            for target_id in dedup_node_targets(&node.failover_targets) {
+                let target =
+                    resolve_distributed_target(&by_id, node, &target_id, "failover_target")?;
+                if node.failure_domain == target.failure_domain {
+                    return Err(FederationError::FailoverTargetSameFailureDomain {
+                        node_id: node.node_id.as_str().to_owned(),
+                        target: target.node_id.as_str().to_owned(),
+                        failure_domain: node.failure_domain.as_str().to_owned(),
+                    });
+                }
+
+                failover_handoffs.push(DistributedFailoverHandoffContract {
+                    source_node: node.node_id.clone(),
+                    target_node: target.node_id.clone(),
+                    source_failure_domain: node.failure_domain.as_str().to_owned(),
+                    target_failure_domain: target.failure_domain.as_str().to_owned(),
+                    handoff_subject: system_subject_pattern(
+                        SystemSubjectFamily::Drain,
+                        &[
+                            "handoff",
+                            node.mailbox_component.as_str(),
+                            target.mailbox_component.as_str(),
+                        ],
+                    )?,
+                    drain_subject: system_subject_pattern(
+                        SystemSubjectFamily::Drain,
+                        &[
+                            "failover",
+                            node.mailbox_component.as_str(),
+                            target.mailbox_component.as_str(),
+                        ],
+                    )?,
+                    registry_lease_subject: system_subject_pattern(
+                        SystemSubjectFamily::Route,
+                        &["registry-lease", target.mailbox_component.as_str()],
+                    )?,
+                    evidence_subject: system_subject_pattern(
+                        SystemSubjectFamily::Replay,
+                        &[
+                            "failover",
+                            node.mailbox_component.as_str(),
+                            target.mailbox_component.as_str(),
+                        ],
+                    )?,
+                    target_strategy: target.restart_envelope.to_supervision_strategy()?,
+                });
+            }
+        }
+
+        Ok(DistributedSupervisionPlan {
+            nodes: compiled_nodes,
+            mailbox_routes,
+            monitor_plans,
+            link_plans,
+            registry_leases,
+            failover_handoffs,
+            evidence_hooks,
+        })
+    }
+}
+
+fn apply_morphisms_to_subject(
+    subject: &Subject,
+    morphisms: &[Morphism],
+) -> Result<SubjectPattern, FederationError> {
+    let mut tokens = subject.tokens().to_vec();
+    for morphism in morphisms {
+        morphism.validate()?;
+        tokens = morphism.transform.apply_tokens(&tokens)?;
+    }
+    Ok(SubjectPattern::from(&Subject::parse(&tokens.join("."))?))
+}
+
+fn dedup_node_targets(targets: &[NodeId]) -> Vec<NodeId> {
+    targets
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn resolve_distributed_target<'a>(
+    by_id: &BTreeMap<String, &'a DistributedSupervisionNodeSpec>,
+    source: &DistributedSupervisionNodeSpec,
+    target: &NodeId,
+    relation: &'static str,
+) -> Result<&'a DistributedSupervisionNodeSpec, FederationError> {
+    if source.node_id == *target {
+        return Err(FederationError::SelfReferentialDistributedRelation {
+            node_id: source.node_id.as_str().to_owned(),
+            relation,
+        });
+    }
+
+    by_id.get(target.as_str()).copied().ok_or_else(|| {
+        FederationError::UnknownDistributedSupervisionTarget {
+            node_id: source.node_id.as_str().to_owned(),
+            target: target.as_str().to_owned(),
+            relation,
+        }
+    })
+}
+
+fn canonical_node_pair(left: &NodeId, right: &NodeId) -> (NodeId, NodeId) {
+    if left <= right {
+        (left.clone(), right.clone())
+    } else {
+        (right.clone(), left.clone())
+    }
+}
+
+fn node_component(node: &NodeId) -> Result<&str, FederationError> {
+    NamespaceComponent::parse(node.as_str())?;
+    Ok(node.as_str())
+}
+
+fn system_subject_pattern(
+    family: SystemSubjectFamily,
+    suffix: &[&str],
+) -> Result<SubjectPattern, FederationError> {
+    let mut raw = family.prefix();
+    for component in suffix {
+        NamespaceComponent::parse(component)?;
+        raw.push('.');
+        raw.push_str(component);
+    }
+    Ok(SubjectPattern::parse(&raw)?)
+}
+
 /// Validation failures for federation-role configuration and bridge wiring.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FederationError {
@@ -1333,6 +2014,53 @@ pub enum FederationError {
     /// Replay bridges require evidence-observation capability.
     #[error("edge replay links require observe-evidence capability in scope")]
     EdgeReplayRequiresObserveEvidence,
+    /// Distributed supervision nodes must reserve a positive mailbox capacity.
+    #[error("distributed supervision mailbox capacity must be greater than zero")]
+    ZeroMailboxCapacity,
+    /// Distributed restart envelopes must budget at least one restart.
+    #[error("distributed supervision restart envelope must allow at least one restart")]
+    ZeroRestartBudget,
+    /// Distributed supervision compilation requires at least one node.
+    #[error("distributed supervision graph must contain at least one node")]
+    EmptyDistributedSupervisionGraph,
+    /// Node identifiers must be unique in one distributed supervision graph.
+    #[error("duplicate distributed supervision node `{node_id}`")]
+    DuplicateDistributedSupervisionNode {
+        /// Duplicate node identifier.
+        node_id: String,
+    },
+    /// Relations must refer to an existing target node.
+    #[error(
+        "distributed supervision node `{node_id}` references unknown {relation} target `{target}`"
+    )]
+    UnknownDistributedSupervisionTarget {
+        /// Source node identifier.
+        node_id: String,
+        /// Missing target identifier.
+        target: String,
+        /// Relation carrying the missing target.
+        relation: &'static str,
+    },
+    /// Monitor/link/failover relations must not point back to self.
+    #[error("distributed supervision node `{node_id}` must not declare a self-{relation}")]
+    SelfReferentialDistributedRelation {
+        /// Source node identifier.
+        node_id: String,
+        /// Relation carrying the self-reference.
+        relation: &'static str,
+    },
+    /// Failover requires a genuinely different failure domain.
+    #[error(
+        "distributed supervision failover from `{node_id}` to `{target}` must cross failure domains (current domain `{failure_domain}`)"
+    )]
+    FailoverTargetSameFailureDomain {
+        /// Source node identifier.
+        node_id: String,
+        /// Failover target identifier.
+        target: String,
+        /// Shared failure domain that made the failover invalid.
+        failure_domain: String,
+    },
     /// Closed bridges cannot be reactivated.
     #[error("cannot activate a closed federation bridge")]
     CannotActivateClosedBridge,
@@ -1379,11 +2107,22 @@ pub enum FederationError {
     /// Underlying morphism validation failed.
     #[error(transparent)]
     MorphismValidation(#[from] MorphismValidationError),
+    /// Deterministic morphism evaluation failed while compiling a plan.
+    #[error(transparent)]
+    MorphismEvaluation(#[from] MorphismEvaluationError),
+    /// Subject or mailbox construction failed.
+    #[error(transparent)]
+    SubjectPattern(#[from] SubjectPatternError),
+    /// Namespace kernel construction failed.
+    #[error(transparent)]
+    NamespaceKernel(#[from] NamespaceKernelError),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::morphism::{ResponsePolicy, ReversibilityRequirement, SharingPolicy};
+    use super::super::morphism::{
+        ResponsePolicy, ReversibilityRequirement, SharingPolicy, SubjectTransform,
+    };
     use super::*;
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::ArenaIndex;
@@ -1423,6 +2162,31 @@ mod tests {
             sequence,
             bytes: 256,
         }
+    }
+
+    fn distributed_node(
+        node_id: &str,
+        service: &str,
+        failure_domain: &str,
+    ) -> DistributedSupervisionNodeSpec {
+        DistributedSupervisionNodeSpec::new(
+            node_id,
+            "acme",
+            service,
+            failure_domain,
+            64,
+            DistributedRestartEnvelope::restart(3, Duration::from_secs(45)),
+        )
+        .expect("distributed node should be valid")
+    }
+
+    fn rename_mailbox_prefix(service: &str, replacement: &str) -> Morphism {
+        let mut morphism = derived_view_morphism();
+        morphism.transform = SubjectTransform::RenamePrefix {
+            from: SubjectPattern::new(format!("tenant.acme.service.{service}.mailbox")),
+            to: SubjectPattern::new(format!("tenant.acme.service.{service}.{replacement}")),
+        };
+        morphism
     }
 
     #[test]
@@ -2560,6 +3324,204 @@ mod tests {
             }
             other => panic!("expected edge replay runtime, got {other:?}"),
         }
+    }
+
+    // -- Distributed supervision compiler -----------------------------------
+
+    #[test]
+    fn distributed_supervision_rejects_duplicate_node_ids() {
+        let alpha_orders = distributed_node("alpha", "orders", "zone-a");
+        let alpha_payments = distributed_node("alpha", "payments", "zone-b");
+
+        let err = DistributedSupervisionCompiler::compile(&[alpha_orders, alpha_payments])
+            .expect_err("duplicate node ids must be rejected");
+
+        assert_eq!(
+            err,
+            FederationError::DuplicateDistributedSupervisionNode {
+                node_id: "alpha".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn distributed_supervision_rejects_unknown_monitor_target() {
+        let alpha =
+            distributed_node("alpha", "orders", "zone-a").with_monitor_targets(["missing-node"]);
+
+        let err = DistributedSupervisionCompiler::compile(&[alpha])
+            .expect_err("unknown monitor targets must be rejected");
+
+        assert_eq!(
+            err,
+            FederationError::UnknownDistributedSupervisionTarget {
+                node_id: "alpha".to_owned(),
+                target: "missing-node".to_owned(),
+                relation: "monitor",
+            }
+        );
+    }
+
+    #[test]
+    fn distributed_supervision_rejects_same_domain_failover() {
+        let alpha = distributed_node("alpha", "orders", "zone-a").with_failover_targets(["beta"]);
+        let beta = distributed_node("beta", "billing", "zone-a");
+
+        let err = DistributedSupervisionCompiler::compile(&[alpha, beta])
+            .expect_err("failover must cross failure domains");
+
+        assert_eq!(
+            err,
+            FederationError::FailoverTargetSameFailureDomain {
+                node_id: "alpha".to_owned(),
+                target: "beta".to_owned(),
+                failure_domain: "zone-a".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn distributed_supervision_compiles_mailbox_monitor_link_lease_and_evidence_plans() {
+        let alpha = distributed_node("alpha", "orders", "zone-a")
+            .with_export_morphisms(vec![rename_mailbox_prefix("orders", "fabric-egress")])
+            .with_monitor_targets(["beta"])
+            .with_link_targets(["beta"])
+            .with_failover_targets(["beta"]);
+        let beta = distributed_node("beta", "billing", "zone-b")
+            .with_link_targets(["alpha"])
+            .with_import_morphisms(vec![rename_mailbox_prefix("billing", "fabric-ingress")]);
+
+        let plan = DistributedSupervisionCompiler::compile(&[alpha, beta])
+            .expect("distributed supervision plan should compile");
+
+        assert_eq!(plan.nodes.len(), 2);
+        assert_eq!(plan.mailbox_routes.len(), 2);
+        assert_eq!(plan.monitor_plans.len(), 1);
+        assert_eq!(plan.link_plans.len(), 1);
+        assert_eq!(plan.registry_leases.len(), 2);
+        assert_eq!(plan.failover_handoffs.len(), 1);
+        assert_eq!(plan.evidence_hooks.len(), 2);
+
+        let alpha_node = plan
+            .nodes
+            .iter()
+            .find(|node| node.node_id.as_str() == "alpha")
+            .expect("alpha node should exist");
+        assert_eq!(
+            alpha_node.mailbox_subject.as_str(),
+            "tenant.acme.service.orders.mailbox.alpha"
+        );
+        assert_eq!(
+            alpha_node.exported_mailbox_subject.as_str(),
+            "tenant.acme.service.orders.fabric-egress.alpha"
+        );
+        assert!(matches!(
+            &alpha_node.supervision_strategy,
+            SupervisionStrategy::Restart(config)
+                if config.max_restarts == 3 && config.window == Duration::from_secs(45)
+        ));
+
+        let beta_route = plan
+            .mailbox_routes
+            .iter()
+            .find(|route| route.node_id.as_str() == "beta")
+            .expect("beta route should exist");
+        assert_eq!(
+            beta_route.imported_mailbox_subject.as_str(),
+            "tenant.acme.service.billing.fabric-ingress.beta"
+        );
+
+        let monitor = &plan.monitor_plans[0];
+        assert_eq!(monitor.watcher.as_str(), "alpha");
+        assert_eq!(monitor.monitored.as_str(), "beta");
+        assert_eq!(
+            monitor.notification_subject.as_str(),
+            "$SYS.FABRIC.DRAIN.monitor.alpha.beta"
+        );
+        assert_eq!(
+            monitor.monitored_mailbox_subject.as_str(),
+            "tenant.acme.service.billing.mailbox.beta"
+        );
+
+        let link = &plan.link_plans[0];
+        assert_eq!(link.left_node.as_str(), "alpha");
+        assert_eq!(link.right_node.as_str(), "beta");
+        assert_eq!(
+            link.control_subject.as_str(),
+            "$SYS.FABRIC.DRAIN.link.alpha.beta"
+        );
+        assert_eq!(link.family, SystemSubjectFamily::Drain);
+
+        let alpha_lease = plan
+            .registry_leases
+            .iter()
+            .find(|lease| lease.node_id.as_str() == "alpha")
+            .expect("alpha lease should exist");
+        assert_eq!(
+            alpha_lease.registry_subject.as_str(),
+            "tenant.acme.service.orders.discover"
+        );
+        assert_eq!(
+            alpha_lease.lease_subject.as_str(),
+            "$SYS.FABRIC.ROUTE.registry-lease.alpha"
+        );
+        assert_eq!(alpha_lease.lease_ttl, Duration::from_secs(45));
+
+        let failover = &plan.failover_handoffs[0];
+        assert_eq!(failover.source_node.as_str(), "alpha");
+        assert_eq!(failover.target_node.as_str(), "beta");
+        assert_eq!(failover.source_failure_domain, "zone-a");
+        assert_eq!(failover.target_failure_domain, "zone-b");
+        assert_eq!(
+            failover.handoff_subject.as_str(),
+            "$SYS.FABRIC.DRAIN.handoff.alpha.beta"
+        );
+        assert_eq!(
+            failover.drain_subject.as_str(),
+            "$SYS.FABRIC.DRAIN.failover.alpha.beta"
+        );
+        assert_eq!(
+            failover.registry_lease_subject.as_str(),
+            "$SYS.FABRIC.ROUTE.registry-lease.beta"
+        );
+        assert_eq!(
+            failover.evidence_subject.as_str(),
+            "$SYS.FABRIC.REPLAY.failover.alpha.beta"
+        );
+        assert!(matches!(
+            &failover.target_strategy,
+            SupervisionStrategy::Restart(_)
+        ));
+
+        let alpha_hook = plan
+            .evidence_hooks
+            .iter()
+            .find(|hook| hook.node_id.as_str() == "alpha")
+            .expect("alpha evidence hook should exist");
+        assert_eq!(
+            alpha_hook.observability_subject.as_str(),
+            "tenant.acme.service.orders.telemetry.supervision-alpha"
+        );
+        assert_eq!(
+            alpha_hook.replay_subject.as_str(),
+            "$SYS.FABRIC.REPLAY.supervision.alpha"
+        );
+        assert_eq!(alpha_hook.family, SystemSubjectFamily::Replay);
+    }
+
+    #[test]
+    fn distributed_supervision_deduplicates_bidirectional_links() {
+        let alpha = distributed_node("alpha", "orders", "zone-a").with_link_targets(["beta"]);
+        let beta = distributed_node("beta", "billing", "zone-b").with_link_targets(["alpha"]);
+
+        let plan =
+            DistributedSupervisionCompiler::compile(&[alpha, beta]).expect("links should compile");
+
+        assert_eq!(plan.link_plans.len(), 1);
+        assert_eq!(
+            plan.link_plans[0].control_subject.as_str(),
+            "$SYS.FABRIC.DRAIN.link.alpha.beta"
+        );
     }
 
     // -- Default enum values -------------------------------------------------

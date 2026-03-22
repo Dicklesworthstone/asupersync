@@ -657,6 +657,80 @@ impl Default for RebalanceBudget {
     }
 }
 
+/// Deterministic strategy used to pack low-rate cells onto shared control
+/// shards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedShardPackingStrategy {
+    /// Use a stable hash of the canonical partition to derive shard id and slot.
+    StableHashBucket,
+}
+
+/// Explicit limits for when a cell may share control-plane storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CardinalityPolicy {
+    /// Maximum number of logical cells packed onto one shared control shard.
+    pub max_cells_per_shared_shard: usize,
+    /// Minimum publish rate that upgrades a cell to a dedicated control shard.
+    pub dedicated_shard_min_publishes_per_second: u64,
+    /// Deterministic packing strategy applied to shared-shard assignment.
+    pub packing_strategy: SharedShardPackingStrategy,
+}
+
+impl Default for CardinalityPolicy {
+    fn default() -> Self {
+        Self {
+            max_cells_per_shared_shard: 8,
+            dedicated_shard_min_publishes_per_second: 1_024,
+            packing_strategy: SharedShardPackingStrategy::StableHashBucket,
+        }
+    }
+}
+
+impl CardinalityPolicy {
+    #[allow(clippy::result_large_err)]
+    fn validate(self) -> Result<(), FabricError> {
+        if self.max_cells_per_shared_shard == 0 {
+            return Err(FabricError::InvalidSharedShardCardinalityLimit);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    fn wants_dedicated_shard(
+        self,
+        temperature: CellTemperature,
+        observed_load: ObservedCellLoad,
+    ) -> bool {
+        matches!(temperature, CellTemperature::Hot)
+            || observed_load.publishes_per_second >= self.dedicated_shard_min_publishes_per_second
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn assign_shared_shard(
+        self,
+        canonical_partition: &SubjectPattern,
+    ) -> Result<SharedControlShard, FabricError> {
+        self.validate()?;
+
+        match self.packing_strategy {
+            SharedShardPackingStrategy::StableHashBucket => {
+                let limit = u64::try_from(self.max_cells_per_shared_shard)
+                    .expect("shared shard cardinality limit must fit into u64");
+                let fingerprint =
+                    stable_hash(("shared-control-shard", canonical_partition.canonical_key()));
+                let shard_bucket = fingerprint / limit;
+                let slot_index = usize::try_from(fingerprint % limit)
+                    .expect("slot index derived from cardinality limit must fit usize");
+                Ok(SharedControlShard {
+                    shard_id: format!("shared-control-shard-{shard_bucket:016x}"),
+                    slot_index,
+                    cardinality_limit: self.max_cells_per_shared_shard,
+                })
+            }
+        }
+    }
+}
+
 /// Incremental steward-set transition plan under hysteresis and budget limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebalancePlan {
@@ -878,6 +952,8 @@ pub struct PlacementPolicy {
     pub rebalance_budget: RebalanceBudget,
     /// Canonicalization rules applied before consistent hashing.
     pub normalization: NormalizationPolicy,
+    /// Control-shard packing policy for low-rate cells.
+    pub cardinality_policy: CardinalityPolicy,
 }
 
 impl Default for PlacementPolicy {
@@ -892,6 +968,7 @@ impl Default for PlacementPolicy {
             thermal_hysteresis: ThermalHysteresis::default(),
             rebalance_budget: RebalanceBudget::default(),
             normalization: NormalizationPolicy::default(),
+            cardinality_policy: CardinalityPolicy::default(),
         }
     }
 }
@@ -1144,6 +1221,25 @@ impl PlacementPolicy {
         }
 
         next
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn control_shard_assignment_for_canonical(
+        &self,
+        canonical_partition: &SubjectPattern,
+        temperature: CellTemperature,
+        observed_load: ObservedCellLoad,
+    ) -> Result<Option<SharedControlShard>, FabricError> {
+        self.cardinality_policy.validate()?;
+        if self
+            .cardinality_policy
+            .wants_dedicated_shard(temperature, observed_load)
+        {
+            return Ok(None);
+        }
+        self.cardinality_policy
+            .assign_shared_shard(canonical_partition)
+            .map(Some)
     }
 }
 
@@ -2052,7 +2148,13 @@ impl SubjectCell {
             data_capsule.temperature,
         )?;
         let cell_id = CellId::for_partition(epoch, &canonical_partition);
-        let control_capsule = ControlCapsuleV1::new(cell_id, steward_set.clone(), epoch);
+        let shared_control_shard = placement_policy.control_shard_assignment_for_canonical(
+            &canonical_partition,
+            data_capsule.temperature,
+            ObservedCellLoad::new(0),
+        )?;
+        let mut control_capsule = ControlCapsuleV1::new(cell_id, steward_set.clone(), epoch);
+        control_capsule.shared_control_shard = shared_control_shard;
 
         Ok(Self {
             cell_id,
@@ -2201,6 +2303,12 @@ impl SubjectCell {
         let next_epoch = self.epoch.next_generation();
         let next_cell_id = CellId::for_partition(next_epoch, &self.subject_partition);
         next_control.rebind_epoch(next_cell_id, next_epoch);
+        next_control.shared_control_shard = placement_policy
+            .control_shard_assignment_for_canonical(
+                &self.subject_partition,
+                plan.next_temperature,
+                observed_load,
+            )?;
 
         let resulting_cell = Self {
             cell_id: next_cell_id,
@@ -2353,6 +2461,9 @@ pub enum FabricError {
         /// Canonical partition that could not be placed.
         partition: SubjectPattern,
     },
+    /// Shared control-shard packing requires a positive cardinality bound.
+    #[error("shared control shard cardinality limit must be at least 1")]
+    InvalidSharedShardCardinalityLimit,
     /// Multiple distinct morphisms claimed the same subject and disagreed on the result.
     #[error("subject `{subject}` matched multiple canonical morphisms (`{left}` and `{right}`)")]
     ConflictingSubjectMorphisms {
@@ -4088,6 +4199,25 @@ mod tests {
         .expect("warm cell")
     }
 
+    fn hot_subject_cell(candidates: &[StewardCandidate], policy: &PlacementPolicy) -> SubjectCell {
+        SubjectCell::new(
+            &SubjectPattern::parse("orders.created").expect("pattern"),
+            CellEpoch::new(11, 2),
+            candidates,
+            policy,
+            RepairPolicy {
+                recoverability_target: 3,
+                cold_witnesses: 1,
+                hot_witnesses: 2,
+            },
+            DataCapsule {
+                temperature: CellTemperature::Hot,
+                retained_message_blocks: 6,
+            },
+        )
+        .expect("hot cell")
+    }
+
     fn repair_bindings_for(
         cell: &SubjectCell,
         plan: &RebalancePlan,
@@ -5278,6 +5408,166 @@ mod tests {
                 slot_index: 3,
                 cardinality_limit: 3,
             }
+        );
+    }
+
+    #[test]
+    fn subject_cell_new_packs_low_rate_cells_onto_shared_control_shards() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+
+        let shard = cell
+            .control_capsule
+            .shared_control_shard
+            .as_ref()
+            .expect("cold cells should pack onto a shared control shard");
+        assert_eq!(
+            shard.cardinality_limit,
+            policy.cardinality_policy.max_cells_per_shared_shard
+        );
+        assert!(
+            shard.slot_index < shard.cardinality_limit,
+            "slot assignment must stay inside the shard cardinality limit"
+        );
+    }
+
+    #[test]
+    fn subject_cell_new_rejects_zero_shared_shard_cardinality_limit() {
+        let candidates = rebalance_candidates();
+        let policy = PlacementPolicy {
+            cardinality_policy: CardinalityPolicy {
+                max_cells_per_shared_shard: 0,
+                ..CardinalityPolicy::default()
+            },
+            ..rebalance_policy()
+        };
+
+        let err = SubjectCell::new(
+            &SubjectPattern::parse("orders.created").expect("pattern"),
+            CellEpoch::new(11, 2),
+            &candidates,
+            &policy,
+            RepairPolicy::default(),
+            DataCapsule::default(),
+        )
+        .expect_err("zero-cardinality shared shard policy must fail closed");
+        assert_eq!(err, FabricError::InvalidSharedShardCardinalityLimit);
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_promotes_hot_cells_to_dedicated_control_shards() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        assert!(
+            cell.control_capsule.shared_control_shard.is_some(),
+            "warm cells should start on a shared control shard"
+        );
+
+        let observed_load = ObservedCellLoad::new(2_048);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 15);
+
+        let certified = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect("hot rebalance");
+        assert_eq!(certified.plan.next_temperature, CellTemperature::Hot);
+        assert_eq!(
+            certified
+                .resulting_cell
+                .control_capsule
+                .shared_control_shard,
+            None,
+            "hot cells should be promoted to dedicated control shards"
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_demotes_cooled_cells_back_to_shared_shards() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = hot_subject_cell(&candidates, &policy);
+        assert_eq!(
+            cell.control_capsule.shared_control_shard, None,
+            "hot cells should start on dedicated control shards"
+        );
+
+        let observed_load = ObservedCellLoad::new(32);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 16);
+
+        let certified = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect("cooled rebalance");
+        assert_eq!(certified.plan.next_temperature, CellTemperature::Warm);
+        assert!(
+            certified
+                .resulting_cell
+                .control_capsule
+                .shared_control_shard
+                .is_some(),
+            "cooled cells should demote back onto shared control shards"
+        );
+    }
+
+    #[test]
+    fn reply_space_compaction_packs_ephemeral_reply_subjects_onto_same_shared_shard() {
+        let candidates = rebalance_candidates();
+        let policy = PlacementPolicy {
+            normalization: NormalizationPolicy {
+                reply_space_policy: ReplySpaceCompactionPolicy {
+                    enabled: true,
+                    preserve_segments: 2,
+                },
+                ..NormalizationPolicy::default()
+            },
+            ..rebalance_policy()
+        };
+        let epoch = CellEpoch::new(17, 1);
+
+        let first = SubjectCell::new(
+            &SubjectPattern::parse("_INBOX.clientA.req-1").expect("reply subject"),
+            epoch,
+            &candidates,
+            &policy,
+            RepairPolicy::default(),
+            DataCapsule::default(),
+        )
+        .expect("first compacted reply cell");
+        let second = SubjectCell::new(
+            &SubjectPattern::parse("_INBOX.clientA.req-2").expect("reply subject"),
+            epoch,
+            &candidates,
+            &policy,
+            RepairPolicy::default(),
+            DataCapsule::default(),
+        )
+        .expect("second compacted reply cell");
+
+        assert_eq!(
+            first.subject_partition, second.subject_partition,
+            "reply-space compaction should collapse ephemeral reply subjects onto one canonical partition"
+        );
+        assert_eq!(
+            first.control_capsule.shared_control_shard, second.control_capsule.shared_control_shard,
+            "compacted reply subjects should share the same control shard assignment"
         );
     }
 

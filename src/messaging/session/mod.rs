@@ -12,7 +12,7 @@ pub use contract::{
     ProtocolContract, ProtocolContractValidationError, RoleName, SessionBranch, SessionPath,
     SessionType, TimeoutLaw, TimeoutOverride,
 };
-pub use obligation::DerivedObligationPlaceholder;
+pub use obligation::{DerivedObligation, DerivedObligationClass, DerivedObligations};
 pub use projection::{
     LocalSessionBranch, LocalSessionType, ProjectionError, is_dual, project, project_contract,
     project_pair,

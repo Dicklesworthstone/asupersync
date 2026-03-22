@@ -674,7 +674,7 @@ impl ProtocolContract {
                     ),
                 );
             }
-            if !valid_paths.contains(&checkpoint.path) {
+            if !is_addressable_session_path(&checkpoint.path, &valid_paths) {
                 return Err(ProtocolContractValidationError::UnknownEvidencePath {
                     name: checkpoint.name.clone(),
                     path: checkpoint.path.clone(),
@@ -695,7 +695,7 @@ impl ProtocolContract {
                     path: override_rule.path.clone(),
                 });
             }
-            if !valid_paths.contains(&override_rule.path) {
+            if !is_addressable_session_path(&override_rule.path, &valid_paths) {
                 return Err(ProtocolContractValidationError::UnknownTimeoutPath {
                     path: override_rule.path.clone(),
                 });
@@ -979,7 +979,7 @@ fn validate_recovery_paths(
                 compensation.name.clone(),
             ));
         }
-        if !valid_paths.contains(&compensation.trigger) {
+        if !is_addressable_session_path(&compensation.trigger, valid_paths) {
             return Err(
                 ProtocolContractValidationError::UnknownCompensationTrigger {
                     name: compensation.name.clone(),
@@ -993,7 +993,7 @@ fn validate_recovery_paths(
             });
         }
         for step in &compensation.path {
-            if !valid_paths.contains(step) {
+            if !is_addressable_session_path(step, valid_paths) {
                 return Err(ProtocolContractValidationError::UnknownCompensationStep {
                     name: compensation.name.clone(),
                     path: step.clone(),
@@ -1018,7 +1018,7 @@ fn validate_cutoff_paths(
                 cutoff.name.clone(),
             ));
         }
-        if !valid_paths.contains(&cutoff.trigger) {
+        if !is_addressable_session_path(&cutoff.trigger, valid_paths) {
             return Err(ProtocolContractValidationError::UnknownCutoffTrigger {
                 name: cutoff.name.clone(),
                 path: cutoff.trigger.clone(),
@@ -1030,7 +1030,7 @@ fn validate_cutoff_paths(
             });
         }
         for step in &cutoff.path {
-            if !valid_paths.contains(step) {
+            if !is_addressable_session_path(step, valid_paths) {
                 return Err(ProtocolContractValidationError::UnknownCutoffStep {
                     name: cutoff.name.clone(),
                     path: step.clone(),
@@ -1039,6 +1039,10 @@ fn validate_cutoff_paths(
         }
     }
     Ok(())
+}
+
+fn is_addressable_session_path(path: &SessionPath, valid_paths: &BTreeSet<SessionPath>) -> bool {
+    path != &SessionPath::root() && valid_paths.contains(path)
 }
 
 #[cfg(test)]
@@ -1271,6 +1275,128 @@ mod tests {
             Err(ProtocolContractValidationError::UnknownEvidencePath {
                 name: "missing".to_owned(),
                 path: path(&["send:nope"]),
+            })
+        );
+    }
+
+    #[test]
+    fn root_evidence_path_is_rejected() {
+        let client = RoleName::from("client");
+        let server = RoleName::from("server");
+        let request = MessageType::new("request", client.clone(), server.clone(), "Req");
+        let response = MessageType::new("response", server.clone(), client.clone(), "Resp");
+
+        let mut contract = ProtocolContract::new(
+            "root_evidence",
+            SchemaVersion::new(1, 0, 0),
+            vec![client.clone(), server.clone()],
+            GlobalSessionType::new(SessionType::send(
+                request,
+                SessionType::receive(response, SessionType::End),
+            )),
+        );
+        contract
+            .evidence_checkpoints
+            .push(EvidenceCheckpoint::new("root", SessionPath::root()));
+
+        assert_eq!(
+            contract.validate(),
+            Err(ProtocolContractValidationError::UnknownEvidencePath {
+                name: "root".to_owned(),
+                path: SessionPath::root(),
+            })
+        );
+    }
+
+    #[test]
+    fn root_timeout_override_is_rejected() {
+        let client = RoleName::from("client");
+        let server = RoleName::from("server");
+        let request = MessageType::new("request", client.clone(), server.clone(), "Req");
+        let response = MessageType::new("response", server.clone(), client.clone(), "Resp");
+
+        let mut contract = ProtocolContract::new(
+            "root_timeout",
+            SchemaVersion::new(1, 0, 0),
+            vec![client.clone(), server.clone()],
+            GlobalSessionType::new(SessionType::send(
+                request,
+                SessionType::receive(response, SessionType::End),
+            )),
+        );
+        contract.timeout_law.per_step.push(TimeoutOverride::new(
+            SessionPath::root(),
+            Duration::from_secs(1),
+        ));
+
+        assert_eq!(
+            contract.validate(),
+            Err(ProtocolContractValidationError::UnknownTimeoutPath {
+                path: SessionPath::root(),
+            })
+        );
+    }
+
+    #[test]
+    fn root_compensation_trigger_is_rejected() {
+        let client = RoleName::from("client");
+        let server = RoleName::from("server");
+        let request = MessageType::new("request", client.clone(), server.clone(), "Req");
+        let response = MessageType::new("response", server.clone(), client.clone(), "Resp");
+
+        let mut contract = ProtocolContract::new(
+            "root_compensation",
+            SchemaVersion::new(1, 0, 0),
+            vec![client.clone(), server.clone()],
+            GlobalSessionType::new(SessionType::send(
+                request,
+                SessionType::receive(response, SessionType::End),
+            )),
+        );
+        contract.compensation_paths.push(CompensationPath::new(
+            "rollback",
+            SessionPath::root(),
+            vec![path(&["send:request", "receive:response", "end"])],
+        ));
+
+        assert_eq!(
+            contract.validate(),
+            Err(
+                ProtocolContractValidationError::UnknownCompensationTrigger {
+                    name: "rollback".to_owned(),
+                    path: SessionPath::root(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn root_cutoff_step_is_rejected() {
+        let client = RoleName::from("client");
+        let server = RoleName::from("server");
+        let request = MessageType::new("request", client.clone(), server.clone(), "Req");
+        let response = MessageType::new("response", server.clone(), client.clone(), "Resp");
+
+        let mut contract = ProtocolContract::new(
+            "root_cutoff",
+            SchemaVersion::new(1, 0, 0),
+            vec![client.clone(), server.clone()],
+            GlobalSessionType::new(SessionType::send(
+                request,
+                SessionType::receive(response, SessionType::End),
+            )),
+        );
+        contract.cutoff_paths.push(CutoffPath::new(
+            "graceful",
+            path(&["send:request"]),
+            vec![SessionPath::root()],
+        ));
+
+        assert_eq!(
+            contract.validate(),
+            Err(ProtocolContractValidationError::UnknownCutoffStep {
+                name: "graceful".to_owned(),
+                path: SessionPath::root(),
             })
         );
     }
