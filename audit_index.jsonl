@@ -685,3 +685,11 @@
 "SOUND"
 0
 "Out-of-range fails closed, lazy poll_ready, clean state machine, lock released before return"
+"src/service/buffer.rs"
+915
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Pending counter lifecycle correct, panic-safe call path, consistent lock ordering, TOCTOU handled"
