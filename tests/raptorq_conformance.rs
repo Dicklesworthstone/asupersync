@@ -1491,7 +1491,7 @@ mod differential_harness {
     use super::*;
     use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
     use asupersync::raptorq::test_log_schema::{
-        UnitDecodeStats, UnitLogEntry, validate_unit_log_json,
+        UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,
     };
 
     const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
@@ -1748,6 +1748,7 @@ mod differential_harness {
                     hard_regime_branch: "none".to_string(),
                     hard_regime_fallbacks: 0,
                     conservative_fallback_reason: "none".to_string(),
+                    governance: None,
                 },
                 |result| UnitDecodeStats {
                     k: case.k,
@@ -1781,6 +1782,11 @@ mod differential_harness {
                         .hard_regime_conservative_fallback_reason
                         .unwrap_or("none")
                         .to_string(),
+                    governance: result
+                        .stats
+                        .governance
+                        .as_ref()
+                        .map(UnitGovernanceDecision::from),
                 },
             );
 
@@ -2320,6 +2326,7 @@ mod metamorphic_property {
                 hard_regime_branch: "none".to_string(),
                 hard_regime_fallbacks: 0,
                 conservative_fallback_reason: "none".to_string(),
+                governance: None,
             }),
         );
 
@@ -2508,6 +2515,7 @@ mod metamorphic_property {
                             hard_regime_branch: "none".to_string(),
                             hard_regime_fallbacks: 0,
                             conservative_fallback_reason: "none".to_string(),
+                            governance: None,
                         }),
                     );
                     panic!("{context}: decode failed for in-scope seed={seed}: {err}");
@@ -2540,6 +2548,7 @@ mod metamorphic_property {
                     hard_regime_branch: "none".to_string(),
                     hard_regime_fallbacks: 0,
                     conservative_fallback_reason: "none".to_string(),
+                    governance: None,
                 }),
             );
 
@@ -2638,7 +2647,7 @@ mod metamorphic_property {
 mod stress_soak_e2e {
     use super::*;
     use asupersync::raptorq::test_log_schema::{
-        UnitDecodeStats, UnitLogEntry, validate_unit_log_json,
+        UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,
     };
     use serde::Serialize;
 
@@ -3049,6 +3058,11 @@ mod stress_soak_e2e {
                                 .hard_regime_conservative_fallback_reason
                                 .unwrap_or("none")
                                 .to_string(),
+                            governance: result
+                                .stats
+                                .governance
+                                .as_ref()
+                                .map(UnitGovernanceDecision::from),
                         });
                     }
                     Err(err) => {

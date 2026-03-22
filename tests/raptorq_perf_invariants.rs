@@ -193,7 +193,7 @@ fn build_decode_received(
 }
 
 use asupersync::raptorq::test_log_schema::{
-    UNIT_LOG_SCHEMA_VERSION, UnitDecodeStats, UnitLogEntry,
+    UNIT_LOG_SCHEMA_VERSION, UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry,
 };
 
 fn replay_log_context(replay_ref: &str, scenario_id: &str, seed: u64, outcome: &str) -> String {
@@ -853,6 +853,11 @@ fn seed_sweep_structured_logging() {
                         .hard_regime_conservative_fallback_reason
                         .unwrap_or("none")
                         .to_string(),
+                    governance: result
+                        .stats
+                        .governance
+                        .as_ref()
+                        .map(UnitGovernanceDecision::from),
                 });
                 eprintln!(
                     "{}",
@@ -904,6 +909,7 @@ fn seed_sweep_structured_logging() {
                     hard_regime_branch: "none".to_string(),
                     hard_regime_fallbacks: 0,
                     conservative_fallback_reason: "none".to_string(),
+                    governance: None,
                 });
                 eprintln!(
                     "{} FAIL: {e:?}",
@@ -4886,6 +4892,7 @@ fn unit_log_schema_contract() {
         hard_regime_branch: "markowitz".to_string(),
         hard_regime_fallbacks: 0,
         conservative_fallback_reason: "none".to_string(),
+        governance: None,
     });
 
     let json = entry.to_json().expect("serialize unit log entry");
@@ -5397,6 +5404,80 @@ fn g7_runtime_governance_output_populated_after_decode() {
             "G7 fallback trigger must force fallback action"
         );
     }
+}
+
+/// G7 invariant: runtime governance telemetry survives unit-log serialization.
+#[test]
+fn g7_unit_log_schema_accepts_runtime_governance_payload() {
+    use asupersync::raptorq::test_log_schema::validate_unit_log_json;
+
+    let k = 16;
+    let symbol_size = 64;
+    let seed = 0x6700_0001_u64;
+
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let drop = [1usize, 5, 9];
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 10);
+
+    let result = decoder.decode(&received).expect("decode should succeed");
+    let log_entry = UnitLogEntry::new(
+        "RQ-G7-RUNTIME-GOVERNANCE-UNIT-LOG",
+        seed,
+        &format!("k={k},symbol_size={symbol_size},loss_pct={}", (drop.len() * 100) / k),
+        G7_DECISION_REPLAY_REF,
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_unit_log_schema_accepts_runtime_governance_payload -- --nocapture",
+        "ok",
+    )
+    .with_decode_stats(UnitDecodeStats {
+        k,
+        loss_pct: (drop.len() * 100) / k,
+        dropped: drop.len(),
+        peeled: result.stats.peeled,
+        inactivated: result.stats.inactivated,
+        gauss_ops: result.stats.gauss_ops,
+        pivots: result.stats.pivots_selected,
+        peel_queue_pushes: result.stats.peel_queue_pushes,
+        peel_queue_pops: result.stats.peel_queue_pops,
+        peel_frontier_peak: result.stats.peel_frontier_peak,
+        dense_core_rows: result.stats.dense_core_rows,
+        dense_core_cols: result.stats.dense_core_cols,
+        dense_core_dropped_rows: result.stats.dense_core_dropped_rows,
+        fallback_reason: result
+            .stats
+            .hard_regime_conservative_fallback_reason
+            .or(result.stats.peeling_fallback_reason)
+            .unwrap_or("none")
+            .to_string(),
+        hard_regime_activated: result.stats.hard_regime_activated,
+        hard_regime_branch: result.stats.hard_regime_branch.unwrap_or("none").to_string(),
+        hard_regime_fallbacks: result.stats.hard_regime_fallbacks,
+        conservative_fallback_reason: result
+            .stats
+            .hard_regime_conservative_fallback_reason
+            .unwrap_or("none")
+            .to_string(),
+        governance: result
+            .stats
+            .governance
+            .as_ref()
+            .map(UnitGovernanceDecision::from),
+    });
+
+    let json = log_entry.to_json().expect("serialize unit log entry");
+    let violations = validate_unit_log_json(&json);
+    assert!(
+        violations.is_empty(),
+        "g7 runtime governance payload must satisfy unit-log schema: {violations:?}"
+    );
+
+    let parsed: UnitLogEntry = serde_json::from_str(&json).expect("deserialize unit log entry");
+    let governance = parsed
+        .decode_stats
+        .and_then(|stats| stats.governance)
+        .expect("unit log should retain governance payload");
+    assert_eq!(governance.replay_ref, G7_DECISION_REPLAY_REF);
 }
 
 /// F6 invariant: first decode has window_len=1, stable phase, zero deltas.

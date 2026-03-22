@@ -2524,7 +2524,9 @@ impl ReceivedSymbol {
 mod tests {
     use super::*;
     use crate::raptorq::systematic::SystematicEncoder;
-    use crate::raptorq::test_log_schema::{UnitDecodeStats, UnitLogEntry, validate_unit_log_json};
+    use crate::raptorq::test_log_schema::{
+        UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,
+    };
 
     fn rfc_eq_context(
         scenario_id: &str,
@@ -2571,6 +2573,7 @@ mod tests {
                 .hard_regime_conservative_fallback_reason
                 .unwrap_or("none")
                 .to_string(),
+            governance: stats.governance.as_ref().map(UnitGovernanceDecision::from),
         }
     }
 

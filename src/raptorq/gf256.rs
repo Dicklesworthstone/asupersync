@@ -1709,6 +1709,8 @@ pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
 pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b: &[u8]) {
     assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
     assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
+    #[cfg(feature = "simd-intrinsics")]
+    #[allow(unused_variables)]
     let dispatch = dispatch();
 
     #[cfg(all(
@@ -1717,8 +1719,7 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
         if src_a.len().min(src_b.len()) < 32 {
-            (dispatch.add_slice)(dst_a, src_a);
-            (dispatch.add_slice)(dst_b, src_b);
+            gf256_add_slices2_scalar(dst_a, src_a, dst_b, src_b);
             return;
         }
         // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
@@ -1732,8 +1733,7 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
         if src_a.len().min(src_b.len()) < 16 {
-            (dispatch.add_slice)(dst_a, src_a);
-            (dispatch.add_slice)(dst_b, src_b);
+            gf256_add_slices2_scalar(dst_a, src_a, dst_b, src_b);
             return;
         }
         // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
@@ -1744,8 +1744,95 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
         return;
     }
 
-    (dispatch.add_slice)(dst_a, src_a);
-    (dispatch.add_slice)(dst_b, src_b);
+    gf256_add_slices2_scalar(dst_a, src_a, dst_b, src_b);
+}
+
+#[inline]
+fn xor_chunk_32_in_place(dst: &mut [u8], src: &[u8]) {
+    let mut d_words = [
+        u64::from_ne_bytes(dst[0..8].try_into().unwrap()),
+        u64::from_ne_bytes(dst[8..16].try_into().unwrap()),
+        u64::from_ne_bytes(dst[16..24].try_into().unwrap()),
+        u64::from_ne_bytes(dst[24..32].try_into().unwrap()),
+    ];
+    let s_words = [
+        u64::from_ne_bytes(src[0..8].try_into().unwrap()),
+        u64::from_ne_bytes(src[8..16].try_into().unwrap()),
+        u64::from_ne_bytes(src[16..24].try_into().unwrap()),
+        u64::from_ne_bytes(src[24..32].try_into().unwrap()),
+    ];
+    d_words[0] ^= s_words[0];
+    d_words[1] ^= s_words[1];
+    d_words[2] ^= s_words[2];
+    d_words[3] ^= s_words[3];
+    dst[0..8].copy_from_slice(&d_words[0].to_ne_bytes());
+    dst[8..16].copy_from_slice(&d_words[1].to_ne_bytes());
+    dst[16..24].copy_from_slice(&d_words[2].to_ne_bytes());
+    dst[24..32].copy_from_slice(&d_words[3].to_ne_bytes());
+}
+
+#[inline]
+fn xor_chunk_8_in_place(dst: &mut [u8], src: &[u8]) {
+    let d_arr: [u8; 8] = dst.try_into().unwrap();
+    let s_arr: [u8; 8] = src.try_into().unwrap();
+    let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(s_arr);
+    dst.copy_from_slice(&result.to_ne_bytes());
+}
+
+#[allow(clippy::similar_names)]
+fn gf256_add_slices2_scalar(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b: &[u8]) {
+    debug_assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
+    debug_assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
+    let common = dst_a.len().min(dst_b.len());
+    let (common_dst_a, tail_dst_a) = dst_a.split_at_mut(common);
+    let (common_src_a, tail_src_a) = src_a.split_at(common);
+    let (common_dst_b, tail_dst_b) = dst_b.split_at_mut(common);
+    let (common_src_b, tail_src_b) = src_b.split_at(common);
+
+    let mut d_chunks_a = common_dst_a.chunks_exact_mut(32);
+    let mut s_chunks_a = common_src_a.chunks_exact(32);
+    let mut d_chunks_b = common_dst_b.chunks_exact_mut(32);
+    let mut s_chunks_b = common_src_b.chunks_exact(32);
+    for ((d_chunk_a, s_chunk_a), (d_chunk_b, s_chunk_b)) in d_chunks_a
+        .by_ref()
+        .zip(s_chunks_a.by_ref())
+        .zip(d_chunks_b.by_ref().zip(s_chunks_b.by_ref()))
+    {
+        xor_chunk_32_in_place(d_chunk_a, s_chunk_a);
+        xor_chunk_32_in_place(d_chunk_b, s_chunk_b);
+    }
+
+    let lane_a_dst_tail = d_chunks_a.into_remainder();
+    let lane_a_src_tail = s_chunks_a.remainder();
+    let lane_b_dst_tail = d_chunks_b.into_remainder();
+    let lane_b_src_tail = s_chunks_b.remainder();
+
+    let mut d8_a = lane_a_dst_tail.chunks_exact_mut(8);
+    let mut s8_a = lane_a_src_tail.chunks_exact(8);
+    let mut d8_b = lane_b_dst_tail.chunks_exact_mut(8);
+    let mut s8_b = lane_b_src_tail.chunks_exact(8);
+    for ((d_chunk_a, s_chunk_a), (d_chunk_b, s_chunk_b)) in d8_a
+        .by_ref()
+        .zip(s8_a.by_ref())
+        .zip(d8_b.by_ref().zip(s8_b.by_ref()))
+    {
+        xor_chunk_8_in_place(d_chunk_a, s_chunk_a);
+        xor_chunk_8_in_place(d_chunk_b, s_chunk_b);
+    }
+
+    for (d, s) in d8_a.into_remainder().iter_mut().zip(s8_a.remainder()) {
+        *d ^= s;
+    }
+    for (d, s) in d8_b.into_remainder().iter_mut().zip(s8_b.remainder()) {
+        *d ^= s;
+    }
+
+    if !tail_dst_a.is_empty() {
+        gf256_add_slice_scalar(tail_dst_a, tail_src_a);
+    }
+    if !tail_dst_b.is_empty() {
+        gf256_add_slice_scalar(tail_dst_b, tail_src_b);
+    }
 }
 
 fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
@@ -1755,26 +1842,7 @@ fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     let mut d_chunks = dst.chunks_exact_mut(32);
     let mut s_chunks = src.chunks_exact(32);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
-        let mut d_words = [
-            u64::from_ne_bytes(d_chunk[0..8].try_into().unwrap()),
-            u64::from_ne_bytes(d_chunk[8..16].try_into().unwrap()),
-            u64::from_ne_bytes(d_chunk[16..24].try_into().unwrap()),
-            u64::from_ne_bytes(d_chunk[24..32].try_into().unwrap()),
-        ];
-        let s_words = [
-            u64::from_ne_bytes(s_chunk[0..8].try_into().unwrap()),
-            u64::from_ne_bytes(s_chunk[8..16].try_into().unwrap()),
-            u64::from_ne_bytes(s_chunk[16..24].try_into().unwrap()),
-            u64::from_ne_bytes(s_chunk[24..32].try_into().unwrap()),
-        ];
-        d_words[0] ^= s_words[0];
-        d_words[1] ^= s_words[1];
-        d_words[2] ^= s_words[2];
-        d_words[3] ^= s_words[3];
-        d_chunk[0..8].copy_from_slice(&d_words[0].to_ne_bytes());
-        d_chunk[8..16].copy_from_slice(&d_words[1].to_ne_bytes());
-        d_chunk[16..24].copy_from_slice(&d_words[2].to_ne_bytes());
-        d_chunk[24..32].copy_from_slice(&d_words[3].to_ne_bytes());
+        xor_chunk_32_in_place(d_chunk, s_chunk);
     }
 
     // 8-byte tail.
@@ -1783,10 +1851,7 @@ fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     let mut d8 = d_rem.chunks_exact_mut(8);
     let mut s8 = s_rem.chunks_exact(8);
     for (d_chunk, s_chunk) in d8.by_ref().zip(s8.by_ref()) {
-        let d_arr: [u8; 8] = d_chunk.try_into().unwrap();
-        let s_arr: [u8; 8] = s_chunk.try_into().unwrap();
-        let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(s_arr);
-        d_chunk.copy_from_slice(&result.to_ne_bytes());
+        xor_chunk_8_in_place(d_chunk, s_chunk);
     }
 
     // Scalar tail.
@@ -1892,6 +1957,7 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
     if c == Gf256::ONE {
         return;
     }
+    #[allow(unused_variables)]
     let dispatch = dispatch();
     if !should_use_dual_mul_fused(dst_a.len(), dst_b.len()) {
         (dispatch.mul_slice)(dst_a, c);
@@ -1933,8 +1999,7 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
     }
 
     let nib = NibbleTables::for_scalar(c);
-    mul_with_table_wide(dst_a, &nib, table);
-    mul_with_table_wide(dst_b, &nib, table);
+    mul_with_table_wide2(dst_a, dst_b, &nib, table);
 }
 
 fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
@@ -2022,6 +2087,34 @@ fn mul_with_table_wide(dst: &mut [u8], nib: &NibbleTables, table: &[u8; 256]) {
     }
 }
 
+#[cfg(feature = "simd-intrinsics")]
+fn mul_with_table_wide2(dst_a: &mut [u8], dst_b: &mut [u8], nib: &NibbleTables, table: &[u8; 256]) {
+    let common = dst_a.len().min(dst_b.len());
+    let (common_a, tail_a) = dst_a.split_at_mut(common);
+    let (common_b, tail_b) = dst_b.split_at_mut(common);
+
+    let mut chunks_a = common_a.chunks_exact_mut(16);
+    let mut chunks_b = common_b.chunks_exact_mut(16);
+    for (chunk_a, chunk_b) in chunks_a.by_ref().zip(chunks_b.by_ref()) {
+        let result_a = nib.mul16(Simd::<u8, 16>::from_slice(chunk_a));
+        let result_b = nib.mul16(Simd::<u8, 16>::from_slice(chunk_b));
+        chunk_a.copy_from_slice(result_a.as_array());
+        chunk_b.copy_from_slice(result_b.as_array());
+    }
+    for d in chunks_a.into_remainder() {
+        *d = table[*d as usize];
+    }
+    for d in chunks_b.into_remainder() {
+        *d = table[*d as usize];
+    }
+    if !tail_a.is_empty() {
+        mul_with_table_wide(tail_a, nib, table);
+    }
+    if !tail_b.is_empty() {
+        mul_with_table_wide(tail_b, nib, table);
+    }
+}
+
 #[cfg(not(feature = "simd-intrinsics"))]
 fn mul_with_table_wide(dst: &mut [u8], _nib: &NibbleTables, table: &[u8; 256]) {
     let mut chunks = dst.chunks_exact_mut(8);
@@ -2040,6 +2133,52 @@ fn mul_with_table_wide(dst: &mut [u8], _nib: &NibbleTables, table: &[u8; 256]) {
     }
     for d in chunks.into_remainder() {
         *d = table[*d as usize];
+    }
+}
+
+#[cfg(not(feature = "simd-intrinsics"))]
+fn mul_with_table_wide2(dst_a: &mut [u8], dst_b: &mut [u8], nib: &NibbleTables, table: &[u8; 256]) {
+    let common = dst_a.len().min(dst_b.len());
+    let (common_a, tail_a) = dst_a.split_at_mut(common);
+    let (common_b, tail_b) = dst_b.split_at_mut(common);
+
+    let mut chunks_a = common_a.chunks_exact_mut(8);
+    let mut chunks_b = common_b.chunks_exact_mut(8);
+    for (chunk_a, chunk_b) in chunks_a.by_ref().zip(chunks_b.by_ref()) {
+        let mapped_a = [
+            table[chunk_a[0] as usize],
+            table[chunk_a[1] as usize],
+            table[chunk_a[2] as usize],
+            table[chunk_a[3] as usize],
+            table[chunk_a[4] as usize],
+            table[chunk_a[5] as usize],
+            table[chunk_a[6] as usize],
+            table[chunk_a[7] as usize],
+        ];
+        let mapped_b = [
+            table[chunk_b[0] as usize],
+            table[chunk_b[1] as usize],
+            table[chunk_b[2] as usize],
+            table[chunk_b[3] as usize],
+            table[chunk_b[4] as usize],
+            table[chunk_b[5] as usize],
+            table[chunk_b[6] as usize],
+            table[chunk_b[7] as usize],
+        ];
+        chunk_a.copy_from_slice(&mapped_a);
+        chunk_b.copy_from_slice(&mapped_b);
+    }
+    for d in chunks_a.into_remainder() {
+        *d = table[*d as usize];
+    }
+    for d in chunks_b.into_remainder() {
+        *d = table[*d as usize];
+    }
+    if !tail_a.is_empty() {
+        mul_with_table_wide(tail_a, nib, table);
+    }
+    if !tail_b.is_empty() {
+        mul_with_table_wide(tail_b, nib, table);
     }
 }
 
@@ -2073,6 +2212,7 @@ fn mul_with_table_scalar(dst: &mut [u8], table: &[u8; 256]) {
 /// Falls back to scalar table lookups for the remainder (< 16 bytes).
 #[cfg(feature = "simd-intrinsics")]
 fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], nib: &NibbleTables, table: &[u8; 256]) {
+    debug_assert_eq!(dst.len(), src.len(), "slice length mismatch");
     let mut d_chunks = dst.chunks_exact_mut(16);
     let mut s_chunks = src.chunks_exact(16);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
@@ -2090,8 +2230,64 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], nib: &NibbleTables, table:
     }
 }
 
+#[cfg(feature = "simd-intrinsics")]
+fn addmul_with_table_wide2(
+    dst_a: &mut [u8],
+    src_a: &[u8],
+    dst_b: &mut [u8],
+    src_b: &[u8],
+    nib: &NibbleTables,
+    table: &[u8; 256],
+) {
+    debug_assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
+    debug_assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
+    let common = dst_a.len().min(dst_b.len());
+    let (common_dst_a, tail_dst_a) = dst_a.split_at_mut(common);
+    let (common_src_a, tail_src_a) = src_a.split_at(common);
+    let (common_dst_b, tail_dst_b) = dst_b.split_at_mut(common);
+    let (common_src_b, tail_src_b) = src_b.split_at(common);
+
+    let mut d_chunks_a = common_dst_a.chunks_exact_mut(16);
+    let mut s_chunks_a = common_src_a.chunks_exact(16);
+    let mut d_chunks_b = common_dst_b.chunks_exact_mut(16);
+    let mut s_chunks_b = common_src_b.chunks_exact(16);
+    for ((d_chunk_a, s_chunk_a), (d_chunk_b, s_chunk_b)) in d_chunks_a
+        .by_ref()
+        .zip(s_chunks_a.by_ref())
+        .zip(d_chunks_b.by_ref().zip(s_chunks_b.by_ref()))
+    {
+        let src_vec_a = Simd::<u8, 16>::from_slice(s_chunk_a);
+        let dst_vec_a = Simd::<u8, 16>::from_slice(d_chunk_a);
+        let src_vec_b = Simd::<u8, 16>::from_slice(s_chunk_b);
+        let dst_vec_b = Simd::<u8, 16>::from_slice(d_chunk_b);
+        d_chunk_a.copy_from_slice((dst_vec_a ^ nib.mul16(src_vec_a)).as_array());
+        d_chunk_b.copy_from_slice((dst_vec_b ^ nib.mul16(src_vec_b)).as_array());
+    }
+    for (d, s) in d_chunks_a
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks_a.remainder())
+    {
+        *d ^= table[*s as usize];
+    }
+    for (d, s) in d_chunks_b
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks_b.remainder())
+    {
+        *d ^= table[*s as usize];
+    }
+    if !tail_dst_a.is_empty() {
+        addmul_with_table_wide(tail_dst_a, tail_src_a, nib, table);
+    }
+    if !tail_dst_b.is_empty() {
+        addmul_with_table_wide(tail_dst_b, tail_src_b, nib, table);
+    }
+}
+
 #[cfg(not(feature = "simd-intrinsics"))]
 fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], _nib: &NibbleTables, table: &[u8; 256]) {
+    debug_assert_eq!(dst.len(), src.len(), "slice length mismatch");
     let mut d_chunks = dst.chunks_exact_mut(8);
     let mut s_chunks = src.chunks_exact(8);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
@@ -2114,6 +2310,83 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], _nib: &NibbleTables, table
         .zip(s_chunks.remainder())
     {
         *d ^= table[*s as usize];
+    }
+}
+
+#[cfg(not(feature = "simd-intrinsics"))]
+fn addmul_with_table_wide2(
+    dst_a: &mut [u8],
+    src_a: &[u8],
+    dst_b: &mut [u8],
+    src_b: &[u8],
+    nib: &NibbleTables,
+    table: &[u8; 256],
+) {
+    debug_assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
+    debug_assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
+    let common = dst_a.len().min(dst_b.len());
+    let (common_dst_a, tail_dst_a) = dst_a.split_at_mut(common);
+    let (common_src_a, tail_src_a) = src_a.split_at(common);
+    let (common_dst_b, tail_dst_b) = dst_b.split_at_mut(common);
+    let (common_src_b, tail_src_b) = src_b.split_at(common);
+
+    let mut d_chunks_a = common_dst_a.chunks_exact_mut(8);
+    let mut s_chunks_a = common_src_a.chunks_exact(8);
+    let mut d_chunks_b = common_dst_b.chunks_exact_mut(8);
+    let mut s_chunks_b = common_src_b.chunks_exact(8);
+    for ((d_chunk_a, s_chunk_a), (d_chunk_b, s_chunk_b)) in d_chunks_a
+        .by_ref()
+        .zip(s_chunks_a.by_ref())
+        .zip(d_chunks_b.by_ref().zip(s_chunks_b.by_ref()))
+    {
+        let t_a = [
+            table[s_chunk_a[0] as usize],
+            table[s_chunk_a[1] as usize],
+            table[s_chunk_a[2] as usize],
+            table[s_chunk_a[3] as usize],
+            table[s_chunk_a[4] as usize],
+            table[s_chunk_a[5] as usize],
+            table[s_chunk_a[6] as usize],
+            table[s_chunk_a[7] as usize],
+        ];
+        let t_b = [
+            table[s_chunk_b[0] as usize],
+            table[s_chunk_b[1] as usize],
+            table[s_chunk_b[2] as usize],
+            table[s_chunk_b[3] as usize],
+            table[s_chunk_b[4] as usize],
+            table[s_chunk_b[5] as usize],
+            table[s_chunk_b[6] as usize],
+            table[s_chunk_b[7] as usize],
+        ];
+        let d_arr_a: [u8; 8] = d_chunk_a[..].try_into().unwrap();
+        let d_arr_b: [u8; 8] = d_chunk_b[..].try_into().unwrap();
+        d_chunk_a.copy_from_slice(
+            &(u64::from_ne_bytes(d_arr_a) ^ u64::from_ne_bytes(t_a)).to_ne_bytes(),
+        );
+        d_chunk_b.copy_from_slice(
+            &(u64::from_ne_bytes(d_arr_b) ^ u64::from_ne_bytes(t_b)).to_ne_bytes(),
+        );
+    }
+    for (d, s) in d_chunks_a
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks_a.remainder())
+    {
+        *d ^= table[*s as usize];
+    }
+    for (d, s) in d_chunks_b
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks_b.remainder())
+    {
+        *d ^= table[*s as usize];
+    }
+    if !tail_dst_a.is_empty() {
+        addmul_with_table_wide(tail_dst_a, tail_src_a, nib, table);
+    }
+    if !tail_dst_b.is_empty() {
+        addmul_with_table_wide(tail_dst_b, tail_src_b, nib, table);
     }
 }
 
@@ -2185,6 +2458,7 @@ pub fn gf256_addmul_slices2(
     if c.is_zero() {
         return;
     }
+    #[allow(unused_variables)]
     let dispatch = dispatch();
     if c == Gf256::ONE {
         // Reuse the dual-add fast path directly for c==1. The add path already
@@ -2243,8 +2517,7 @@ pub fn gf256_addmul_slices2(
     }
 
     let nib = NibbleTables::for_scalar(c);
-    addmul_with_table_wide(dst_a, src_a, &nib, table);
-    addmul_with_table_wide(dst_b, src_b, &nib, table);
+    addmul_with_table_wide2(dst_a, src_a, dst_b, src_b, &nib, table);
 }
 
 fn gf256_addmul_slice_scalar(dst: &mut [u8], src: &[u8], c: Gf256) {
@@ -3424,6 +3697,66 @@ mod tests {
     }
 
     #[test]
+    fn mul_with_table_wide2_matches_two_independent_single_lane_paths() {
+        const LEN_A: usize = 47;
+        const LEN_B: usize = 89;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "mul_with_table_wide2_matches_two_independent_single_lane_paths",
+            replay_ref,
+        );
+        let c = Gf256(157);
+        let nib = NibbleTables::for_scalar(c);
+        let table = mul_table_for(c);
+
+        let mut actual_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(7)) as u8).collect();
+        let mut actual_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(11)) as u8).collect();
+        let mut expected_a = actual_a.clone();
+        let mut expected_b = actual_b.clone();
+
+        mul_with_table_wide2(&mut actual_a, &mut actual_b, &nib, table);
+        mul_with_table_wide(&mut expected_a, &nib, table);
+        mul_with_table_wide(&mut expected_b, &nib, table);
+
+        assert_eq!(actual_a, expected_a, "{context}");
+        assert_eq!(actual_b, expected_b, "{context}");
+    }
+
+    #[test]
+    fn addmul_with_table_wide2_matches_two_independent_single_lane_paths() {
+        const LEN_A: usize = 55;
+        const LEN_B: usize = 93;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "addmul_with_table_wide2_matches_two_independent_single_lane_paths",
+            replay_ref,
+        );
+        let c = Gf256(181);
+        let nib = NibbleTables::for_scalar(c);
+        let table = mul_table_for(c);
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
+        let mut actual_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut actual_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut expected_a = actual_a.clone();
+        let mut expected_b = actual_b.clone();
+
+        addmul_with_table_wide2(&mut actual_a, &src_a, &mut actual_b, &src_b, &nib, table);
+        addmul_with_table_wide(&mut expected_a, &src_a, &nib, table);
+        addmul_with_table_wide(&mut expected_b, &src_b, &nib, table);
+
+        assert_eq!(actual_a, expected_a, "{context}");
+        assert_eq!(actual_b, expected_b, "{context}");
+    }
+
+    #[test]
     fn addmul_slices2_with_one_matches_two_independent_add_slice_calls() {
         let seed = 0u64;
         let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
@@ -3790,6 +4123,34 @@ mod tests {
             assert_eq!(accum_left, expected_left, "{scenario}: {context}");
             assert_eq!(accum_right, expected_right, "{scenario}: {context}");
         }
+    }
+
+    #[test]
+    fn add_slices2_scalar_matches_two_independent_single_lane_paths() {
+        const LEN_A: usize = 47;
+        const LEN_B: usize = 89;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "add_slices2_scalar_matches_two_independent_single_lane_paths",
+            replay_ref,
+        );
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
+        let mut actual_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut actual_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut expected_a = actual_a.clone();
+        let mut expected_b = actual_b.clone();
+
+        gf256_add_slices2_scalar(&mut actual_a, &src_a, &mut actual_b, &src_b);
+        gf256_add_slice_scalar(&mut expected_a, &src_a);
+        gf256_add_slice_scalar(&mut expected_b, &src_b);
+
+        assert_eq!(actual_a, expected_a, "{context}");
+        assert_eq!(actual_b, expected_b, "{context}");
     }
 
     #[test]

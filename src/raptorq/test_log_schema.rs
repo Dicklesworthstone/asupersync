@@ -32,6 +32,7 @@
 //! fail the run if any required field is missing or has the wrong type/version.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // ============================================================================
 // Schema version constants
@@ -59,6 +60,9 @@ pub const VALID_UNIT_OUTCOMES: &[&str] = &[
 
 /// Required phase marker set for E2E log entries.
 pub const REQUIRED_PHASE_MARKERS: &[&str] = &["encode", "loss", "decode", "proof", "report"];
+
+const GOVERNANCE_STATE_KEYS: &[&str] = &["healthy", "degraded", "regression", "unknown"];
+const GOVERNANCE_ACTION_KEYS: &[&str] = &["continue", "canary_hold", "rollback", "fallback"];
 
 // ============================================================================
 // E2E log entry — full pipeline report
@@ -276,6 +280,87 @@ pub struct UnitDecodeStats {
     pub hard_regime_fallbacks: usize,
     /// Deterministic conservative fallback reason for accelerated hard-regime paths.
     pub conservative_fallback_reason: String,
+    /// Optional G7 governance decision payload captured alongside decode stats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub governance: Option<UnitGovernanceDecision>,
+}
+
+/// Structured G7 governance decision payload embedded in unit decode logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnitGovernanceDecision {
+    /// Posterior mass over canonical G7 states in permille.
+    pub state_posterior: BTreeMap<String, u16>,
+    /// Expected-loss terms for the canonical G7 actions.
+    pub expected_loss_terms: BTreeMap<String, u32>,
+    /// Action chosen by the runtime governance contract.
+    pub chosen_action: String,
+    /// Top evidence contributors with deterministic ordering and weights.
+    pub top_evidence_contributors: Vec<UnitGovernanceContributor>,
+    /// Confidence score in the canonical 0..=1000 range.
+    pub confidence_score: u16,
+    /// Uncertainty score in the canonical 0..=1000 range.
+    pub uncertainty_score: u16,
+    /// Deterministic fallback trigger summary.
+    pub deterministic_fallback_trigger: UnitFallbackTrigger,
+    /// Canonical replay pointer for the governance decision.
+    pub replay_ref: String,
+}
+
+/// A single surfaced governance evidence contributor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnitGovernanceContributor {
+    /// Contributor name from the contract artifact/runtime.
+    pub name: String,
+    /// Relative contributor weight in permille.
+    pub contribution_permille: u16,
+}
+
+/// Deterministic fallback trigger summary for governance logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnitFallbackTrigger {
+    /// Whether the fallback trigger fired.
+    pub fired: bool,
+    /// Canonical reason string, or `"none"`.
+    pub reason: String,
+}
+
+impl From<&crate::raptorq::decision_contract::GovernanceTelemetry> for UnitGovernanceDecision {
+    fn from(telemetry: &crate::raptorq::decision_contract::GovernanceTelemetry) -> Self {
+        let state_posterior = GOVERNANCE_STATE_KEYS
+            .iter()
+            .copied()
+            .zip(telemetry.state_posterior_permille)
+            .map(|(name, value)| (name.to_string(), value))
+            .collect();
+        let expected_loss_terms = GOVERNANCE_ACTION_KEYS
+            .iter()
+            .copied()
+            .zip(telemetry.expected_loss_terms)
+            .map(|(name, value)| (name.to_string(), value))
+            .collect();
+        let top_evidence_contributors = telemetry
+            .top_evidence_contributors
+            .iter()
+            .map(|contributor| UnitGovernanceContributor {
+                name: contributor.name.to_string(),
+                contribution_permille: contributor.contribution_permille,
+            })
+            .collect();
+
+        Self {
+            state_posterior,
+            expected_loss_terms,
+            chosen_action: telemetry.chosen_action.to_string(),
+            top_evidence_contributors,
+            confidence_score: telemetry.confidence_score,
+            uncertainty_score: telemetry.uncertainty_score,
+            deterministic_fallback_trigger: UnitFallbackTrigger {
+                fired: telemetry.deterministic_fallback_triggered,
+                reason: telemetry.deterministic_fallback_reason.to_string(),
+            },
+            replay_ref: telemetry.replay_ref.to_string(),
+        }
+    }
 }
 
 // ============================================================================
@@ -692,6 +777,7 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
                 "hard_regime_activated",
                 &mut violations,
             );
+            validate_decode_stats_governance_field(decode_stats, &mut violations);
         } else {
             violations.push("decode_stats must be an object".to_string());
         }
@@ -843,6 +929,211 @@ fn validate_decode_stats_bool_field(
     }
 }
 
+fn validate_decode_stats_governance_field(
+    decode_stats: &serde_json::Value,
+    violations: &mut Vec<String>,
+) {
+    let Some(governance) = decode_stats.get("governance") else {
+        return;
+    };
+    if governance.is_null() {
+        return;
+    }
+    let Some(governance) = governance.as_object() else {
+        violations.push("decode_stats.governance must be an object".to_string());
+        return;
+    };
+
+    validate_governance_map_field(
+        governance,
+        "state_posterior",
+        GOVERNANCE_STATE_KEYS,
+        "unsigned integer",
+        violations,
+    );
+    validate_governance_map_field(
+        governance,
+        "expected_loss_terms",
+        GOVERNANCE_ACTION_KEYS,
+        "unsigned integer",
+        violations,
+    );
+    validate_governance_string_field(governance, "chosen_action", violations);
+    validate_governance_unsigned_integer_field(governance, "confidence_score", violations);
+    validate_governance_unsigned_integer_field(governance, "uncertainty_score", violations);
+    validate_governance_string_field(governance, "replay_ref", violations);
+
+    match governance.get("top_evidence_contributors") {
+        Some(serde_json::Value::Array(items)) => {
+            if items.len() != 3 {
+                violations.push(
+                    "decode_stats.governance.top_evidence_contributors must contain exactly 3 items"
+                        .to_string(),
+                );
+            }
+            for (index, contributor) in items.iter().enumerate() {
+                let Some(contributor) = contributor.as_object() else {
+                    violations.push(format!(
+                        "decode_stats.governance.top_evidence_contributors[{index}] must be an object"
+                    ));
+                    continue;
+                };
+                validate_governance_string_field_in(
+                    contributor,
+                    &format!("top_evidence_contributors[{index}].name"),
+                    violations,
+                );
+                validate_governance_unsigned_integer_field_in(
+                    contributor,
+                    &format!("top_evidence_contributors[{index}].contribution_permille"),
+                    violations,
+                );
+            }
+        }
+        Some(_) => violations
+            .push("decode_stats.governance.top_evidence_contributors must be an array".to_string()),
+        None => violations.push(
+            "decode_stats.governance.top_evidence_contributors is missing or null".to_string(),
+        ),
+    }
+
+    match governance.get("deterministic_fallback_trigger") {
+        Some(serde_json::Value::Object(trigger)) => {
+            validate_governance_bool_field_in(
+                trigger,
+                "deterministic_fallback_trigger.fired",
+                violations,
+            );
+            validate_governance_string_field_in(
+                trigger,
+                "deterministic_fallback_trigger.reason",
+                violations,
+            );
+        }
+        Some(_) => violations.push(
+            "decode_stats.governance.deterministic_fallback_trigger must be an object".to_string(),
+        ),
+        None => violations.push(
+            "decode_stats.governance.deterministic_fallback_trigger is missing or null".to_string(),
+        ),
+    }
+}
+
+fn validate_governance_map_field(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    required_keys: &[&str],
+    value_description: &str,
+    violations: &mut Vec<String>,
+) {
+    match governance.get(field) {
+        Some(serde_json::Value::Object(map)) => {
+            for key in required_keys {
+                if let Some(value) = map.get(*key) {
+                    match value {
+                        serde_json::Value::Number(number) if number.as_u64().is_some() => {}
+                        serde_json::Value::Null => violations.push(format!(
+                            "decode_stats.governance.{field}.{key} is missing or null"
+                        )),
+                        _ => violations.push(format!(
+                            "decode_stats.governance.{field}.{key} must be a {value_description}"
+                        )),
+                    }
+                } else {
+                    violations.push(format!(
+                        "decode_stats.governance.{field}.{key} is missing or null"
+                    ));
+                }
+            }
+        }
+        Some(_) => violations.push(format!("decode_stats.governance.{field} must be an object")),
+        None => violations.push(format!(
+            "decode_stats.governance.{field} is missing or null"
+        )),
+    }
+}
+
+fn validate_governance_string_field(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    validate_governance_string_field_in(governance, field, violations);
+}
+
+fn validate_governance_unsigned_integer_field(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    validate_governance_unsigned_integer_field_in(governance, field, violations);
+}
+
+fn validate_governance_string_field_in(
+    map: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    let key = field.rsplit('.').next().unwrap_or(field);
+    if let Some(value) = map.get(key) {
+        match value {
+            serde_json::Value::String(_) => {}
+            serde_json::Value::Null => violations.push(format!(
+                "decode_stats.governance.{field} is missing or null"
+            )),
+            _ => violations.push(format!("decode_stats.governance.{field} must be a string")),
+        }
+    } else {
+        violations.push(format!(
+            "decode_stats.governance.{field} is missing or null"
+        ));
+    }
+}
+
+fn validate_governance_unsigned_integer_field_in(
+    map: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    let key = field.rsplit('.').next().unwrap_or(field);
+    if let Some(value) = map.get(key) {
+        match value {
+            serde_json::Value::Number(number) if number.as_u64().is_some() => {}
+            serde_json::Value::Null => violations.push(format!(
+                "decode_stats.governance.{field} is missing or null"
+            )),
+            _ => violations.push(format!(
+                "decode_stats.governance.{field} must be an unsigned integer"
+            )),
+        }
+    } else {
+        violations.push(format!(
+            "decode_stats.governance.{field} is missing or null"
+        ));
+    }
+}
+
+fn validate_governance_bool_field_in(
+    map: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    let key = field.rsplit('.').next().unwrap_or(field);
+    if let Some(value) = map.get(key) {
+        match value {
+            serde_json::Value::Bool(_) => {}
+            serde_json::Value::Null => violations.push(format!(
+                "decode_stats.governance.{field} is missing or null"
+            )),
+            _ => violations.push(format!("decode_stats.governance.{field} must be a boolean")),
+        }
+    } else {
+        violations.push(format!(
+            "decode_stats.governance.{field} is missing or null"
+        ));
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -851,6 +1142,45 @@ fn validate_decode_stats_bool_field(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn sample_governance_decision() -> UnitGovernanceDecision {
+        UnitGovernanceDecision {
+            state_posterior: BTreeMap::from([
+                ("healthy".to_string(), 820),
+                ("degraded".to_string(), 120),
+                ("regression".to_string(), 40),
+                ("unknown".to_string(), 20),
+            ]),
+            expected_loss_terms: BTreeMap::from([
+                ("continue".to_string(), 11),
+                ("canary_hold".to_string(), 17),
+                ("rollback".to_string(), 43),
+                ("fallback".to_string(), 71),
+            ]),
+            chosen_action: "continue".to_string(),
+            top_evidence_contributors: vec![
+                UnitGovernanceContributor {
+                    name: "decode_success_rate".to_string(),
+                    contribution_permille: 470,
+                },
+                UnitGovernanceContributor {
+                    name: "fallback_incidence".to_string(),
+                    contribution_permille: 320,
+                },
+                UnitGovernanceContributor {
+                    name: "tail_latency_guardrail".to_string(),
+                    contribution_permille: 210,
+                },
+            ],
+            confidence_score: 910,
+            uncertainty_score: 90,
+            deterministic_fallback_trigger: UnitFallbackTrigger {
+                fired: false,
+                reason: "none".to_string(),
+            },
+            replay_ref: "replay:rq-g7-structured-governance-v1".to_string(),
+        }
+    }
 
     fn valid_e2e_log_value() -> serde_json::Value {
         json!({
@@ -1266,12 +1596,17 @@ mod tests {
                 hard_regime_branch: "markowitz".to_string(),
                 hard_regime_fallbacks: 0,
                 conservative_fallback_reason: String::new(),
+                governance: Some(sample_governance_decision()),
             }),
         )
         .expect("serialize to value");
         entry["decode_stats"]["k"] = json!("eight");
         entry["decode_stats"]["hard_regime_activated"] = json!("false");
         entry["decode_stats"]["fallback_reason"] = json!(7);
+        entry["decode_stats"]["governance"]["confidence_score"] = json!("910");
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["fired"] =
+            json!("false");
+        entry["decode_stats"]["governance"]["top_evidence_contributors"][0]["name"] = json!(7);
 
         let violations = validate_unit_log_json(&entry.to_string());
         assert!(
@@ -1291,6 +1626,28 @@ mod tests {
                 .iter()
                 .any(|v| v.contains("decode_stats.fallback_reason must be a string")),
             "should reject non-string fallback_reason: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains("decode_stats.governance.confidence_score must be an unsigned integer")
+            }),
+            "should reject non-numeric governance confidence_score: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.deterministic_fallback_trigger.fired must be a boolean"
+                )
+            }),
+            "should reject non-boolean governance trigger flag: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.top_evidence_contributors[0].name must be a string",
+                )
+            }),
+            "should reject non-string governance contributor name: {violations:?}"
         );
     }
 
@@ -1544,6 +1901,7 @@ mod tests {
             hard_regime_branch: "block_schur_low_rank".to_string(),
             hard_regime_fallbacks: 1,
             conservative_fallback_reason: "block_schur_failed_to_converge".to_string(),
+            governance: Some(sample_governance_decision()),
         });
 
         let json = entry.to_json().expect("serialize");
@@ -1557,5 +1915,12 @@ mod tests {
         let stats = parsed.decode_stats.expect("should have stats");
         assert_eq!(stats.k, 16);
         assert_eq!(stats.dropped, 4);
+        assert_eq!(
+            stats
+                .governance
+                .expect("should include governance")
+                .chosen_action,
+            "continue"
+        );
     }
 }
