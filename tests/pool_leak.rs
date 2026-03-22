@@ -41,7 +41,7 @@ fn test_pool_leak() {
         let stats = pool.stats();
         println!("Total connections: {}", stats.total);
         println!("Active: {}", stats.active);
-        
+
         assert_eq!(stats.total, 0, "LEAK DETECTED!");
     });
 }
