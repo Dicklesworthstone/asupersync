@@ -165,7 +165,7 @@ fn write_after_close_returns_error() {
         .expect_err("write after close must fail");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 }
 
@@ -194,7 +194,7 @@ fn open_stream_after_close_returns_error() {
         .expect_err("open bidi after close must fail");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 
     // Also try uni stream.
@@ -204,7 +204,7 @@ fn open_stream_after_close_returns_error() {
         .expect_err("open uni after close must fail");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 }
 

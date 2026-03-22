@@ -643,6 +643,345 @@ impl<M: ConnectionManager> fmt::Debug for PooledConnection<'_, M> {
     }
 }
 
+// ─── AsyncConnectionManager ─────────────────────────────────────────────────
+
+use crate::cx::Cx;
+use crate::types::Outcome;
+
+/// Async connection manager for database backends whose `connect` and
+/// `is_valid` operations are asynchronous and require a [`Cx`].
+///
+/// This is the async counterpart of [`ConnectionManager`], designed for
+/// clients like PostgreSQL whose connect methods are async and return
+/// [`Outcome`].
+pub trait AsyncConnectionManager: Send + Sync + 'static {
+    /// The connection type managed by this manager.
+    type Connection: Send + 'static;
+
+    /// Error type for connection operations.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Create a new connection asynchronously.
+    fn connect(
+        &self,
+        cx: &Cx,
+    ) -> impl std::future::Future<Output = Outcome<Self::Connection, Self::Error>> + Send;
+
+    /// Validate that a connection is still usable.
+    ///
+    /// Takes `&mut` because validation typically requires sending a query
+    /// that mutates protocol state.
+    fn is_valid(
+        &self,
+        cx: &Cx,
+        conn: &mut Self::Connection,
+    ) -> impl std::future::Future<Output = bool> + Send;
+
+    /// Called when a connection is permanently removed from the pool.
+    fn disconnect(&self, _conn: Self::Connection) {}
+}
+
+// ─── AsyncDbPool ─────────────────────────────────────────────────────────────
+
+/// An async database connection pool with health checks.
+///
+/// The async counterpart of [`DbPool`], designed for backends whose connect
+/// and validate operations are asynchronous. All acquisition methods take a
+/// [`Cx`] for cancellation integration.
+pub struct AsyncDbPool<M: AsyncConnectionManager> {
+    manager: Arc<M>,
+    config: DbPoolConfig,
+    inner: Mutex<PoolInner<M::Connection>>,
+    stats: PoolStatCounters,
+}
+
+impl<M: AsyncConnectionManager> AsyncDbPool<M> {
+    /// Create a new async connection pool.
+    pub fn new(manager: M, config: DbPoolConfig) -> Self {
+        Self {
+            manager: Arc::new(manager),
+            config,
+            inner: Mutex::new(PoolInner {
+                idle: VecDeque::new(),
+                total: 0,
+                closed: false,
+            }),
+            stats: PoolStatCounters::default(),
+        }
+    }
+
+    /// Create a pool with default configuration.
+    pub fn with_manager(manager: M) -> Self {
+        Self::new(manager, DbPoolConfig::default())
+    }
+
+    /// Get the pool configuration.
+    #[must_use]
+    pub fn config(&self) -> &DbPoolConfig {
+        &self.config
+    }
+
+    /// Get current pool statistics.
+    #[must_use]
+    pub fn stats(&self) -> DbPoolStats {
+        let inner = self.inner.lock();
+        DbPoolStats {
+            idle: inner.idle.len(),
+            active: inner.total.saturating_sub(inner.idle.len()),
+            total: inner.total,
+            max_size: self.config.max_size,
+            total_acquisitions: self.stats.total_acquisitions.load(Ordering::Relaxed),
+            total_creates: self.stats.total_creates.load(Ordering::Relaxed),
+            total_discards: self.stats.total_discards.load(Ordering::Relaxed),
+            total_timeouts: self.stats.total_timeouts.load(Ordering::Relaxed),
+            total_validation_failures: self.stats.total_validation_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Acquire a connection from the pool.
+    pub async fn get(
+        &self,
+        cx: &Cx,
+    ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        loop {
+            if cx.is_cancel_requested() {
+                return Err(DbPoolError::Timeout);
+            }
+
+            let candidate = {
+                let mut inner = self.inner.lock();
+                if inner.closed {
+                    return Err(DbPoolError::Closed);
+                }
+                inner.idle.pop_front()
+            };
+
+            if let Some(idle) = candidate {
+                let is_expired = idle.is_expired(&self.config);
+                let is_stale = idle.is_idle_too_long(&self.config);
+
+                if is_expired || is_stale {
+                    {
+                        let mut inner = self.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    self.manager.disconnect(idle.conn);
+                    continue;
+                }
+
+                if self.config.validate_on_checkout {
+                    let mut conn = idle.conn;
+                    if !self.manager.is_valid(cx, &mut conn).await {
+                        {
+                            let mut inner = self.inner.lock();
+                            inner.total = inner.total.saturating_sub(1);
+                        }
+                        self.stats
+                            .total_validation_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                        self.manager.disconnect(conn);
+                        continue;
+                    }
+                    return self.finish_async_checkout(conn, idle.created_at);
+                }
+
+                return self.finish_async_checkout(idle.conn, idle.created_at);
+            }
+
+            {
+                let mut inner = self.inner.lock();
+                if inner.total >= self.config.max_size {
+                    return Err(DbPoolError::Full);
+                }
+                inner.total += 1;
+            }
+
+            match self.manager.connect(cx).await {
+                Outcome::Ok(conn) => {
+                    self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                    return self.finish_async_checkout(conn, Instant::now());
+                }
+                Outcome::Err(e) => {
+                    let mut inner = self.inner.lock();
+                    inner.total = inner.total.saturating_sub(1);
+                    return Err(DbPoolError::Connect(e));
+                }
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                    let mut inner = self.inner.lock();
+                    inner.total = inner.total.saturating_sub(1);
+                    return Err(DbPoolError::Timeout);
+                }
+            }
+        }
+    }
+
+    fn finish_async_checkout(
+        &self,
+        conn: M::Connection,
+        created_at: Instant,
+    ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        {
+            let inner = self.inner.lock();
+            if inner.closed {
+                drop(inner);
+                let mut inner2 = self.inner.lock();
+                inner2.total = inner2.total.saturating_sub(1);
+                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                self.manager.disconnect(conn);
+                return Err(DbPoolError::Closed);
+            }
+        }
+
+        self.stats
+            .total_acquisitions
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(AsyncPooledConnection {
+            conn: Some(conn),
+            pool: self,
+            created_at,
+        })
+    }
+
+    /// Return a connection to the pool.
+    fn return_connection(&self, conn: M::Connection, created_at: Instant) {
+        let conn_to_disconnect = {
+            let mut inner = self.inner.lock();
+            if inner.closed {
+                inner.total = inner.total.saturating_sub(1);
+                Some(conn)
+            } else {
+                inner.idle.push_back(IdleConnection {
+                    conn,
+                    created_at,
+                    last_used: Instant::now(),
+                });
+                None
+            }
+        };
+
+        if let Some(conn) = conn_to_disconnect {
+            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+            self.manager.disconnect(conn);
+        }
+    }
+
+    /// Discard a connection instead of returning it to the pool.
+    fn discard_connection(&self, conn: M::Connection) {
+        {
+            let mut inner = self.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+        }
+        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+        self.manager.disconnect(conn);
+    }
+
+    /// Close the pool, preventing new acquisitions.
+    pub fn close(&self) {
+        let mut inner = self.inner.lock();
+        inner.closed = true;
+        let idle: Vec<_> = inner.idle.drain(..).collect();
+        let drained = idle.len();
+        inner.total = inner.total.saturating_sub(drained);
+        if drained > 0 {
+            self.stats
+                .total_discards
+                .fetch_add(drained as u64, Ordering::Relaxed);
+        }
+        drop(inner);
+        for entry in idle {
+            self.manager.disconnect(entry.conn);
+        }
+    }
+
+    /// Returns `true` if the pool is closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().closed
+    }
+}
+
+impl<M: AsyncConnectionManager> fmt::Debug for AsyncDbPool<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let inner = self.inner.lock();
+        f.debug_struct("AsyncDbPool")
+            .field("idle", &inner.idle.len())
+            .field("total", &inner.total)
+            .field("max_size", &self.config.max_size)
+            .field("closed", &inner.closed)
+            .finish()
+    }
+}
+
+// ─── AsyncPooledConnection ───────────────────────────────────────────────────
+
+/// A connection borrowed from an [`AsyncDbPool`].
+///
+/// Automatically returns the connection to the pool on drop.
+pub struct AsyncPooledConnection<'a, M: AsyncConnectionManager> {
+    conn: Option<M::Connection>,
+    pool: &'a AsyncDbPool<M>,
+    created_at: Instant,
+}
+
+impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
+    /// Access the underlying connection.
+    #[must_use]
+    pub fn get(&self) -> &M::Connection {
+        self.conn.as_ref().expect("connection already taken")
+    }
+
+    /// Access the underlying connection mutably.
+    pub fn get_mut(&mut self) -> &mut M::Connection {
+        self.conn.as_mut().expect("connection already taken")
+    }
+
+    /// Explicitly return the connection to the pool.
+    pub fn return_to_pool(mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.return_connection(conn, self.created_at);
+        }
+    }
+
+    /// Discard this connection instead of returning it.
+    pub fn discard(mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.discard_connection(conn);
+        }
+    }
+}
+
+impl<M: AsyncConnectionManager> std::ops::Deref for AsyncPooledConnection<'_, M> {
+    type Target = M::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.get()
+    }
+}
+
+impl<M: AsyncConnectionManager> std::ops::DerefMut for AsyncPooledConnection<'_, M> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.get_mut()
+    }
+}
+
+impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.return_connection(conn, self.created_at);
+        }
+    }
+}
+
+impl<M: AsyncConnectionManager> fmt::Debug for AsyncPooledConnection<'_, M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AsyncPooledConnection")
+            .field("active", &self.conn.is_some())
+            .finish()
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
