@@ -773,7 +773,9 @@ impl ChaosStats {
         self.io_errors = self.io_errors.saturating_add(other.io_errors);
         self.wakeup_storms = self.wakeup_storms.saturating_add(other.wakeup_storms);
         self.spurious_wakeups = self.spurious_wakeups.saturating_add(other.spurious_wakeups);
-        self.budget_exhaustions = self.budget_exhaustions.saturating_add(other.budget_exhaustions);
+        self.budget_exhaustions = self
+            .budget_exhaustions
+            .saturating_add(other.budget_exhaustions);
         self.decision_points = self.decision_points.saturating_add(other.decision_points);
     }
 

@@ -954,7 +954,8 @@ impl CostVector {
         match subject.evidence_policy.retention {
             RetentionPolicy::DropImmediately => {}
             RetentionPolicy::RetainFor { duration } => {
-                cost.storage_amplification = (duration.as_secs_f64().min(3600.0) / 3600.0).mul_add(0.3, cost.storage_amplification);
+                cost.storage_amplification = (duration.as_secs_f64().min(3600.0) / 3600.0)
+                    .mul_add(0.3, cost.storage_amplification);
                 cost.restore_handoff_time =
                     cost.restore_handoff_time
                         .saturating_add(DurationEstimate::new(
@@ -965,7 +966,8 @@ impl CostVector {
             }
             RetentionPolicy::RetainForEvents { events } => {
                 let event_factor = events.min(10_000) as f64 / 10_000.0;
-                cost.storage_amplification = 0.4f64.mul_add(event_factor, cost.storage_amplification);
+                cost.storage_amplification =
+                    0.4f64.mul_add(event_factor, cost.storage_amplification);
             }
             RetentionPolicy::Forever => {
                 cost.storage_amplification += 0.75;

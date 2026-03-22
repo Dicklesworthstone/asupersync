@@ -1136,7 +1136,10 @@ fn g2_f7_burst_cache_p95p99_multiscenario_report() {
                     InactivationDecoder::new(scenario.k, scenario.symbol_size, seed);
                 let baseline_t0 = Instant::now();
                 let baseline_result = decode_with_retry(&baseline_decoder);
-                baseline_elapsed_total_us = baseline_t0.elapsed().as_secs_f64().mul_add(1_000_000.0, baseline_elapsed_total_us);
+                baseline_elapsed_total_us = baseline_t0
+                    .elapsed()
+                    .as_secs_f64()
+                    .mul_add(1_000_000.0, baseline_elapsed_total_us);
                 assert_eq!(
                     baseline_result.source, source,
                     "F7 baseline decode must recover source symbols \
@@ -1161,7 +1164,10 @@ fn g2_f7_burst_cache_p95p99_multiscenario_report() {
             for rep in 0..MEASURE_REPETITIONS {
                 let warmed_t0 = Instant::now();
                 let warmed_result = decode_with_retry(&warmed_decoder);
-                warmed_elapsed_total_us = warmed_t0.elapsed().as_secs_f64().mul_add(1_000_000.0, warmed_elapsed_total_us);
+                warmed_elapsed_total_us = warmed_t0
+                    .elapsed()
+                    .as_secs_f64()
+                    .mul_add(1_000_000.0, warmed_elapsed_total_us);
                 assert_eq!(
                     warmed_result.source, source,
                     "F7 warmed decode must recover source symbols \
@@ -1186,7 +1192,10 @@ fn g2_f7_burst_cache_p95p99_multiscenario_report() {
                     InactivationDecoder::new(scenario.k, scenario.symbol_size, seed);
                 let rollback_t0 = Instant::now();
                 let rollback_result = decode_with_retry(&rollback_decoder);
-                rollback_elapsed_total_us = rollback_t0.elapsed().as_secs_f64().mul_add(1_000_000.0, rollback_elapsed_total_us);
+                rollback_elapsed_total_us = rollback_t0
+                    .elapsed()
+                    .as_secs_f64()
+                    .mul_add(1_000_000.0, rollback_elapsed_total_us);
                 assert_eq!(
                     rollback_result.source, source,
                     "F7 rollback-proxy decode must recover source symbols \
@@ -1499,7 +1508,10 @@ fn g2_f7_burst_cache_closure_evidence_v3() {
                     InactivationDecoder::new(scenario.k, scenario.symbol_size, seed);
                 let t0 = Instant::now();
                 let result = decode_with_retry(&baseline_decoder);
-                baseline_elapsed_total_us = t0.elapsed().as_secs_f64().mul_add(1_000_000.0, baseline_elapsed_total_us);
+                baseline_elapsed_total_us = t0
+                    .elapsed()
+                    .as_secs_f64()
+                    .mul_add(1_000_000.0, baseline_elapsed_total_us);
                 assert_eq!(result.source, source, "F7-v3 baseline source mismatch");
                 if i == 0 {
                     total_dense_core_cols += result.stats.dense_core_cols;
@@ -1520,7 +1532,10 @@ fn g2_f7_burst_cache_closure_evidence_v3() {
             for _rep in 0..MEASURE_REPETITIONS {
                 let t0 = Instant::now();
                 let result = decode_with_retry(&warmed_decoder);
-                warmed_elapsed_total_us = t0.elapsed().as_secs_f64().mul_add(1_000_000.0, warmed_elapsed_total_us);
+                warmed_elapsed_total_us = t0
+                    .elapsed()
+                    .as_secs_f64()
+                    .mul_add(1_000_000.0, warmed_elapsed_total_us);
                 assert_eq!(result.source, source, "F7-v3 warmed source mismatch");
                 if result.stats.factor_cache_hits > 0 {
                     warmed_sample_hit = true;
@@ -1541,7 +1556,10 @@ fn g2_f7_burst_cache_closure_evidence_v3() {
                     InactivationDecoder::new(scenario.k, scenario.symbol_size, seed);
                 let t0 = Instant::now();
                 let result = decode_with_retry(&rollback_decoder);
-                rollback_elapsed_total_us = t0.elapsed().as_secs_f64().mul_add(1_000_000.0, rollback_elapsed_total_us);
+                rollback_elapsed_total_us = t0
+                    .elapsed()
+                    .as_secs_f64()
+                    .mul_add(1_000_000.0, rollback_elapsed_total_us);
                 assert_eq!(result.source, source, "F7-v3 rollback source mismatch");
             }
             let rollback_elapsed_us = rollback_elapsed_total_us / MEASURE_REPETITIONS as f64;

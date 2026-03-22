@@ -3987,9 +3987,19 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
         let idx = state.insert_task_with(|idx| {
-            TaskRecord::new_with_time(TaskId::from_arena(idx), region, Budget::INFINITE, Time::ZERO)
+            TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                region,
+                Budget::INFINITE,
+                Time::ZERO,
+            )
         });
-        state.regions.get(region.arena_index()).unwrap().add_task(TaskId::from_arena(idx)).unwrap();
+        state
+            .regions
+            .get(region.arena_index())
+            .unwrap()
+            .add_task(TaskId::from_arena(idx))
+            .unwrap();
 
         let _tasks = state.cancel_request(region, &CancelReason::timeout(), None);
 
@@ -4351,14 +4361,40 @@ mod tests {
         state.set_cancel_attribution_config(CancelAttributionConfig::new(2, 256));
 
         let root = state.create_root_region(Budget::INFINITE);
-        let idx_root = state.insert_task_with(|idx| { TaskRecord::new_with_time(TaskId::from_arena(idx), root, Budget::INFINITE, Time::ZERO) });
-        state.regions.get(root.arena_index()).unwrap().add_task(TaskId::from_arena(idx_root)).unwrap();
+        let idx_root = state.insert_task_with(|idx| {
+            TaskRecord::new_with_time(TaskId::from_arena(idx), root, Budget::INFINITE, Time::ZERO)
+        });
+        state
+            .regions
+            .get(root.arena_index())
+            .unwrap()
+            .add_task(TaskId::from_arena(idx_root))
+            .unwrap();
         let child = create_child_region(&mut state, root);
-        let idx_child = state.insert_task_with(|idx| { TaskRecord::new_with_time(TaskId::from_arena(idx), child, Budget::INFINITE, Time::ZERO) });
-        state.regions.get(child.arena_index()).unwrap().add_task(TaskId::from_arena(idx_child)).unwrap();
+        let idx_child = state.insert_task_with(|idx| {
+            TaskRecord::new_with_time(TaskId::from_arena(idx), child, Budget::INFINITE, Time::ZERO)
+        });
+        state
+            .regions
+            .get(child.arena_index())
+            .unwrap()
+            .add_task(TaskId::from_arena(idx_child))
+            .unwrap();
         let grandchild = create_child_region(&mut state, child);
-        let idx_grandchild = state.insert_task_with(|idx| { TaskRecord::new_with_time(TaskId::from_arena(idx), grandchild, Budget::INFINITE, Time::ZERO) });
-        state.regions.get(grandchild.arena_index()).unwrap().add_task(TaskId::from_arena(idx_grandchild)).unwrap();
+        let idx_grandchild = state.insert_task_with(|idx| {
+            TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                grandchild,
+                Budget::INFINITE,
+                Time::ZERO,
+            )
+        });
+        state
+            .regions
+            .get(grandchild.arena_index())
+            .unwrap()
+            .add_task(TaskId::from_arena(idx_grandchild))
+            .unwrap();
 
         let reason = CancelReason::deadline().with_message("root deadline");
         let _ = state.cancel_request(root, &reason, None);
@@ -5037,8 +5073,20 @@ mod tests {
         init_test("cancel_request_should_prevent_new_spawns");
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
-        let idx = state.insert_task_with(|idx| { TaskRecord::new_with_time(TaskId::from_arena(idx), region, Budget::INFINITE, Time::ZERO) });
-        state.regions.get(region.arena_index()).unwrap().add_task(TaskId::from_arena(idx)).unwrap();
+        let idx = state.insert_task_with(|idx| {
+            TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                region,
+                Budget::INFINITE,
+                Time::ZERO,
+            )
+        });
+        state
+            .regions
+            .get(region.arena_index())
+            .unwrap()
+            .add_task(TaskId::from_arena(idx))
+            .unwrap();
 
         // Request cancellation
         let _ = state.cancel_request(region, &CancelReason::user("stop"), None);

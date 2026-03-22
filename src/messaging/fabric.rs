@@ -2510,7 +2510,10 @@ impl SpeculativeExecutionPolicy {
         self.kill_switches
             .ensure_enabled(cell.cell_id, request.service_class)?;
 
-        if !self.allowed_service_classes.contains(&request.service_class) {
+        if !self
+            .allowed_service_classes
+            .contains(&request.service_class)
+        {
             return Err(SpeculativeExecutionError::ServiceClassNotAdmitted {
                 service_class: request.service_class,
             });
@@ -6371,8 +6374,14 @@ mod tests {
             first.tentative_obligation.obligation_id,
             second.tentative_obligation.obligation_id
         );
-        assert_eq!(first.replay_artifact.replay_key, second.replay_artifact.replay_key);
-        assert_eq!(first.replay_artifact.oracle_key, second.replay_artifact.oracle_key);
+        assert_eq!(
+            first.replay_artifact.replay_key,
+            second.replay_artifact.replay_key
+        );
+        assert_eq!(
+            first.replay_artifact.oracle_key,
+            second.replay_artifact.oracle_key
+        );
         assert!(first.replay_artifact.verifies());
         assert!(second.replay_artifact.verifies());
     }

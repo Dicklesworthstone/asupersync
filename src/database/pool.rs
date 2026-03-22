@@ -893,7 +893,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
                     let delay = calculate_delay(policy, attempt, None);
                     // Use cx-aware sleep
-                    let _ = crate::time::timeout(crate::time::wall_now(), delay.min(remaining), crate::time::sleep(crate::time::wall_now(), delay.min(remaining))).await;
+                    let _ = crate::time::timeout(
+                        crate::time::wall_now(),
+                        delay.min(remaining),
+                        crate::time::sleep(crate::time::wall_now(), delay.min(remaining)),
+                    )
+                    .await;
 
                     if crate::time::wall_now() >= deadline || cx.is_cancel_requested() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
