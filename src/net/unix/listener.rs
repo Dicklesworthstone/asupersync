@@ -93,6 +93,29 @@ pub(crate) fn remove_socket_file_if_same_inode(
     }
 }
 
+pub(crate) fn finalize_bound_socket<T, F>(
+    path: &Path,
+    inner: T,
+    configure: F,
+) -> io::Result<(T, Option<SocketFileIdentity>)>
+where
+    F: FnOnce(&T) -> io::Result<()>,
+{
+    // Capture the inode identity before returning the wrapper so cleanup can
+    // safely target only the socket file created by this bind.
+    let cleanup_identity = socket_file_identity(path).ok().flatten();
+
+    if let Err(err) = configure(&inner) {
+        drop(inner);
+        if let Some(identity) = cleanup_identity {
+            let _ = remove_socket_file_if_same_inode(path, identity);
+        }
+        return Err(err);
+    }
+
+    Ok((inner, cleanup_identity))
+}
+
 /// A Unix domain socket listener.
 ///
 /// Creates a socket bound to a filesystem path or abstract namespace (Linux),
@@ -150,16 +173,7 @@ impl UnixListener {
         remove_stale_socket_file(path)?;
 
         let inner = net::UnixListener::bind(path)?;
-        inner.set_nonblocking(true)?;
-
-        Ok(Self {
-            inner,
-            path: Some(path.to_path_buf()),
-            // If identity capture fails, skip automatic cleanup rather than risk
-            // unlinking a different socket later rebound at the same pathname.
-            cleanup_identity: socket_file_identity(path).ok().flatten(),
-            registration: Mutex::new(None), // Lazy registration on first poll
-        })
+        Self::from_bound_with(path, inner, |socket| socket.set_nonblocking(true))
     }
 
     /// Binds to an abstract namespace socket (Linux only).
@@ -371,6 +385,20 @@ impl UnixListener {
     pub fn take_path(&mut self) -> Option<PathBuf> {
         self.cleanup_identity = None;
         self.path.take()
+    }
+
+    fn from_bound_with<F>(path: &Path, inner: net::UnixListener, configure: F) -> io::Result<Self>
+    where
+        F: FnOnce(&net::UnixListener) -> io::Result<()>,
+    {
+        let (inner, cleanup_identity) = finalize_bound_socket(path, inner, configure)?;
+
+        Ok(Self {
+            inner,
+            path: Some(path.to_path_buf()),
+            cleanup_identity,
+            registration: Mutex::new(None), // Lazy registration on first poll
+        })
     }
 }
 
@@ -731,6 +759,35 @@ mod tests {
         drop(replacement);
         std::fs::remove_file(&path).ok();
         crate::test_complete!("replacement_socket_path_survives_old_listener_drop");
+    }
+
+    #[test]
+    fn test_bind_cleanup_on_post_bind_init_failure() {
+        init_test("test_listener_bind_cleanup_on_post_bind_init_failure");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("listener_init_failure.sock");
+
+        remove_stale_socket_file(&path).expect("clear stale socket");
+        let inner = net::UnixListener::bind(&path).expect("bind failed");
+        let err = UnixListener::from_bound_with(&path, inner, |_socket| {
+            Err(io::Error::other("injected listener init failure"))
+        })
+        .expect_err("post-bind init should fail");
+
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Other,
+            "init error kind",
+            io::ErrorKind::Other,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            !path.exists(),
+            "socket path cleaned after init failure",
+            false,
+            path.exists()
+        );
+
+        crate::test_complete!("test_listener_bind_cleanup_on_post_bind_init_failure");
     }
 
     #[cfg(target_os = "linux")]

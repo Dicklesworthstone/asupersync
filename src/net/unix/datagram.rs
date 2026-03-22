@@ -73,6 +73,21 @@ pub struct UnixDatagram {
 }
 
 impl UnixDatagram {
+    fn from_bound_with<F>(path: &Path, inner: net::UnixDatagram, configure: F) -> io::Result<Self>
+    where
+        F: FnOnce(&net::UnixDatagram) -> io::Result<()>,
+    {
+        let (inner, cleanup_identity) =
+            super::listener::finalize_bound_socket(path, inner, configure)?;
+
+        Ok(Self {
+            inner,
+            path: Some(path.to_path_buf()),
+            cleanup_identity,
+            registration: None,
+        })
+    }
+
     /// Binds to a filesystem path.
     ///
     /// Creates a new Unix datagram socket bound to the specified path.
@@ -101,16 +116,7 @@ impl UnixDatagram {
         super::listener::remove_stale_socket_file(path)?;
 
         let inner = net::UnixDatagram::bind(path)?;
-        inner.set_nonblocking(true)?;
-
-        Ok(Self {
-            inner,
-            path: Some(path.to_path_buf()),
-            // If identity capture fails, skip automatic cleanup rather than risk
-            // unlinking a different socket later rebound at the same pathname.
-            cleanup_identity: super::listener::socket_file_identity(path).ok().flatten(),
-            registration: None,
-        })
+        Self::from_bound_with(path, inner, |socket| socket.set_nonblocking(true))
     }
 
     /// Binds to an abstract namespace socket (Linux only).
@@ -1095,6 +1101,35 @@ mod tests {
         drop(replacement);
         std::fs::remove_file(&path).ok();
         crate::test_complete!("replacement_socket_path_survives_old_datagram_drop");
+    }
+
+    #[test]
+    fn test_bind_cleanup_on_post_bind_init_failure() {
+        init_test("test_datagram_bind_cleanup_on_post_bind_init_failure");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("datagram_init_failure.sock");
+
+        crate::net::unix::listener::remove_stale_socket_file(&path).expect("clear stale socket");
+        let inner = net::UnixDatagram::bind(&path).expect("bind failed");
+        let err = UnixDatagram::from_bound_with(&path, inner, |_socket| {
+            Err(io::Error::other("injected datagram init failure"))
+        })
+        .expect_err("post-bind init should fail");
+
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Other,
+            "init error kind",
+            io::ErrorKind::Other,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            !path.exists(),
+            "socket path cleaned after init failure",
+            false,
+            path.exists()
+        );
+
+        crate::test_complete!("test_datagram_bind_cleanup_on_post_bind_init_failure");
     }
 
     #[test]

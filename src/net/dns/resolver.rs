@@ -564,12 +564,36 @@ fn validate_lookup_hostname(host: &str) -> Result<(), DnsError> {
 
     if validated_host
         .split('.')
-        .any(|label| label.is_empty() || label.len() > 63)
+        .any(|label| !is_valid_lookup_hostname_label(label))
     {
         return Err(DnsError::InvalidHost(host.to_string()));
     }
 
     Ok(())
+}
+
+fn is_valid_lookup_hostname_label(label: &str) -> bool {
+    if label.is_empty() || label.len() > 63 {
+        return false;
+    }
+
+    let mut bytes = label.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+
+    let mut last = first;
+    for byte in bytes {
+        if !(byte.is_ascii_alphanumeric() || byte == b'-') {
+            return false;
+        }
+        last = byte;
+    }
+
+    last.is_ascii_alphanumeric()
 }
 
 #[cfg(test)]
@@ -748,6 +772,54 @@ mod tests {
         );
 
         crate::test_complete!("resolver_rejects_hostname_with_overlong_label");
+    }
+
+    #[test]
+    fn resolver_rejects_hostname_with_whitespace_label() {
+        init_test("resolver_rejects_hostname_with_whitespace_label");
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        });
+        let result = future::block_on(async { resolver.lookup_ip("bad host.example").await });
+        let invalid = matches!(
+            result,
+            Err(DnsError::InvalidHost(ref host)) if host == "bad host.example"
+        );
+        crate::assert_with_log!(
+            invalid,
+            "hostname with whitespace rejected before resolver fallback",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_rejects_hostname_with_whitespace_label");
+    }
+
+    #[test]
+    fn resolver_rejects_hostname_with_hyphen_edge_label() {
+        init_test("resolver_rejects_hostname_with_hyphen_edge_label");
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        });
+
+        for host in ["-bad.example", "bad-.example"] {
+            let result = future::block_on(async { resolver.lookup_ip(host).await });
+            let invalid = matches!(result, Err(DnsError::InvalidHost(ref bad)) if bad == host);
+            crate::assert_with_log!(
+                invalid,
+                "hostname with edge hyphen rejected before resolver fallback",
+                true,
+                format!("{host}: {result:?}")
+            );
+        }
+
+        crate::test_complete!("resolver_rejects_hostname_with_hyphen_edge_label");
     }
 
     #[test]
