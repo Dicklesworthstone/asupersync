@@ -104,6 +104,9 @@ fn playbook_requires_release_and_npm_rollback_artifacts() {
         "artifacts/npm/publish_outcome.json",
         "artifacts/npm/rollback_outcome.json",
         "artifacts/npm/rollback_actions.txt",
+        "surface_evidence_paths",
+        "browser-run.json",
+        "scenario_inventory",
     ];
     for artifact in required_artifacts {
         assert!(
@@ -128,6 +131,28 @@ fn playbook_references_release_channel_strategy_and_publish_workflow() {
         playbook.contains("rollback_npm_to_version") && playbook.contains("rollback_reason"),
         "playbook must document rollback workflow inputs"
     );
+}
+
+#[test]
+fn playbook_defines_vnext_surface_specific_rollbacks() {
+    let playbook = load_playbook();
+    for token in [
+        "Dedicated Web Worker",
+        "browser-run.json",
+        "scenario_inventory",
+        "Service-worker bounded broker registration + durable handoff",
+        "Shared-worker bounded coordinator attach + downgrade",
+        "guarded canary-only",
+        "preview_only",
+        "service_worker_not_yet_shipped",
+        "service_worker_direct_runtime_not_shipped",
+        "shared_worker_direct_runtime_not_shipped",
+    ] {
+        assert!(
+            playbook.contains(token),
+            "playbook missing vNext rollback governance token: {token}"
+        );
+    }
 }
 
 #[test]

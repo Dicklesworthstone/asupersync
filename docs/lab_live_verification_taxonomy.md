@@ -301,7 +301,7 @@ through three stable profile lanes:
 |---|---|---|
 | `Smoke` | `phase1.cancel.protocol.drain_finalize`, `phase1.combinator.race.one_loser`, `phase1.channel.reserve_send.commit` | the fastest shared pass/fail lane for the initial semantic core |
 | `Phase1Core` | `phase1.cancel.protocol.drain_finalize`, `phase1.combinator.race.one_loser`, `phase1.channel.reserve_send.commit`, `phase1.channel.reserve_send.abort_visible`, `phase1.region.close.quiescent` | the full admitted `Phase 1` executable floor, including the cancel-before-commit channel path |
-| `Calibration` | `phase1.cancel.protocol.drain_finalize`, `calibration.cancellation.cleanup_missing`, `calibration.comparator.resource_counter_mismatch`, `calibration.channel.commit_visibility_mismatch`, `calibration.obligation.leak_detected` | prove the classifier, artifact bundle, and failure-retention paths with intentional divergences |
+| `Calibration` | `phase1.cancel.protocol.drain_finalize`, `calibration.cancellation.cleanup_missing`, `calibration.comparator.resource_counter_mismatch`, `calibration.channel.commit_visibility_mismatch`, `calibration.obligation.leak_detected`, `calibration.region.close.non_quiescent` | prove the classifier, artifact bundle, and failure-retention paths with intentional divergences |
 
 #### Surface-to-inventory map
 
@@ -311,12 +311,13 @@ through three stable profile lanes:
 | `combinators` | `phase1.combinator.race.one_loser` in `src/bin/asupersync.rs` | `tests/e2e/combinator/cancel_correctness/async_loser_drain.rs`, `tests/phase0_verification.rs`, `src/lab/oracle/loser_drain.rs`, `src/combinator/race.rs` | current dedicated differential `T4` anchor is still missing; until a pilot bead lands it, local loser-drain oracle failures are the nearest negative-control evidence | `loser_drain`, `terminal_outcome`, `policy_class`, `artifact_bundle`, `normalized_record_path` |
 | `channels` | `phase1.channel.reserve_send.commit` and `phase1.channel.reserve_send.abort_visible` in `src/bin/asupersync.rs` | `tests/e2e_channel_patterns.rs`, `src/channel/mpsc.rs`, `src/channel/oneshot.rs`, `src/channel/broadcast.rs`, `src/channel/watch.rs` | `calibration.channel.commit_visibility_mismatch` proves committed/aborted visibility failures stay loud through the shared runner | `resource_surface`, `obligation_balance`, `terminal_outcome`, `artifact_bundle`, `repro_command` |
 | `obligations` | currently piggybacks on `phase1.cancel.protocol.drain_finalize`, `phase1.channel.reserve_send.commit`, and `phase1.region.close.quiescent` because each emits `obligation_balance` in the normalized record | `tests/obligation_lifecycle_e2e.rs`, `tests/cancel_obligation_invariants.rs`, `src/lab/oracle/obligation_leak.rs`, `src/runtime/obligation_table.rs` | `calibration.obligation.leak_detected` | `obligation_balance`, `policy_class`, `normalized_record_path`, `artifact_bundle`, `repro_command` |
-| `region_close` / `quiescence` | `phase1.region.close.quiescent` in `src/bin/asupersync.rs` | `tests/close_quiescence_regression.rs`, `tests/semantic_adr_regression.rs`, `tests/region_lifecycle_conformance.rs`, `src/lab/oracle/quiescence.rs`, `src/lab/oracle/finalizer.rs` | current dedicated differential `T4` anchor is still missing; later pilot beads must add an explicit non-quiescent close witness | `region_close`, `terminal_outcome`, `artifact_bundle`, `normalized_record_path`, `repro_command` |
+| `region_close` / `quiescence` | `phase1.region.close.quiescent` in `src/bin/asupersync.rs` | `tests/close_quiescence_regression.rs`, `tests/semantic_adr_regression.rs`, `tests/region_lifecycle_conformance.rs`, `src/lab/oracle/quiescence.rs`, `src/lab/oracle/finalizer.rs` | `calibration.region.close.non_quiescent` proves non-quiescent root close is escalated through the shared runner and retained artifact bundle | `region_close`, `terminal_outcome`, `artifact_bundle`, `normalized_record_path`, `repro_command` |
 
 Interpretation rules for the executable inventory:
 
-- `current dedicated differential T4 anchor is still missing` is an explicit
-  backlog statement, not permission to skip the future adversarial witness
+- `calibration.region.close.non_quiescent` is the dedicated adversarial anchor
+  for close-with-live-children evidence; future beads may extend it with richer
+  nested/finalizer witnesses, but this baseline anchor must remain executable
 - a bead may cite file-level anchors from this table only if its retained bundle
   also points at the exact scenario ID or test it exercised
 - when obligation evidence is piggybacked through another surface, the bundle

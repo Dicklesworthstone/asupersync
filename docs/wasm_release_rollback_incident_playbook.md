@@ -102,10 +102,12 @@ allowed to blur together under one generic Browser Edition status line.
 
 | Surface | Trigger class | Immediate action | Public downgrade language |
 |---|---|---|---|
-| `Dedicated Web Worker` direct-runtime lane | worker bootstrap, cancel-drain, or worker artifact/export evidence regresses | demote the worker lane from `stable` to `canary` and freeze further worker promotion | keep browser main-thread runtime as the supported fallback while worker evidence is repaired |
+| `Dedicated Web Worker` direct-runtime lane | worker bootstrap, cancel-drain, worker artifact/export evidence, or dedicated-worker `browser-run.json` / `scenario_inventory` evidence regresses | demote the worker lane from `stable` to `canary` and freeze further worker promotion | keep browser main-thread runtime as the supported fallback while worker evidence is repaired |
 | `IndexedDB` durable storage + `BrowserArtifactStore` | blocked-upgrade/quota/export diagnostics drift or maintained fixture evidence fails | demote durable storage/artifact claims to `canary` and stop advertising durable browser persistence as release-ready | tell users to export/clear artifacts explicitly; do not silently fall back to ambient persistence |
-| Rust-authored browser path | `repository_maintained_rust_browser_fixture` validation or docs drift breaks | revert the surface to `preview_only` / `architecturally feasible only` and block any stable/public Rust lane claim | direct Rust users back to the repository fixture workflow until the evidence bundle is green again |
+| Rust-authored browser path | `repository_maintained_rust_browser_fixture` validation, `browser-run.json`, or docs drift breaks | revert the surface to `preview_only` / `architecturally feasible only` and block any stable/public Rust lane claim | direct Rust users back to the repository fixture workflow until the evidence bundle is green again |
 | `WebTransport` datagrams | guarded prerequisite or fallback contract regresses | demote to `preview_only` and remove any guarded canary/stable claim | require `WebSocket` / `fetch` fallback guidance in the incident note and release notes |
+| Service-worker bounded broker registration + durable handoff | broker registration manifest, durable handoff metadata, stale-broker downgrade logs, or bounded-broker policy docs/tests regress | demote the broker surface from `guarded canary-only` to `preview_only` and freeze further broker promotion | keep `service_worker_not_yet_shipped` and `service_worker_direct_runtime_not_shipped` as the public truth, preserve the bounded broker framing, and route users to dedicated-worker or browser main-thread fallback guidance |
+| Shared-worker bounded coordinator attach + downgrade | attach/handshake evidence, protocol-version checks, downgrade logs, or bounded-coordinator policy docs/tests regress | demote the coordinator surface from `guarded canary-only` to `preview_only` and freeze further coordinator promotion | keep `shared_worker_direct_runtime_not_shipped` as the public truth, preserve the bounded coordinator framing, and route users back to dedicated-worker or browser main-thread fallback guidance |
 | Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | public claim appears without public SDK export closure or contract evidence | retract the public Browser Edition claim immediately | state that these surfaces remain application-boundary-only / unshipped |
 | `SharedArrayBuffer` / worker offload / parallel executor lanes | cross-origin-isolation, ownership/cancellation, replay, chaos, or perf evidence regresses | disable the lane immediately and demote `canary -> nightly` or preview-only | keep the single-threaded browser runtime as the only supported default |
 
@@ -174,7 +176,10 @@ Each incident ticket must include:
 5. replay command that reproduces the failing gate,
 6. `surface_id` for the affected vNext lane when applicable,
 7. `support_bucket_before` and `support_bucket_after`,
-8. `channel_ceiling_before` and `channel_ceiling_after`.
+8. `channel_ceiling_before` and `channel_ceiling_after`,
+9. `surface_evidence_paths`, including any `browser-run.json`,
+   `scenario_inventory`, broker registration, durable handoff, or coordinator
+   downgrade artifacts that justified the rollback decision.
 
 ## Postmortem Requirements
 

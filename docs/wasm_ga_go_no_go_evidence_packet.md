@@ -156,6 +156,8 @@ Required `surface_decisions` rows:
 - `BrowserArtifactStore`
 - Rust-authored browser path
 - `WebTransport`
+- Service-worker bounded broker registration + durable handoff
+- Shared-worker bounded coordinator attach + downgrade
 - `MessageChannel`
 - `MessagePort`
 - `BroadcastChannel`
@@ -234,8 +236,10 @@ GA approval fails automatically when one or more are true:
    and `docs/wasm_release_channel_strategy.md`,
 7. any `Dedicated Web Worker`, `IndexedDB durable storage`,
    `BrowserArtifactStore`, Rust-authored browser path, `WebTransport`,
-   `MessageChannel`, `MessagePort`, `BroadcastChannel`, `SharedArrayBuffer`, or
-   worker offload row is missing an explicit decision/evidence entry.
+   Service-worker bounded broker registration + durable handoff,
+   Shared-worker bounded coordinator attach + downgrade, `MessageChannel`,
+   `MessagePort`, `BroadcastChannel`, `SharedArrayBuffer`, or worker offload
+   row is missing an explicit decision/evidence entry.
 
 ## Structured Decision Log Schema
 
@@ -299,11 +303,15 @@ Minimum artifact bundle this packet must point to:
 29. `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`
 30. `artifacts/onboarding/worker.summary.json`
 31. `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`
-32. `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`
-33. `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`
-34. `docs/WASM.md`
-35. `docs/wasm_release_channel_strategy.md`
-36. `docs/wasm_troubleshooting_compendium.md`
+32. `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`
+33. `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`
+34. `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`
+35. `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json`
+36. `docs/WASM.md`
+37. `docs/wasm_release_channel_strategy.md`
+38. `docs/wasm_troubleshooting_compendium.md`
+39. `docs/wasm_service_worker_broker_contract.md`
+40. `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`
 
 ## Cross-References
 

@@ -75,15 +75,20 @@ Minimum Browser Edition evidence bundle before `L0_INTERNAL`:
    `wasm-qa-smoke-suite-summaries`,
    `artifacts/onboarding/vanilla.summary.json`,
    `artifacts/onboarding/react.summary.json`,
-   `artifacts/onboarding/next.summary.json`, and
-   `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`.
+   `artifacts/onboarding/next.summary.json`,
+   `artifacts/onboarding/worker.summary.json`,
+   `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`,
+   `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`,
+   and `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`.
 9. `asupersync-3qv04.9.1`, `asupersync-3qv04.9.2`, `asupersync-3qv04.9.3`,
    `asupersync-3qv04.9.4`, and `asupersync-3qv04.9.5` developer-facing surfaces:
    `docs/wasm_quickstart_migration.md`,
    `docs/wasm_bundler_compatibility_matrix.md`,
    `docs/wasm_canonical_examples.md`,
    `docs/wasm_troubleshooting_compendium.md`, and
-   `docs/wasm_api_surface_census.md`.
+   `docs/wasm_api_surface_census.md`,
+   `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, and
+   `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json`.
 10. Board and launch certification artifacts:
    `wasm-ga-readiness-review-board-certification` and
    `wasm-launch-rollout-support-stabilization-certification`.
@@ -108,10 +113,12 @@ surfaces must still respect their own rollout floors and ceilings.
 
 | Surface | Earliest rollout stage | Highest stage without extra closure | Required artifact bundle before `L3_GA` claim | Default downgrade path |
 |---|---|---|---|---|
-| `Dedicated Web Worker` direct-runtime lane | `L1_PILOT` | may reach `L3_GA` only after worker onboarding + contract evidence is green in the candidate window | `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | downgrade the worker lane to `L2_CANARY`; keep the browser main-thread runtime as the supported GA fallback |
+| `Dedicated Web Worker` direct-runtime lane | `L1_PILOT` | may reach `L3_GA` only after worker onboarding + contract evidence is green in the candidate window | `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh`; the reviewed candidate must preserve the dedicated-worker `scenario_inventory` and `artifacts` pointers in the summary bundle | downgrade the worker lane to `L2_CANARY`; keep the browser main-thread runtime as the supported GA fallback |
 | `IndexedDB` durable storage + `BrowserArtifactStore` | `L1_PILOT` | may reach `L3_GA` only after storage/export diagnostics and maintained fixture evidence are green | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs` | downgrade durable storage/artifact promises to `L2_CANARY` and keep users on explicit export / cleanup guidance |
-| Rust-authored browser path | `L0_INTERNAL` | `L1_PILOT` / `preview_only`; no `L3_GA` claim while the lane is repository-maintained rather than a public Rust browser API | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh`, `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `tests/wasm_rust_browser_example_contract.rs`, `docs/wasm_quickstart_migration.md` | revert to `repository_maintained_rust_browser_fixture` guidance and remove any public/stable wording |
+| Rust-authored browser path | `L0_INTERNAL` | `L1_PILOT` / `preview_only`; no `L3_GA` claim while the lane is repository-maintained rather than a public Rust browser API | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh`, `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json`, `tests/wasm_rust_browser_example_contract.rs`, `docs/wasm_quickstart_migration.md` | revert to `repository_maintained_rust_browser_fixture` guidance and remove any public/stable wording |
 | `WebTransport` datagrams | `L1_PILOT` | `L2_CANARY` and `guarded canary-only` unless fallback evidence remains green | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` | downgrade to `preview_only` and require `WebSocket` / `fetch` fallback messaging |
+| Service-worker bounded broker registration + durable handoff | `L1_PILOT` | `L2_CANARY` / `guarded canary-only`; never `L3_GA` while the host remains a fail-closed direct-runtime denial | `docs/wasm_service_worker_broker_contract.md`, `tests/wasm_service_worker_broker_contract.rs`, `docs/WASM.md`, `packages/browser/src/index.ts`; the reviewed candidate must preserve explicit broker registration, durable handoff, and downgrade diagnostics without widening the host claim | downgrade to `preview_only`, keep `service_worker_not_yet_shipped` / `service_worker_direct_runtime_not_shipped` as the public truth, and route users to dedicated-worker or browser main-thread fallback guidance |
+| Shared-worker bounded coordinator attach + downgrade | `L1_PILOT` | `L2_CANARY` / `guarded canary-only`; never `L3_GA` while SharedWorker direct runtime remains fail-closed | `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `docs/WASM.md`, `packages/browser/src/index.ts`; the reviewed candidate must preserve explicit coordinator attach, version handshake, and downgrade semantics | downgrade to `preview_only`, keep `shared_worker_direct_runtime_not_shipped` as the public truth, and route users back to dedicated-worker or browser main-thread fallback guidance |
 | Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `L0_INTERNAL` | `preview_only` until public Browser Edition APIs ship | `docs/wasm_api_surface_census.md`, `docs/WASM.md`, public API contract tests once exported | revert to application-boundary-only guidance |
 | `SharedArrayBuffer` / worker offload / parallel executor lanes | `L0_INTERNAL` | `nightly-only`; never default `L3_GA` while `asupersync-2jhnk.*` remains open | `asupersync-2jhnk.2`, `asupersync-2jhnk.3`, `asupersync-2jhnk.4`, `asupersync-2jhnk.5`, plus replay/chaos/perf evidence | disable the lane and demote `canary -> nightly` or preview-only |
 
