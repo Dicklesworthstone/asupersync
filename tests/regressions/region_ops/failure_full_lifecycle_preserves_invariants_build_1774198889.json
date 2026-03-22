@@ -1,0 +1,15 @@
+[
+  {
+    "op": "close_region",
+    "region": 17
+  },
+  {
+    "op": "cancel",
+    "region": 18,
+    "reason": "deadline"
+  },
+  {
+    "op": "close_region",
+    "region": 20
+  }
+]

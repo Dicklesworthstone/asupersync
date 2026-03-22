@@ -1,0 +1,124 @@
+[
+  {
+    "op": "close_region",
+    "region": 17
+  },
+  {
+    "op": "cancel",
+    "region": 18,
+    "reason": "deadline"
+  },
+  {
+    "op": "close_region",
+    "region": 20
+  },
+  {
+    "op": "cancel",
+    "region": 75,
+    "reason": "user"
+  },
+  {
+    "op": "create_child",
+    "parent": 3
+  },
+  {
+    "op": "create_child",
+    "parent": 81
+  },
+  {
+    "op": "spawn_task",
+    "region": 87
+  },
+  {
+    "op": "cancel",
+    "region": 26,
+    "reason": "shutdown"
+  },
+  {
+    "op": "spawn_task",
+    "region": 29
+  },
+  {
+    "op": "spawn_task",
+    "region": 14
+  },
+  {
+    "op": "create_child",
+    "parent": 54
+  },
+  {
+    "op": "advance_time",
+    "millis": 8881
+  },
+  {
+    "op": "complete_task",
+    "task": 72,
+    "outcome": "panic"
+  },
+  {
+    "op": "set_deadline",
+    "region": 83,
+    "millis": 4768
+  },
+  {
+    "op": "spawn_task",
+    "region": 14
+  },
+  {
+    "op": "close_region",
+    "region": 47
+  },
+  {
+    "op": "create_child",
+    "parent": 80
+  },
+  {
+    "op": "create_child",
+    "parent": 31
+  },
+  {
+    "op": "create_child",
+    "parent": 35
+  },
+  {
+    "op": "spawn_task",
+    "region": 69
+  },
+  {
+    "op": "close_region",
+    "region": 59
+  },
+  {
+    "op": "create_child",
+    "parent": 27
+  },
+  {
+    "op": "create_child",
+    "parent": 56
+  },
+  {
+    "op": "create_child",
+    "parent": 54
+  },
+  {
+    "op": "create_child",
+    "parent": 69
+  },
+  {
+    "op": "complete_task",
+    "task": 42,
+    "outcome": "ok"
+  },
+  {
+    "op": "close_region",
+    "region": 37
+  },
+  {
+    "op": "create_child",
+    "parent": 51
+  },
+  {
+    "op": "spawn_task",
+    "region": 67
+  }
+]

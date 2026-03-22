@@ -1,0 +1,27 @@
+[
+  {
+    "op": "advance_time",
+    "millis": 4760
+  },
+  {
+    "op": "close_region",
+    "region": 32
+  },
+  {
+    "op": "cancel",
+    "region": 69,
+    "reason": "user"
+  },
+  {
+    "op": "close_region",
+    "region": 96
+  },
+  {
+    "op": "close_region",
+    "region": 50
+  },
+  {
+    "op": "spawn_task",
+    "region": 15
+  }
+]
