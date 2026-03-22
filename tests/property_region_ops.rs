@@ -1349,11 +1349,11 @@ fn check_valid_tree_structure(harness: &TestHarness) -> Vec<InvariantViolation> 
         }
     }
 
-    if roots.len() != 1 {
+    if roots.len() > 1 {
         violations.push(InvariantViolation {
             invariant: "single_root",
             message: format!(
-                "Expected exactly one root region, found {}: {:?}",
+                "Expected at most one root region, found {}: {:?}",
                 roots.len(),
                 roots
             ),

@@ -1,3 +1,5 @@
+//! Test for timer wheel tick skipping bounds.
+
 use asupersync::time::TimerWheel;
 use asupersync::types::Time;
 use std::sync::Arc;
