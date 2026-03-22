@@ -701,3 +701,27 @@
 "SOUND"
 0
 "Reserve/send/abort pattern correct, sent flag prevents double-abort, waker taken under lock woken outside"
+"src/obligation/choreography/mod.rs"
+3533
+410
+"2026-03-22"
+"SapphireHill"
+"SOUND"
+0
+"Purely functional AST/DSL — projection, validation, seq_local RecVar correct, knowledge-of-choice complete"
+"src/obligation/graded.rs"
+1363
+410
+"2026-03-22"
+"SapphireHill"
+"SOUND"
+0
+"Linear-type approximation correct, drop bombs with double-panic guard, scope counters, u32 overflow impractical"
+"src/trace/boundary.rs"
+658
+410
+"2026-03-22"
+"SapphireHill"
+"SOUND"
+0
+"Chain complex boundary operators correct (d1*d2=0 verified), deterministic cell ordering, pure computation"
