@@ -512,43 +512,48 @@ impl DecodingPipeline {
             return None;
         }
 
-        let decoded_symbols =
-            match decode_block(block_plan, &symbols, usize::from(self.config.symbol_size)) {
-                Ok(symbols) => symbols,
-                Err(DecodingError::InsufficientSymbols { .. }) => {
-                    return Some(SymbolAcceptResult::Rejected(RejectReason::InsufficientRank));
+        let decoded_symbols = match decode_block(
+            block_plan,
+            &symbols,
+            usize::from(self.config.symbol_size),
+        ) {
+            Ok(symbols) => symbols,
+            Err(DecodingError::InsufficientSymbols { .. }) => {
+                return Some(SymbolAcceptResult::Rejected(RejectReason::InsufficientRank));
+            }
+            Err(DecodingError::MatrixInversionFailed { .. }) => {
+                return Some(SymbolAcceptResult::Rejected(
+                    RejectReason::InconsistentEquations,
+                ));
+            }
+            Err(DecodingError::InconsistentMetadata { .. }) => {
+                let block = self.blocks.get_mut(&sbn);
+                if let Some(block) = block {
+                    block.state = BlockDecodingState::Failed;
                 }
-                Err(DecodingError::MatrixInversionFailed { .. }) => {
-                    return Some(SymbolAcceptResult::Rejected(
-                        RejectReason::InconsistentEquations,
-                    ));
+                return Some(SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata));
+            }
+            Err(DecodingError::SymbolSizeMismatch { .. }) => {
+                let block = self.blocks.get_mut(&sbn);
+                if let Some(block) = block {
+                    block.state = BlockDecodingState::Failed;
                 }
-                Err(DecodingError::InconsistentMetadata { .. }) => {
-                    let block = self.blocks.get_mut(&sbn);
-                    if let Some(block) = block {
-                        block.state = BlockDecodingState::Failed;
-                    }
-                    return Some(SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata));
+                return Some(SymbolAcceptResult::Rejected(
+                    RejectReason::SymbolSizeMismatch,
+                ));
+            }
+            Err(_err) => {
+                let block = self.blocks.get_mut(&sbn);
+                if let Some(block) = block {
+                    block.state = BlockDecodingState::Failed;
                 }
-                Err(DecodingError::SymbolSizeMismatch { .. }) => {
-                    let block = self.blocks.get_mut(&sbn);
-                    if let Some(block) = block {
-                        block.state = BlockDecodingState::Failed;
-                    }
-                    return Some(SymbolAcceptResult::Rejected(
-                        RejectReason::SymbolSizeMismatch,
-                    ));
-                }
-                Err(_err) => {
-                    let block = self.blocks.get_mut(&sbn);
-                    if let Some(block) = block {
-                        block.state = BlockDecodingState::Failed;
-                    }
-                    return Some(SymbolAcceptResult::Rejected(
-                        RejectReason::MemoryLimitReached,
-                    ));
-                }
-            };
+                #[cfg(feature = "tracing-integration")]
+                tracing::error!(sbn = sbn, error = %_err, "unexpected error during block decode");
+                return Some(SymbolAcceptResult::Rejected(
+                    RejectReason::InconsistentEquations,
+                ));
+            }
+        };
 
         let mut block_data = Vec::with_capacity(block_plan.len);
         for symbol in &decoded_symbols {
