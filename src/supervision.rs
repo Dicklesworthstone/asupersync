@@ -1880,7 +1880,7 @@ pub struct StormMonitorConfig {
     /// Intensities persistently above this accumulate evidence for a storm.
     pub expected_rate: f64,
     /// Minimum observations before the monitor can trigger an alert.
-    pub min_observations: u32,
+    pub min_observations: u64,
     /// Tolerance factor for intensity fluctuations (normalizer).
     ///
     /// Intensities below `tolerance * expected_rate` will cause the evidence to decay.
@@ -1952,13 +1952,13 @@ pub struct RestartStormMonitor {
     /// Rejection threshold: 1/alpha.
     threshold: f64,
     /// Number of observations so far.
-    observations: u32,
+    observations: u64,
     /// Running sum of log-likelihood ratios (for numerical stability).
     log_e_value: f64,
     /// Peak e-value observed (for diagnostics).
     peak_e_value: f64,
     /// Number of times alert was triggered.
-    alert_count: u32,
+    alert_count: u64,
 }
 
 impl RestartStormMonitor {
@@ -2088,7 +2088,7 @@ impl RestartStormMonitor {
 
     /// Returns the number of observations.
     #[must_use]
-    pub fn observations(&self) -> u32 {
+    pub fn observations(&self) -> u64 {
         self.observations
     }
 
@@ -2100,7 +2100,7 @@ impl RestartStormMonitor {
 
     /// Returns the number of times alert was triggered.
     #[must_use]
-    pub fn alert_count(&self) -> u32 {
+    pub fn alert_count(&self) -> u64 {
         self.alert_count
     }
 
@@ -2141,13 +2141,13 @@ pub struct StormMonitorSnapshot {
     /// Rejection threshold.
     pub threshold: f64,
     /// Number of observations.
-    pub observations: u32,
+    pub observations: u64,
     /// Current alert state.
     pub alert_state: crate::obligation::eprocess::AlertState,
     /// Peak e-value ever observed.
     pub peak_e_value: f64,
     /// Number of alert triggers.
-    pub alert_count: u32,
+    pub alert_count: u64,
 }
 
 impl std::fmt::Display for StormMonitorSnapshot {

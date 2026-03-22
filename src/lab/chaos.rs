@@ -767,14 +767,14 @@ impl ChaosStats {
 
     /// Merges another stats instance into this one.
     pub fn merge(&mut self, other: &Self) {
-        self.cancellations += other.cancellations;
-        self.delays += other.delays;
-        self.total_delay += other.total_delay;
-        self.io_errors += other.io_errors;
-        self.wakeup_storms += other.wakeup_storms;
-        self.spurious_wakeups += other.spurious_wakeups;
-        self.budget_exhaustions += other.budget_exhaustions;
-        self.decision_points += other.decision_points;
+        self.cancellations = self.cancellations.saturating_add(other.cancellations);
+        self.delays = self.delays.saturating_add(other.delays);
+        self.total_delay = self.total_delay.saturating_add(other.total_delay);
+        self.io_errors = self.io_errors.saturating_add(other.io_errors);
+        self.wakeup_storms = self.wakeup_storms.saturating_add(other.wakeup_storms);
+        self.spurious_wakeups = self.spurious_wakeups.saturating_add(other.spurious_wakeups);
+        self.budget_exhaustions = self.budget_exhaustions.saturating_add(other.budget_exhaustions);
+        self.decision_points = self.decision_points.saturating_add(other.decision_points);
     }
 
     /// Returns the injection rate (injections / decision points).
@@ -784,11 +784,12 @@ impl ChaosStats {
         if self.decision_points == 0 {
             return 0.0;
         }
-        let injections = self.cancellations
-            + self.delays
-            + self.io_errors
-            + self.wakeup_storms
-            + self.budget_exhaustions;
+        let injections = self
+            .cancellations
+            .saturating_add(self.delays)
+            .saturating_add(self.io_errors)
+            .saturating_add(self.wakeup_storms)
+            .saturating_add(self.budget_exhaustions);
         injections as f64 / self.decision_points as f64
     }
 }

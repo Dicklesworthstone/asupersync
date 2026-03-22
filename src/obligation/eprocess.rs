@@ -65,7 +65,7 @@ pub struct MonitorConfig {
     pub expected_lifetime_ns: u64,
     /// Minimum observations before the monitor can trigger an alert.
     /// Prevents spurious alerts from small samples.
-    pub min_observations: u32,
+    pub min_observations: u64,
 }
 
 impl Default for MonitorConfig {
@@ -115,13 +115,13 @@ pub struct LeakMonitor {
     /// Rejection threshold: 1/alpha.
     threshold: f64,
     /// Number of observations so far.
-    observations: u32,
+    observations: u64,
     /// Running sum of log-likelihood ratios (for numerical stability).
     log_e_value: f64,
     /// Peak e-value observed (for diagnostics).
     peak_e_value: f64,
     /// Number of times alert was triggered.
-    alert_count: u32,
+    alert_count: u64,
 }
 
 impl LeakMonitor {
@@ -197,7 +197,7 @@ impl LeakMonitor {
             self.peak_e_value = self.e_value;
         }
 
-        if self.e_value >= self.threshold && self.observations >= self.config.min_observations {
+        if self.e_value >= self.threshold && self.observations >= u64::from(self.config.min_observations) {
             self.alert_count += 1;
         }
     }
@@ -205,7 +205,7 @@ impl LeakMonitor {
     /// Returns the current alert state.
     #[must_use]
     pub fn alert_state(&self) -> AlertState {
-        if self.observations < self.config.min_observations {
+        if self.observations < u64::from(self.config.min_observations) {
             return AlertState::Clear;
         }
         if self.e_value >= self.threshold {
@@ -237,7 +237,7 @@ impl LeakMonitor {
 
     /// Returns the number of observations.
     #[must_use]
-    pub fn observations(&self) -> u32 {
+    pub fn observations(&self) -> u64 {
         self.observations
     }
 
@@ -249,7 +249,7 @@ impl LeakMonitor {
 
     /// Returns the number of times alert was triggered.
     #[must_use]
-    pub fn alert_count(&self) -> u32 {
+    pub fn alert_count(&self) -> u64 {
         self.alert_count
     }
 
@@ -290,13 +290,13 @@ pub struct MonitorSnapshot {
     /// Rejection threshold.
     pub threshold: f64,
     /// Number of observations.
-    pub observations: u32,
+    pub observations: u64,
     /// Current alert state.
     pub alert_state: AlertState,
     /// Peak e-value ever observed.
     pub peak_e_value: f64,
     /// Number of alert triggers.
-    pub alert_count: u32,
+    pub alert_count: u64,
 }
 
 impl fmt::Display for MonitorSnapshot {
