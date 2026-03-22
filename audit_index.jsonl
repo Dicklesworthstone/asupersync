@@ -810,3 +810,22 @@
 {"file":"src/messaging/explain.rs","lines":1946,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Morphism composition fixed-point, adaptive policy envelope. Clean."}
 {"file":"src/messaging/class.rs","lines":495,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery class enum, policy validation, serde re-validation. Clean."}
 {"file":"src/http/h2/connection.rs","lines":3402,"batch":419,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 LOW: process_headers accepts new streams after GOAWAY sent, violating RFC 9113 §6.8. Fixed by rejecting with RST_STREAM/REFUSED_STREAM."}
+{"file":"src/runtime/region_table.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/net/unix/mod.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/runtime/reactor/windows.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/cx/mod.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/codec/bytes_codec.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/lab/network/harness.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/io/seek.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/fs/open_options.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/stream/filter.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/stream/collect.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/fs/lines.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/http/h3_native.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/util/det_hash.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/http/h3/body.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/monitor.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/web/sse.rs","lines":567,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: SSE data field injection via bare CR. data.split(\n) didnt handle \r, allowing injection of retry:/event:/id: fields. Fixed by normalizing \r\n and \r to \n before split."}
+{"file":"src/http/h1/codec.rs","lines":1455,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request smuggling audit: TE+CL rejected, null bytes rejected, case-insensitive lookups. Clean."}
+{"file":"src/http/h1/server.rs","lines":919,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"100-continue handling, connection reuse after body drain. Clean."}
+{"file":"src/http/body.rs","lines":600,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Body consumption guard via take(), Limited size tracking. Clean."}

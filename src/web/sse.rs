@@ -132,8 +132,12 @@ impl SseEvent {
         }
 
         // Data — each line gets its own `data:` prefix.
+        // Normalize bare \r to \n before splitting so the browser's
+        // EventSource parser (WHATWG SSE spec) can't interpret a bare
+        // \r as a field separator and inject retry:/event:/id: fields.
         if let Some(ref data) = self.data {
-            for line in data.split('\n') {
+            let normalized = data.replace("\r\n", "\n").replace('\r', "\n");
+            for line in normalized.split('\n') {
                 let _ = writeln!(buf, "data:{line}");
             }
         }
