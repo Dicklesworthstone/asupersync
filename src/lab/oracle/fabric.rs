@@ -609,6 +609,64 @@ impl Oracle for FabricRedeliveryOracle {
 mod tests {
     use super::*;
     use crate::lab::oracle::{EvidenceLedger, OracleSuite};
+    use parking_lot::Mutex;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedEvent {
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct EventFieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl Visit for EventFieldVisitor {
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Default)]
+    struct EventRecorder {
+        events: Arc<Mutex<Vec<RecordedEvent>>>,
+    }
+
+    impl<S> Layer<S> for EventRecorder
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = EventFieldVisitor::default();
+            event.record(&mut visitor);
+            self.events.lock().push(RecordedEvent {
+                fields: visitor.fields,
+            });
+        }
+    }
 
     fn region(n: u32) -> RegionId {
         RegionId::new_for_test(n, 0)
@@ -784,7 +842,13 @@ mod tests {
             .fabric_publish
             .on_publish_committed(Subject::new("orders.created"), t(10));
 
-        let report = suite.report(t(20));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorder = EventRecorder {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(recorder);
+
+        let report = tracing::subscriber::with_default(subscriber, || suite.report(t(20)));
         let entry = report
             .entry("fabric_publish")
             .expect("fabric publish entry should exist");
@@ -800,5 +864,28 @@ mod tests {
             .find(|entry| entry.invariant == "fabric_publish")
             .expect("fabric publish evidence entry should exist");
         assert!(!evidence_entry.passed);
+
+        let events = events.lock();
+        let fabric_publish_event = events.iter().find(|event| {
+            event.fields.get("event").map(String::as_str) == Some("oracle_check")
+                && event.fields.get("invariant").map(String::as_str) == Some("fabric_publish")
+        });
+        let fabric_publish_event =
+            fabric_publish_event.expect("fabric publish oracle_check should be emitted");
+
+        assert_eq!(
+            fabric_publish_event
+                .fields
+                .get("passed")
+                .map(String::as_str),
+            Some("false")
+        );
+        assert!(
+            fabric_publish_event
+                .fields
+                .get("details")
+                .is_some_and(|details| details.contains("missed 1 subscriber")),
+            "fabric publish oracle_check should preserve violation details",
+        );
     }
 }

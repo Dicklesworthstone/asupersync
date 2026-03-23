@@ -3756,6 +3756,8 @@ fn lab_explore(args: &LabExploreArgs, output: &mut Output) -> Result<(), CliErro
 const LAB_DIFFERENTIAL_REPORT_SCHEMA_VERSION: &str = "lab-live-differential-runner-report-v1";
 const LAB_DIFFERENTIAL_SUMMARY_SCHEMA_VERSION: &str = "lab-live-differential-run-summary-v1";
 const LAB_DIFFERENTIAL_EVENT_SCHEMA_VERSION: &str = "lab-live-differential-event-v1";
+const LAB_DIFFERENTIAL_ARTIFACT_INDEX_SCHEMA_VERSION: &str =
+    "lab-live-differential-artifact-index-v1";
 
 #[derive(Clone, Copy, Debug)]
 enum LabDifferentialExpectation {
@@ -3835,14 +3837,63 @@ struct LabDifferentialScenarioReport {
     repro_commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialProfileContract {
+    profile: String,
+    evidence_grade: String,
+    confidence_label: String,
+    runtime_cost: String,
+    operator_intent: String,
+    exit_semantics: String,
+    scenario_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialArtifactIndexScenario {
+    scenario_id: String,
+    status: LabDifferentialScenarioStatus,
+    seed_lineage_id: String,
+    observed_provisional_class: String,
+    observed_final_policy_class: Option<String>,
+    summary_path: String,
+    event_log_path: String,
+    lab_normalized_path: String,
+    live_normalized_path: String,
+    failures_path: Option<String>,
+    deviations_path: Option<String>,
+    repro_manifest_path: Option<String>,
+    repro_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialArtifactIndex {
+    schema_version: String,
+    profile: String,
+    evidence_grade: String,
+    confidence_label: String,
+    runtime_cost: String,
+    operator_intent: String,
+    exit_semantics: String,
+    root_seed: u64,
+    out_dir: String,
+    runner_summary_path: String,
+    operator_summary_path: String,
+    aggregate_event_log_path: String,
+    scenario_count: usize,
+    scenarios: Vec<LabDifferentialArtifactIndexScenario>,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct LabDifferentialOutput {
     schema_version: String,
     profile: String,
+    profile_contract: LabDifferentialProfileContract,
     root_seed: u64,
     success: bool,
     out_dir: String,
     runner_summary_path: String,
+    operator_summary_path: String,
+    artifact_index_path: String,
     aggregate_event_log_path: String,
     scenario_count: usize,
     pass_count: usize,
@@ -3854,34 +3905,46 @@ struct LabDifferentialOutput {
 
 impl Outputtable for LabDifferentialOutput {
     fn human_format(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push(format!("Profile: {}", self.profile));
-        lines.push(format!(
-            "Status: {}",
-            if self.success { "pass" } else { "failure" }
-        ));
-        lines.push(format!("Root seed: {}", self.root_seed));
-        lines.push(format!(
-            "Scenarios: {} (pass={}, expected_divergence={}, unexpected_divergence={}, missing_expected_divergence={})",
-            self.scenario_count,
-            self.pass_count,
-            self.expected_divergence_count,
-            self.unexpected_divergence_count,
-            self.missing_expected_divergence_count,
-        ));
-        lines.push(format!("Artifacts: {}", self.runner_summary_path));
-        for scenario in &self.scenarios {
-            lines.push(format!(
-                "- {} {} [{}] provisional={} final={} summary={}",
-                scenario.status.as_str(),
-                scenario.scenario_id,
-                scenario.seed_lineage_id,
-                scenario.observed_provisional_class,
-                display_final_policy_class(scenario),
-                scenario.summary_path
-            ));
+        render_lab_differential_operator_summary(self)
+    }
+}
+
+impl LabDifferentialOutput {
+    fn artifact_index(&self) -> LabDifferentialArtifactIndex {
+        LabDifferentialArtifactIndex {
+            schema_version: LAB_DIFFERENTIAL_ARTIFACT_INDEX_SCHEMA_VERSION.to_string(),
+            profile: self.profile.clone(),
+            evidence_grade: self.profile_contract.evidence_grade.clone(),
+            confidence_label: self.profile_contract.confidence_label.clone(),
+            runtime_cost: self.profile_contract.runtime_cost.clone(),
+            operator_intent: self.profile_contract.operator_intent.clone(),
+            exit_semantics: self.profile_contract.exit_semantics.clone(),
+            root_seed: self.root_seed,
+            out_dir: self.out_dir.clone(),
+            runner_summary_path: self.runner_summary_path.clone(),
+            operator_summary_path: self.operator_summary_path.clone(),
+            aggregate_event_log_path: self.aggregate_event_log_path.clone(),
+            scenario_count: self.scenario_count,
+            scenarios: self
+                .scenarios
+                .iter()
+                .map(|scenario| LabDifferentialArtifactIndexScenario {
+                    scenario_id: scenario.scenario_id.clone(),
+                    status: scenario.status,
+                    seed_lineage_id: scenario.seed_lineage_id.clone(),
+                    observed_provisional_class: scenario.observed_provisional_class.clone(),
+                    observed_final_policy_class: scenario.observed_final_policy_class.clone(),
+                    summary_path: scenario.summary_path.clone(),
+                    event_log_path: scenario.event_log_path.clone(),
+                    lab_normalized_path: scenario.lab_normalized_path.clone(),
+                    live_normalized_path: scenario.live_normalized_path.clone(),
+                    failures_path: scenario.failures_path.clone(),
+                    deviations_path: scenario.deviations_path.clone(),
+                    repro_manifest_path: scenario.repro_manifest_path.clone(),
+                    repro_commands: scenario.repro_commands.clone(),
+                })
+                .collect(),
         }
-        lines.join("\n")
     }
 }
 
@@ -3898,6 +3961,162 @@ fn display_final_policy_class(scenario: &LabDifferentialScenarioReport) -> &str 
                 "pending"
             }
         })
+}
+
+fn profile_evidence_grade(profile: LabDifferentialProfile) -> &'static str {
+    match profile {
+        LabDifferentialProfile::Smoke => "t2_dual_run_smoke",
+        LabDifferentialProfile::Phase1Core => "t3_pilot_surface",
+        LabDifferentialProfile::Calibration => "t4_negative_control",
+    }
+}
+
+fn profile_confidence_label(profile: LabDifferentialProfile) -> &'static str {
+    match profile {
+        LabDifferentialProfile::Smoke => "baseline_signal",
+        LabDifferentialProfile::Phase1Core => "surface_backed",
+        LabDifferentialProfile::Calibration => "guardrail_validation",
+    }
+}
+
+fn profile_runtime_cost(profile: LabDifferentialProfile) -> &'static str {
+    match profile {
+        LabDifferentialProfile::Smoke => "fast",
+        LabDifferentialProfile::Phase1Core | LabDifferentialProfile::Calibration => "medium",
+    }
+}
+
+fn profile_operator_intent(profile: LabDifferentialProfile) -> &'static str {
+    match profile {
+        LabDifferentialProfile::Smoke => "Fast shared signal for the semantic-core smoke surface.",
+        LabDifferentialProfile::Phase1Core => {
+            "Full Phase 1 pilot lane across admitted semantic surfaces."
+        }
+        LabDifferentialProfile::Calibration => {
+            "Intentional divergence lane that proves classifier and artifact retention behavior."
+        }
+    }
+}
+
+fn lab_differential_exit_semantics() -> &'static str {
+    "selected scenarios must end in pass or expected_divergence; unexpected_divergence and missing_expected_divergence fail the run"
+}
+
+fn lab_differential_profile_contract(
+    profile: LabDifferentialProfile,
+    selected: &[LabDifferentialScenarioDefinition],
+) -> LabDifferentialProfileContract {
+    LabDifferentialProfileContract {
+        profile: profile.as_str().to_string(),
+        evidence_grade: profile_evidence_grade(profile).to_string(),
+        confidence_label: profile_confidence_label(profile).to_string(),
+        runtime_cost: profile_runtime_cost(profile).to_string(),
+        operator_intent: profile_operator_intent(profile).to_string(),
+        exit_semantics: lab_differential_exit_semantics().to_string(),
+        scenario_ids: selected
+            .iter()
+            .map(|definition| definition.id.to_string())
+            .collect(),
+    }
+}
+
+fn render_lab_differential_operator_summary(report: &LabDifferentialOutput) -> String {
+    let mut summary = String::new();
+    let status = if report.success { "pass" } else { "failure" };
+    let _ = writeln!(summary, "Differential operator summary");
+    let _ = writeln!(summary, "Profile: {}", report.profile);
+    let _ = writeln!(
+        summary,
+        "Evidence grade: {}",
+        report.profile_contract.evidence_grade
+    );
+    let _ = writeln!(
+        summary,
+        "Confidence label: {}",
+        report.profile_contract.confidence_label
+    );
+    let _ = writeln!(
+        summary,
+        "Runtime cost: {}",
+        report.profile_contract.runtime_cost
+    );
+    let _ = writeln!(
+        summary,
+        "Operator intent: {}",
+        report.profile_contract.operator_intent
+    );
+    let _ = writeln!(summary, "Status: {status}");
+    let _ = writeln!(summary, "Root seed: {}", report.root_seed);
+    let _ = writeln!(
+        summary,
+        "Exit semantics: {}",
+        report.profile_contract.exit_semantics
+    );
+    let _ = writeln!(
+        summary,
+        "Scenario pack: {}",
+        report.profile_contract.scenario_ids.join(", ")
+    );
+    let _ = writeln!(
+        summary,
+        "Scenarios: {} (pass={}, expected_divergence={}, unexpected_divergence={}, missing_expected_divergence={})",
+        report.scenario_count,
+        report.pass_count,
+        report.expected_divergence_count,
+        report.unexpected_divergence_count,
+        report.missing_expected_divergence_count,
+    );
+    let _ = writeln!(summary, "Artifacts:");
+    let _ = writeln!(summary, "  runner_summary: {}", report.runner_summary_path);
+    let _ = writeln!(
+        summary,
+        "  operator_summary: {}",
+        report.operator_summary_path
+    );
+    let _ = writeln!(summary, "  artifact_index: {}", report.artifact_index_path);
+    let _ = writeln!(
+        summary,
+        "  aggregate_event_log: {}",
+        report.aggregate_event_log_path
+    );
+    let _ = writeln!(summary, "Scenario results:");
+    for scenario in &report.scenarios {
+        let _ = writeln!(
+            summary,
+            "- {} {} [{}] provisional={} final={} summary={}",
+            scenario.status.as_str(),
+            scenario.scenario_id,
+            scenario.seed_lineage_id,
+            scenario.observed_provisional_class,
+            display_final_policy_class(scenario),
+            scenario.summary_path
+        );
+        let _ = writeln!(summary, "  event_log: {}", scenario.event_log_path);
+        let _ = writeln!(
+            summary,
+            "  lab_normalized: {}",
+            scenario.lab_normalized_path
+        );
+        let _ = writeln!(
+            summary,
+            "  live_normalized: {}",
+            scenario.live_normalized_path
+        );
+        if let Some(path) = &scenario.failures_path {
+            let _ = writeln!(summary, "  failures: {path}");
+        }
+        if let Some(path) = &scenario.deviations_path {
+            let _ = writeln!(summary, "  deviations: {path}");
+        }
+        if let Some(path) = &scenario.repro_manifest_path {
+            let _ = writeln!(summary, "  repro_manifest: {path}");
+        }
+        let _ = writeln!(summary, "  replay:");
+        for command in &scenario.repro_commands {
+            let _ = writeln!(summary, "    {command}");
+        }
+    }
+    summary
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4033,11 +4252,12 @@ fn lab_differential(args: &LabDifferentialArgs, output: &mut Output) -> Result<(
 
 fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOutput, CliError> {
     let selected = select_lab_differential_scenarios(args)?;
+    let profile_contract = lab_differential_profile_contract(args.profile, &selected);
     let profile_root = args.out_dir.join(args.profile.as_str());
     let mut scenario_reports = Vec::new();
     let mut aggregate_event_log = Vec::new();
 
-    for definition in selected {
+    for definition in selected.iter().copied() {
         let canonical_seed = derive_scenario_seed(args.seed, definition.id);
         let execution = execute_lab_differential_scenario(definition, canonical_seed);
         let initial_attempt = execution.initial_attempt();
@@ -4265,6 +4485,8 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
 
     let aggregate_event_log_path = profile_root.join("differential_event_log.jsonl");
     let runner_summary_path = profile_root.join("runner_summary.json");
+    let operator_summary_path = profile_root.join("operator_summary.txt");
+    let artifact_index_path = profile_root.join("artifact_index.json");
     write_jsonl_artifact(&aggregate_event_log_path, &aggregate_event_log)?;
 
     let pass_count = scenario_reports
@@ -4287,12 +4509,15 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
     let report = LabDifferentialOutput {
         schema_version: LAB_DIFFERENTIAL_REPORT_SCHEMA_VERSION.to_string(),
         profile: args.profile.as_str().to_string(),
+        profile_contract,
         root_seed: args.seed,
         success: scenario_reports
             .iter()
             .all(|report| report.status.is_success()),
         out_dir: profile_root.display().to_string(),
         runner_summary_path: runner_summary_path.display().to_string(),
+        operator_summary_path: operator_summary_path.display().to_string(),
+        artifact_index_path: artifact_index_path.display().to_string(),
         aggregate_event_log_path: aggregate_event_log_path.display().to_string(),
         scenario_count: scenario_reports.len(),
         pass_count,
@@ -4302,6 +4527,8 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
         scenarios: scenario_reports,
     };
     write_json_artifact(&runner_summary_path, &report)?;
+    write_json_artifact(&artifact_index_path, &report.artifact_index())?;
+    write_text_artifact(&operator_summary_path, &report.human_format())?;
 
     Ok(report)
 }
@@ -4592,19 +4819,32 @@ fn build_differential_rerun_commands(
     vec![
         format!(
             "asupersync lab differential --profile {} --scenario {} --seed {} --out-dir {}",
-            args.profile.as_str(),
-            scenario_id,
+            shell_escape_command_arg(args.profile.as_str()),
+            shell_escape_command_arg(scenario_id),
             args.seed,
-            args.out_dir.display()
+            shell_escape_command_arg(&args.out_dir.display().to_string())
         ),
         format!(
             "scripts/run_lab_live_differential.sh --profile {} --scenario {} --seed {} --out-dir {}",
-            args.profile.as_str(),
-            scenario_id,
+            shell_escape_command_arg(args.profile.as_str()),
+            shell_escape_command_arg(scenario_id),
             args.seed,
-            args.out_dir.display()
+            shell_escape_command_arg(&args.out_dir.display().to_string())
         ),
     ]
+}
+
+fn shell_escape_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | ',')
+    }) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn differential_attempt_paths(scenario_root: &Path, attempt_index: u32) -> (PathBuf, PathBuf) {
@@ -4999,6 +5239,30 @@ fn write_jsonl_artifact<T: serde::Serialize>(path: &Path, entries: &[T]) -> Resu
     }
 
     Ok(())
+}
+
+fn write_text_artifact(path: &Path, contents: &str) -> Result<(), CliError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            CliError::new(
+                "artifact_output_error",
+                "Failed to create artifact directory",
+            )
+            .detail(err.to_string())
+            .context("path", parent.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    }
+
+    fs::write(path, contents).map_err(|err| {
+        CliError::new("artifact_output_error", "Failed to write artifact text")
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })
 }
 
 fn make_normalized_semantics(
@@ -5563,7 +5827,8 @@ struct ReplayDivergenceDetails {
 }
 
 fn build_replay_rerun_commands(args: &LabReplayArgs, seed: u64) -> Vec<String> {
-    let mut replay = format!("asupersync lab replay {}", args.scenario.display());
+    let scenario = shell_escape_command_arg(&args.scenario.display().to_string());
+    let mut replay = format!("asupersync lab replay {scenario}");
     replay.push_str(&format!(" --seed {seed}"));
 
     if args.window_start > 0 {
@@ -5573,16 +5838,19 @@ fn build_replay_rerun_commands(args: &LabReplayArgs, seed: u64) -> Vec<String> {
         replay.push_str(&format!(" --window-events {window_events}"));
     }
     if let Some(pointer) = &args.artifact_pointer {
-        replay.push_str(&format!(" --artifact-pointer {pointer}"));
+        replay.push_str(&format!(
+            " --artifact-pointer {}",
+            shell_escape_command_arg(pointer)
+        ));
     }
     if let Some(path) = &args.artifact_output {
-        replay.push_str(&format!(" --artifact-output {}", path.display()));
+        replay.push_str(&format!(
+            " --artifact-output {}",
+            shell_escape_command_arg(&path.display().to_string())
+        ));
     }
 
-    let run = format!(
-        "asupersync lab run {} --seed {seed}",
-        args.scenario.display()
-    );
+    let run = format!("asupersync lab run {scenario} --seed {seed}");
     vec![replay, run]
 }
 
@@ -6641,6 +6909,51 @@ mod tests {
     }
 
     #[test]
+    fn build_replay_rerun_commands_shell_escape_paths() {
+        let args = LabReplayArgs {
+            scenario: PathBuf::from("examples/scenarios/with space.yaml"),
+            seed: Some(91),
+            artifact_pointer: Some("artifacts/replay/pinned report.json".to_string()),
+            artifact_output: Some(PathBuf::from("artifacts/replay/output report.json")),
+            window_start: 0,
+            window_events: None,
+            json: false,
+        };
+
+        let commands = build_replay_rerun_commands(&args, 91);
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].contains("asupersync lab replay 'examples/scenarios/with space.yaml'"));
+        assert!(commands[0].contains("--artifact-pointer 'artifacts/replay/pinned report.json'"));
+        assert!(commands[0].contains("--artifact-output 'artifacts/replay/output report.json'"));
+        assert_eq!(
+            commands[1],
+            "asupersync lab run 'examples/scenarios/with space.yaml' --seed 91"
+        );
+    }
+
+    #[test]
+    fn build_differential_rerun_commands_shell_escape_out_dir() {
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Smoke,
+            scenarios: vec!["phase1.channel.reserve_send.commit".to_string()],
+            seed: 91,
+            out_dir: PathBuf::from("artifacts/diff reports"),
+            json: false,
+        };
+
+        let commands = build_differential_rerun_commands(
+            &args,
+            "phase1.channel.reserve_send.commit",
+            Path::new("unused"),
+        );
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].contains("--profile smoke"));
+        assert!(commands[0].contains("--scenario phase1.channel.reserve_send.commit"));
+        assert!(commands[0].contains("--out-dir 'artifacts/diff reports'"));
+        assert!(commands[1].contains("--out-dir 'artifacts/diff reports'"));
+    }
+
+    #[test]
     fn write_replay_artifact_persists_json_report() {
         let temp = tempfile::tempdir().expect("tempdir");
         let output_path = temp.path().join("replay/report.json");
@@ -6703,8 +7016,56 @@ mod tests {
         assert!(Path::new(&scenario.lab_normalized_path).exists());
         assert!(Path::new(&scenario.live_normalized_path).exists());
         assert!(Path::new(&report.runner_summary_path).exists());
+        assert!(Path::new(&report.operator_summary_path).exists());
+        assert!(Path::new(&report.artifact_index_path).exists());
         assert!(Path::new(&report.aggregate_event_log_path).exists());
+
+        let operator_summary =
+            fs::read_to_string(&report.operator_summary_path).expect("read operator summary");
+        let expected_operator_summary = format!(
+            concat!(
+                "Differential operator summary\n",
+                "Profile: smoke\n",
+                "Evidence grade: t2_dual_run_smoke\n",
+                "Confidence label: baseline_signal\n",
+                "Runtime cost: fast\n",
+                "Operator intent: Fast shared signal for the semantic-core smoke surface.\n",
+                "Status: pass\n",
+                "Root seed: 91\n",
+                "Exit semantics: {}\n",
+                "Scenario pack: phase1.channel.reserve_send.commit\n",
+                "Scenarios: 1 (pass=1, expected_divergence=0, unexpected_divergence=0, missing_expected_divergence=0)\n",
+                "Artifacts:\n",
+                "  runner_summary: {}\n",
+                "  operator_summary: {}\n",
+                "  artifact_index: {}\n",
+                "  aggregate_event_log: {}\n",
+                "Scenario results:\n",
+                "- pass phase1.channel.reserve_send.commit [{}] provisional=pass final=not_applicable summary={}\n",
+                "  event_log: {}\n",
+                "  lab_normalized: {}\n",
+                "  live_normalized: {}\n",
+                "  replay:\n",
+                "    asupersync lab differential --profile smoke --scenario phase1.channel.reserve_send.commit --seed 91 --out-dir {}\n",
+                "    scripts/run_lab_live_differential.sh --profile smoke --scenario phase1.channel.reserve_send.commit --seed 91 --out-dir {}\n",
+            ),
+            lab_differential_exit_semantics(),
+            report.runner_summary_path,
+            report.operator_summary_path,
+            report.artifact_index_path,
+            report.aggregate_event_log_path,
+            scenario.seed_lineage_id,
+            scenario.summary_path,
+            scenario.event_log_path,
+            scenario.lab_normalized_path,
+            scenario.live_normalized_path,
+            args.out_dir.display(),
+            args.out_dir.display(),
+        );
+        assert_eq!(operator_summary, expected_operator_summary);
+
         let human = report.human_format();
+        assert_eq!(human, operator_summary);
         assert!(human.contains("final=not_applicable"));
         assert!(!human.contains("final=pending"));
     }
@@ -7206,6 +7567,102 @@ mod tests {
         assert!(event_log.contains("\"attempt_kind\":\"deterministic_lab_replay\""));
         assert!(event_log.contains("\"attempt_kind\":\"live_confirmation\""));
         assert!(event_log.contains("\"rerun_count\":3"));
+
+        let operator_summary =
+            fs::read_to_string(&report.operator_summary_path).expect("read operator summary");
+        assert!(operator_summary.contains("Evidence grade: t4_negative_control"));
+        assert!(operator_summary.contains("Confidence label: guardrail_validation"));
+        assert!(operator_summary.contains(
+            "Operator intent: Intentional divergence lane that proves classifier and artifact retention behavior."
+        ));
+        assert!(operator_summary.contains("final=runtime_semantic_bug"));
+        assert!(operator_summary.contains("repro_manifest:"));
+        assert!(operator_summary.contains(
+            "asupersync lab differential --profile calibration --scenario calibration.comparator.resource_counter_mismatch --seed 8080"
+        ));
+
+        let artifact_index: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&report.artifact_index_path).expect("read artifact index"),
+        )
+        .expect("parse artifact index");
+        assert_eq!(
+            artifact_index["schema_version"],
+            LAB_DIFFERENTIAL_ARTIFACT_INDEX_SCHEMA_VERSION
+        );
+        assert_eq!(artifact_index["profile"], "calibration");
+        assert_eq!(artifact_index["evidence_grade"], "t4_negative_control");
+        assert_eq!(artifact_index["confidence_label"], "guardrail_validation");
+        assert_eq!(artifact_index["runtime_cost"], "medium");
+        assert_eq!(
+            artifact_index["operator_intent"],
+            "Intentional divergence lane that proves classifier and artifact retention behavior."
+        );
+        assert_eq!(
+            artifact_index["exit_semantics"],
+            lab_differential_exit_semantics()
+        );
+        assert_eq!(artifact_index["scenario_count"], 1);
+        assert_eq!(
+            artifact_index["operator_summary_path"].as_str(),
+            Some(report.operator_summary_path.as_str())
+        );
+        assert_eq!(
+            artifact_index["runner_summary_path"].as_str(),
+            Some(report.runner_summary_path.as_str())
+        );
+        assert_eq!(
+            artifact_index["aggregate_event_log_path"].as_str(),
+            Some(report.aggregate_event_log_path.as_str())
+        );
+
+        let scenarios = artifact_index["scenarios"]
+            .as_array()
+            .expect("artifact index scenarios");
+        assert_eq!(scenarios.len(), 1);
+        let indexed = &scenarios[0];
+        assert_eq!(
+            indexed["scenario_id"],
+            "calibration.comparator.resource_counter_mismatch"
+        );
+        assert_eq!(indexed["status"], "expected_divergence");
+        assert_eq!(
+            indexed["observed_provisional_class"],
+            "semantic_mismatch_admitted_surface"
+        );
+        assert_eq!(
+            indexed["observed_final_policy_class"],
+            "runtime_semantic_bug"
+        );
+        assert_eq!(
+            indexed["summary_path"].as_str(),
+            Some(scenario.summary_path.as_str())
+        );
+        assert_eq!(
+            indexed["event_log_path"].as_str(),
+            Some(scenario.event_log_path.as_str())
+        );
+        assert_eq!(
+            indexed["lab_normalized_path"].as_str(),
+            Some(scenario.lab_normalized_path.as_str())
+        );
+        assert_eq!(
+            indexed["live_normalized_path"].as_str(),
+            Some(scenario.live_normalized_path.as_str())
+        );
+        assert_eq!(
+            indexed["repro_manifest_path"],
+            scenario
+                .repro_manifest_path
+                .as_deref()
+                .expect("repro manifest path present")
+        );
+        assert!(
+            indexed["repro_commands"]
+                .as_array()
+                .expect("repro commands array")
+                .len()
+                >= 2
+        );
 
         let human = report.human_format();
         assert!(human.contains("provisional=semantic_mismatch_admitted_surface"));

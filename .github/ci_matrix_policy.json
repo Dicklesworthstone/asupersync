@@ -64,6 +64,30 @@
       }
     },
     {
+      "lane_id": "lab-live-differential-fast",
+      "title": "Fast lab-vs-live differential CI lane",
+      "owner": "verification-infra",
+      "required_job_ids": ["differential-fast"],
+      "required_step_names": [
+        "Differential fast CI gate"
+      ],
+      "required_artifact_names": [
+        "lab-live-differential-fast-artifacts"
+      ],
+      "replay_command": "bash scripts/run_lab_live_differential.sh --profile smoke --seed 91 --out-dir artifacts/lab-differential-fast && bash scripts/run_lab_live_differential.sh --profile calibration --scenario calibration.channel.commit_visibility_mismatch --seed 20260323 --out-dir artifacts/lab-differential-fast",
+      "require_rch": false,
+      "rch_required_step_names": [],
+      "failure_taxonomy": [
+        "profile_contract_regression",
+        "artifact_bundle_contract_regression",
+        "calibration_path_regression"
+      ],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 1
+      }
+    },
+    {
       "lane_id": "e2e",
       "title": "Deterministic E2E scenario matrix lane",
       "owner": "verification-infra",

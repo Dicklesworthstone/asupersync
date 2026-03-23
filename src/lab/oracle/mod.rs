@@ -753,10 +753,24 @@ impl OracleEntryReport {
         violation: Option<OracleViolation>,
         stats: OracleStats,
     ) -> Self {
+        let passed = violation.is_none();
+        let violation_text = violation.map(|violation| violation.to_string());
+        let details = violation_text.as_deref().unwrap_or("clean");
+
+        tracing::info!(
+            event = "oracle_check",
+            invariant = invariant,
+            passed,
+            entities_tracked = stats.entities_tracked,
+            events_recorded = stats.events_recorded,
+            details = details,
+            "oracle_check"
+        );
+
         Self {
             invariant: invariant.to_owned(),
-            passed: violation.is_none(),
-            violation: violation.map(|v| v.to_string()),
+            passed,
+            violation: violation_text,
             stats,
         }
     }
@@ -854,6 +868,64 @@ impl OracleReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedEvent {
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct EventFieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl Visit for EventFieldVisitor {
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Default)]
+    struct EventRecorder {
+        events: Arc<Mutex<Vec<RecordedEvent>>>,
+    }
+
+    impl<S> Layer<S> for EventRecorder
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = EventFieldVisitor::default();
+            event.record(&mut visitor);
+            self.events.lock().push(RecordedEvent {
+                fields: visitor.fields,
+            });
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -924,6 +996,35 @@ mod tests {
         let text = report.to_text();
         assert!(text.contains("Oracle Report"));
         assert!(text.contains("PASS"));
+    }
+
+    #[test]
+    fn oracle_report_emits_structured_oracle_check_events() {
+        let suite = OracleSuite::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorder = EventRecorder {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(recorder);
+
+        let report = tracing::subscriber::with_default(subscriber, || suite.report(Time::ZERO));
+        assert!(report.all_passed());
+
+        let events = events.lock();
+        let task_leak_event = events.iter().find(|event| {
+            event.fields.get("event").map(String::as_str) == Some("oracle_check")
+                && event.fields.get("invariant").map(String::as_str) == Some("task_leak")
+        });
+        let task_leak_event = task_leak_event.expect("task_leak oracle_check should be emitted");
+
+        assert_eq!(
+            task_leak_event.fields.get("passed").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            task_leak_event.fields.get("details").map(String::as_str),
+            Some("clean")
+        );
     }
 
     #[test]

@@ -598,6 +598,90 @@ jobs:
             cargo check --all-targets --all-features
           fi
 
+  differential-fast:
+    name: Differential Fast Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-differential-fast-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Differential fast CI gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/lab-differential-fast
+
+          bash scripts/run_lab_live_differential.sh \
+            --profile smoke \
+            --seed 91 \
+            --out-dir artifacts/lab-differential-fast \
+            | tee artifacts/lab-differential-fast/smoke.stdout.log
+
+          bash scripts/run_lab_live_differential.sh \
+            --profile calibration \
+            --scenario calibration.channel.commit_visibility_mismatch \
+            --seed 20260323 \
+            --out-dir artifacts/lab-differential-fast \
+            | tee artifacts/lab-differential-fast/calibration.stdout.log
+
+      - name: Summarize differential fast gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Lab Differential Fast Gate"
+            echo
+            for profile in smoke calibration; do
+              profile_dir="artifacts/lab-differential-fast/${profile}"
+              artifact_index="${profile_dir}/artifact_index.json"
+              operator_summary="${profile_dir}/operator_summary.txt"
+              echo "### ${profile}"
+              if [[ -f "${artifact_index}" ]]; then
+                scenario_ids="$(jq -r '[(.scenarios // [])[] | .scenario_id] | join(", ")' "${artifact_index}" 2>/dev/null || echo "<unavailable>")"
+                exit_semantics="$(jq -r '.exit_semantics // "<missing>"' "${artifact_index}" 2>/dev/null || echo "<unavailable>")"
+                aggregate_event_log="$(jq -r '.aggregate_event_log_path // "<missing>"' "${artifact_index}" 2>/dev/null || echo "<unavailable>")"
+                if [[ -z "${scenario_ids}" ]]; then
+                  scenario_ids="<none>"
+                fi
+                echo "- artifact_index: \`${artifact_index}\`"
+                echo "- scenario_ids: \`${scenario_ids}\`"
+                echo "- exit_semantics: \`${exit_semantics}\`"
+                echo "- aggregate_event_log: \`${aggregate_event_log}\`"
+              else
+                echo "- artifact_index missing: \`${artifact_index}\`"
+              fi
+              if [[ -f "${operator_summary}" ]]; then
+                echo
+                echo '```text'
+                cat "${operator_summary}"
+                echo '```'
+              fi
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload differential fast gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-live-differential-fast-artifacts
+          path: artifacts/lab-differential-fast/
+          retention-days: 14
+
   lean-smoke:
     name: Lean Smoke Gate (PR)
     if: github.event_name == 'pull_request'
