@@ -36,6 +36,16 @@ pub enum BroadcastStreamRecvError {
     Lagged(u64),
 }
 
+impl std::fmt::Display for BroadcastStreamRecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lagged(n) => write!(f, "lagged by {n} messages"),
+        }
+    }
+}
+
+impl std::error::Error for BroadcastStreamRecvError {}
+
 impl<T: Clone + Send> Stream for BroadcastStream<T> {
     type Item = Result<T, BroadcastStreamRecvError>;
 
@@ -216,7 +226,7 @@ mod tests {
         crate::test_complete!("broadcast_stream_pending_poll_keeps_waker_registration");
     }
 
-    /// Invariant: BroadcastStreamRecvError::Lagged preserves the count.
+    /// Invariant: BroadcastStreamRecvError::Lagged preserves the count and implements Display/Error.
     #[test]
     fn broadcast_stream_recv_error_lagged_preserves_count() {
         init_test("broadcast_stream_recv_error_lagged_preserves_count");
@@ -234,6 +244,15 @@ mod tests {
         let dbg = format!("{err:?}");
         let has_42 = dbg.contains("42");
         crate::assert_with_log!(has_42, "debug contains count", true, has_42);
+
+        // Display
+        let disp = format!("{err}");
+        let disp_has_42 = disp.contains("lagged by 42 messages");
+        crate::assert_with_log!(disp_has_42, "display contains message", true, disp_has_42);
+
+        // Error trait
+        let e: &dyn std::error::Error = &err;
+        crate::assert_with_log!(e.source().is_none(), "no source", true, e.source().is_none());
 
         crate::test_complete!("broadcast_stream_recv_error_lagged_preserves_count");
     }

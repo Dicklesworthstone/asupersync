@@ -3175,8 +3175,9 @@ pub enum ConsumerCall {
 pub enum ConsumerReply {
     /// Pull result.
     Pull(Result<PullDispatchOutcome, FabricConsumerError>),
-    /// Ack result — returns the obligation ID that was committed.
-    Ack(Result<ObligationId, FabricConsumerError>),
+    /// Ack result — returns the full resolution so callers can distinguish
+    /// committed acks from stale no-ops.
+    Ack(Result<AckResolution, FabricConsumerError>),
     /// Nack result.
     Nack(Result<NackResolution, FabricConsumerError>),
     /// Current state snapshot.
@@ -3287,10 +3288,7 @@ impl crate::gen_server::GenServer for ConsumerActor {
                     }
                 }
                 ConsumerCall::Ack { attempt } => {
-                    let result = self
-                        .consumer
-                        .acknowledge_delivery(&attempt)
-                        .map(|_ack| attempt.obligation_id);
+                    let result = self.consumer.acknowledge_delivery(&attempt);
                     reply.send(ConsumerReply::Ack(result));
                 }
                 ConsumerCall::Nack { attempt, reason } => {
