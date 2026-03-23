@@ -1059,3 +1059,5 @@
 {"file":"src/trace/divergence.rs","lines":1749,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace divergence analysis. Clean."}
 {"file":"src/lab/instrumented_future.rs","lines":1716,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Instrumented future wrapper. Clean."}
 {"file":"src/lab/explorer.rs","lines":1822,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Schedule explorer with pending seed tracking. Clean."}
+{"file":"src/observability/resource_accounting.rs","lines":700,"batch":431,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Verified fetch_max replacement correct (signed comparison for i64). Clean."}
+{"file":"src/stream/broadcast_stream.rs","lines":400,"batch":431,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Verified Display+Error trait addition. Clean."}
