@@ -7,7 +7,7 @@
 //! - pseudo-header validation helpers
 
 use crate::net::quic_core::{decode_varint, encode_varint};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 const H3_FRAME_DATA: u64 = 0x0;
@@ -1312,6 +1312,7 @@ pub struct H3ConnectionState {
     config: H3ConnectionConfig,
     control: H3ControlState,
     request_streams: BTreeMap<u64, H3RequestStreamState>,
+    finished_request_streams: BTreeSet<u64>,
     push_streams: BTreeMap<u64, H3RequestStreamState>,
     uni_stream_types: BTreeMap<u64, H3UniStreamType>,
     control_stream_id: Option<u64>,
@@ -1340,6 +1341,7 @@ impl H3ConnectionState {
             config,
             control: H3ControlState::default(),
             request_streams: BTreeMap::new(),
+            finished_request_streams: BTreeSet::new(),
             push_streams: BTreeMap::new(),
             uni_stream_types: BTreeMap::new(),
             control_stream_id: None,
@@ -1382,6 +1384,11 @@ impl H3ConnectionState {
                 "request stream id is registered as unidirectional",
             ));
         }
+        if self.finished_request_streams.contains(&stream_id) {
+            return Err(H3NativeError::ControlProtocol(
+                "request stream already finished",
+            ));
+        }
         if let Some(goaway_id) = self.goaway_id
             && stream_id >= goaway_id
         {
@@ -1395,6 +1402,11 @@ impl H3ConnectionState {
 
     /// Mark request-stream end and remove it from tracking.
     pub fn finish_request_stream(&mut self, stream_id: u64) -> Result<(), H3NativeError> {
+        if self.finished_request_streams.contains(&stream_id) {
+            return Err(H3NativeError::ControlProtocol(
+                "request stream already finished",
+            ));
+        }
         let state =
             self.request_streams
                 .get_mut(&stream_id)
@@ -1402,9 +1414,10 @@ impl H3ConnectionState {
                     "unknown request stream on finish",
                 ))?;
         state.mark_end_stream()?;
-        // Remove finished stream to prevent unbounded memory growth on
-        // long-lived connections.
+        // Drop detailed state but retain the finished stream id so late frames
+        // on the same QUIC stream are still rejected as protocol violations.
         self.request_streams.remove(&stream_id);
+        self.finished_request_streams.insert(stream_id);
         Ok(())
     }
 
@@ -2423,6 +2436,34 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::ControlProtocol("unknown request stream on finish")
+        );
+    }
+
+    #[test]
+    fn finished_request_stream_rejects_late_frames() {
+        let mut c = H3ConnectionState::new();
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![0x80]))
+            .expect("headers");
+        c.finish_request_stream(0).expect("finish");
+        let err = c
+            .on_request_stream_frame(0, &H3Frame::Headers(vec![0x81]))
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("request stream already finished")
+        );
+    }
+
+    #[test]
+    fn finish_request_stream_twice_reports_finished() {
+        let mut c = H3ConnectionState::new();
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![0x80]))
+            .expect("headers");
+        c.finish_request_stream(0).expect("finish");
+        let err = c.finish_request_stream(0).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("request stream already finished")
         );
     }
 

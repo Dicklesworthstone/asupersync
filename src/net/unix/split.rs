@@ -356,10 +356,9 @@ impl UnixStreamInner {
     fn clear_waiter_on_drop(&self, interest: Interest) {
         let mut guard = self.state.lock();
 
-        let mut wakers_changed = false;
-        if interest.is_readable() {
+        let mut wakers_changed = interest.is_readable();
+        if wakers_changed {
             guard.read_waker = None;
-            wakers_changed = true;
         }
         if interest.is_writable() {
             guard.write_waker = None;

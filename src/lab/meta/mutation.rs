@@ -131,7 +131,7 @@ pub enum BuiltinMutation {
 /// Returns all built-in mutations in a stable order.
 #[must_use]
 pub fn builtin_mutations() -> Vec<BuiltinMutation> {
-    let mut mutations = vec![
+    let mutations = vec![
         BuiltinMutation::TaskLeak,
         BuiltinMutation::ObligationLeak,
         BuiltinMutation::Quiescence,
@@ -147,14 +147,16 @@ pub fn builtin_mutations() -> Vec<BuiltinMutation> {
         BuiltinMutation::CrossRegionRRefAccess,
     ];
     #[cfg(feature = "messaging-fabric")]
-    {
+    let mutations = {
+        let mut mutations = mutations;
         mutations.extend([
             BuiltinMutation::FabricPublishMissingSubscriberDelivery,
             BuiltinMutation::FabricReplyUnresolvedOnClose,
             BuiltinMutation::FabricQuiescenceBusyCellOnClose,
             BuiltinMutation::FabricRedeliveryBoundExceeded,
         ]);
-    }
+        mutations
+    };
     mutations
 }
 

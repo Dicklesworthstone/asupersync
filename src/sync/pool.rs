@@ -4052,6 +4052,160 @@ mod tests {
         crate::test_complete!("pool_exhaustion_blocks_then_unblocks_on_return");
     }
 
+    /// Invariant: returning one resource from an exhausted pool only wakes one
+    /// waiter; remaining waiters stay queued until another resource return.
+    #[test]
+    fn pool_return_wakes_waiters_one_at_a_time() {
+        init_test("pool_return_wakes_waiters_one_at_a_time");
+
+        let pool = Arc::new(GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+        ));
+        let cx_handle: crate::cx::Cx = crate::cx::Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx_handle)).expect("first acquire");
+
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let (release_second_tx, release_second_rx) = std::sync::mpsc::channel();
+
+        let first_waiter_pool = Arc::clone(&pool);
+        let first_waiter_tx = acquired_tx.clone();
+        let first_waiter = std::thread::spawn(move || {
+            let cx = crate::cx::Cx::for_testing();
+            let acquired =
+                futures_lite::future::block_on(first_waiter_pool.acquire(&cx)).expect("waiter A");
+            first_waiter_tx
+                .send(1usize)
+                .expect("send waiter A acquisition");
+            release_first_rx.recv().expect("waiter A release signal");
+            acquired.return_to_pool();
+        });
+
+        let second_waiter_pool = Arc::clone(&pool);
+        let second_waiter_tx = acquired_tx;
+        let second_waiter = std::thread::spawn(move || {
+            let cx = crate::cx::Cx::for_testing();
+            let acquired =
+                futures_lite::future::block_on(second_waiter_pool.acquire(&cx)).expect("waiter B");
+            second_waiter_tx
+                .send(2usize)
+                .expect("send waiter B acquisition");
+            release_second_rx.recv().expect("waiter B release signal");
+            acquired.return_to_pool();
+        });
+
+        let mut both_waiters_registered = false;
+        for _ in 0..4_096 {
+            if pool.stats().waiters == 2 {
+                both_waiters_registered = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        crate::assert_with_log!(
+            both_waiters_registered,
+            "both blocked acquirers should register as waiters",
+            true,
+            both_waiters_registered
+        );
+
+        held.return_to_pool();
+
+        let first = acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first waiter should wake");
+
+        let mut one_waiter_still_blocked = false;
+        for _ in 0..4_096 {
+            let stats = pool.stats();
+            if stats.waiters == 1 && stats.active == 1 {
+                one_waiter_still_blocked = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        crate::assert_with_log!(
+            one_waiter_still_blocked,
+            "one waiter should remain queued while the woken waiter holds the resource",
+            true,
+            one_waiter_still_blocked
+        );
+
+        match first {
+            1 => release_first_tx.send(()).expect("release waiter A"),
+            2 => release_second_tx.send(()).expect("release waiter B"),
+            other => panic!("unexpected waiter id: {other}"),
+        }
+
+        let second = acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second waiter should wake after the next return");
+        crate::assert_with_log!(
+            first != second,
+            "resource returns should wake distinct waiters sequentially",
+            true,
+            first != second
+        );
+
+        let mut no_waiters_left = false;
+        for _ in 0..4_096 {
+            let stats = pool.stats();
+            if stats.waiters == 0 && stats.active == 1 {
+                no_waiters_left = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        crate::assert_with_log!(
+            no_waiters_left,
+            "second wake should drain the waiter queue while the final borrower holds the resource",
+            true,
+            no_waiters_left
+        );
+
+        match second {
+            1 => release_first_tx
+                .send(())
+                .expect("release waiter A after second wake"),
+            2 => release_second_tx
+                .send(())
+                .expect("release waiter B after second wake"),
+            other => panic!("unexpected waiter id: {other}"),
+        }
+
+        first_waiter.join().expect("waiter A should not panic");
+        second_waiter.join().expect("waiter B should not panic");
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.waiters == 0,
+            "all waiters should be drained after both resources are returned",
+            0usize,
+            stats.waiters
+        );
+        crate::assert_with_log!(
+            stats.active == 0,
+            "no active resources should remain after both waiters release",
+            0usize,
+            stats.active
+        );
+        crate::assert_with_log!(
+            stats.idle == 1,
+            "the single pooled resource should be returned to idle storage",
+            1usize,
+            stats.idle
+        );
+        crate::assert_with_log!(
+            stats.total == 1,
+            "capacity accounting should settle back to a single retained resource",
+            1usize,
+            stats.total
+        );
+
+        crate::test_complete!("pool_return_wakes_waiters_one_at_a_time");
+    }
+
     /// Invariant: if the factory returns an error during acquire, the
     /// creating slot is released and does not permanently reduce capacity.
     #[test]

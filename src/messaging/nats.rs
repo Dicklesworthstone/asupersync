@@ -308,7 +308,6 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
             '\\' => {
                 let next = chars.next()?;
                 match next {
-                    '"' | '\\' | '/' => out.push(next),
                     'b' => out.push('\x08'),
                     'f' => out.push('\x0C'),
                     'n' => out.push('\n'),
@@ -325,7 +324,7 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
                             }
                         }
                     }
-                    _ => out.push(next),
+                    other => out.push(other),
                 }
             }
             c => out.push(c),
@@ -482,6 +481,20 @@ impl SharedState {
             subscriptions: Mutex::new(HashMap::new()),
             server_info: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+struct SubscribeGuard<'a> {
+    subs: &'a Mutex<HashMap<u64, SubscriptionState>>,
+    sid: u64,
+    defused: bool,
+}
+
+impl Drop for SubscribeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused {
+            self.subs.lock().remove(&self.sid);
         }
     }
 }
@@ -1053,20 +1066,6 @@ impl NatsClient {
             );
         }
 
-        struct SubscribeGuard<'a> {
-            subs: &'a Mutex<std::collections::HashMap<u64, SubscriptionState>>,
-            sid: u64,
-            defused: bool,
-        }
-
-        impl Drop for SubscribeGuard<'_> {
-            fn drop(&mut self) {
-                if !self.defused {
-                    self.subs.lock().remove(&self.sid);
-                }
-            }
-        }
-
         let mut guard = SubscribeGuard {
             subs: &self.state.subscriptions,
             sid,
@@ -1118,20 +1117,6 @@ impl NatsClient {
                     sender: tx,
                 },
             );
-        }
-
-        struct SubscribeGuard<'a> {
-            subs: &'a Mutex<std::collections::HashMap<u64, SubscriptionState>>,
-            sid: u64,
-            defused: bool,
-        }
-
-        impl Drop for SubscribeGuard<'_> {
-            fn drop(&mut self) {
-                if !self.defused {
-                    self.subs.lock().remove(&self.sid);
-                }
-            }
         }
 
         let mut guard = SubscribeGuard {

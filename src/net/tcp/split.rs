@@ -350,27 +350,29 @@ impl TcpStreamInner {
         {
             let mut guard = self.state.lock();
 
-            let mut wakers_changed = false;
             // Store this direction's waker for combined dispatch.
             // Use independent checks (not else-if) so that callers passing
             // combined interest (READABLE | WRITABLE) update both wakers.
-            if interest.is_readable()
-                && !guard
+            let mut wakers_changed = false;
+            if interest.is_readable() {
+                if !guard
                     .read_waker
                     .as_ref()
                     .is_some_and(|w| w.will_wake(cx.waker()))
-            {
-                guard.read_waker = Some(cx.waker().clone());
-                wakers_changed = true;
+                {
+                    guard.read_waker = Some(cx.waker().clone());
+                    wakers_changed = true;
+                }
             }
-            if interest.is_writable()
-                && !guard
+            if interest.is_writable() {
+                if !guard
                     .write_waker
                     .as_ref()
                     .is_some_and(|w| w.will_wake(cx.waker()))
-            {
-                guard.write_waker = Some(cx.waker().clone());
-                wakers_changed = true;
+                {
+                    guard.write_waker = Some(cx.waker().clone());
+                    wakers_changed = true;
+                }
             }
 
             if wakers_changed || guard.combined_waker.is_none() {
@@ -477,10 +479,9 @@ impl TcpStreamInner {
     fn clear_waiter_on_drop(&self, interest: Interest) {
         let mut guard = self.state.lock();
 
-        let mut wakers_changed = false;
-        if interest.is_readable() {
+        let mut wakers_changed = interest.is_readable();
+        if wakers_changed {
             guard.read_waker = None;
-            wakers_changed = true;
         }
         if interest.is_writable() {
             guard.write_waker = None;

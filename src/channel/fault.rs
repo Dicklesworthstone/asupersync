@@ -238,15 +238,17 @@ impl<T: Clone> FaultSender<T> {
 
         if should_reorder {
             self.record_reorder();
-            let mut value_to_flush = None;
-            {
+            let value_to_flush = {
                 let mut buffer = self.reorder_buffer.lock();
                 if buffer.len() + 1 < self.config.reorder_buffer_size {
                     buffer.push(value);
+                    drop(buffer);
+                    None
                 } else {
-                    value_to_flush = Some(value);
+                    drop(buffer);
+                    Some(value)
                 }
-            }
+            };
             if let Some(v) = value_to_flush {
                 self.auto_flush_including_current(cx, v).await?;
             }
