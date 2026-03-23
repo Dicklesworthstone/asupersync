@@ -180,7 +180,19 @@ for asset in asset_files:
     markers["worker_artifact_quota_guard_marker"] |= "worker-artifact-quota-guard" in content
     markers["worker_artifact_cleanup_marker"] |= "worker-artifact-cleanup" in content
 
-scenario_inventory = browser_run.get("scenario_inventory") or [
+CANONICAL_SCENARIO_INVENTORY = [
+    {
+        "scenario_id": "worker_bootstrap_baseline",
+        "failure_family": "baseline",
+        "expected_outcome": "dedicated worker direct runtime stays selected on the no-throw path",
+        "artifact_keys": ["browser_run", "log"],
+    },
+    {
+        "scenario_id": "preferred_lane_mismatch_truthful_worker_selection",
+        "failure_family": "preferred_lane_mismatch",
+        "expected_outcome": "requested main-thread preference stays truthful to the worker lane",
+        "artifact_keys": ["browser_run", "log"],
+    },
     {
         "scenario_id": "worker_loss_retry_window",
         "failure_family": "worker_loss",
@@ -199,7 +211,86 @@ scenario_inventory = browser_run.get("scenario_inventory") or [
         "expected_outcome": "current prerequisite loss outranks stale demotion state",
         "artifact_keys": ["browser_run", "log"],
     },
+    {
+        "scenario_id": "lane_health_recovery",
+        "failure_family": "recovery",
+        "expected_outcome": "health reset restores the dedicated worker lane",
+        "artifact_keys": ["browser_run", "log"],
+    },
+    {
+        "scenario_id": "graceful_shutdown_handoff",
+        "failure_family": "shutdown",
+        "expected_outcome": "fixture reaches shutdown_complete after worker handoff",
+        "artifact_keys": ["browser_run", "log"],
+    },
 ]
+
+
+def normalize_artifact_keys(raw_keys: object) -> list[str]:
+    artifact_keys: list[str] = []
+    if isinstance(raw_keys, list):
+        for key in raw_keys:
+            if isinstance(key, str) and key not in artifact_keys:
+                artifact_keys.append(key)
+    for required_key in ["browser_run", "log"]:
+        if required_key not in artifact_keys:
+            artifact_keys.append(required_key)
+    return artifact_keys
+
+
+def normalize_scenario_inventory(browser_run: dict[str, object]) -> list[dict[str, object]]:
+    canonical_scenarios = [
+        {**entry, "artifact_keys": normalize_artifact_keys(entry.get("artifact_keys"))}
+        for entry in CANONICAL_SCENARIO_INVENTORY
+    ]
+    canonical_by_id = {
+        entry["scenario_id"]: entry
+        for entry in canonical_scenarios
+        if isinstance(entry.get("scenario_id"), str)
+    }
+    extras: list[dict[str, object]] = []
+    raw_inventory = browser_run.get("scenario_inventory")
+    if not isinstance(raw_inventory, list):
+        return canonical_scenarios
+
+    for raw_entry in raw_inventory:
+        if not isinstance(raw_entry, dict):
+            continue
+        scenario_id = raw_entry.get("scenario_id")
+        if not isinstance(scenario_id, str):
+            continue
+        normalized_artifact_keys = normalize_artifact_keys(raw_entry.get("artifact_keys"))
+        observed = raw_entry.get("observed")
+        failure_family = raw_entry.get("failure_family")
+        expected_outcome = raw_entry.get("expected_outcome")
+
+        if scenario_id in canonical_by_id:
+            entry = canonical_by_id[scenario_id]
+            if isinstance(failure_family, str):
+                entry["failure_family"] = failure_family
+            if isinstance(expected_outcome, str):
+                entry["expected_outcome"] = expected_outcome
+            entry["artifact_keys"] = normalized_artifact_keys
+            if isinstance(observed, dict):
+                entry["observed"] = observed
+            continue
+
+        extra_entry = {
+            "scenario_id": scenario_id,
+            "artifact_keys": normalized_artifact_keys,
+        }
+        if isinstance(failure_family, str):
+            extra_entry["failure_family"] = failure_family
+        if isinstance(expected_outcome, str):
+            extra_entry["expected_outcome"] = expected_outcome
+        if isinstance(observed, dict):
+            extra_entry["observed"] = observed
+        extras.append(extra_entry)
+
+    return canonical_scenarios + extras
+
+
+scenario_inventory = normalize_scenario_inventory(browser_run)
 
 artifacts = {
     "summary": repo_relative(summary_path),
@@ -231,6 +322,7 @@ summary = {
         "browser_scenario_id": browser_run["scenario_id"],
         "browser_final_phase_is_shutdown_complete": browser_run["final_phase"] == "shutdown_complete",
         "browser_shutdown_reason": browser_run["shutdown_reason"],
+        "browser_shutdown_reason_is_fixture_handoff_complete": browser_run["shutdown_reason"] == "fixture-handoff-complete",
         "browser_support_runtime_context": browser_run["support_runtime_context"],
         "browser_baseline_selected_lane": browser_run["baseline_selected_lane"],
         "browser_baseline_scope_outcome_is_ok": browser_run["baseline_scope_outcome"] == "ok",

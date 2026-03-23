@@ -17,6 +17,10 @@ This document defines the H2 closure packet for:
 This packet is intentionally execution-ready but not final until dependency
 closure conditions are satisfied.
 
+Track-G is the sole remaining blocker. Track-H is already closed, and the
+unresolved upstream convergence now sits in Track-E, especially `asupersync-36m6p`,
+which is consumed through the still-open Track-G governance path.
+
 ## Claim Boundaries
 
 Sign-off claims are bounded by explicit evidence:
@@ -65,9 +69,9 @@ The packet includes an explicit Track D/E/F/G/H completion matrix in
 Current state snapshot in the artifact:
 
 1. Track D (`asupersync-np1co`): `closed`
-2. Track E (`asupersync-2ncba`): `in_progress` (gated via Track G)
+2. Track E (`asupersync-2ncba`): `in_progress` (the unresolved upstream lane, consumed via Track G; active leaf: `asupersync-36m6p`)
 3. Track F (`asupersync-mg1qh`): `closed`
-4. Track G (`asupersync-2cyx5`): `in_progress`
+4. Track G (`asupersync-2cyx5`): `in_progress` (the sole remaining direct H2 blocker)
 5. Track H (`asupersync-p8o9m`): `closed`
 
 ## Track-G Handoff Packet Fields
@@ -77,13 +81,18 @@ The closure packet now carries explicit Track-G handoff fields:
 1. `gate_verdict_table`
 2. `artifact_replay_index`
 3. `residual_risk_register`
-4. `go_no_go_decision`
+4. `follow_up_ownership`
+5. `go_no_go_decision`
 
 These fields are included directly in
 `artifacts/raptorq_program_closure_signoff_packet_v1.json` so G7 closure
 readiness can consume the handoff without implicit assumptions. The handoff is
 not closure-ready until `TRACK_G` is still the sole blocker and
 `h2_closure_packet_dependency_status_alignment` stays green.
+
+`follow_up_ownership` is the explicit owner map for the blocked packet state:
+it names who curates the packet while H2 remains draft-blocked and who is
+responsible for the final go/no-go publication once Track-G closes.
 
 ## Radical Lever Coverage Requirement
 

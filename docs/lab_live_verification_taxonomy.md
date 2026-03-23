@@ -303,6 +303,30 @@ through three stable profile lanes:
 | `Phase1Core` | `phase1.cancel.protocol.drain_finalize`, `phase1.cancel.protocol.before_first_poll`, `phase1.cancel.protocol.child_await`, `phase1.cancel.protocol.cleanup_budget`, `phase1.combinator.race.one_loser`, `phase1.channel.reserve_send.commit`, `phase1.channel.reserve_send.abort_visible`, `phase1.region.close.quiescent` | the full admitted `Phase 1` executable floor, including the pre-checkpoint, child-await, and cleanup-budget cancellation families plus the cancel-before-commit channel path |
 | `Calibration` | `phase1.cancel.protocol.drain_finalize`, `calibration.combinator.loser_not_drained`, `calibration.cancellation.cleanup_missing`, `calibration.cancellation.cleanup_budget_exhausted`, `calibration.comparator.resource_counter_mismatch`, `calibration.channel.commit_visibility_mismatch`, `calibration.obligation.leak_detected`, `calibration.region.close.non_quiescent` | prove the classifier, artifact bundle, and failure-retention paths with intentional divergences, including loser-drain failure on the combinator surface and cleanup-budget exhaustion on the cancellation surface |
 
+#### Current fast CI differential lane
+
+The normal CI-owned differential lane is intentionally smaller than nightly or
+stress usage. It currently runs two commands against the shared runner surface:
+
+- `scripts/run_lab_live_differential.sh --profile smoke --seed 91 --out-dir artifacts/lab-differential-fast`
+- `scripts/run_lab_live_differential.sh --profile calibration --scenario calibration.channel.commit_visibility_mismatch --seed 20260323 --out-dir artifacts/lab-differential-fast`
+
+This lane exists to keep the fastest shared semantic-core witness green on
+ordinary pushes while also proving that the calibration/report path still fails
+loudly on a cheap intentional mismatch.
+
+The retained CI bundle for this lane is profile-scoped and must preserve at
+least these stable artifact paths under `artifacts/lab-differential-fast/`:
+
+- `smoke/operator_summary.txt`
+- `smoke/runner_summary.json`
+- `smoke/artifact_index.json`
+- `smoke/differential_event_log.jsonl`
+- `calibration/operator_summary.txt`
+- `calibration/runner_summary.json`
+- `calibration/artifact_index.json`
+- `calibration/differential_event_log.jsonl`
+
 #### Surface-to-inventory map
 
 | Surface | Current shared differential anchors | Current local unit/e2e anchors | Current calibration / negative-control anchors | Required invariant-log focus |

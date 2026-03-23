@@ -69,7 +69,8 @@ fixture as a black-box smoke test. The current inventory covers:
 - `lane_health_recovery`
   proves `resetBrowserLaneHealth()` restores the dedicated-worker lane
 - `graceful_shutdown_handoff`
-  proves the worker and main thread reach `shutdown_complete`
+  proves the worker and main thread reach `shutdown_complete` with shutdown
+  reason `fixture-handoff-complete`
 
 ## Deterministic Validation
 

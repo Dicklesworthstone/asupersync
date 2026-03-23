@@ -1548,10 +1548,11 @@ function browserLaneHealthMessageFragment(
 ): string {
   const cooldown =
     health.cooldownUntilMs === null
-      ? "cooldown_until_ms=null"
-      : `cooldown_until_ms=${health.cooldownUntilMs}`;
+      ? "lane_health_cooldown_until_ms=null"
+      : `lane_health_cooldown_until_ms=${health.cooldownUntilMs}`;
   const trigger = health.lastTrigger ?? "runtime_init_failure";
-  return `lane_health_status=${health.status}; failure_count=${health.failureCount}; retry_budget_remaining=${health.retryBudgetRemaining}; ${cooldown}; last_trigger=${trigger}`;
+  const demotedLaneId = health.demotedToLaneId ?? "null";
+  return `lane_health_status=${health.status}; lane_health_failure_count=${health.failureCount}; lane_health_retry_budget_remaining=${health.retryBudgetRemaining}; ${cooldown}; lane_health_last_trigger=${trigger}; demoted_lane_id=${demotedLaneId}`;
 }
 
 function browserExecutionLaneUnhealthyMessage(
