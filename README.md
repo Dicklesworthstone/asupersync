@@ -8,7 +8,6 @@
 
 <img src="asupersync_diagram.webp" alt="Asupersync Architecture - Regions, Tasks, and Quiescence" width="700">
 
-[![CI](https://github.com/Dicklesworthstone/asupersync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dicklesworthstone/asupersync/actions/workflows/ci.yml)
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)](https://www.rust-lang.org/)
 [![Status: Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen)](https://github.com/Dicklesworthstone/asupersync)
