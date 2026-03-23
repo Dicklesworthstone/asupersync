@@ -1034,3 +1034,9 @@
 {"file":"src/grpc/client.rs","lines":0,"batch":430,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Reviewed async RequestSink loop and client loopback interceptor mapping. Sound."}
 {"file":"src/grpc/server.rs","lines":0,"batch":430,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Confirmed CallContext expiry mechanics properly leverage mocked virtual time sources."}
 {"file":"src/http/h3/mod.rs","lines":0,"batch":430,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Reviewed H3 module definition layer."}
+{"file":"src/service/load_shed.rs","status":"audited"}
+{"file":"src/cx/wrappers.rs","status":"audited"}
+{"file":"src/observability/resource_accounting.rs","status":"audited"}
+{"file":"src/channel/oneshot.rs","status":"audited"}
+{"file":"src/stream/merge.rs","status":"audited"}
+{"file":"src/trace/integrity.rs","status":"audited"}

@@ -442,13 +442,7 @@ impl Default for ResourceAccounting {
 
 /// Atomically updates a peak gauge if the new value exceeds the current peak.
 fn update_peak(peak: &AtomicI64, new_value: i64) {
-    let mut current = peak.load(Ordering::Relaxed);
-    while new_value > current {
-        match peak.compare_exchange_weak(current, new_value, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(v) => current = v,
-        }
-    }
+    peak.fetch_max(new_value, Ordering::Relaxed);
 }
 
 // ============================================================================
