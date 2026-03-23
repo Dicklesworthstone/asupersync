@@ -120,20 +120,27 @@ impl ActorLeakOracle {
     /// Checks that for every closed region, all its actors have stopped.
     /// Returns an error with the first violation found.
     pub fn check(&self, _now: Time) -> Result<(), ActorLeakViolation> {
-        for (&region, &close_time) in &self.region_closes {
+        // Sort region keys for deterministic violation selection.
+        // HashMap iteration order is non-deterministic and would cause
+        // flaky oracle verdicts across runs with identical seeds.
+        let mut sorted_regions: Vec<_> = self.region_closes.iter().collect();
+        sorted_regions.sort_by_key(|&(&region, _)| region);
+
+        for (&region, &close_time) in sorted_regions {
             let Some(actors) = self.actors_by_region.get(&region) else {
                 continue; // No actors spawned in this region
             };
 
-            let mut leaked = Vec::new();
-
-            for &actor in actors {
-                let stopped_at = self.stopped_actors.get(&actor);
-                let leaked_now = stopped_at.is_none_or(|t| *t > close_time);
-                if leaked_now {
-                    leaked.push(actor);
-                }
-            }
+            let mut leaked: Vec<_> = actors
+                .iter()
+                .copied()
+                .filter(|actor| {
+                    self.stopped_actors
+                        .get(actor)
+                        .is_none_or(|t| *t > close_time)
+                })
+                .collect();
+            leaked.sort();
 
             if !leaked.is_empty() {
                 return Err(ActorLeakViolation {
@@ -744,7 +751,10 @@ impl MailboxOracle {
         }
 
         // Message accounting checks.
-        for (&actor, stats) in &self.mailboxes {
+        // Sort mailbox keys for deterministic violation selection.
+        let mut sorted_actors: Vec<_> = self.mailboxes.iter().collect();
+        sorted_actors.sort_by_key(|&(&actor, _)| actor);
+        for (&actor, stats) in sorted_actors {
             // If an actor is known-stopped, its mailbox must be fully drained.
             if stats.stopped_at.is_some()
                 && (stats.current_size != 0 || stats.total_sent != stats.total_received)

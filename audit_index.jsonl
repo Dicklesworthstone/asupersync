@@ -1,971 +1,980 @@
-"2026-03-21T09:36:47Z"
-"audited_and_fixed"
-"src/lab/chaos.rs"
-1308
-328
-"2026-03-21"
-"BrightCat"
-"FIXED"
-1
-"pre-poll chaos stats overcounted decision_points when cancel, delay, and budget exhaust fired together"
-"src/messaging/cut.rs"
-3207
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Cut-certified mobility, incident rehearsal, CutLatticeIndex, BranchRegistry. 55 tests. Clean."
-"src/messaging/fabric.rs"
-3633
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"SubjectCell, ControlCapsule, FabricState, thermal hysteresis, rebalance budget, repair bindings. 55+ tests. Clean."
-"src/messaging/consumer.rs"
-4583
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"FabricConsumer, cursor, pull requests, lease fencing, adaptive kernel. 1 LOW noted (revoked_tickets unbounded). 40+ tests. Clean."
-"src/bin/asupersync.rs"
-6522
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"CLI entry point: trace inspection, differential scenarios, diagnostics. Well-structured error handling. Clean."
-"src/combinator/circuit_breaker.rs"
-2090
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/lab/dual_run.rs"
-6645
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Lines 3500-6645 audited: DualRunHarness, run method, tests, promotion logic"
-"src/lab/oracle/rref_access.rs"
-633
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/obligation/eprocess.rs"
-658
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"E-process math verified correct"
-"src/messaging/service.rs"
-5654
-403
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-1
-"LOW: ChunkedReplyObligation::receive_chunk u32 overflow on unbounded streams, fixed with saturating_add"
-"src/messaging/session/synthesis.rs"
-975
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/transport/sink.rs"
-1870
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/transport/stream.rs"
-2233
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/process.rs"
-2464
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Lines 2150-2464 zombie-reap tests audited"
-"src/lab/runtime.rs"
-4910
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"LabRuntime: virtual time, deterministic scheduling, chaos injection, oracle checking, futurelock detection. Clean."
-"src/bin/asupersync.rs"
-5314
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Full CLI binary audit, no injection/traversal/leak issues"
-"src/raptorq/gf256.rs"
-4894
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"SIMD threshold fix and c==1 fast path both correct"
-"src/lab/dual_run.rs"
-6645
-403
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-1
-"DualRunHarness, divergence classification, normalization. 1 MEDIUM FIXED: u32 overflow in capture_obligation_balance and recompute (saturating_add). ~100 tests."
-"src/messaging/jetstream.rs"
-1735
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"JetStream messaging: json parsing, base64, pull with timeout, ack lifecycle. Clean."
-"src/messaging/control.rs"
-3896
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Control plane: CRDT propagation, ReplicaCounter, LagSketch, ControlRegistry, CursorMark. Clean."
-"src/messaging/compiler.rs"
-1247
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Declaration compiler: subject/morphism/service/protocol/consumer validation, cost estimation. Clean."
-"src/messaging/fabric.rs"
-3633
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Brokerless fabric: placement, control capsule, rebalance, normalization. Clean."
-"src/messaging/privacy.rs"
-1216
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Differential privacy: Laplace noise, HMAC key hierarchy, budget ledger, blinding. Clean."
-"src/messaging/consumer.rs"
-4607
-403
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-2
-"MEDIUM: ack_floor advances past pending windows on out-of-order ack (fixed with advance_ack_floor). MEDIUM: revoked_tickets unbounded growth (noted, not fixed). MEDIUM: decision_log unbounded growth (noted, not fixed)."
-"src/messaging/explain.rs"
-1945
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/messaging/cut.rs"
-3207
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/messaging/ir.rs"
-3225
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
 ""
-"src/messaging/subject.rs"
-2688
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Trie routing, wildcards, sharding, cache — all correct. Minor: SublistCache never evicts stale entries."
-"src/messaging/morphism.rs"
-2163
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Subject transforms, cycle detection, deterministic bucketing — all correct."
-"src/evidence_sink.rs"
-599
-405
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-1
-"1 MEDIUM: u32 overflow in emit_scheduler_evidence depth sum. Fixed with saturating_add."
-"src/sync/rwlock.rs"
-2267
-405
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Cancel-aware RwLock, writer-preference fairness, proper baton-passing on abandon. 30+ tests."
-"src/encoding.rs"
-1042
-405
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"RaptorQ encoding pipeline, block planning, systematic encoder, pool allocation. 20+ tests."
-"src/database/transaction.rs"
-865
-405
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Transaction helpers with retry, savepoint SQL injection protection, exponential backoff."
-"src/net/tcp/listener.rs"
-710
-405
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"TCP listener with accept storm backoff, re-arm race handling, reactor registration."
-"src/monitor.rs"
-1382
-405
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Process monitors, DownNotification, MonitorSet with BTreeMap indexes. Deterministic ordering."
-"src/distributed/assignment.rs"
-628
-405
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Symbol-to-replica assignment: Full/Striped/MinimumK/Weighted strategies. 15+ tests."
-"src/channel/fault.rs"
-1248
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Fault-injecting channel wrapper. RAII guards for message preservation on error. Deterministic ChaosRng. Complex but correct."
-"src/runtime/sharded_state.rs"
-1416
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Sharded lock ordering E→D→B→A→C. ShardGuard variants, CAS root region, debug lock assertions. Core infrastructure, correct."
-"src/net/tcp/listener.rs"
-710
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"TCP listener with accept storm backoff, re-arm race fix, reactor registration. Duplicate entry."
-"src/web/session.rs"
-915
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Session middleware: fixation prevention, cookie handling, MemoryStore. Proper ID regeneration on unknown session."
-"src/http/h1/listener.rs"
-919
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"HTTP/1.1 listener: accept loop, connection manager, max connections, drain/shutdown lifecycle. Correct delegation."
-"src/runtime/env_config.rs"
-771
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Environment and TOML config parsing. Proper bool parsing, trimmed values, error messages."
-{"file":"src/channel/broadcast.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/net/quic_native/connection.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/database/mysql.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/raptorq/regression.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/app.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/cli/error.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/lab/oracle/evidence.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/codec/length_delimited.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-{"file":"src/http/h3/error.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
-"src/net/websocket/frame.rs"
-1740
-403
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-2
-"2 MEDIUM: receive-side close code validation too strict (rejected 1016-2999), Frame::close missing 125-byte limit"
-"src/runtime/reactor/registration.rs"
-838
-403
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Deregister retry correct, disarmed Cell prevents double-dereg, !Sync prevents races"
-{"file":"src/messaging/federation.rs","lines":2585,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Federation bridges, capability scoping, replication transfer, replay trimming. Clean."}
-{"file":"src/messaging/stream.rs","lines":812,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Quiescent streams, retention, byte accounting, lifecycle. Clean."}
-{"file":"src/messaging/policy.rs","lines":2017,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Priority scoring, degradation planning, bounded-regret controller, safety envelope. Clean."}
-{"file":"src/messaging/kafka.rs","lines":1588,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka client wrapper: rdkafka integration, delivery channel, cancel-safety. Clean."}
-{"file":"src/messaging/class.rs","lines":495,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery classes, cost vectors, policy validation. Clean."}
-{"file":"src/messaging/capability/mod.rs","lines":604,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability registry, pattern coverage, fail-closed checks. Clean."}
-{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear tokens, session advance, cursor authority lease. Clean."}
-{"file":"src/messaging/capability/routing.rs","lines":796,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Routing programs, subject rewriting, capability authorization. Clean."}
-{"file":"src/service/load_balance.rs","lines":1920,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"In-flight RAII tracking, SWRR strategy, PowerOf2Choices, RoundRobin, discover reconciliation. Clean."}
-{"file":"src/database/sqlite.rs","lines":1645,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deferred-rollback pattern, cancel-correctness, parameterized queries. Clean."}
-{"file":"src/database/transaction.rs","lines":866,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Savepoint name validation, retry with delay, cancel-aware. Clean."}
-{"file":"src/service/retry.rs","lines":924,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Retry policy, cooperative budget, cancel-safe state machine. Clean."}
-{"file":"src/service/buffer.rs","lines":895,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"MEDIUM: pending slot leak on panic during WaitingForReady->Active transition (fixed with temp state restore). LOW: waker vec growth under alternating contention (noted)."}
-{"file":"src/service/discover.rs","lines":1242,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS discovery, generation-based staleness, symmetric diff changes. Clean."}
-{"file":"src/service/steer.rs","lines":727,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request routing, fail-closed index validation, cancel-safe state machine. Clean."}
-"src/http/h1/http_client.rs"
-3452
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"URL parsing rejects userinfo, SOCKS5 protocol correct, CONNECT tunnel has CRLF injection checks, redirect strips sensitive headers"
-"src/http/h1/codec.rs"
-1547
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Request smuggling resistant: rejects TE+CL combo, duplicate TE/CL, TE on HTTP/1.0. Chunked decoder state machine correct."
-"src/database/postgres.rs"
-5518
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"SCRAM-SHA-256 correct: constant-time sig verify, username escaping order, PBKDF2 single-block, nonce prefix check"
-"src/sync/pool.rs"
-4280
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Positional waiter waking correct, RAII slot reservation, health check guard, cancel-safe acquire with baton passing"
-"src/service/load_balance.rs"
-1919
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"SWRR weights safe, P2C correct, LoadMetricGuard RAII for in-flight, call_balanced readiness fallback correct"
-"src/signal/graceful.rs"
-901
-404
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Race semantics correct, pre-check for already-shutdown, proper grace period with timeout"
-"src/http/h2/connection.rs"
-3405
-405
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-1
-"1 MEDIUM: missing max_concurrent_streams enforcement for incoming streams in get_or_create"
-"src/http/h2/stream.rs"
-1940
-405
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-1
-"1 MEDIUM: get_or_create now enforces max_concurrent_streams with REFUSED_STREAM"
-"src/transport/aggregator.rs"
-3782
-405
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-1
-"1 MEDIUM: symbol permanently lost when reorder buffer full + dedup marks seen (bead filed)"
-"src/gen_server.rs"
-6443
-405
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Thorough lifecycle, obligation tracking, cancel-correctness, drain semantics all correct"
-{"file":"src/trace/file.rs","lines":1984,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"3 MEDIUM: usize as u32 truncation on meta_len, event_len, chunk_len. Fixed with u32::try_from."}
-{"file":"src/http/h2/frame.rs","lines":1625,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":7,"notes":"7 MEDIUM: usize as u32 in frame encode could silently truncate to corrupt 24-bit length field. Fixed with frame_length() helper that clamps to MAX_FRAME_SIZE + debug_assert in write()."}
-{"file":"src/http/h2/hpack.rs","lines":2471,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 LOW: size -= evicted.size() could underflow if invariant broken. Fixed with saturating_sub."}
-{"file":"src/combinator/circuit_breaker.rs","lines":1950,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 LOW: success_count + failure_count u32 overflow in failure_rate/should_open. Fixed with saturating_add."}
-{"file":"src/cancel/progress_certificate.rs","lines":1500,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Drain phase classification, Azuma/Freedman bounds, stall detection. Correct math."}
-{"file":"src/obligation/marking.rs","lines":1000,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Marking analyzer, obligation lifecycle counting. Clean."}
-{"file":"src/obligation/saga.rs","lines":1200,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Saga compensation, unwind guard. Drop-safe. Clean."}
-{"file":"src/obligation/separation_logic.rs","lines":1500,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Separation logic verifier, double-resolve detection, region close leak check. Correct."}
-{"file":"src/obligation/leak_check.rs","lines":1200,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"VarState join lattice, obligation leak detection. Correct scope exit analysis."}
-{"file":"src/channel/session.rs","lines":708,"batch":408,"date":"2026-03-21","agent":"ChartreuseGrove","verdict":"SOUND","bugs":0,"notes":"Deep trace through session send/recv, mpsc/oneshot integration, graded obligation flow, and end-to-end usages. No concrete defect found."}
-{"file":"src/grpc/streaming.rs","lines":886,"batch":408,"date":"2026-03-21","agent":"ChartreuseGrove","verdict":"FIXED","bugs":1,"notes":"Metadata insert paths preserved mixed-case keys in storage. Normalized ASCII and binary keys to lowercase on insert and added regression coverage."}
-{"file":"src/messaging/cut.rs","lines":0,"batch":409,"date":"2026-03-21","agent":"ChartreuseGrove","verdict":"FIXED","bugs":1,"notes":"Peer review found promote-on-NaN in counterfactual scoring: evaluate_promotion validated confidence and violation rate but not policy_gain, so NaN could bypass the no-improvement check. Added fail-closed validation for baseline/candidate scores and regression tests."}
-{"file":"src/decoding.rs","lines":2085,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: plan.k as u16 truncation in configure_block_k. Fixed with u16::try_from."}
-{"file":"src/grpc/client.rs","lines":1498,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 HIGH: borrow-after-move compile error in GrpcClient::new and with_codec. Fixed by reordering."}
-{"file":"src/messaging/morphism.rs","lines":2162,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Subject transforms, cycle detection, boundary plans. Clean."}
-{"file":"src/messaging/policy.rs","lines":1995,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Degradation policy, reliability controller, safety envelope. Clean."}
-{"file":"src/messaging/privacy.rs","lines":1215,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Privacy budget ledger, Laplace DP, HMAC key derivation. Clean."}
-{"file":"src/messaging/federation.rs","lines":2584,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cross-domain federation bridge, replication, gateway convergence. Clean."}
-{"file":"src/channel/mpsc.rs","lines":865,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MPSC channel: reserve/send two-phase, baton passing, cascade waking. No lost wakeups."}
-{"file":"src/channel/broadcast.rs","lines":456,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Broadcast channel: all receivers woken on send, proper lag handling. Clean."}
-{"file":"src/channel/watch.rs","lines":631,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Watch channel: double-check pattern closes TOCTOU, atomic borrow_and_update. Clean."}
-{"file":"src/sync/notify.rs","lines":518,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Notify: baton passing, stored notifications, broadcast vs notify_one interleave. Clean."}
-{"file":"src/sync/semaphore.rs","lines":649,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Semaphore: FIFO fairness, cascade waking on permit release. Clean."}
-{"file":"src/http/h1/http_client.rs","lines":3447,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP client: redirects, connection reuse, stale retry, sensitive header stripping. No casts, no unwrap."}
-{"file":"src/http/pool.rs","lines":1600,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Connection pool: stale eviction, cleanup_expired before create check, u64 counters. Clean."}
-{"file":"src/database/postgres.rs","lines":5493,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PG wire protocol, SCRAM-SHA-256 (constant-time, nonce prefix verify), OID cast correct."}
-{"file":"src/database/mysql.rs","lines":2910,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MySQL packet parsing, auth plugin dispatch, lenenc encoding. All casts bounded."}
-{"file":"src/database/sqlite.rs","lines":1644,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"SQLite wrapper: Mutex-protected connection, blocking pool dispatch. Column unwraps safe."}
-{"file":"src/http/h1/stream.rs","lines":1895,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP stream: CRLF sanitization, reason phrase validation, nibble casts bounded."}
-{"file":"src/grpc/client.rs","lines":1670,"batch":410,"date":"2026-03-21","agent":"OrangeRidge","verdict":"FIXED","bugs":2,"notes":"gRPC client compression negotiation now suppresses unsupported send encodings while preserving accepted decoding support; also fixed constructor borrow-after-move regression in GrpcClient::new/with_codec validation path."}
-{"file":"src/grpc/codec.rs","lines":807,"batch":410,"date":"2026-03-21","agent":"OrangeRidge","verdict":"FIXED","bugs":1,"notes":"FramedCodec now supports independent compressor/decompressor hook configuration so inbound compressed-frame support no longer forces outbound compressed framing."}
-{"file":"src/combinator/hedge.rs","lines":1335,"batch":410,"date":"2026-03-21","agent":"EmeraldBrook","verdict":"FIXED","bugs":1,"notes":"AdaptiveHedgePolicy warmup no longer freezes forever for window_size < 10; calibration now starts once small windows are full, with focused regression coverage."}
-{"file":"src/messaging/snapshot.rs","lines":842,"batch":412,"date":"2026-03-21","agent":"OrangeRidge","verdict":"FIXED","bugs":1,"notes":"RecoverableServiceCapsule::capture now rejects pre-hibernated state so callers cannot bypass the explicit capture->hibernate->restore transition. Validated on the combined shared-tree snapshot hardening."}
-{"file":"src/messaging/fabric.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/policy.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/snapshot.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/cut.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/ir.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/service.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/transport/sink.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/redis.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/service/load_balance.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/mod.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/explain.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/messaging/privacy.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
-{"file":"src/channel/clock_skew.rs","lines":842,"batch":406,"date":"2026-03-21","agent":"SwiftLake","verdict":"FIXED","bugs":2,"notes":"logged non-jump skew evidence; fixed 1ns jitter collapsing to zero"}
-{"file":"src/transport/mock.rs","lines":1357,"batch":406,"date":"2026-03-21","agent":"SwiftLake","verdict":"FIXED","bugs":1,"notes":"corrupted symbols no longer preserve verified auth state"}
-{"file":"src/messaging/consumer.rs","lines":4746,"batch":406,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of consumer cursor lease state machine. 40 tests. Lease fencing, ack floor gap prevention, obligation lifecycle all correct."}
-{"file":"src/messaging/control.rs","lines":3895,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of control advisory system. 89 tests. CRDT propagation, anti-entropy, membership, advisory damping all correct."}
-{"file":"src/messaging/compiler.rs","lines":1246,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FABRIC validation compiler. 6 tests. Cross-reference checks, fail-closed validation. Clean."}
-{"file":"src/messaging/federation.rs","lines":2584,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
-{"file":"src/messaging/morphism.rs","lines":2162,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
-{"file":"src/messaging/class.rs","lines":495,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
-{"file":"src/messaging/subject.rs","lines":2687,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
-{"file":"src/messaging/capability/mod.rs","lines":604,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
-{"file":"src/messaging/capability/routing.rs","lines":796,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
-{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
-{"file":"src/messaging/session/contract.rs","lines":1257,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
-{"file":"src/messaging/session/synthesis.rs","lines":1459,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
-"src/net/quic_native/streams.rs"
-1721
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Flow control accounting correct, two-phase connection/stream credit, recv range merging, RR cursor resilient"
-"src/net/tcp/split.rs"
-1665
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"CombinedWaker prevents lost wakeups, interest narrowing on drop, registration held during driver.register"
-"src/runtime/reactor/epoll.rs"
-1518
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Duplicate detection, stale fd cleanup on ENOENT/EBADF, fcntl validity check before register"
-"src/runtime/scheduler/worker.rs"
-1457
-406
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"TaskExecutionGuard panic safety, work steal order correct, spin/yield/park backoff"
-"src/runtime/scheduler/three_lane.rs"
-6879
-407
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"EXP3 weights correct, Lyapunov governor sound, Tarjan SCC correct, work-stealing safe, lock ordering respected"
-"src/http/h2/hpack.rs"
-2520
-407
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Huffman fast paths verified complete, integer decode overflow-safe, dynamic table eviction correct, DoS protections"
-"src/runtime/scheduler/intrusive.rs"
-1554
-407
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Tag-based membership + &mut Arena exclusive access eliminates ABA by construction"
-"src/combinator/retry.rs"
-1251
-407
-"2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Cancel drains instead of drops in Polling state, attempt counting correct, clean state machine"
-"src/http/h1/server.rs"
-1488
-408
-"2026-03-21"
-"SapphireHill"
-"FIXED"
-1
 "1 LOW: HEAD response overwrites handler Content-Length, violating RFC 9110 §9.3.2"
-{"file":"src/service/buffer.rs","lines":901,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 HIGH: pending counter leak when inner poll_ready returns Err. After capacity errors, buffer permanently full (deadlock). Fixed by decrementing pending before Error state transition."}
-{"file":"src/grpc/streaming.rs","lines":800,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"gRPC streaming: request/response types, waker management, close semantics. Clean."}
-{"file":"src/fs/buf_reader.rs","lines":172,"batch":413,"date":"2026-03-21","agent":"MistyIsland","verdict":"SOUND","bugs":0,"notes":"Current HEAD already contains BufReader::capacity and FS-VERIFY-030 wrapper coverage; audited the fs wrapper/read-path surface and found no remaining issue. Verified with remote fs_verify_030 plus cargo check/clippy."}
-{"file":"src/trace/dpor.rs","lines":888,"batch":420,"date":"2026-03-21","agent":"MistyIsland","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: estimated_classes() counted same-task immediate races and could report >1 classes for purely sequential traces. Fixed by filtering HB-ordered races before class estimation; added focused regression and validated with rch-backed test/check/clippy."}
-{"file":"src/messaging/class.rs","lines":496,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery-class taxonomy, monotonic ordering, serde round-trip, binary search policy. 14 tests. Clean."}
-{"file":"src/messaging/explain.rs","lines":1947,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Sheaf topology checker, morphism composition, cursor delegation overlap detection, witness placement durability+confidentiality, adaptive policy envelope. 10 tests. Clean."}
-{"file":"src/messaging/compiler.rs","lines":1246,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FABRIC IR validation compiler. Subject/morphism/service/protocol/capability/consumer validation. Cost estimation with saturating arithmetic. 5 tests. Clean."}
-{"file":"src/messaging/privacy.rs","lines":1216,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Privacy export with HMAC-SHA256 key hierarchy, Laplace noise, budget ledger, restore scrub. Deterministic unit_interval avoids 0/1. 14 tests. Clean."}
-{"file":"src/actor.rs","lines":2270,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"1 HIGH: supervised actor restart leaves state as Stopping, restarted actor exits immediately on empty mailbox (deadlock-on-restart). 1 MEDIUM: restart ignores backoff delay from SupervisionDecision. Both fixed."}
-{"file":"src/supervision.rs","lines":8362,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Restart window detection, topological sort, escalation, region cleanup. Clean."}
-{"file":"src/link.rs","lines":1836,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Link symmetry, self-links, exit resolution, region cleanup. Clean."}
-{"file":"src/process.rs","lines":1863,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kill-on-drop SIGKILL+reap, stdin close before wait, pipe handles. Clean."}
-{"file":"src/messaging/subject.rs","lines":2687,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"NATS-style subject patterns, trie routing, queue groups, sharded sublist, subject registry with specificity lookup, namespace kernel. 30+ tests. Clean."}
-{"file":"src/messaging/stream.rs","lines":811,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Region-owned stream state machine. Lifecycle, retention limits, quiescence, capture policy, in-memory backend. 8 tests. Clean."}
-{"file":"src/fs/dir.rs","lines":259,"batch":414,"date":"2026-03-21","agent":"TopazWolf","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: Linux io_uring create_dir path hardcoded mode 0o755, diverging from std::fs::create_dir / mkdir defaults and making feature enablement change directory permissions. Fixed by aligning the mode with std semantics and adding focused regression coverage."}
-{"file":"src/fs/path_ops.rs","lines":672,"batch":416,"date":"2026-03-21","agent":"TopazWolf","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: write_atomic replaced existing files with a fresh temp inode but did not preserve the target's permissions, so atomic rewrites could silently drop mode bits. Fixed by copying existing permissions onto the temp file before rename and adding focused regression coverage."}
-{"file":"src/net/worker_channel.rs","lines":2626,"batch":414,"date":"2026-03-21","agent":"RusticGlen","verdict":"FIXED","bugs":1,"notes":"Shutdown follow-up leak fixed: once shutdown_requested is set, inbound CancelAcknowledged/DrainCompleted no longer enqueue new DrainJob/FinalizeJob traffic. Added 2 focused regressions."}
-{"file":"src/distributed/recovery.rs","lines":2382,"batch":414,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RaptorQ recovery orchestrator, collector, decoder state machine. Symbol dedup+upgrade, block requirements, attempt tracking, saturating arithmetic. Clean."}
-{"file":"src/messaging/morphism.rs","lines":2162,"batch":414,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Re-audit of morphism transforms, semantic cycle detection, boundary plans. OR logic in classify_semantic_cycle is intentionally fail-safe. Clean."}
-{"file":"src/service/concurrency_limit.rs","lines":1192,"batch":415,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Semaphore-based concurrency limiter. Permit lifecycle cancel-safe. Clone resets state. No leaks. Clean."}
-{"file":"src/service/timeout.rs","lines":766,"batch":415,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timeout middleware. Done sentinel prevents double-poll. Inner polled first. Cancel-safe. Clean."}
-{"file":"src/service/rate_limit.rs","lines":1269,"batch":415,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Token bucket rate limiter. Wait queue with waker dedup. Saturating arithmetic. Cancel-safe. Clean."}
-{"file":"src/grpc/server.rs","lines":1196,"batch":417,"date":"2026-03-21","agent":"TopazWolf","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: CallContext::from_metadata_at treated a malformed grpc-timeout header as if it were absent by falling back to default_timeout, contradicting the documented fail-closed contract. Fixed by only applying the default when the header is absent and adding a focused regression test."}
-{"file":"src/distributed/distribution.rs","lines":944,"batch":418,"date":"2026-03-21","agent":"WindyLake","verdict":"SOUND","bugs":0,"notes":"Stale re-verification/closure pass: current HEAD already reports symbols_distributed from symbols_sent_total and includes focused regressions for no-replica and assignment-plan count cases. Historical fix was already present; no new source patch required in this pass."}
-{"file":"src/trace/canonicalize.rs","lines":1257,"batch":419,"date":"2026-03-21","agent":"WindyLake","verdict":"SOUND","bugs":0,"notes":"Stale re-verification/closure pass: current HEAD already has semantic-payload exact equivalence and the RegionCancel.reason regression passes remotely via rch. Historical fix was already present; no new source patch required in this pass."}
-"src/runtime/timer.rs"
-323
-409
+"1 MEDIUM: get_or_create now enforces max_concurrent_streams with REFUSED_STREAM"
+"1 MEDIUM: missing max_concurrent_streams enforcement for incoming streams in get_or_create"
+"1 MEDIUM: symbol permanently lost when reorder buffer full + dedup marks seen (bead filed)"
+"1 MEDIUM: u32 overflow in emit_scheduler_evidence depth sum. Fixed with saturating_add."
+"2 MEDIUM: receive-side close code validation too strict (rejected 1016-2999), Frame::close missing 125-byte limit"
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Min-heap via reversed ordering, generation wrapping for tie-break, pop_expired includes exact deadline"
-"src/runtime/task_table.rs"
-387
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"ID canonicalization, stored_future cleanup on task remove, bounds checking, counter correct"
-"src/io/buf_writer.rs"
-524
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Flush tracking via written field, cancel-safe partial flush, large-write bypass"
-"src/codec/framed_read.rs"
-396
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Cooperative yielding (32 passes cap), correct EOF handling, fused end-of-stream"
-"src/runtime/reactor/interest.rs"
-711
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Standard bitflag pattern, const constructors, correct contains semantics"
-"src/stream/mod.rs"
-1089
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Clean combinator library with standard delegation, comprehensive StreamExt"
-"src/stream/debounce.rs"
-310
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Cooperative budget, flush-on-end, dual-clock pattern (wall for wakes, custom for readiness)"
-"src/stream/buffered.rs"
-450
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Order preservation, round-robin polling, cooperative admission+poll budgets, rotate pattern"
-"src/service/steer.rs"
-726
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Out-of-range fails closed, lazy poll_ready, clean state machine, lock released before return"
-"src/service/buffer.rs"
-915
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Pending counter lifecycle correct, panic-safe call path, consistent lock ordering, TOCTOU handled"
-"src/channel/oneshot.rs"
-1751
-409
 "2026-03-21"
-"SapphireHill"
-"SOUND"
-0
-"Reserve/send/abort pattern correct, sent flag prevents double-abort, waker taken under lock woken outside"
-"src/obligation/choreography/mod.rs"
-3533
-410
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21"
+"2026-03-21T09:36:47Z"
 "2026-03-22"
-"SapphireHill"
-"SOUND"
-0
-"Purely functional AST/DSL — projection, validation, seq_local RecVar correct, knowledge-of-choice complete"
-"src/obligation/graded.rs"
-1363
-410
 "2026-03-22"
-"SapphireHill"
-"SOUND"
-0
-"Linear-type approximation correct, drop bombs with double-panic guard, scope counters, u32 overflow impractical"
-"src/trace/boundary.rs"
-658
-410
 "2026-03-22"
-"SapphireHill"
-"SOUND"
-0
+"BrightCat"
+"Brokerless fabric: placement, control capsule, rebalance, normalization. Clean."
+"CLI entry point: trace inspection, differential scenarios, diagnostics. Well-structured error handling. Clean."
+"Cancel drains instead of drops in Polling state, attempt counting correct, clean state machine"
+"Cancel-aware RwLock, writer-preference fairness, proper baton-passing on abandon. 30+ tests."
 "Chain complex boundary operators correct (d1*d2=0 verified), deterministic cell ordering, pure computation"
-{"file":"src/distributed/bridge.rs","lines":1869,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: finalizer_count as u32 truncation. Fixed with try_from/unwrap_or."}
-{"file":"src/trace/distributed/crdt.rs","lines":1170,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: MVRegister::set unchecked += 1 on version counter. Fixed with saturating_add."}
-{"file":"src/server/shutdown.rs","lines":1221,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Phased shutdown state machine with CAS transitions. Clean."}
-{"file":"src/net/udp.rs","lines":732,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async UDP wrapper, proper WouldBlock handling, fallback wakeup. Clean."}
-{"file":"src/lab/oracle/ambient_authority.rs","lines":845,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability model, Full wildcard, orphan safety. Clean."}
-{"file":"src/trace/boundary.rs","lines":658,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Square complex construction, GF(2) boundary operators. Clean."}
-{"file":"src/util/entropy.rs","lines":472,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DetEntropy SplitMix64, thread-local fork, strict guard RAII. Clean."}
-{"file":"src/runtime/blocking_pool.rs","lines":1872,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CAS thread spawning, idle retirement with re-check, catch_unwind around tasks, ThreadExitGuard. Clean."}
-{"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"io_uring PollAdd reactor, eventfd wakeup, stale user_data filtering. Clean."}
-{"file":"src/lab/http/harness.rs","lines":516,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: by_status_class u16 overflow on class * 100. Fixed with saturating_mul/add."}
-{"file":"src/fs/path_ops.rs","lines":672,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic write, temp path RAII, parent fsync. No path traversal. Clean."}
+"Clean combinator library with standard delegation, comprehensive StreamExt"
+"CombinedWaker prevents lost wakeups, interest narrowing on drop, registration held during driver.register"
+"Control plane: CRDT propagation, ReplicaCounter, LagSketch, ControlRegistry, CursorMark. Clean."
+"Cooperative budget, flush-on-end, dual-clock pattern (wall for wakes, custom for readiness)"
+"Cooperative yielding (32 passes cap), correct EOF handling, fused end-of-stream"
+"Cut-certified mobility, incident rehearsal, CutLatticeIndex, BranchRegistry. 55 tests. Clean."
+"Declaration compiler: subject/morphism/service/protocol/consumer validation, cost estimation. Clean."
+"Deregister retry correct, disarmed Cell prevents double-dereg, !Sync prevents races"
+"Differential privacy: Laplace noise, HMAC key hierarchy, budget ledger, blinding. Clean."
+"DualRunHarness, divergence classification, normalization. 1 MEDIUM FIXED: u32 overflow in capture_obligation_balance and recompute (saturating_add). ~100 tests."
+"Duplicate detection, stale fd cleanup on ENOENT/EBADF, fcntl validity check before register"
+"E-process math verified correct"
+"EXP3 weights correct, Lyapunov governor sound, Tarjan SCC correct, work-stealing safe, lock ordering respected"
+"Environment and TOML config parsing. Proper bool parsing, trimmed values, error messages."
+"FIXED"
+"FIXED"
+"FIXED"
+"FIXED"
+"FIXED"
+"FIXED"
+"FIXED"
+"FIXED"
+"FIXED"
+"FIXED"
+"FabricConsumer, cursor, pull requests, lease fencing, adaptive kernel. 1 LOW noted (revoked_tickets unbounded). 40+ tests. Clean."
+"Fault-injecting channel wrapper. RAII guards for message preservation on error. Deterministic ChaosRng. Complex but correct."
+"Flow control accounting correct, two-phase connection/stream credit, recv range merging, RR cursor resilient"
+"Flush tracking via written field, cancel-safe partial flush, large-write bypass"
+"Full CLI binary audit, no injection/traversal/leak issues"
+"HTTP/1.1 listener: accept loop, connection manager, max connections, drain/shutdown lifecycle. Correct delegation."
+"Huffman fast paths verified complete, integer decode overflow-safe, dynamic table eviction correct, DoS protections"
+"ID canonicalization, stored_future cleanup on task remove, bounds checking, counter correct"
+"JetStream messaging: json parsing, base64, pull with timeout, ack lifecycle. Clean."
+"LOW: ChunkedReplyObligation::receive_chunk u32 overflow on unbounded streams, fixed with saturating_add"
+"LabRuntime: virtual time, deterministic scheduling, chaos injection, oracle checking, futurelock detection. Clean."
+"Linear-type approximation correct, drop bombs with double-panic guard, scope counters, u32 overflow impractical"
+"Lines 2150-2464 zombie-reap tests audited"
+"Lines 3500-6645 audited: DualRunHarness, run method, tests, promotion logic"
+"MEDIUM: ack_floor advances past pending windows on out-of-order ack (fixed with advance_ack_floor). MEDIUM: revoked_tickets unbounded growth (noted, not fixed). MEDIUM: decision_log unbounded growth (noted, not fixed)."
+"Min-heap via reversed ordering, generation wrapping for tie-break, pop_expired includes exact deadline"
+"Order preservation, round-robin polling, cooperative admission+poll budgets, rotate pattern"
+"Out-of-range fails closed, lazy poll_ready, clean state machine, lock released before return"
+"Pending counter lifecycle correct, panic-safe call path, consistent lock ordering, TOCTOU handled"
+"Positional waiter waking correct, RAII slot reservation, health check guard, cancel-safe acquire with baton passing"
+"Process monitors, DownNotification, MonitorSet with BTreeMap indexes. Deterministic ordering."
+"Purely functional AST/DSL — projection, validation, seq_local RecVar correct, knowledge-of-choice complete"
+"Race semantics correct, pre-check for already-shutdown, proper grace period with timeout"
+"RaptorQ encoding pipeline, block planning, systematic encoder, pool allocation. 20+ tests."
+"Request smuggling resistant: rejects TE+CL combo, duplicate TE/CL, TE on HTTP/1.0. Chunked decoder state machine correct."
+"Reserve/send/abort pattern correct, sent flag prevents double-abort, waker taken under lock woken outside"
+"SCRAM-SHA-256 correct: constant-time sig verify, username escaping order, PBKDF2 single-block, nonce prefix check"
+"SIMD threshold fix and c==1 fast path both correct"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SOUND"
+"SWRR weights safe, P2C correct, LoadMetricGuard RAII for in-flight, call_balanced readiness fallback correct"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"SapphireHill"
+"Session middleware: fixation prevention, cookie handling, MemoryStore. Proper ID regeneration on unknown session."
+"Sharded lock ordering E→D→B→A→C. ShardGuard variants, CAS root region, debug lock assertions. Core infrastructure, correct."
+"Standard bitflag pattern, const constructors, correct contains semantics"
+"Subject transforms, cycle detection, deterministic bucketing — all correct."
+"SubjectCell, ControlCapsule, FabricState, thermal hysteresis, rebalance budget, repair bindings. 55+ tests. Clean."
+"Symbol-to-replica assignment: Full/Striped/MinimumK/Weighted strategies. 15+ tests."
+"TCP listener with accept storm backoff, re-arm race fix, reactor registration. Duplicate entry."
+"TCP listener with accept storm backoff, re-arm race handling, reactor registration."
+"Tag-based membership + &mut Arena exclusive access eliminates ABA by construction"
+"TaskExecutionGuard panic safety, work steal order correct, spin/yield/park backoff"
+"Thorough lifecycle, obligation tracking, cancel-correctness, drain semantics all correct"
+"Transaction helpers with retry, savepoint SQL injection protection, exponential backoff."
+"Trie routing, wildcards, sharding, cache — all correct. Minor: SublistCache never evicts stale entries."
+"URL parsing rejects userinfo, SOCKS5 protocol correct, CONNECT tunnel has CRLF injection checks, redirect strips sensitive headers"
+"audited_and_fixed"
+"pre-poll chaos stats overcounted decision_points when cancel, delay, and budget exhaust fired together"
+"src/bin/asupersync.rs"
+"src/bin/asupersync.rs"
+"src/channel/fault.rs"
+"src/channel/oneshot.rs"
+"src/codec/framed_read.rs"
+"src/combinator/circuit_breaker.rs"
+"src/combinator/retry.rs"
+"src/database/postgres.rs"
+"src/database/transaction.rs"
+"src/distributed/assignment.rs"
+"src/encoding.rs"
+"src/evidence_sink.rs"
+"src/gen_server.rs"
+"src/http/h1/codec.rs"
+"src/http/h1/http_client.rs"
+"src/http/h1/listener.rs"
+"src/http/h1/server.rs"
+"src/http/h2/connection.rs"
+"src/http/h2/hpack.rs"
+"src/http/h2/stream.rs"
+"src/io/buf_writer.rs"
+"src/lab/chaos.rs"
+"src/lab/dual_run.rs"
+"src/lab/dual_run.rs"
+"src/lab/oracle/rref_access.rs"
+"src/lab/runtime.rs"
+"src/messaging/compiler.rs"
+"src/messaging/consumer.rs"
+"src/messaging/consumer.rs"
+"src/messaging/control.rs"
+"src/messaging/cut.rs"
+"src/messaging/cut.rs"
+"src/messaging/explain.rs"
+"src/messaging/fabric.rs"
+"src/messaging/fabric.rs"
+"src/messaging/ir.rs"
+"src/messaging/jetstream.rs"
+"src/messaging/morphism.rs"
+"src/messaging/privacy.rs"
+"src/messaging/service.rs"
+"src/messaging/session/synthesis.rs"
+"src/messaging/subject.rs"
+"src/monitor.rs"
+"src/net/quic_native/streams.rs"
+"src/net/tcp/listener.rs"
+"src/net/tcp/listener.rs"
+"src/net/tcp/split.rs"
+"src/net/websocket/frame.rs"
+"src/obligation/choreography/mod.rs"
+"src/obligation/eprocess.rs"
+"src/obligation/graded.rs"
+"src/process.rs"
+"src/raptorq/gf256.rs"
+"src/runtime/env_config.rs"
+"src/runtime/reactor/epoll.rs"
+"src/runtime/reactor/interest.rs"
+"src/runtime/reactor/registration.rs"
+"src/runtime/scheduler/intrusive.rs"
+"src/runtime/scheduler/three_lane.rs"
+"src/runtime/scheduler/worker.rs"
+"src/runtime/sharded_state.rs"
+"src/runtime/task_table.rs"
+"src/runtime/timer.rs"
+"src/service/buffer.rs"
+"src/service/load_balance.rs"
+"src/service/steer.rs"
+"src/signal/graceful.rs"
+"src/stream/buffered.rs"
+"src/stream/debounce.rs"
+"src/stream/mod.rs"
+"src/sync/pool.rs"
+"src/sync/rwlock.rs"
+"src/trace/boundary.rs"
+"src/transport/aggregator.rs"
+"src/transport/sink.rs"
+"src/transport/stream.rs"
+"src/web/session.rs"
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+1
+1
+1
+1
+1
+1
+1
+1
+1042
+1089
+1216
+1247
+1248
+1251
+1308
+1363
+1382
+1416
+1457
+1488
+1518
+1547
+1554
+1665
+1721
+1735
+1740
+1751
+1870
+1919
+1940
+1945
+2
+2
+2090
+2163
+2233
+2267
+2464
+2520
+2688
+310
+3207
+3207
+3225
+323
+328
+3405
+3452
+3533
+3633
+3633
+3782
+387
+3896
+396
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+403
+404
+404
+404
+404
+404
+404
+404
+404
+404
+405
+405
+405
+405
+405
+405
+405
+405
+405
+405
+405
+406
+406
+406
+406
+406
+406
+406
+406
+406
+406
+407
+407
+407
+407
+408
+409
+409
+409
+409
+409
+409
+409
+409
+409
+409
+409
+410
+410
+410
+4280
+450
+4583
+4607
+4894
+4910
+524
+5314
+5518
+5654
+599
+628
+633
+6443
+6522
+658
+658
+6645
+6645
+6879
+710
+710
+711
+726
+771
+838
+865
+901
+915
+915
+919
+975
+{"file":"conformance/src/lib.rs","lines":625,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Conformance trait definitions. Clean."}
+{"file":"franken_decision/src/lib.rs","lines":1614,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Decision contract runtime, Bayesian update, loss matrix. Clean."}
+{"file":"franken_evidence/src/export.rs","lines":382,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"JSONL export, rotation, crash recovery. Clean."}
+{"file":"franken_evidence/src/lib.rs","lines":687,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Evidence ledger schema, builder validation. Clean."}
+{"file":"franken_evidence/src/render.rs","lines":1399,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Multi-level renderer, HTML escaping correct. Clean."}
+{"file":"franken_kernel/src/lib.rs","lines":1608,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core type substrate, TraceId/DecisionId. forbid(unsafe). Clean."}
+{"file":"frankenlab/src/main.rs","lines":513,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CLI harness. Clean."}
+{"file":"src/actor.rs","lines":2270,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"1 HIGH: supervised actor restart leaves state as Stopping, restarted actor exits immediately on empty mailbox (deadlock-on-restart). 1 MEDIUM: restart ignores backoff delay from SupervisionDecision. Both fixed."}
+{"file":"src/actor.rs","lines":2427,"batch":425,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":1,"notes":"ActorJoinFuture drop-abort path diverged from ActorHandle::abort; now marks Stopping, wakes the mailbox receiver, and is covered by a regression test."}
+{"file":"src/actor.rs","timestamp":"2026-03-23T01:00:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed ActorHandle::join returning an unsafe future (now returns ActorJoinFuture) and ActorHandle::abort not waking cancel_waker."}
+{"file":"src/app.rs","lines":2390,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"App lifecycle, drop bomb defuse on all paths, convergence guard. Clean."}
+{"file":"src/app.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/audit/ambient.rs","lines":605,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"SOUND","bugs":0,"notes":"Reviewed ambient-authority catalog and source-tree scanner invariants. Current exemptions, ceiling enforcement, and non-test filtering look internally consistent."}
+{"file":"src/bytes/buf/chain.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/bytes/buf/limit.rs","status":"audited"}
+{"file":"src/bytes/bytes.rs","lines":734,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Arc-based sharing, window arithmetic correct."}
+{"file":"src/bytes/bytes_mut.rs","lines":709,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Vec-backed, delegation to Vec safety."}
+{"file":"src/bytes/bytes_mut.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/bytes/mod.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/cancel/progress_certificate.rs","lines":1500,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Drain phase classification, Azuma/Freedman bounds, stall detection. Correct math."}
+{"file":"src/cancel/progress_certificate.rs","lines":2520,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Azuma-Hoeffding/Freedman bounds, variance accumulator. Correct."}
+{"file":"src/cancel/symbol_cancel.rs","status":"audited"}
+{"file":"src/channel/broadcast.rs","lines":456,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Broadcast channel: all receivers woken on send, proper lag handling. Clean."}
+{"file":"src/channel/broadcast.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/channel/clock_skew.rs","lines":842,"batch":406,"date":"2026-03-21","agent":"SwiftLake","verdict":"FIXED","bugs":2,"notes":"logged non-jump skew evidence; fixed 1ns jitter collapsing to zero"}
+{"file":"src/channel/mpsc.rs","lines":865,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MPSC channel: reserve/send two-phase, baton passing, cascade waking. No lost wakeups."}
+{"file":"src/channel/mpsc.rs","lines":865,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: waker management, Pin safety, cancel-safety. All correct."}
+{"file":"src/channel/partition.rs","lines":876,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Directed partition, atomic count consistent with HashSet."}
+{"file":"src/channel/session.rs","lines":708,"batch":408,"date":"2026-03-21","agent":"ChartreuseGrove","verdict":"SOUND","bugs":0,"notes":"Deep trace through session send/recv, mpsc/oneshot integration, graded obligation flow, and end-to-end usages. No concrete defect found."}
+{"file":"src/channel/session.rs","lines":708,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session-typed channels, obligation abort on send failure. Clean."}
+{"file":"src/channel/session.rs","lines":708,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session-typed channels. Clean."}
+{"file":"src/channel/watch.rs","lines":1718,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: ChangedFuture waker lives on receiver, version double-check. Clean."}
+{"file":"src/channel/watch.rs","lines":631,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Watch channel: double-check pattern closes TOCTOU, atomic borrow_and_update. Clean."}
+{"file":"src/cli/error.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/cli/exit.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/cli/output.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/codec/bytes_codec.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
 {"file":"src/codec/framed.rs","lines":238,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Framed codec, cooperative budget, EOF handling. Clean."}
 {"file":"src/codec/length_delimited.rs","lines":241,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Length-delimited framing, checked arithmetic throughout. Clean."}
-{"file":"src/trace/geodesic.rs","lines":2344,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"A* geodesic normalization, greedy/beam search. No unsafe casts in production code."}
-{"file":"src/config.rs","lines":1565,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Runtime config types, CLI parsing. No unsafe casts. Clean."}
-{"file":"src/types/budget.rs","lines":1797,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Budget semiring: saturating arithmetic throughout. MinPlusCurve correct. Clean."}
-{"file":"src/types/pressure.rs","lines":183,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Backpressure with correct threshold directions. Clamp to [0,1]. Clean."}
-{"file":"src/types/builder.rs","lines":933,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Builder error types, validation helpers. All correct. Clean."}
-{"file":"src/signal/graceful.rs","lines":901,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Graceful shutdown, grace period RAII guard, saturating duration. Clean."}
+{"file":"src/codec/length_delimited.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
 {"file":"src/codec/lines.rs","lines":333,"batch":415,"date":"2026-03-21","agent":"CopperCove","verdict":"FIXED","bugs":1,"notes":"Reset stale LinesCodec scan/discard state when callers reuse a shorter buffer so decode() cannot panic or discard unrelated replacement data after partial/oversized-line paths."}
-{"file":"src/net/unix/datagram.rs","lines":1377,"batch":372,"date":"2026-03-21","agent":"CyanLynx","verdict":"FIXED","bugs":1,"notes":"bind post-init failure could leak the socket path before wrapper drop cleanup was installed; fixed via shared finalize helper + regression"}
-{"file":"src/net/unix/listener.rs","lines":815,"batch":372,"date":"2026-03-21","agent":"CyanLynx","verdict":"FIXED","bugs":1,"notes":"bind post-init failure could leak the socket path before wrapper drop cleanup was installed; fixed via shared finalize helper + regression"}
-{"file":"src/stream/peekable.rs","lines":395,"batch":421,"date":"2026-03-21","agent":"MistyIsland","verdict":"FIXED","bugs":1,"notes":"Removed the unnecessary Unpin bound from StreamExt::peekable() so Peekable remains usable with pinned !Unpin streams; added a focused regression covering a PhantomPinned stream."}
-{"file":"src/obligation/eprocess.rs","lines":657,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: LeakMonitor observations/alert_count u32 overflow. Widened to u64."}
-{"file":"src/supervision.rs","lines":8362,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: RestartStormMonitor observations/alert_count u32 overflow. Widened to u64."}
-{"file":"src/lab/chaos.rs","lines":1248,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 MEDIUM: injection_rate u64 addition chain overflow + merge plain += overflow. Fixed with saturating_add."}
-{"file":"src/gen_server.rs","lines":6443,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"OTP-style GenServer: reply obligations, mailbox drain, lifecycle. Clean."}
-{"file":"src/time/driver.rs","lines":1943,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer driver, VirtualClock CAS, BrowserMonotonicClock. Clean."}
-{"file":"src/channel/session.rs","lines":708,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session-typed channels, obligation abort on send failure. Clean."}
+{"file":"src/combinator/adaptive_hedge.rs","lines":346,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Peak-EWMA decay, clamp order. Correct."}
+{"file":"src/combinator/bracket.rs","lines":499,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Release on all post-acquire paths including panic+cancel."}
+{"file":"src/combinator/bulkhead.rs","lines":1717,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capped CAS release, FIFO queue, anti-barging. Clean."}
+{"file":"src/combinator/circuit_breaker.rs","lines":1950,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 LOW: success_count + failure_count u32 overflow in failure_rate/should_open. Fixed with saturating_add."}
 {"file":"src/combinator/first_ok.rs","lines":845,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"First-ok combinator, cancel-point ordering, failure collection. Clean."}
-{"file":"src/gen_server.rs","lines":6443,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"OTP-style GenServer: reply obligations, mailbox drain, lifecycle. Clean."}
-{"file":"src/time/driver.rs","lines":1943,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer driver, VirtualClock CAS, BrowserMonotonicClock. Clean."}
-{"file":"src/channel/session.rs","lines":708,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session-typed channels. Clean."}
 {"file":"src/combinator/first_ok.rs","lines":845,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"First-ok combinator. Clean."}
-{"file":"src/messaging/kafka.rs","lines":1587,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka client, DeliverySender Drop guard. Clean."}
-{"file":"src/messaging/kafka_consumer.rs","lines":1266,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka consumer, TOCTOU re-check, rebalance cleanup. Clean."}
-{"file":"src/messaging/stream.rs","lines":1021,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Messaging streams, retention enforcement. Clean."}
-{"file":"src/messaging/snapshot.rs","lines":842,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Service capsule snapshot/restore, digest computation. Clean."}
-{"file":"src/messaging/capability/routing.rs","lines":796,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability routing, wildcard injection prevention. Clean."}
-{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear capability tokens, schema authorization. Clean."}
-{"file":"src/trace/recorder.rs","lines":1423,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace recorder, DropOldest loop termination, ensure_capacity. Clean."}
-{"file":"src/trace/buffer.rs","lines":422,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Ring buffer, boundary conditions, capacity clamp. Clean."}
-{"file":"src/trace/scoring.rs","lines":482,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace scoring, persistence_sum saturating. Clean."}
-{"file":"src/trace/event_structure.rs","lines":520,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TracePoset, sorted successor invariant, topo sort. Clean."}
-{"file":"src/trace/tla_export.rs","lines":764,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TLA+ trace export. Clean."}
-{"file":"src/channel/mpsc.rs","lines":865,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: waker management, Pin safety, cancel-safety. All correct."}
-{"file":"src/sync/semaphore.rs","lines":649,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: waker registration, Drop cleanup, baton-passing. All correct."}
-{"file":"src/stream/debounce.rs","lines":578,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: timer re-arm, waker handling. Clean."}
-{"file":"src/channel/watch.rs","lines":1718,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: ChangedFuture waker lives on receiver, version double-check. Clean."}
-{"file":"src/grpc/server.rs","timestamp":"2026-03-22T19:37:26Z","agent":"Gemini","status":"SOUND","notes":"Audited and fixed test clone issue"}
-{"file":"src/web/router.rs","timestamp":"2026-03-22T19:37:26Z","agent":"Gemini","status":"SOUND","notes":"Audited and fixed test clone issue"}
-{"file":"src/security/error.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/bytes/mod.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/plan/fixtures.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/stream/zip.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/web/websocket.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/io/read_line.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/cli/output.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/net/sys/windows.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/web/session.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/combinator/hedge.rs","lines":1253,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed polled-after-completion fix (panic→Cancelled). Correct."}
+{"file":"src/combinator/hedge.rs","lines":1335,"batch":410,"date":"2026-03-21","agent":"EmeraldBrook","verdict":"FIXED","bugs":1,"notes":"AdaptiveHedgePolicy warmup no longer freezes forever for window_size < 10; calibration now starts once small windows are full, with focused regression coverage."}
+{"file":"src/combinator/hedge.rs","timestamp":"2026-03-23T00:00:30Z","agent":"Gemini","status":"SOUND","notes":"Audited, fixed panic on repoll"}
+{"file":"src/combinator/join.rs","status":"audited"}
 {"file":"src/combinator/map_reduce.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/bytes/bytes_mut.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/net/websocket/mod.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/fs/file.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/net/tcp/socket.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"src/plan/extractor.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
-{"file":"franken_kernel/src/lib.rs","lines":1608,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core type substrate, TraceId/DecisionId. forbid(unsafe). Clean."}
-{"file":"franken_evidence/src/lib.rs","lines":687,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Evidence ledger schema, builder validation. Clean."}
-{"file":"franken_evidence/src/export.rs","lines":382,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"JSONL export, rotation, crash recovery. Clean."}
-{"file":"franken_evidence/src/render.rs","lines":1399,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Multi-level renderer, HTML escaping correct. Clean."}
-{"file":"franken_decision/src/lib.rs","lines":1614,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Decision contract runtime, Bayesian update, loss matrix. Clean."}
-{"file":"frankenlab/src/main.rs","lines":513,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CLI harness. Clean."}
-{"file":"conformance/src/lib.rs","lines":625,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Conformance trait definitions. Clean."}
-{"file":"src/raptorq/decoder.rs","lines":4751,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: all as-u casts bounded by RFC 6330 table limits. Clean."}
-{"file":"src/raptorq/systematic.rs","lines":1939,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: k bounded by SystematicParams, mod 255 for u8. Clean."}
-{"file":"src/time/intrusive_wheel.rs","lines":1314,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: all casts bounded by slot counts (max 256) or .min() clamped. Clean."}
-{"file":"src/plan/certificate.rs","lines":1869,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: hashing casts lossless, node_count casts need 192GB+ to overflow. Clean."}
-{"file":"src/epoch.rs","lines":3010,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Epoch-based versioning: checked_add, saturating_add, correct CAS. Clean."}
-{"file":"src/app.rs","lines":2390,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"App lifecycle, drop bomb defuse on all paths, convergence guard. Clean."}
+{"file":"src/combinator/quorum.rs","lines":805,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"M-of-N >= threshold correct, zero-quorum identity."}
+{"file":"src/combinator/race.rs","lines":1275,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Race outcome routing, loser panic propagation."}
+{"file":"src/combinator/rate_limit.rs","status":"audited"}
+{"file":"src/combinator/retry.rs","lines":923,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed polled-after-completion fix (panic→Cancelled). Correct."}
+{"file":"src/combinator/retry.rs","timestamp":"2026-03-23T00:00:30Z","agent":"Gemini","status":"SOUND","notes":"Audited, fixed panic on repoll"}
+{"file":"src/combinator/select.rs","lines":600,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Alternating bias, no result leak. Clean."}
+{"file":"src/combinator/timeout.rs","status":"audited"}
+{"file":"src/config.rs","lines":1565,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Runtime config types, CLI parsing. No unsafe casts. Clean."}
+{"file":"src/cx/cx.rs","lines":3409,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core Cx: mask_depth bounded, checkpoint count u64, capability model correct."}
 {"file":"src/cx/macaroon.rs","lines":2670,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Macaroon capability attenuation, HMAC chain, constant-time compare. Clean."}
+{"file":"src/cx/mod.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/cx/registry.rs","lines":3510,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"NameRegistry: checked_add on watch_ref, permit identity validation correct."}
+{"file":"src/cx/scope.rs","lines":2375,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Structured concurrency scope: TaskCreationGuard rollback, race_all fairness."}
+{"file":"src/database/mysql.rs","lines":2910,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MySQL packet parsing, auth plugin dispatch, lenenc encoding. All casts bounded."}
+{"file":"src/database/mysql.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/database/pool.rs","lines":1600,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed cancel-aware retry backoff. 10ms chunk sleep. Correct."}
+{"file":"src/database/pool.rs","lines":1794,"batch":423,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"Restored the dropped async pool surface, kept retry backoff cancellation-aware, and added async cancellation regression coverage."}
+{"file":"src/database/postgres.rs","lines":5493,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PG wire protocol, SCRAM-SHA-256 (constant-time, nonce prefix verify), OID cast correct."}
+{"file":"src/database/sqlite.rs","lines":1644,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"SQLite wrapper: Mutex-protected connection, blocking pool dispatch. Column unwraps safe."}
+{"file":"src/database/sqlite.rs","lines":1645,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deferred-rollback pattern, cancel-correctness, parameterized queries. Clean."}
+{"file":"src/database/transaction.rs","lines":866,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Savepoint name validation, retry with delay, cancel-aware. Clean."}
+{"file":"src/decoding.rs","lines":2085,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: plan.k as u16 truncation in configure_block_k. Fixed with u16::try_from."}
+{"file":"src/distributed/assignment.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/distributed/bridge.rs","lines":1869,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: finalizer_count as u32 truncation. Fixed with try_from/unwrap_or."}
+{"file":"src/distributed/consistent_hash.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/distributed/distribution.rs","lines":944,"batch":418,"date":"2026-03-21","agent":"WindyLake","verdict":"SOUND","bugs":0,"notes":"Stale re-verification/closure pass: current HEAD already reports symbols_distributed from symbols_sent_total and includes focused regressions for no-replica and assignment-plan count cases. Historical fix was already present; no new source patch required in this pass."}
+{"file":"src/distributed/encoding.rs","status":"audited"}
+{"file":"src/distributed/recovery.rs","lines":2382,"batch":414,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RaptorQ recovery orchestrator, collector, decoder state machine. Symbol dedup+upgrade, block requirements, attempt tracking, saturating arithmetic. Clean."}
+{"file":"src/distributed/snapshot.rs","lines":1067,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Binary serde, bounded pre-alloc, trailing bytes rejected."}
+{"file":"src/epoch.rs","lines":3010,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Epoch-based versioning: checked_add, saturating_add, correct CAS. Clean."}
+{"file":"src/error.rs","lines":1276,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Error taxonomy, exhaustive category/recoverability match."}
+{"file":"src/fs/buf_reader.rs","lines":172,"batch":413,"date":"2026-03-21","agent":"MistyIsland","verdict":"SOUND","bugs":0,"notes":"Current HEAD already contains BufReader::capacity and FS-VERIFY-030 wrapper coverage; audited the fs wrapper/read-path surface and found no remaining issue. Verified with remote fs_verify_030 plus cargo check/clippy."}
+{"file":"src/fs/dir.rs","lines":259,"batch":414,"date":"2026-03-21","agent":"TopazWolf","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: Linux io_uring create_dir path hardcoded mode 0o755, diverging from std::fs::create_dir / mkdir defaults and making feature enablement change directory permissions. Fixed by aligning the mode with std semantics and adding focused regression coverage."}
+{"file":"src/fs/file.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/fs/lines.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/fs/open_options.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/fs/path_ops.rs","lines":672,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic write, temp path RAII, parent fsync. No path traversal. Clean."}
+{"file":"src/fs/path_ops.rs","lines":672,"batch":416,"date":"2026-03-21","agent":"TopazWolf","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: write_atomic replaced existing files with a fresh temp inode but did not preserve the target's permissions, so atomic rewrites could silently drop mode bits. Fixed by copying existing permissions onto the temp file before rename and adding focused regression coverage."}
+{"file":"src/fs/read_dir.rs","lines":291,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"SOUND","bugs":0,"notes":"Traced fs::read_dir through Vfs and verification coverage. Pending-state ownership and DirEntry metadata/file_type semantics look consistent."}
+{"file":"src/fs/uring.rs","lines":700,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"io_uring file ops. Drop drains completions, position CAS, lseek seek. Clean."}
+{"file":"src/gen_server.rs","lines":6443,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"OTP-style GenServer: reply obligations, mailbox drain, lifecycle. Clean."}
+{"file":"src/gen_server.rs","lines":6443,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"OTP-style GenServer: reply obligations, mailbox drain, lifecycle. Clean."}
+{"file":"src/gen_server.rs","lines":6578,"batch":425,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":1,"notes":"GenServerJoinFuture drop-abort path diverged from GenServerHandle::abort; now marks Stopping, wakes the mailbox receiver, and is covered by a regression test."}
+{"file":"src/gen_server.rs","timestamp":"2026-03-23T01:00:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed GenServerHandle::join returning an unsafe future (now returns GenServerJoinFuture) and GenServerHandle::abort not waking cancel_waker."}
+{"file":"src/grpc/client.rs","lines":1498,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 HIGH: borrow-after-move compile error in GrpcClient::new and with_codec. Fixed by reordering."}
+{"file":"src/grpc/client.rs","lines":1670,"batch":410,"date":"2026-03-21","agent":"OrangeRidge","verdict":"FIXED","bugs":2,"notes":"gRPC client compression negotiation now suppresses unsupported send encodings while preserving accepted decoding support; also fixed constructor borrow-after-move regression in GrpcClient::new/with_codec validation path."}
+{"file":"src/grpc/codec.rs","lines":807,"batch":410,"date":"2026-03-21","agent":"OrangeRidge","verdict":"FIXED","bugs":1,"notes":"FramedCodec now supports independent compressor/decompressor hook configuration so inbound compressed-frame support no longer forces outbound compressed framing."}
+{"file":"src/grpc/health.rs","lines":1332,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":1,"notes":"HealthService::watch constructed initial status/version snapshots in separate reads and could miss a concurrent transition forever; it now snapshots atomically and has a lock-coupling regression test."}
+{"file":"src/grpc/health.rs","lines":600,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic status+version capture fix correct."}
+{"file":"src/grpc/reflection.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/grpc/server.rs","lines":1196,"batch":417,"date":"2026-03-21","agent":"TopazWolf","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: CallContext::from_metadata_at treated a malformed grpc-timeout header as if it were absent by falling back to default_timeout, contradicting the documented fail-closed contract. Fixed by only applying the default when the header is absent and adding a focused regression test."}
+{"file":"src/grpc/server.rs","timestamp":"2026-03-22T19:37:26Z","agent":"Gemini","status":"SOUND","notes":"Audited and fixed test clone issue"}
+{"file":"src/grpc/streaming.rs","lines":800,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"gRPC streaming: request/response types, waker management, close semantics. Clean."}
+{"file":"src/grpc/streaming.rs","lines":886,"batch":408,"date":"2026-03-21","agent":"ChartreuseGrove","verdict":"FIXED","bugs":1,"notes":"Metadata insert paths preserved mixed-case keys in storage. Normalized ASCII and binary keys to lowercase on insert and added regression coverage."}
+{"file":"src/http/body.rs","lines":600,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Body consumption guard via take(), Limited size tracking. Clean."}
+{"file":"src/http/h1/client.rs","lines":1200,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Header injection prevention, body framing. Clean."}
+{"file":"src/http/h1/codec.rs","lines":1455,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request smuggling audit: TE+CL rejected, null bytes rejected, case-insensitive lookups. Clean."}
+{"file":"src/http/h1/http_client.rs","lines":3447,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP client: redirects, connection reuse, stale retry, sensitive header stripping. No casts, no unwrap."}
+{"file":"src/http/h1/server.rs","lines":919,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"100-continue handling, connection reuse after body drain. Clean."}
+{"file":"src/http/h1/stream.rs","lines":1895,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP stream: CRLF sanitization, reason phrase validation, nibble casts bounded."}
+{"file":"src/http/h2/connection.rs","lines":3402,"batch":419,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 LOW: process_headers accepts new streams after GOAWAY sent, violating RFC 9113 §6.8. Fixed by rejecting with RST_STREAM/REFUSED_STREAM."}
+{"file":"src/http/h2/frame.rs","lines":1625,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":7,"notes":"7 MEDIUM: usize as u32 in frame encode could silently truncate to corrupt 24-bit length field. Fixed with frame_length() helper that clamps to MAX_FRAME_SIZE + debug_assert in write()."}
+{"file":"src/http/h2/hpack.rs","lines":2471,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 LOW: size -= evicted.size() could underflow if invariant broken. Fixed with saturating_sub."}
+{"file":"src/http/h3/body.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/http/h3/error.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/http/h3_native.rs","lines":3092,"batch":428,"date":"2026-03-23","agent":"CrimsonEagle","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes audit found closed request streams could be silently recreated after finish; added finished-stream tombstones and regression coverage for late frames / double finish."}
+{"file":"src/http/h3_native.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/http/pool.rs","lines":1600,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Connection pool: stale eviction, cleanup_expired before create check, u64 counters. Clean."}
+{"file":"src/io/browser_stream.rs","lines":2970,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"WASM stream bridges, state machine, limits enforced."}
+{"file":"src/io/buf_writer.rs","lines":524,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"SOUND","bugs":0,"notes":"Traced AsyncWrite/AsyncWriteExt interactions and cancellation tests. Buffer flush cursor and direct-write bypass behavior look coherent."}
+{"file":"src/io/cap.rs","status":"audited"}
+{"file":"src/io/copy.rs","lines":400,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async copy. EOF, partial write retry, flush-on-complete. Clean."}
+{"file":"src/io/lines.rs","status":"audited"}
+{"file":"src/io/read_line.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/io/seek.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/lab/chaos.rs","lines":1248,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 MEDIUM: injection_rate u64 addition chain overflow + merge plain += overflow. Fixed with saturating_add."}
+{"file":"src/lab/config.rs","status":"audited"}
+{"file":"src/lab/conformal.rs","lines":1652,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: quantile rank formula, empty set handling. Correct."}
+{"file":"src/lab/http/harness.rs","lines":516,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: by_status_class u16 overflow on class * 100. Fixed with saturating_mul/add."}
+{"file":"src/lab/network/harness.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/lab/network/network.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/lab/oracle/actor.rs","lines":1159,"batch":424,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"SupervisionOracle escalation detection needed explicit supervisor-origin matching for restart-limit escalation checks; clarified the predicate and added a regression covering supervisor-originated escalation."}
+{"file":"src/lab/oracle/actor.rs","lines":1241,"batch":425,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":2,"notes":"SupervisionOracle was letting later restarts/escalations satisfy earlier failures across incident boundaries; it now evaluates each failure inside its own causal window and covers OneForAll and RestForOne regressions."}
+{"file":"src/lab/oracle/ambient_authority.rs","lines":845,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability model, Full wildcard, orphan safety. Clean."}
+{"file":"src/lab/oracle/evidence.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/lab/oracle/obligation_leak.rs","status":"audited"}
+{"file":"src/lab/spork_harness.rs","status":"audited"}
+{"file":"src/link.rs","lines":1836,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Link symmetry, self-links, exit resolution, region cleanup. Clean."}
+{"file":"src/messaging/capability/mod.rs","lines":604,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability registry, pattern coverage, fail-closed checks. Clean."}
+{"file":"src/messaging/capability/mod.rs","lines":604,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/capability/routing.rs","lines":796,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Routing programs, subject rewriting, capability authorization. Clean."}
+{"file":"src/messaging/capability/routing.rs","lines":796,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/capability/routing.rs","lines":796,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability routing, wildcard injection prevention. Clean."}
+{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear tokens, session advance, cursor authority lease. Clean."}
+{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear capability tokens, schema authorization. Clean."}
+{"file":"src/messaging/class.rs","lines":495,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery classes, cost vectors, policy validation. Clean."}
+{"file":"src/messaging/class.rs","lines":495,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/class.rs","lines":495,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery class enum, policy validation, serde re-validation. Clean."}
+{"file":"src/messaging/class.rs","lines":496,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery-class taxonomy, monotonic ordering, serde round-trip, binary search policy. 14 tests. Clean."}
+{"file":"src/messaging/compiler.rs","lines":1246,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FABRIC validation compiler. 6 tests. Cross-reference checks, fail-closed validation. Clean."}
+{"file":"src/messaging/compiler.rs","lines":1246,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FABRIC IR validation compiler. Subject/morphism/service/protocol/capability/consumer validation. Cost estimation with saturating arithmetic. 5 tests. Clean."}
+{"file":"src/messaging/consumer.rs","lines":4746,"batch":406,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of consumer cursor lease state machine. 40 tests. Lease fencing, ack floor gap prevention, obligation lifecycle all correct."}
+{"file":"src/messaging/control.rs","lines":3895,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of control advisory system. 89 tests. CRDT propagation, anti-entropy, membership, advisory damping all correct."}
+{"file":"src/messaging/cut.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/cut.rs","lines":0,"batch":409,"date":"2026-03-21","agent":"ChartreuseGrove","verdict":"FIXED","bugs":1,"notes":"Peer review found promote-on-NaN in counterfactual scoring: evaluate_promotion validated confidence and violation rate but not policy_gain, so NaN could bypass the no-improvement check. Added fail-closed validation for baseline/candidate scores and regression tests."}
+{"file":"src/messaging/explain.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/explain.rs","lines":1946,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Morphism composition fixed-point, adaptive policy envelope. Clean."}
+{"file":"src/messaging/explain.rs","lines":1947,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Sheaf topology checker, morphism composition, cursor delegation overlap detection, witness placement durability+confidentiality, adaptive policy envelope. 10 tests. Clean."}
+{"file":"src/messaging/fabric.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/fabric.rs","lines":5710,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed SpeculativePublishAttempt Drop+must_use. Correct lifecycle."}
+{"file":"src/messaging/fabric.rs","lines":7093,"batch":423,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"Speculative publish attempts are now single-use with a debug drop contract; replayability coverage now resolves attempts explicitly."}
+{"file":"src/messaging/federation.rs","lines":2584,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cross-domain federation bridge, replication, gateway convergence. Clean."}
+{"file":"src/messaging/federation.rs","lines":2584,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/federation.rs","lines":2585,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Federation bridges, capability scoping, replication transfer, replay trimming. Clean."}
+{"file":"src/messaging/ir.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/kafka.rs","lines":1587,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka client, DeliverySender Drop guard. Clean."}
+{"file":"src/messaging/kafka.rs","lines":1588,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka client wrapper: rdkafka integration, delivery channel, cancel-safety. Clean."}
+{"file":"src/messaging/kafka_consumer.rs","lines":1266,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka consumer, TOCTOU re-check, rebalance cleanup. Clean."}
+{"file":"src/messaging/mod.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/morphism.rs","lines":2162,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Subject transforms, cycle detection, boundary plans. Clean."}
+{"file":"src/messaging/morphism.rs","lines":2162,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/morphism.rs","lines":2162,"batch":414,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Re-audit of morphism transforms, semantic cycle detection, boundary plans. OR logic in classify_semantic_cycle is intentionally fail-safe. Clean."}
+{"file":"src/messaging/nats.rs","lines":1953,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: subscribe/queue_subscribe leak subscription entry on write failure. Fixed by removing entry in error path."}
+{"file":"src/messaging/nats.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed cancellation leak in subscribe and queue_subscribe using SubscribeGuard. Previous agent only handled Err path, not future drop/cancellation."}
+{"file":"src/messaging/policy.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/policy.rs","lines":1995,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Degradation policy, reliability controller, safety envelope. Clean."}
+{"file":"src/messaging/policy.rs","lines":2017,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Priority scoring, degradation planning, bounded-regret controller, safety envelope. Clean."}
+{"file":"src/messaging/privacy.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/privacy.rs","lines":1215,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Privacy budget ledger, Laplace DP, HMAC key derivation. Clean."}
+{"file":"src/messaging/privacy.rs","lines":1216,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Privacy export with HMAC-SHA256 key hierarchy, Laplace noise, budget ledger, restore scrub. Deterministic unit_interval avoids 0/1. 14 tests. Clean."}
+{"file":"src/messaging/redis.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/redis.rs","lines":2445,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PubSub subscribe tracks after ACK. No pre-registration leak."}
+{"file":"src/messaging/service.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/service.rs","lines":5748,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed ServiceBoundary addition. No dangerous casts. Clean."}
+{"file":"src/messaging/session/contract.rs","lines":1257,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
 {"file":"src/messaging/session/contract.rs","lines":1403,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session contract validation, label scoping, duality check. Clean."}
 {"file":"src/messaging/session/obligation.rs","lines":692,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session obligation tokens, no leaks. Clean."}
 {"file":"src/messaging/session/projection.rs","lines":534,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session type projection, Send|Receive merge correct. Clean."}
-{"file":"src/messaging/explain.rs","lines":1946,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Morphism composition fixed-point, adaptive policy envelope. Clean."}
-{"file":"src/messaging/class.rs","lines":495,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery class enum, policy validation, serde re-validation. Clean."}
-{"file":"src/http/h2/connection.rs","lines":3402,"batch":419,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 LOW: process_headers accepts new streams after GOAWAY sent, violating RFC 9113 §6.8. Fixed by rejecting with RST_STREAM/REFUSED_STREAM."}
-{"file":"src/runtime/region_table.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/net/unix/mod.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/runtime/reactor/windows.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/cx/mod.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/codec/bytes_codec.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/lab/network/harness.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/io/seek.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/fs/open_options.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/stream/filter.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/stream/collect.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/fs/lines.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/http/h3_native.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/util/det_hash.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/http/h3/body.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/messaging/session/synthesis.rs","lines":1459,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/snapshot.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/messaging/snapshot.rs","lines":842,"batch":412,"date":"2026-03-21","agent":"OrangeRidge","verdict":"FIXED","bugs":1,"notes":"RecoverableServiceCapsule::capture now rejects pre-hibernated state so callers cannot bypass the explicit capture->hibernate->restore transition. Validated on the combined shared-tree snapshot hardening."}
+{"file":"src/messaging/snapshot.rs","lines":842,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Service capsule snapshot/restore, digest computation. Clean."}
+{"file":"src/messaging/stream.rs","lines":1021,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Messaging streams, retention enforcement. Clean."}
+{"file":"src/messaging/stream.rs","lines":811,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Region-owned stream state machine. Lifecycle, retention limits, quiescence, capture policy, in-memory backend. 8 tests. Clean."}
+{"file":"src/messaging/stream.rs","lines":812,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Quiescent streams, retention, byte accounting, lifecycle. Clean."}
+{"file":"src/messaging/subject.rs","lines":2687,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/subject.rs","lines":2687,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"NATS-style subject patterns, trie routing, queue groups, sharded sublist, subject registry with specificity lookup, namespace kernel. 30+ tests. Clean."}
 {"file":"src/monitor.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
-{"file":"src/web/sse.rs","lines":567,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: SSE data field injection via bare CR. data.split(\n) didnt handle \r, allowing injection of retry:/event:/id: fields. Fixed by normalizing \r\n and \r to \n before split."}
-{"file":"src/http/h1/codec.rs","lines":1455,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request smuggling audit: TE+CL rejected, null bytes rejected, case-insensitive lookups. Clean."}
-{"file":"src/http/h1/server.rs","lines":919,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"100-continue handling, connection reuse after body drain. Clean."}
-{"file":"src/http/body.rs","lines":600,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Body consumption guard via take(), Limited size tracking. Clean."}
-{"file":"src/net/websocket/handshake.rs","lines":1288,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: SHA-1 accept key correct, CRLF sanitization, no origin bypass. Clean."}
-{"file":"src/net/websocket/client.rs","lines":1371,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: close handshake correct, message size limits, ping flood cap. Clean."}
-{"file":"src/net/websocket/server.rs","lines":944,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: data-after-close rejected, close state machine correct. Clean."}
-{"file":"src/tls/stream.rs","lines":649,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: no renegotiation, clean state machine. Clean."}
-{"file":"src/tls/acceptor.rs","lines":783,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: safe defaults, proper client cert verification. Clean."}
-{"file":"src/web/middleware.rs","lines":2889,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CORS, auth, rate limiting, body limits. CRLF sanitized. Clean."}
-{"file":"src/web/extract.rs","lines":1245,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Body extraction with size limits. Clean."}
-{"file":"src/web/router.rs","lines":500,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"URL routing, no path traversal concern. Clean."}
-{"file":"src/net/dns/resolver.rs","lines":988,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS resolution, hostname validation. Clean."}
 {"file":"src/net/dns/cache.rs","lines":686,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS cache TTL handling. Clean."}
-{"file":"src/service/discover.rs","lines":1025,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Generation-based stale protection, concurrent resolver safety. Clean."}
-{"file":"src/net/quic_native/transport.rs","lines":1534,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC transport: RTT, congestion, loss detection. saturating arithmetic. Clean."}
+{"file":"src/net/dns/error.rs","status":"audited"}
+{"file":"src/net/dns/resolver.rs","lines":988,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS resolution, hostname validation. Clean."}
+{"file":"src/net/happy_eyeballs.rs","lines":300,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lazy filter optimization preserves interleaving logic. No aliasing issue."}
+{"file":"src/net/happy_eyeballs.rs","status":"audited"}
+{"file":"src/net/quic/connection.rs","status":"audited"}
 {"file":"src/net/quic_core/mod.rs","lines":1300,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC varint encoding/decoding, packet number, transport params. Clean."}
-{"file":"src/transport/router.rs","lines":2946,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Endpoint routing, DispatchGuard RAII, ConnectionGuard. Clean."}
+{"file":"src/net/quic_native/connection.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/net/quic_native/mod.rs","status":"audited"}
+{"file":"src/net/quic_native/streams.rs","status":"audited"}
+{"file":"src/net/quic_native/transport.rs","lines":1534,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC transport: RTT, congestion, loss detection. saturating arithmetic. Clean."}
+{"file":"src/net/quic_native/transport.rs","status":"audited"}
+{"file":"src/net/sys/windows.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/net/tcp/socket.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/net/tcp/split.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed borrow checker conflict (E0502) in waker rearm by cloning the combined waker."}
+{"file":"src/net/tcp/traits.rs","status":"audited"}
+{"file":"src/net/udp.rs","lines":732,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async UDP wrapper, proper WouldBlock handling, fallback wakeup. Clean."}
+{"file":"src/net/unix/datagram.rs","lines":1377,"batch":372,"date":"2026-03-21","agent":"CyanLynx","verdict":"FIXED","bugs":1,"notes":"bind post-init failure could leak the socket path before wrapper drop cleanup was installed; fixed via shared finalize helper + regression"}
+{"file":"src/net/unix/listener.rs","lines":815,"batch":372,"date":"2026-03-21","agent":"CyanLynx","verdict":"FIXED","bugs":1,"notes":"bind post-init failure could leak the socket path before wrapper drop cleanup was installed; fixed via shared finalize helper + regression"}
+{"file":"src/net/unix/mod.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/net/unix/split.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed missing combined_waker initialization and borrow checker conflict (E0609, E0502) in split I/O state."}
+{"file":"src/net/websocket/client.rs","lines":1371,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: close handshake correct, message size limits, ping flood cap. Clean."}
+{"file":"src/net/websocket/handshake.rs","lines":1288,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: SHA-1 accept key correct, CRLF sanitization, no origin bypass. Clean."}
+{"file":"src/net/websocket/mod.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/net/websocket/server.rs","lines":944,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: data-after-close rejected, close state machine correct. Clean."}
+{"file":"src/net/websocket/split.rs","status":"audited"}
+{"file":"src/net/worker_channel.rs","lines":2626,"batch":414,"date":"2026-03-21","agent":"RusticGlen","verdict":"FIXED","bugs":1,"notes":"Shutdown follow-up leak fixed: once shutdown_requested is set, inbound CancelAcknowledged/DrainCompleted no longer enqueue new DrainJob/FinalizeJob traffic. Added 2 focused regressions."}
+{"file":"src/obligation/dialectica.rs","status":"audited"}
+{"file":"src/obligation/eprocess.rs","lines":657,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: LeakMonitor observations/alert_count u32 overflow. Widened to u64."}
+{"file":"src/obligation/graded.rs","status":"audited"}
+{"file":"src/obligation/leak_check.rs","lines":1200,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"VarState join lattice, obligation leak detection. Correct scope exit analysis."}
+{"file":"src/obligation/lyapunov.rs","lines":2302,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Potential V >= 0 by construction, i128 slack, history bounded."}
+{"file":"src/obligation/marking.rs","lines":1000,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Marking analyzer, obligation lifecycle counting. Clean."}
+{"file":"src/obligation/no_aliasing_proof.rs","lines":2140,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"5 lemmas verified: allocation, transfer, release, frame, leak."}
+{"file":"src/obligation/saga.rs","lines":1200,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Saga compensation, unwind guard. Drop-safe. Clean."}
+{"file":"src/obligation/separation_logic.rs","lines":1500,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Separation logic verifier, double-resolve detection, region close leak check. Correct."}
+{"file":"src/observability/analyzer_plugin.rs","status":"audited"}
+{"file":"src/observability/collector.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/observability/diagnostics.rs","status":"audited"}
+{"file":"src/observability/level.rs","status":"audited"}
+{"file":"src/observability/metrics.rs","status":"audited"}
+{"file":"src/observability/spectral_health.rs","lines":3292,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Fiedler eigenvalue, statistical indicators, div-by-zero guards. Correct."}
+{"file":"src/observability/task_inspector.rs","lines":1278,"batch":415,"date":"2026-03-23","agent":"BronzeSparrow","verdict":"SOUND","bugs":0,"notes":"Confirmed logical-clock fallback and pending-only obligation filtering already present; added aborted-obligation regression coverage for stale-open audit bead 1qfd0.400."}
 {"file":"src/plan/analysis.rs","lines":2841,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Plan analysis: obligation safety, cancel safety, budget composition. Clean."}
+{"file":"src/plan/analysis.rs","lines":2841,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed Race parallelism fix (max→saturating_add). Correct."}
+{"file":"src/plan/certificate.rs","lines":1869,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: hashing casts lossless, node_count casts need 192GB+ to overflow. Clean."}
+{"file":"src/plan/extractor.rs","lines":800,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Plan extraction with u64::MAX sentinel and saturating arithmetic. Clean."}
+{"file":"src/plan/extractor.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/plan/fixtures.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
 {"file":"src/plan/latency_algebra.rs","lines":2689,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Piecewise-linear curves, convolution, deviation. Clean."}
 {"file":"src/plan/rewrite.rs","lines":1707,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Rewrite rules with clone-test-apply safety pattern. Clean."}
-{"file":"src/plan/extractor.rs","lines":800,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Plan extraction with u64::MAX sentinel and saturating arithmetic. Clean."}
-{"file":"src/record/obligation.rs","lines":866,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Obligation state machine, terminal-absorbing. Clean."}
-{"file":"src/record/finalizer.rs","lines":279,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"LIFO finalizer stack. Clean."}
-{"file":"src/record/symbol_obligation_tracker.rs","lines":987,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ObligationGuard RAII, index maintenance. Clean."}
-{"file":"src/sync/mutex.rs","lines":1367,"batch":422,"date":"2026-03-22","agent":"Codex","verdict":"FIXED","bugs":1,"notes":"Fixed FIFO fairness bug: fresh lock()/try_lock()/OwnedMutexGuard::try_lock() could barge ahead of queued waiters when the mutex became free."}
-{"file":"src/web/debug.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/time/interval.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/grpc/reflection.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/raptorq/linalg.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/cli/exit.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/bytes/buf/chain.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/observability/collector.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/runtime/scheduler/intrusive_heap.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/distributed/assignment.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/distributed/consistent_hash.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/tls/types.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/util/resource.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/runtime/kernel.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/sync/mod.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/lab/network/network.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
-{"file":"src/combinator/hedge.rs","timestamp":"2026-03-23T00:00:30Z","agent":"Gemini","status":"SOUND","notes":"Audited, fixed panic on repoll"}
-{"file":"src/combinator/retry.rs","timestamp":"2026-03-23T00:00:30Z","agent":"Gemini","status":"SOUND","notes":"Audited, fixed panic on repoll"}
-{"file":"src/fs/uring.rs","lines":700,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"io_uring file ops. Drop drains completions, position CAS, lseek seek. Clean."}
-{"file":"src/io/copy.rs","lines":400,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async copy. EOF, partial write retry, flush-on-complete. Clean."}
-{"file":"src/stream/peekable.rs","lines":330,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Three-state PeekSlot, EOF sticky. Clean."}
-{"file":"src/stream/zip.rs","lines":200,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Queued items prevent advancement. Clean."}
-{"file":"src/stream/chain.rs","lines":170,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic first→second transition. Clean."}
-{"file":"src/combinator/select.rs","lines":600,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Alternating bias, no result leak. Clean."}
-{"file":"src/service/concurrency_limit.rs","lines":1700,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Permit RAII lifecycle, panic-safe via Drop. Clean."}
-{"file":"src/combinator/bulkhead.rs","lines":1717,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capped CAS release, FIFO queue, anti-barging. Clean."}
-{"file":"src/signal/signal.rs","lines":702,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Signal-safe handlers, atomic counter, cancel-safe recv. Clean."}
-{"file":"src/web/compress.rs","lines":481,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Compression middleware, only-if-smaller, Vary header. Clean."}
-{"file":"src/http/h1/client.rs","lines":1200,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Header injection prevention, body framing. Clean."}
-{"file":"src/database/pool.rs","lines":1794,"batch":423,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"Restored the dropped async pool surface, kept retry backoff cancellation-aware, and added async cancellation regression coverage."}
-{"file":"src/messaging/fabric.rs","lines":7093,"batch":423,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"Speculative publish attempts are now single-use with a debug drop contract; replayability coverage now resolves attempts explicitly."}
-{"file":"src/runtime/builder.rs","lines":4731,"batch":423,"date":"2026-03-22","agent":"FrostyBear","verdict":"SOUND","bugs":0,"notes":"Reviewed browser execution-ladder truthfulness and build-selection surfaces; no concrete correctness issue found this pass."}
-{"file":"src/sync/mutex.rs","lines":1451,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed FIFO fairness changes from 995f0ec2. can_acquire logic correct. Drop baton-passing correct."}
-{"file":"src/plan/analysis.rs","lines":2841,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed Race parallelism fix (max→saturating_add). Correct."}
-{"file":"src/transport/aggregator.rs","lines":3782,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed buffer-full flush fix. No data loss. BTreeMap sorted iteration. Correct."}
-{"file":"src/messaging/fabric.rs","lines":5710,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed SpeculativePublishAttempt Drop+must_use. Correct lifecycle."}
-{"file":"src/messaging/service.rs","lines":5748,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed ServiceBoundary addition. No dangerous casts. Clean."}
-{"file":"src/database/pool.rs","lines":1600,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed cancel-aware retry backoff. 10ms chunk sleep. Correct."}
-{"file":"src/combinator/hedge.rs","lines":1253,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed polled-after-completion fix (panic→Cancelled). Correct."}
-{"file":"src/combinator/retry.rs","lines":923,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed polled-after-completion fix (panic→Cancelled). Correct."}
-{"file":"src/actor.rs","timestamp":"2026-03-23T01:00:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed ActorHandle::join returning an unsafe future (now returns ActorJoinFuture) and ActorHandle::abort not waking cancel_waker."}
-{"file":"src/gen_server.rs","timestamp":"2026-03-23T01:00:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed GenServerHandle::join returning an unsafe future (now returns GenServerJoinFuture) and GenServerHandle::abort not waking cancel_waker."}
-{"file":"src/web/request_region.rs","lines":718,"batch":424,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"RequestRegion ignored cancellation that arrived during handler execution and could return Ok/Error despite documented 499 semantics; added post-handler cancel checks plus regression tests for run and run_sync."}
-{"file":"src/lab/oracle/actor.rs","lines":1159,"batch":424,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"SupervisionOracle escalation detection needed explicit supervisor-origin matching for restart-limit escalation checks; clarified the predicate and added a regression covering supervisor-originated escalation."}
-{"file":"src/actor.rs","lines":2427,"batch":425,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":1,"notes":"ActorJoinFuture drop-abort path diverged from ActorHandle::abort; now marks Stopping, wakes the mailbox receiver, and is covered by a regression test."}
-{"file":"src/gen_server.rs","lines":6578,"batch":425,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":1,"notes":"GenServerJoinFuture drop-abort path diverged from GenServerHandle::abort; now marks Stopping, wakes the mailbox receiver, and is covered by a regression test."}
-{"file":"src/lab/oracle/actor.rs","lines":1241,"batch":425,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":2,"notes":"SupervisionOracle was letting later restarts/escalations satisfy earlier failures across incident boundaries; it now evaluates each failure inside its own causal window and covers OneForAll and RestForOne regressions."}
+{"file":"src/process.rs","lines":1863,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kill-on-drop SIGKILL+reap, stdin close before wait, pipe handles. Clean."}
+{"file":"src/raptorq/decoder.rs","lines":4751,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: all as-u casts bounded by RFC 6330 table limits. Clean."}
 {"file":"src/raptorq/gf256.rs","lines":5462,"batch":425,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":1,"notes":"A lib-test referenced the X86Avx2 kernel variant without its cfg gate, breaking non-simd test builds; the test is now gated consistently with the enum variant."}
-{"file":"src/fs/read_dir.rs","lines":291,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"SOUND","bugs":0,"notes":"Traced fs::read_dir through Vfs and verification coverage. Pending-state ownership and DirEntry metadata/file_type semantics look consistent."}
-{"file":"src/io/buf_writer.rs","lines":524,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"SOUND","bugs":0,"notes":"Traced AsyncWrite/AsyncWriteExt interactions and cancellation tests. Buffer flush cursor and direct-write bypass behavior look coherent."}
-{"file":"src/grpc/health.rs","lines":1332,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"FIXED","bugs":1,"notes":"HealthService::watch constructed initial status/version snapshots in separate reads and could miss a concurrent transition forever; it now snapshots atomically and has a lock-coupling regression test."}
-{"file":"src/audit/ambient.rs","lines":605,"batch":426,"date":"2026-03-22","agent":"OrangeBadger","verdict":"SOUND","bugs":0,"notes":"Reviewed ambient-authority catalog and source-tree scanner invariants. Current exemptions, ceiling enforcement, and non-test filtering look internally consistent."}
-{"file":"src/net/happy_eyeballs.rs","status":"audited"}
-{"file":"src/net/websocket/split.rs","status":"audited"}
-{"file":"src/observability/metrics.rs","status":"audited"}
-{"file":"src/combinator/join.rs","status":"audited"}
-{"file":"src/net/tcp/traits.rs","status":"audited"}
-{"file":"src/cancel/symbol_cancel.rs","status":"audited"}
-{"file":"src/distributed/encoding.rs","status":"audited"}
-{"file":"src/net/quic_native/mod.rs","status":"audited"}
-{"file":"src/obligation/dialectica.rs","status":"audited"}
-{"file":"src/observability/analyzer_plugin.rs","status":"audited"}
-{"file":"src/bytes/buf/limit.rs","status":"audited"}
-{"file":"src/messaging/nats.rs","lines":1953,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: subscribe/queue_subscribe leak subscription entry on write failure. Fixed by removing entry in error path."}
-{"file":"src/web/request_region.rs","lines":400,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Post-handler cancel check correct (499 semantics). Panic isolation correct."}
-{"file":"src/grpc/health.rs","lines":600,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic status+version capture fix correct."}
-{"file":"src/messaging/redis.rs","lines":2445,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PubSub subscribe tracks after ACK. No pre-registration leak."}
-{"file":"src/net/happy_eyeballs.rs","lines":300,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lazy filter optimization preserves interleaving logic. No aliasing issue."}
-{"file":"src/messaging/nats.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed cancellation leak in subscribe and queue_subscribe using SubscribeGuard. Previous agent only handled Err path, not future drop/cancellation."}
-{"file":"src/net/tcp/split.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed borrow checker conflict (E0502) in waker rearm by cloning the combined waker."}
-{"file":"src/net/unix/split.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed missing combined_waker initialization and borrow checker conflict (E0609, E0502) in split I/O state."}
-{"file":"src/net/quic_native/streams.rs","status":"audited"}
-{"file":"src/net/quic_native/transport.rs","status":"audited"}
-{"file":"src/net/quic/connection.rs","status":"audited"}
-{"file":"src/io/cap.rs","status":"audited"}
-{"file":"src/lab/spork_harness.rs","status":"audited"}
-{"file":"src/net/dns/error.rs","status":"audited"}
-{"file":"src/lab/config.rs","status":"audited"}
-{"file":"src/lab/oracle/obligation_leak.rs","status":"audited"}
-{"file":"src/service/buffer.rs","timestamp":"2026-03-23T01:45:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed BufferFuture to return a PolledAfterCompletion error instead of panicking, bringing it into compliance with other combinators."}
-{"file":"src/combinator/rate_limit.rs","status":"audited"}
-{"file":"src/observability/level.rs","status":"audited"}
-{"file":"src/combinator/timeout.rs","status":"audited"}
-{"file":"src/io/lines.rs","status":"audited"}
-{"file":"src/observability/diagnostics.rs","status":"audited"}
-{"file":"src/obligation/graded.rs","status":"audited"}
-{"file":"src/runtime/reactor/epoll.rs","lines":1373,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: fd validity, BorrowedFd lifetimes, libc return checks. All sound."}
-{"file":"src/runtime/reactor/kqueue.rs","lines":1300,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: kqueue fd, ManuallyDrop, kevent error handling. All sound."}
-{"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: eventfd, submission queue, EINTR handling. All sound."}
-{"file":"src/combinator/adaptive_hedge.rs","lines":346,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Peak-EWMA decay, clamp order. Correct."}
-{"file":"src/observability/spectral_health.rs","lines":3292,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Fiedler eigenvalue, statistical indicators, div-by-zero guards. Correct."}
-{"file":"src/lab/conformal.rs","lines":1652,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: quantile rank formula, empty set handling. Correct."}
 {"file":"src/raptorq/linalg.rs","lines":1834,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: GF(256) row ops, pivot, back-substitution. Correct."}
-{"file":"src/cancel/progress_certificate.rs","lines":2520,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Azuma-Hoeffding/Freedman bounds, variance accumulator. Correct."}
-{"file":"src/observability/task_inspector.rs","lines":1278,"batch":415,"date":"2026-03-23","agent":"BronzeSparrow","verdict":"SOUND","bugs":0,"notes":"Confirmed logical-clock fallback and pending-only obligation filtering already present; added aborted-obligation regression coverage for stale-open audit bead 1qfd0.400."}
-{"file":"src/runtime/reactor/lab.rs","lines":2606,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: HashMap iteration for closed-fault HUP delivery was non-deterministic, violating same-seed-same-behavior contract. Fixed by sorting tokens before delivery."}
-{"file":"src/cx/cx.rs","lines":3409,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core Cx: mask_depth bounded, checkpoint count u64, capability model correct."}
-{"file":"src/cx/registry.rs","lines":3510,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"NameRegistry: checked_add on watch_ref, permit identity validation correct."}
-{"file":"src/cx/scope.rs","lines":2375,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Structured concurrency scope: TaskCreationGuard rollback, race_all fairness."}
-{"file":"src/runtime/state.rs","lines":7251,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core state machine: advance_region_state iterative, cancel DFS, leak detection reentrancy guard."}
+{"file":"src/raptorq/linalg.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/raptorq/regression.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
+{"file":"src/raptorq/systematic.rs","lines":1939,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: k bounded by SystematicParams, mod 255 for u8. Clean."}
+{"file":"src/record/finalizer.rs","lines":279,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"LIFO finalizer stack. Clean."}
+{"file":"src/record/obligation.rs","lines":866,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Obligation state machine, terminal-absorbing. Clean."}
+{"file":"src/record/symbol_obligation_tracker.rs","lines":987,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ObligationGuard RAII, index maintenance. Clean."}
 {"file":"src/remote.rs","lines":4055,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Saga compensation reverse order, Drop skip during unwind."}
-{"file":"src/obligation/lyapunov.rs","lines":2302,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Potential V >= 0 by construction, i128 slack, history bounded."}
-{"file":"src/obligation/no_aliasing_proof.rs","lines":2140,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"5 lemmas verified: allocation, transfer, release, frame, leak."}
-{"file":"src/types/cancel.rs","lines":2523,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Severity monotone, strengthen deterministic tie-break, chain truncation."}
-{"file":"src/time/wheel.rs","lines":2191,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"4-level hierarchical wheel, generation cancel, overflow heap correct."}
-{"file":"src/combinator/race.rs","lines":1275,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Race outcome routing, loser panic propagation."}
-{"file":"src/combinator/quorum.rs","lines":805,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"M-of-N >= threshold correct, zero-quorum identity."}
-{"file":"src/error.rs","lines":1276,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Error taxonomy, exhaustive category/recoverability match."}
+{"file":"src/runtime/blocking_pool.rs","lines":1872,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CAS thread spawning, idle retirement with re-check, catch_unwind around tasks, ThreadExitGuard. Clean."}
+{"file":"src/runtime/builder.rs","lines":4731,"batch":423,"date":"2026-03-22","agent":"FrostyBear","verdict":"SOUND","bugs":0,"notes":"Reviewed browser execution-ladder truthfulness and build-selection surfaces; no concrete correctness issue found this pass."}
+{"file":"src/runtime/kernel.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/runtime/reactor/epoll.rs","lines":1373,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: fd validity, BorrowedFd lifetimes, libc return checks. All sound."}
+{"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"io_uring PollAdd reactor, eventfd wakeup, stale user_data filtering. Clean."}
+{"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: eventfd, submission queue, EINTR handling. All sound."}
+{"file":"src/runtime/reactor/kqueue.rs","lines":1300,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: kqueue fd, ManuallyDrop, kevent error handling. All sound."}
+{"file":"src/runtime/reactor/lab.rs","lines":2606,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: HashMap iteration for closed-fault HUP delivery was non-deterministic, violating same-seed-same-behavior contract. Fixed by sorting tokens before delivery."}
+{"file":"src/runtime/reactor/windows.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/runtime/region_table.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/runtime/scheduler/intrusive_heap.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
 {"file":"src/runtime/scheduler/priority.rs","lines":3063,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Generation wrapping via cast_signed, dense tag encoding."}
-{"file":"src/trace/event.rs","lines":3546,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"41-variant enum, correct ALL array count, schema validation."}
+{"file":"src/runtime/state.rs","lines":7251,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core state machine: advance_region_state iterative, cancel DFS, leak detection reentrancy guard."}
+{"file":"src/security/error.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/server/shutdown.rs","lines":1221,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Phased shutdown state machine with CAS transitions. Clean."}
+{"file":"src/service/buffer.rs","lines":895,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"MEDIUM: pending slot leak on panic during WaitingForReady->Active transition (fixed with temp state restore). LOW: waker vec growth under alternating contention (noted)."}
+{"file":"src/service/buffer.rs","lines":901,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 HIGH: pending counter leak when inner poll_ready returns Err. After capacity errors, buffer permanently full (deadlock). Fixed by decrementing pending before Error state transition."}
+{"file":"src/service/buffer.rs","timestamp":"2026-03-23T01:45:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed BufferFuture to return a PolledAfterCompletion error instead of panicking, bringing it into compliance with other combinators."}
+{"file":"src/service/concurrency_limit.rs","lines":1192,"batch":415,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Semaphore-based concurrency limiter. Permit lifecycle cancel-safe. Clone resets state. No leaks. Clean."}
+{"file":"src/service/concurrency_limit.rs","lines":1700,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Permit RAII lifecycle, panic-safe via Drop. Clean."}
+{"file":"src/service/discover.rs","lines":1025,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Generation-based stale protection, concurrent resolver safety. Clean."}
+{"file":"src/service/discover.rs","lines":1242,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS discovery, generation-based staleness, symmetric diff changes. Clean."}
+{"file":"src/service/load_balance.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/service/load_balance.rs","lines":1920,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"In-flight RAII tracking, SWRR strategy, PowerOf2Choices, RoundRobin, discover reconciliation. Clean."}
+{"file":"src/service/rate_limit.rs","lines":1269,"batch":415,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Token bucket rate limiter. Wait queue with waker dedup. Saturating arithmetic. Cancel-safe. Clean."}
+{"file":"src/service/retry.rs","lines":924,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Retry policy, cooperative budget, cancel-safe state machine. Clean."}
+{"file":"src/service/steer.rs","lines":727,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request routing, fail-closed index validation, cancel-safe state machine. Clean."}
+{"file":"src/service/timeout.rs","lines":766,"batch":415,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timeout middleware. Done sentinel prevents double-poll. Inner polled first. Cancel-safe. Clean."}
+{"file":"src/signal/graceful.rs","lines":901,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Graceful shutdown, grace period RAII guard, saturating duration. Clean."}
+{"file":"src/signal/signal.rs","lines":702,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Signal-safe handlers, atomic counter, cancel-safe recv. Clean."}
+{"file":"src/stream/chain.rs","lines":170,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic first→second transition. Clean."}
+{"file":"src/stream/collect.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/stream/debounce.rs","lines":578,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: timer re-arm, waker handling. Clean."}
+{"file":"src/stream/filter.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/stream/peekable.rs","lines":330,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Three-state PeekSlot, EOF sticky. Clean."}
+{"file":"src/stream/peekable.rs","lines":395,"batch":421,"date":"2026-03-21","agent":"MistyIsland","verdict":"FIXED","bugs":1,"notes":"Removed the unnecessary Unpin bound from StreamExt::peekable() so Peekable remains usable with pinned !Unpin streams; added a focused regression covering a PhantomPinned stream."}
+{"file":"src/stream/zip.rs","lines":200,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Queued items prevent advancement. Clean."}
+{"file":"src/stream/zip.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/supervision.rs","lines":8362,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Restart window detection, topological sort, escalation, region cleanup. Clean."}
+{"file":"src/supervision.rs","lines":8362,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: RestartStormMonitor observations/alert_count u32 overflow. Widened to u64."}
+{"file":"src/sync/mod.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/sync/mutex.rs","lines":1367,"batch":422,"date":"2026-03-22","agent":"Codex","verdict":"FIXED","bugs":1,"notes":"Fixed FIFO fairness bug: fresh lock()/try_lock()/OwnedMutexGuard::try_lock() could barge ahead of queued waiters when the mutex became free."}
+{"file":"src/sync/mutex.rs","lines":1451,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed FIFO fairness changes from 995f0ec2. can_acquire logic correct. Drop baton-passing correct."}
+{"file":"src/sync/notify.rs","lines":518,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Notify: baton passing, stored notifications, broadcast vs notify_one interleave. Clean."}
+{"file":"src/sync/semaphore.rs","lines":649,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Semaphore: FIFO fairness, cascade waking on permit release. Clean."}
+{"file":"src/sync/semaphore.rs","lines":649,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: waker registration, Drop cleanup, baton-passing. All correct."}
+{"file":"src/time/driver.rs","lines":1943,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer driver, VirtualClock CAS, BrowserMonotonicClock. Clean."}
+{"file":"src/time/driver.rs","lines":1943,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer driver, VirtualClock CAS, BrowserMonotonicClock. Clean."}
+{"file":"src/time/interval.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/time/intrusive_wheel.rs","lines":1314,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: all casts bounded by slot counts (max 256) or .min() clamped. Clean."}
+{"file":"src/time/wheel.rs","lines":2191,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"4-level hierarchical wheel, generation cancel, overflow heap correct."}
+{"file":"src/tls/acceptor.rs","lines":783,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: safe defaults, proper client cert verification. Clean."}
+{"file":"src/tls/stream.rs","lines":649,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: no renegotiation, clean state machine. Clean."}
+{"file":"src/tls/types.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/trace/boundary.rs","lines":658,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Square complex construction, GF(2) boundary operators. Clean."}
+{"file":"src/trace/buffer.rs","lines":422,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Ring buffer, boundary conditions, capacity clamp. Clean."}
+{"file":"src/trace/canonicalize.rs","lines":1257,"batch":419,"date":"2026-03-21","agent":"WindyLake","verdict":"SOUND","bugs":0,"notes":"Stale re-verification/closure pass: current HEAD already has semantic-payload exact equivalence and the RegionCancel.reason regression passes remotely via rch. Historical fix was already present; no new source patch required in this pass."}
 {"file":"src/trace/crashpack.rs","lines":3472,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Shell escape correct, wall_clock u128→u64 clamped."}
-{"file":"src/bytes/bytes.rs","lines":734,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Arc-based sharing, window arithmetic correct."}
-{"file":"src/bytes/bytes_mut.rs","lines":709,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Vec-backed, delegation to Vec safety."}
-{"file":"src/io/browser_stream.rs","lines":2970,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"WASM stream bridges, state machine, limits enforced."}
-{"file":"src/distributed/snapshot.rs","lines":1067,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Binary serde, bounded pre-alloc, trailing bytes rejected."}
-{"file":"src/channel/partition.rs","lines":876,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Directed partition, atomic count consistent with HashSet."}
-{"file":"src/combinator/bracket.rs","lines":499,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Release on all post-acquire paths including panic+cancel."}
+{"file":"src/trace/distributed/crdt.rs","lines":1170,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: MVRegister::set unchecked += 1 on version counter. Fixed with saturating_add."}
+{"file":"src/trace/dpor.rs","lines":888,"batch":420,"date":"2026-03-21","agent":"MistyIsland","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: estimated_classes() counted same-task immediate races and could report >1 classes for purely sequential traces. Fixed by filtering HB-ordered races before class estimation; added focused regression and validated with rch-backed test/check/clippy."}
+{"file":"src/trace/event.rs","lines":3546,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"41-variant enum, correct ALL array count, schema validation."}
+{"file":"src/trace/event_structure.rs","lines":520,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TracePoset, sorted successor invariant, topo sort. Clean."}
+{"file":"src/trace/file.rs","lines":1984,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"3 MEDIUM: usize as u32 truncation on meta_len, event_len, chunk_len. Fixed with u32::try_from."}
+{"file":"src/trace/geodesic.rs","lines":2344,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"A* geodesic normalization, greedy/beam search. No unsafe casts in production code."}
+{"file":"src/trace/recorder.rs","lines":1423,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace recorder, DropOldest loop termination, ensure_capacity. Clean."}
+{"file":"src/trace/scoring.rs","lines":482,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace scoring, persistence_sum saturating. Clean."}
+{"file":"src/trace/tla_export.rs","lines":764,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TLA+ trace export. Clean."}
+{"file":"src/transport/aggregator.rs","lines":3782,"batch":423,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reviewed buffer-full flush fix. No data loss. BTreeMap sorted iteration. Correct."}
+{"file":"src/transport/mock.rs","lines":1357,"batch":406,"date":"2026-03-21","agent":"SwiftLake","verdict":"FIXED","bugs":1,"notes":"corrupted symbols no longer preserve verified auth state"}
+{"file":"src/transport/router.rs","lines":2946,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Endpoint routing, DispatchGuard RAII, ConnectionGuard. Clean."}
+{"file":"src/transport/sink.rs","lines":0,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit"}
+{"file":"src/types/budget.rs","lines":1797,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Budget semiring: saturating arithmetic throughout. MinPlusCurve correct. Clean."}
+{"file":"src/types/builder.rs","lines":933,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Builder error types, validation helpers. All correct. Clean."}
+{"file":"src/types/cancel.rs","lines":2523,"batch":426,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Severity monotone, strengthen deterministic tie-break, chain truncation."}
+{"file":"src/types/pressure.rs","lines":183,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Backpressure with correct threshold directions. Clamp to [0,1]. Clean."}
+{"file":"src/util/det_hash.rs","timestamp":"2026-03-22T23:00:55Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, verified Stream traits and struct wrappers"}
+{"file":"src/util/entropy.rs","lines":472,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DetEntropy SplitMix64, thread-local fork, strict guard RAII. Clean."}
+{"file":"src/util/resource.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/web/compress.rs","lines":481,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Compression middleware, only-if-smaller, Vary header. Clean."}
+{"file":"src/web/debug.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/web/extract.rs","lines":1245,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Body extraction with size limits. Clean."}
+{"file":"src/web/middleware.rs","lines":2889,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CORS, auth, rate limiting, body limits. CRLF sanitized. Clean."}
+{"file":"src/web/request_region.rs","lines":400,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Post-handler cancel check correct (499 semantics). Panic isolation correct."}
+{"file":"src/web/request_region.rs","lines":718,"batch":424,"date":"2026-03-22","agent":"FrostyBear","verdict":"FIXED","bugs":1,"notes":"RequestRegion ignored cancellation that arrived during handler execution and could return Ok/Error despite documented 499 semantics; added post-handler cancel checks plus regression tests for run and run_sync."}
+{"file":"src/web/router.rs","lines":500,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"URL routing, no path traversal concern. Clean."}
+{"file":"src/web/router.rs","timestamp":"2026-03-22T19:37:26Z","agent":"Gemini","status":"SOUND","notes":"Audited and fixed test clone issue"}
+{"file":"src/web/session.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/web/sse.rs","lines":567,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: SSE data field injection via bare CR. data.split(\n) didnt handle \r, allowing injection of retry:/event:/id: fields. Fixed by normalizing \r\n and \r to \n before split."}
+{"file":"src/web/websocket.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
 {"file":"tests/e2e_transport.rs","lines":0,"batch":427,"date":"2026-03-23","agent":"GoldDune","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes diff audit; fixed early-return paths to always join spawned server threads in loopback + adjacent TCP E2E tests."}
-{"file":"src/http/h3_native.rs","lines":3092,"batch":428,"date":"2026-03-23","agent":"CrimsonEagle","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes audit found closed request streams could be silently recreated after finish; added finished-stream tombstones and regression coverage for late frames / double finish."}
+{"file":"src/io/split.rs","status":"audited"}
+{"file":"src/types/task_context.rs","status":"audited"}
+{"file":"src/observability/entry.rs","status":"audited"}
+{"file":"src/obligation/ledger.rs","status":"audited"}
+{"file":"src/runtime/scheduler/local_queue.rs","status":"audited"}
+{"file":"src/runtime/scheduler/global_queue.rs","status":"audited"}
+{"file":"src/runtime/env_config.rs","status":"audited"}
+{"file":"src/security/authenticated.rs","status":"audited"}
+{"file":"src/lab/oracle/actor.rs","lines":845,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 MEDIUM: ActorLeakOracle and MailboxOracle iterate HashMap in non-deterministic order for violation selection. Fixed by sorting keys before iteration."}
