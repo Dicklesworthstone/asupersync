@@ -240,7 +240,7 @@ fn validate_retained_records<'a, I>(records: I) -> Result<(), StreamError>
 where
     I: IntoIterator<Item = &'a StreamRecord>,
 {
-    let mut previous_seq = None;
+    let mut previous_seq: Option<u64> = None;
     for record in records {
         match previous_seq {
             None => {
@@ -377,7 +377,7 @@ enum WalEntry {
 }
 
 /// Append-only WAL-backed stream storage with deterministic recovery semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct WalStorageBackend {
     config: WalStorageConfig,
     records: VecDeque<StreamRecord>,
@@ -541,7 +541,7 @@ impl WalStorageBackend {
     fn segment_paths(root_dir: &Path) -> Result<Vec<(u64, PathBuf)>, StreamError> {
         let mut paths = fs::read_dir(root_dir)
             .map_err(|error| StreamError::wal_io("read_dir", root_dir, &error))?
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .filter_map(|entry| {
                 let file_type = entry.file_type().ok()?;
                 if !file_type.is_file() {
@@ -849,9 +849,9 @@ pub struct StreamAppendPermit {
     /// Region id captured when the permit was reserved.
     region_id: RegionId,
     /// Subject for the record.
-    pub subject: Subject,
+    subject: Subject,
     /// Logical publish time for retention.
-    pub published_at: Time,
+    published_at: Time,
     /// Sequence assigned when the permit is successfully committed.
     committed_seq: Option<u64>,
 }
@@ -871,10 +871,22 @@ impl StreamAppendPermit {
     pub fn committed_seq(&self) -> Option<u64> {
         self.committed_seq
     }
+
+    /// Returns the validated subject bound to this permit.
+    #[must_use]
+    pub fn subject(&self) -> &Subject {
+        &self.subject
+    }
+
+    /// Returns the logical publish time bound to this permit.
+    #[must_use]
+    pub fn published_at(&self) -> Time {
+        self.published_at
+    }
 }
 
 /// Region-owned durable stream state machine for the FABRIC lane.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Stream<B: StorageBackend = InMemoryStorageBackend> {
     name: String,
     region_id: RegionId,
@@ -977,16 +989,20 @@ impl<B: StorageBackend> Stream<B> {
     /// Check whether a (subject, payload) pair is a duplicate within
     /// the configured dedup window.  Returns `Ok(())` if the message
     /// is fresh or dedup is disabled.
-    fn check_dedup(&mut self, subject: &Subject, payload: &[u8], now: Time) -> Result<(), StreamError> {
+    fn check_dedup(
+        &mut self,
+        subject: &Subject,
+        payload: &[u8],
+        now: Time,
+    ) -> Result<(), StreamError> {
         let Some(window) = self.config.dedupe_window else {
             return Ok(());
         };
 
         // Evict expired entries.
         let window_nanos = window.as_nanos() as u64;
-        self.dedup_index.retain(|_, (ts, _)| {
-            now.duration_since(*ts) < window_nanos
-        });
+        self.dedup_index
+            .retain(|_, (ts, _)| now.duration_since(*ts) < window_nanos);
 
         let key = (subject.as_str().to_owned(), Self::payload_hash(payload));
         if let Some((_ts, existing_seq)) = self.dedup_index.get(&key) {
@@ -1062,7 +1078,9 @@ impl<B: StorageBackend> Stream<B> {
         permit: &mut StreamAppendPermit,
         payload: impl Into<Vec<u8>>,
     ) -> Result<StreamRecord, StreamError> {
-        if permit.stream_name != self.name || permit.region_id != self.region_id {
+        let wrong_stream_name = permit.stream_name != self.name;
+        let wrong_region = permit.region_id != self.region_id;
+        if wrong_stream_name || wrong_region {
             return Err(StreamError::PermitStreamMismatch {
                 permit_name: permit.stream_name.clone(),
                 permit_region: permit.region_id,
@@ -1073,6 +1091,7 @@ impl<B: StorageBackend> Stream<B> {
         if let Some(seq) = permit.committed_seq {
             return Err(StreamError::PermitAlreadyCommitted { seq });
         }
+        self.ensure_accepting_appends()?;
 
         let payload = payload.into();
         self.check_dedup(&permit.subject, &payload, permit.published_at)?;
@@ -1086,7 +1105,12 @@ impl<B: StorageBackend> Stream<B> {
         let _ = record.payload_len()?;
 
         self.storage.append(record.clone())?;
-        self.record_dedup(&record.subject, &record.payload, permit.published_at, record.seq);
+        self.record_dedup(
+            &record.subject,
+            &record.payload,
+            permit.published_at,
+            record.seq,
+        );
         self.next_seq = self.next_seq.saturating_add(1);
         permit.committed_seq = Some(record.seq);
         self.enforce_retention(permit.published_at)?;
@@ -2026,7 +2050,11 @@ mod tests {
             .expect("reserve");
 
         permit.abort();
-        assert_eq!(stream.state().msg_count, 0, "aborted permit must not store anything");
+        assert_eq!(
+            stream.state().msg_count,
+            0,
+            "aborted permit must not store anything"
+        );
         let record = stream
             .append(
                 Subject::new("orders.created"),
@@ -2034,7 +2062,10 @@ mod tests {
                 Time::from_secs(2),
             )
             .expect("append after abort");
-        assert_eq!(record.seq, 1, "aborted permits must not burn sequence numbers");
+        assert_eq!(
+            record.seq, 1,
+            "aborted permits must not burn sequence numbers"
+        );
     }
 
     #[test]
@@ -2046,7 +2077,11 @@ mod tests {
                 .expect("reserve");
             // dropped without commit
         }
-        assert_eq!(stream.state().msg_count, 0, "dropped permit must not store anything");
+        assert_eq!(
+            stream.state().msg_count,
+            0,
+            "dropped permit must not store anything"
+        );
         let record = stream
             .append(
                 Subject::new("orders.created"),
@@ -2054,7 +2089,10 @@ mod tests {
                 Time::from_secs(2),
             )
             .expect("append after drop");
-        assert_eq!(record.seq, 1, "dropped permits must not burn sequence numbers");
+        assert_eq!(
+            record.seq, 1,
+            "dropped permits must not burn sequence numbers"
+        );
     }
 
     #[test]
@@ -2141,11 +2179,19 @@ mod tests {
         .expect("create stream");
 
         stream
-            .append(Subject::new("fabric.default"), b"unique".to_vec(), Time::from_secs(1))
+            .append(
+                Subject::new("fabric.default"),
+                b"unique".to_vec(),
+                Time::from_secs(1),
+            )
             .expect("first append");
 
         let err = stream
-            .append(Subject::new("fabric.default"), b"unique".to_vec(), Time::from_secs(2))
+            .append(
+                Subject::new("fabric.default"),
+                b"unique".to_vec(),
+                Time::from_secs(2),
+            )
             .expect_err("duplicate must be rejected");
 
         assert!(
@@ -2170,12 +2216,20 @@ mod tests {
         .expect("create stream");
 
         stream
-            .append(Subject::new("fabric.default"), b"data".to_vec(), Time::from_secs(1))
+            .append(
+                Subject::new("fabric.default"),
+                b"data".to_vec(),
+                Time::from_secs(1),
+            )
             .expect("first append");
 
         // 15 seconds later — outside the 10s window.
         stream
-            .append(Subject::new("fabric.default"), b"data".to_vec(), Time::from_secs(16))
+            .append(
+                Subject::new("fabric.default"),
+                b"data".to_vec(),
+                Time::from_secs(16),
+            )
             .expect("append after window expiry should succeed");
 
         assert_eq!(stream.state().msg_count, 2);
@@ -2197,11 +2251,19 @@ mod tests {
         .expect("create stream");
 
         stream
-            .append(Subject::new("fabric.default"), b"data-1".to_vec(), Time::from_secs(1))
+            .append(
+                Subject::new("fabric.default"),
+                b"data-1".to_vec(),
+                Time::from_secs(1),
+            )
             .expect("first append");
 
         stream
-            .append(Subject::new("fabric.default"), b"data-2".to_vec(), Time::from_secs(2))
+            .append(
+                Subject::new("fabric.default"),
+                b"data-2".to_vec(),
+                Time::from_secs(2),
+            )
             .expect("different payload should not be a dup");
 
         assert_eq!(stream.state().msg_count, 2);
@@ -2212,10 +2274,18 @@ mod tests {
         let mut stream = make_default_stream();
 
         stream
-            .append(Subject::new("orders.created"), b"same".to_vec(), Time::from_secs(1))
+            .append(
+                Subject::new("orders.created"),
+                b"same".to_vec(),
+                Time::from_secs(1),
+            )
             .expect("first");
         stream
-            .append(Subject::new("orders.created"), b"same".to_vec(), Time::from_secs(2))
+            .append(
+                Subject::new("orders.created"),
+                b"same".to_vec(),
+                Time::from_secs(2),
+            )
             .expect("second — dedup disabled by default");
 
         assert_eq!(stream.state().msg_count, 2);
@@ -2237,7 +2307,11 @@ mod tests {
         .expect("create stream");
 
         stream
-            .append(Subject::new("fabric.default"), b"data".to_vec(), Time::from_secs(1))
+            .append(
+                Subject::new("fabric.default"),
+                b"data".to_vec(),
+                Time::from_secs(1),
+            )
             .expect("direct append");
 
         let mut permit = stream
@@ -2252,7 +2326,10 @@ mod tests {
             matches!(err, StreamError::DuplicateDetected { .. }),
             "expected DuplicateDetected, got {err:?}"
         );
-        assert!(!permit.is_committed(), "permit should not be marked committed on dedup failure");
+        assert!(
+            !permit.is_committed(),
+            "permit should not be marked committed on dedup failure"
+        );
 
         let unique = stream
             .append(
@@ -2261,42 +2338,88 @@ mod tests {
                 Time::from_secs(3),
             )
             .expect("append after dedup failure");
-        assert_eq!(unique.seq, 2, "failed commit must not burn a sequence number");
+        assert_eq!(
+            unique.seq, 2,
+            "failed commit must not burn a sequence number"
+        );
     }
 
     #[test]
-    fn permit_cannot_commit_into_different_stream() {
-        let mut left = make_default_stream();
-        let mut right = Stream::new(
-            "other-stream",
-            test_region(2),
-            Time::from_secs(0),
-            stream_config("orders.>"),
-            InMemoryStorageBackend::default(),
-        )
-        .expect("create second stream");
-
-        let mut permit = left
+    fn reserved_permit_cannot_commit_after_stream_begins_closing() {
+        let mut stream = make_default_stream();
+        let mut permit = stream
             .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
             .expect("reserve");
-        let err = right
+
+        stream.begin_close();
+        let err = stream
             .commit_append(&mut permit, b"payload".to_vec())
-            .expect_err("permit must stay bound to the reserving stream");
+            .expect_err("closing stream must reject commit from prior permit");
 
         assert!(
             matches!(
                 err,
-                StreamError::PermitStreamMismatch {
-                    permit_name,
-                    permit_region,
-                    stream_name,
-                    stream_region,
-                } if permit_name == "test-stream"
-                    && permit_region == test_region(1)
-                    && stream_name == "other-stream"
-                    && stream_region == test_region(2)
+                StreamError::NotAcceptingAppends {
+                    ref name,
+                    lifecycle: StreamLifecycle::Closing,
+                } if name == "test-stream"
             ),
-            "expected PermitStreamMismatch, got {err:?}"
+            "expected NotAcceptingAppends(Closing), got {err:?}"
+        );
+        assert!(
+            !permit.is_committed(),
+            "failed close-boundary commit must leave permit uncommitted"
+        );
+    }
+
+    #[test]
+    fn reserved_permit_cannot_commit_after_stream_closes() {
+        let mut stream = make_default_stream();
+        let mut permit = stream
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+            .expect("reserve");
+
+        stream.close().expect("close");
+        let err = stream
+            .commit_append(&mut permit, b"payload".to_vec())
+            .expect_err("closed stream must reject commit from prior permit");
+
+        assert!(
+            matches!(
+                err,
+                StreamError::NotAcceptingAppends {
+                    ref name,
+                    lifecycle: StreamLifecycle::Closed,
+                } if name == "test-stream"
+            ),
+            "expected NotAcceptingAppends(Closed), got {err:?}"
+        );
+        assert!(
+            !permit.is_committed(),
+            "failed closed-stream commit must leave permit uncommitted"
+        );
+    }
+
+    #[test]
+    fn consumed_permit_still_reports_already_committed_after_stream_closes() {
+        let mut stream = make_default_stream();
+        let mut permit = stream
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+            .expect("reserve");
+
+        let record = stream
+            .commit_append(&mut permit, b"payload".to_vec())
+            .expect("commit");
+        assert_eq!(record.seq, 1);
+
+        stream.close().expect("close");
+        let err = stream
+            .commit_append(&mut permit, b"again".to_vec())
+            .expect_err("consumed permit must stay consumed after close");
+
+        assert!(
+            matches!(err, StreamError::PermitAlreadyCommitted { seq: 1 }),
+            "expected PermitAlreadyCommitted, got {err:?}"
         );
     }
 }

@@ -18,9 +18,10 @@ use super::subject::{Sublist, SubscriptionGuard, SubscriptionId};
 use crate::cx::Cx;
 use crate::distributed::HashRing;
 use crate::error::{Error as AsupersyncError, ErrorKind};
-use crate::obligation::ledger::ObligationLedger;
+use crate::obligation::ledger::{ObligationLedger, ObligationToken};
+use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::remote::NodeId;
-use crate::types::ObligationId;
+use crate::types::{ObligationId, Time};
 use crate::util::DetHasher;
 use franken_decision::{
     DecisionAuditEntry, DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior,
@@ -312,11 +313,11 @@ impl FabricState {
     fn publish_message(
         &mut self,
         cx: &Cx,
-        subject: Subject,
+        subject: &Subject,
         payload: Vec<u8>,
         delivery_class: DeliveryClass,
     ) -> Result<(), AsupersyncError> {
-        let prepared = self.prepare_publish_message(cx, &subject, payload, delivery_class)?;
+        let prepared = self.prepare_publish_message(cx, subject, payload, delivery_class)?;
         self.apply_prepared_publish(cx, prepared);
         Ok(())
     }
@@ -331,7 +332,7 @@ impl FabricState {
     ) -> Result<PreparedFabricPublish, AsupersyncError> {
         self.prune_cells(cx);
 
-        let routed_cells = self.route_keys_for_subject(cx, &subject, delivery_class)?;
+        let routed_cells = self.route_keys_for_subject(cx, subject, delivery_class)?;
         let capacity = self.effective_cell_buffer_capacity();
         let message = FabricMessage {
             subject: subject.clone(),
@@ -505,7 +506,12 @@ fn trace_fabric_cell_state_transition(
     );
 }
 
-fn trace_publish_reserve(cx: &Cx, subject: &Subject, delivery_class: DeliveryClass, obligation_id: Option<ObligationId>) {
+fn trace_publish_reserve(
+    cx: &Cx,
+    subject: &Subject,
+    delivery_class: DeliveryClass,
+    obligation_id: Option<ObligationId>,
+) {
     let subject_str = subject.as_str();
     let class_str = delivery_class.to_string();
     let obligation_str = obligation_id.map_or_else(String::new, |id| format!("{id}"));
@@ -520,7 +526,13 @@ fn trace_publish_reserve(cx: &Cx, subject: &Subject, delivery_class: DeliveryCla
     );
 }
 
-fn trace_publish_commit(cx: &Cx, subject: &Subject, delivery_class: DeliveryClass, obligation_id: Option<ObligationId>, payload_len: usize) {
+fn trace_publish_commit(
+    cx: &Cx,
+    subject: &Subject,
+    delivery_class: DeliveryClass,
+    obligation_id: Option<ObligationId>,
+    payload_len: usize,
+) {
     let subject_str = subject.as_str();
     let class_str = delivery_class.to_string();
     let obligation_str = obligation_id.map_or_else(String::new, |id| format!("{id}"));
@@ -537,7 +549,13 @@ fn trace_publish_commit(cx: &Cx, subject: &Subject, delivery_class: DeliveryClas
     );
 }
 
-fn trace_publish_abort(cx: &Cx, subject: &Subject, delivery_class: DeliveryClass, obligation_id: Option<ObligationId>, reason: &str) {
+fn trace_publish_abort(
+    cx: &Cx,
+    subject: &Subject,
+    delivery_class: DeliveryClass,
+    obligation_id: Option<ObligationId>,
+    reason: &str,
+) {
     let subject_str = subject.as_str();
     let class_str = delivery_class.to_string();
     let obligation_str = obligation_id.map_or_else(String::new, |id| format!("{id}"));
@@ -1434,10 +1452,18 @@ pub struct PublishReceipt {
 ///
 /// For [`DeliveryClass::EphemeralInteractive`] the permit is lightweight
 /// (no obligation token).  For durable or obligation-backed classes an
-/// [`ObligationId`] is allocated during [`Fabric::reserve_publish`] and
-/// committed or aborted together with the payload.
+/// [`ObligationId`] is allocated during [`Fabric::reserve_publish_durable`]
+/// and committed or aborted together with the payload.
+#[derive(Debug)]
+struct PublishPermitObligation<'ledger> {
+    ledger: &'ledger mut ObligationLedger,
+    token: ObligationToken,
+    reserved_at: Time,
+}
+
+/// Two-phase publish reservation for the packet plane.
 #[must_use = "a PublishPermit must be sent or explicitly aborted"]
-pub struct PublishPermit {
+pub struct PublishPermit<'ledger> {
     /// Fabric shared state handle.
     state: Arc<Mutex<FabricState>>,
     /// Pre-validated subject.
@@ -1448,30 +1474,50 @@ pub struct PublishPermit {
     prepared: Option<PreparedFabricPublish>,
     /// Obligation token for durable delivery classes (None for ephemeral).
     obligation_id: Option<ObligationId>,
+    /// Live ledger token for durable delivery classes.
+    obligation: Option<PublishPermitObligation<'ledger>>,
     /// Whether `send` or `abort` has been called.  Guards against
     /// double-consume and ensures `Drop` only fires the abort path once.
     consumed: bool,
 }
 
-impl fmt::Debug for PublishPermit {
+impl fmt::Debug for PublishPermit<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PublishPermit")
             .field("subject", &self.subject)
             .field("delivery_class", &self.delivery_class)
             .field("obligation_id", &self.obligation_id)
+            .field("has_obligation", &self.obligation.is_some())
             .field("consumed", &self.consumed)
             .finish()
     }
 }
 
-impl PublishPermit {
+impl PublishPermit<'_> {
+    fn commit_obligation(&mut self, now: Time) {
+        if let Some(obligation) = self.obligation.take() {
+            let _ = obligation.ledger.commit(obligation.token, now);
+        }
+    }
+
+    fn abort_obligation(&mut self, now: Time, reason: ObligationAbortReason) {
+        if let Some(obligation) = self.obligation.take() {
+            let _ = obligation.ledger.abort(obligation.token, now, reason);
+        }
+    }
+
+    fn drop_abort_time(&self) -> Time {
+        self.obligation
+            .as_ref()
+            .map_or(Time::ZERO, |obligation| obligation.reserved_at)
+    }
+
     /// Commit the publish by supplying the payload.
     ///
     /// The payload is enqueued to all routed cells, the obligation (if any)
     /// is committed, and a [`PublishReceipt`] is returned.  This method
     /// consumes the permit; calling it a second time is a compile error.
     pub fn send(mut self, cx: &Cx, payload: impl Into<Vec<u8>>) -> PublishReceipt {
-        self.consumed = true;
         let payload = payload.into();
         let payload_len = payload.len();
         let delivery_class = self.delivery_class;
@@ -1484,11 +1530,13 @@ impl PublishPermit {
             self.state.lock().apply_prepared_publish(cx, prepared);
         }
 
+        self.commit_obligation(cx.now());
         trace_publish_commit(cx, &subject, delivery_class, obligation_id, payload_len);
+        self.consumed = true;
 
         let ack_kind = match delivery_class {
             DeliveryClass::EphemeralInteractive => AckKind::Accepted,
-            _ => AckKind::Persisted,
+            _ => AckKind::Committed,
         };
 
         PublishReceipt {
@@ -1502,13 +1550,19 @@ impl PublishPermit {
     /// Explicitly abort the publish, releasing the reserved slot and any
     /// associated obligation without committing data.
     ///
-    /// For durable delivery classes, the caller is responsible for aborting
-    /// the obligation token in the ledger using
-    /// [`obligation_id`](Self::obligation_id).
+    /// For durable delivery classes, this also aborts the backing
+    /// obligation token.
     pub fn abort(mut self, cx: &Cx) {
-        self.consumed = true;
-        trace_publish_abort(cx, &self.subject, self.delivery_class, self.obligation_id, "explicit");
+        self.abort_obligation(cx.now(), ObligationAbortReason::Explicit);
+        trace_publish_abort(
+            cx,
+            &self.subject,
+            self.delivery_class,
+            self.obligation_id,
+            "explicit",
+        );
         self.prepared = None;
+        self.consumed = true;
     }
 
     /// Returns the subject that was reserved.
@@ -1531,11 +1585,12 @@ impl PublishPermit {
     }
 }
 
-impl Drop for PublishPermit {
+impl Drop for PublishPermit<'_> {
     fn drop(&mut self) {
         if !self.consumed {
             // Silent abort — the slot is released and the obligation (if any)
-            // will be cleaned up by region drain or leak detection.
+            // is aborted deterministically instead of leaking into drain.
+            self.abort_obligation(self.drop_abort_time(), ObligationAbortReason::Explicit);
             self.prepared = None;
         }
     }
@@ -1735,18 +1790,16 @@ impl Fabric {
         cx: &Cx,
         subject: impl AsRef<str>,
         delivery_class: DeliveryClass,
-    ) -> Result<PublishPermit, AsupersyncError> {
+    ) -> Result<PublishPermit<'static>, AsupersyncError> {
         cx.checkpoint()?;
 
         let subject = parse_subject(subject)?;
         // Prepare with an empty payload — the real payload is supplied at
         // send time.  The prepare phase validates routing and capacity.
-        let prepared = self.state.lock().prepare_publish_message(
-            cx,
-            &subject,
-            Vec::new(),
-            delivery_class,
-        )?;
+        let prepared =
+            self.state
+                .lock()
+                .prepare_publish_message(cx, &subject, Vec::new(), delivery_class)?;
 
         trace_publish_reserve(cx, &subject, delivery_class, None);
 
@@ -1756,6 +1809,7 @@ impl Fabric {
             delivery_class,
             prepared: Some(prepared),
             obligation_id: None,
+            obligation: None,
             consumed: false,
         })
     }
@@ -1767,36 +1821,38 @@ impl Fabric {
     /// committed when [`PublishPermit::send`] is called and aborted on
     /// drop or explicit [`PublishPermit::abort`].
     #[allow(clippy::unused_async)]
-    pub async fn reserve_publish_durable(
+    pub async fn reserve_publish_durable<'ledger>(
         &self,
         cx: &Cx,
-        ledger: &mut ObligationLedger,
+        ledger: &'ledger mut ObligationLedger,
         subject: impl AsRef<str>,
         delivery_class: DeliveryClass,
-    ) -> Result<PublishPermit, AsupersyncError> {
+    ) -> Result<PublishPermit<'ledger>, AsupersyncError> {
         cx.checkpoint()?;
 
         let subject = parse_subject(subject)?;
-        let prepared = self.state.lock().prepare_publish_message(
-            cx,
-            &subject,
-            Vec::new(),
-            delivery_class,
-        )?;
+        let prepared =
+            self.state
+                .lock()
+                .prepare_publish_message(cx, &subject, Vec::new(), delivery_class)?;
 
-        let obligation_id = if delivery_class > DeliveryClass::EphemeralInteractive {
-            use crate::record::ObligationKind;
-            let now = cx.now();
+        let obligation = if delivery_class > DeliveryClass::EphemeralInteractive {
+            let reserved_at = cx.now();
             let token = ledger.acquire(
                 ObligationKind::SendPermit,
                 cx.task_id(),
                 cx.region_id(),
-                now,
+                reserved_at,
             );
-            Some(token.id())
+            Some(PublishPermitObligation {
+                ledger,
+                token,
+                reserved_at,
+            })
         } else {
             None
         };
+        let obligation_id = obligation.as_ref().map(|obligation| obligation.token.id());
 
         trace_publish_reserve(cx, &subject, delivery_class, obligation_id);
 
@@ -1806,6 +1862,7 @@ impl Fabric {
             delivery_class,
             prepared: Some(prepared),
             obligation_id,
+            obligation,
             consumed: false,
         })
     }
@@ -9010,15 +9067,94 @@ mod tests {
                 .await
                 .expect("reserve durable");
 
-            assert!(
-                permit.obligation_id().is_some(),
-                "durable publish must allocate obligation"
-            );
+            let obligation_id = permit
+                .obligation_id()
+                .expect("durable publish must allocate obligation");
             assert_eq!(permit.delivery_class(), DeliveryClass::DurableOrdered);
 
             let receipt = permit.send(&cx, b"durable-payload".to_vec());
-            assert_eq!(receipt.ack_kind, AckKind::Persisted);
+            assert_eq!(receipt.ack_kind, AckKind::Committed);
             assert_eq!(receipt.delivery_class, DeliveryClass::DurableOrdered);
+            assert_eq!(ledger.pending_count(), 0);
+            assert_eq!(ledger.stats().total_committed, 1);
+            assert_eq!(
+                ledger
+                    .get(obligation_id)
+                    .expect("committed obligation must remain recorded")
+                    .state,
+                crate::record::ObligationState::Committed
+            );
+        });
+    }
+
+    #[test]
+    fn reserve_publish_durable_abort_resolves_obligation() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-durable-abort")
+                .await
+                .expect("connect");
+            let mut ledger = ObligationLedger::new();
+
+            let permit = fabric
+                .reserve_publish_durable(
+                    &cx,
+                    &mut ledger,
+                    "orders.created",
+                    DeliveryClass::DurableOrdered,
+                )
+                .await
+                .expect("reserve durable");
+            let obligation_id = permit
+                .obligation_id()
+                .expect("durable publish must allocate obligation");
+
+            permit.abort(&cx);
+
+            assert_eq!(ledger.pending_count(), 0);
+            assert_eq!(ledger.stats().total_aborted, 1);
+            assert_eq!(
+                ledger
+                    .get(obligation_id)
+                    .expect("aborted obligation must remain recorded")
+                    .state,
+                crate::record::ObligationState::Aborted
+            );
+        });
+    }
+
+    #[test]
+    fn reserve_publish_durable_drop_resolves_obligation() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-durable-drop")
+                .await
+                .expect("connect");
+            let mut ledger = ObligationLedger::new();
+            let obligation_id;
+
+            {
+                let permit = fabric
+                    .reserve_publish_durable(
+                        &cx,
+                        &mut ledger,
+                        "orders.created",
+                        DeliveryClass::DurableOrdered,
+                    )
+                    .await
+                    .expect("reserve durable");
+                obligation_id = permit
+                    .obligation_id()
+                    .expect("durable publish must allocate obligation");
+            }
+
+            assert_eq!(ledger.pending_count(), 0);
+            assert_eq!(ledger.stats().total_aborted, 1);
+            assert_eq!(
+                ledger
+                    .get(obligation_id)
+                    .expect("dropped obligation must remain recorded")
+                    .state,
+                crate::record::ObligationState::Aborted
+            );
         });
     }
 
