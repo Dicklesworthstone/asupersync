@@ -43,6 +43,18 @@ pub const INVARIANT_REGISTRY_LEASE: &str = "registry_lease";
 pub const INVARIANT_DOWN_ORDER: &str = "down_order";
 /// Invariant name for the supervisor quiescence oracle (Spork).
 pub const INVARIANT_SUPERVISOR_QUIESCENCE: &str = "supervisor_quiescence";
+/// Invariant name for the FABRIC publish oracle.
+#[cfg(feature = "messaging-fabric")]
+pub const INVARIANT_FABRIC_PUBLISH: &str = "fabric_publish";
+/// Invariant name for the FABRIC reply oracle.
+#[cfg(feature = "messaging-fabric")]
+pub const INVARIANT_FABRIC_REPLY: &str = "fabric_reply";
+/// Invariant name for the FABRIC quiescence oracle.
+#[cfg(feature = "messaging-fabric")]
+pub const INVARIANT_FABRIC_QUIESCENCE: &str = "fabric_quiescence";
+/// Invariant name for the FABRIC redelivery oracle.
+#[cfg(feature = "messaging-fabric")]
+pub const INVARIANT_FABRIC_REDELIVERY: &str = "fabric_redelivery";
 
 /// Ordered list of all oracle invariants covered by the meta runner.
 pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
@@ -63,6 +75,14 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_REGISTRY_LEASE,
     INVARIANT_DOWN_ORDER,
     INVARIANT_SUPERVISOR_QUIESCENCE,
+    #[cfg(feature = "messaging-fabric")]
+    INVARIANT_FABRIC_PUBLISH,
+    #[cfg(feature = "messaging-fabric")]
+    INVARIANT_FABRIC_REPLY,
+    #[cfg(feature = "messaging-fabric")]
+    INVARIANT_FABRIC_QUIESCENCE,
+    #[cfg(feature = "messaging-fabric")]
+    INVARIANT_FABRIC_REDELIVERY,
 ];
 
 /// Built-in mutations used to validate oracle detection.
@@ -94,12 +114,24 @@ pub enum BuiltinMutation {
     MailboxCapacityExceeded,
     /// Task accesses RRef from a different region.
     CrossRegionRRefAccess,
+    /// Committed FABRIC publish is not observed by a matching subscriber.
+    #[cfg(feature = "messaging-fabric")]
+    FabricPublishMissingSubscriberDelivery,
+    /// Obligation-backed FABRIC request remains unresolved when region closes.
+    #[cfg(feature = "messaging-fabric")]
+    FabricReplyUnresolvedOnClose,
+    /// Region closes while a FABRIC cell still has buffered messages.
+    #[cfg(feature = "messaging-fabric")]
+    FabricQuiescenceBusyCellOnClose,
+    /// FABRIC message exceeds its configured redelivery bound.
+    #[cfg(feature = "messaging-fabric")]
+    FabricRedeliveryBoundExceeded,
 }
 
 /// Returns all built-in mutations in a stable order.
 #[must_use]
 pub fn builtin_mutations() -> Vec<BuiltinMutation> {
-    vec![
+    let mut mutations = vec![
         BuiltinMutation::TaskLeak,
         BuiltinMutation::ObligationLeak,
         BuiltinMutation::Quiescence,
@@ -113,7 +145,17 @@ pub fn builtin_mutations() -> Vec<BuiltinMutation> {
         BuiltinMutation::SupervisionRestartLimitExceeded,
         BuiltinMutation::MailboxCapacityExceeded,
         BuiltinMutation::CrossRegionRRefAccess,
-    ]
+    ];
+    #[cfg(feature = "messaging-fabric")]
+    {
+        mutations.extend([
+            BuiltinMutation::FabricPublishMissingSubscriberDelivery,
+            BuiltinMutation::FabricReplyUnresolvedOnClose,
+            BuiltinMutation::FabricQuiescenceBusyCellOnClose,
+            BuiltinMutation::FabricRedeliveryBoundExceeded,
+        ]);
+    }
+    mutations
 }
 
 impl BuiltinMutation {
@@ -136,6 +178,18 @@ impl BuiltinMutation {
             Self::SupervisionRestartLimitExceeded => "mutation_supervision_restart_limit",
             Self::MailboxCapacityExceeded => "mutation_mailbox_capacity_exceeded",
             Self::CrossRegionRRefAccess => "mutation_cross_region_rref_access",
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricPublishMissingSubscriberDelivery => {
+                "mutation_fabric_publish_missing_subscriber_delivery"
+            }
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricReplyUnresolvedOnClose => "mutation_fabric_reply_unresolved_on_close",
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricQuiescenceBusyCellOnClose => {
+                "mutation_fabric_quiescence_busy_cell_on_close"
+            }
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricRedeliveryBoundExceeded => "mutation_fabric_redelivery_bound_exceeded",
         }
     }
 
@@ -156,6 +210,14 @@ impl BuiltinMutation {
             Self::SupervisionRestartLimitExceeded => INVARIANT_SUPERVISION,
             Self::MailboxCapacityExceeded => INVARIANT_MAILBOX,
             Self::CrossRegionRRefAccess => INVARIANT_RREF_ACCESS,
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricPublishMissingSubscriberDelivery => INVARIANT_FABRIC_PUBLISH,
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricReplyUnresolvedOnClose => INVARIANT_FABRIC_REPLY,
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricQuiescenceBusyCellOnClose => INVARIANT_FABRIC_QUIESCENCE,
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricRedeliveryBoundExceeded => INVARIANT_FABRIC_REDELIVERY,
         }
     }
 
@@ -174,6 +236,14 @@ impl BuiltinMutation {
             Self::SupervisionRestartLimitExceeded => baseline_supervision_restart(harness),
             Self::MailboxCapacityExceeded => baseline_mailbox_capacity(harness),
             Self::CrossRegionRRefAccess => baseline_rref_access(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricPublishMissingSubscriberDelivery => baseline_fabric_publish(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricReplyUnresolvedOnClose => baseline_fabric_reply(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricQuiescenceBusyCellOnClose => baseline_fabric_quiescence(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricRedeliveryBoundExceeded => baseline_fabric_redelivery(harness),
         }
     }
 
@@ -192,12 +262,32 @@ impl BuiltinMutation {
             Self::SupervisionRestartLimitExceeded => mutation_supervision_restart(harness),
             Self::MailboxCapacityExceeded => mutation_mailbox_capacity(harness),
             Self::CrossRegionRRefAccess => mutation_rref_access(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricPublishMissingSubscriberDelivery => mutation_fabric_publish(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricReplyUnresolvedOnClose => mutation_fabric_reply(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricQuiescenceBusyCellOnClose => mutation_fabric_quiescence(harness),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricRedeliveryBoundExceeded => mutation_fabric_redelivery(harness),
         }
     }
 }
 
 fn actor(n: u32) -> ActorId {
     ActorId::from_task(TaskId::from_arena(ArenaIndex::new(n, 0)))
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn fabric_cell_id(
+    pattern: &str,
+    membership_epoch: u64,
+    generation: u64,
+) -> crate::messaging::fabric::CellId {
+    crate::messaging::fabric::CellId::for_partition(
+        crate::messaging::fabric::CellEpoch::new(membership_epoch, generation),
+        &crate::messaging::SubjectPattern::new(pattern),
+    )
 }
 
 fn baseline_task_leak(harness: &mut MetaHarness) {
@@ -589,6 +679,150 @@ fn mutation_rref_access(harness: &mut MetaHarness) {
     harness.oracles.rref_access.on_rref_access(rref, task, now);
 }
 
+#[cfg(feature = "messaging-fabric")]
+fn baseline_fabric_publish(harness: &mut MetaHarness) {
+    let now = harness.now();
+    harness
+        .oracles
+        .fabric_publish
+        .register_subscription(1, crate::messaging::SubjectPattern::new("orders.>"));
+    harness
+        .oracles
+        .fabric_publish
+        .register_subscription(2, crate::messaging::SubjectPattern::new("orders.created"));
+    let publish_id = harness
+        .oracles
+        .fabric_publish
+        .on_publish_committed(crate::messaging::Subject::new("orders.created"), now);
+    harness
+        .oracles
+        .fabric_publish
+        .on_subscriber_receive(publish_id, 1);
+    harness
+        .oracles
+        .fabric_publish
+        .on_subscriber_receive(publish_id, 2);
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn mutation_fabric_publish(harness: &mut MetaHarness) {
+    let now = harness.now();
+    harness
+        .oracles
+        .fabric_publish
+        .register_subscription(1, crate::messaging::SubjectPattern::new("orders.>"));
+    harness
+        .oracles
+        .fabric_publish
+        .register_subscription(2, crate::messaging::SubjectPattern::new("orders.created"));
+    let publish_id = harness
+        .oracles
+        .fabric_publish
+        .on_publish_committed(crate::messaging::Subject::new("orders.created"), now);
+    harness
+        .oracles
+        .fabric_publish
+        .on_subscriber_receive(publish_id, 1);
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn baseline_fabric_reply(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    harness.oracles.fabric_reply.on_request_started(
+        "req-fabric-clean",
+        region,
+        crate::messaging::DeliveryClass::ObligationBacked,
+        now,
+    );
+    harness
+        .oracles
+        .fabric_reply
+        .on_reply_resolved("req-fabric-clean", now);
+    harness.oracles.fabric_reply.on_region_close(region, now);
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn mutation_fabric_reply(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    harness.oracles.fabric_reply.on_request_started(
+        "req-fabric-open",
+        region,
+        crate::messaging::DeliveryClass::ObligationBacked,
+        now,
+    );
+    harness.oracles.fabric_reply.on_region_close(region, now);
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn baseline_fabric_quiescence(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let cell = fabric_cell_id("orders.created", 1, 0);
+    harness
+        .oracles
+        .fabric_quiescence
+        .observe_cell(region, cell, 2, now);
+    harness
+        .oracles
+        .fabric_quiescence
+        .observe_cell(region, cell, 0, now);
+    harness
+        .oracles
+        .fabric_quiescence
+        .on_region_close(region, now);
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn mutation_fabric_quiescence(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let cell = fabric_cell_id("orders.created", 1, 0);
+    harness
+        .oracles
+        .fabric_quiescence
+        .observe_cell(region, cell, 1, now);
+    harness
+        .oracles
+        .fabric_quiescence
+        .on_region_close(region, now);
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn baseline_fabric_redelivery(harness: &mut MetaHarness) {
+    let now = harness.now();
+    harness
+        .oracles
+        .fabric_redelivery
+        .track_message("msg-fabric-clean", 2);
+    harness
+        .oracles
+        .fabric_redelivery
+        .on_redelivery("msg-fabric-clean", now);
+    harness
+        .oracles
+        .fabric_redelivery
+        .on_redelivery("msg-fabric-clean", now);
+}
+
+#[cfg(feature = "messaging-fabric")]
+fn mutation_fabric_redelivery(harness: &mut MetaHarness) {
+    let now = harness.now();
+    harness
+        .oracles
+        .fabric_redelivery
+        .track_message("msg-fabric-overflow", 1);
+    harness
+        .oracles
+        .fabric_redelivery
+        .on_redelivery("msg-fabric-overflow", now);
+    harness
+        .oracles
+        .fabric_redelivery
+        .on_redelivery("msg-fabric-overflow", now);
+}
+
 /// Maps an oracle violation to its invariant name.
 #[must_use]
 pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
@@ -610,6 +844,14 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::RegistryLease(_) => INVARIANT_REGISTRY_LEASE,
         OracleViolation::DownOrder(_) => INVARIANT_DOWN_ORDER,
         OracleViolation::SupervisorQuiescence(_) => INVARIANT_SUPERVISOR_QUIESCENCE,
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricPublish(_) => INVARIANT_FABRIC_PUBLISH,
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricReply(_) => INVARIANT_FABRIC_REPLY,
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricQuiescence(_) => INVARIANT_FABRIC_QUIESCENCE,
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricRedelivery(_) => INVARIANT_FABRIC_REDELIVERY,
     }
 }
 
@@ -618,9 +860,28 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    fn expected_oracle_invariant_count() -> usize {
+        let mut count = 17;
+        if cfg!(feature = "messaging-fabric") {
+            count += 4;
+        }
+        count
+    }
+
+    fn expected_builtin_mutation_count() -> usize {
+        let mut count = 13;
+        if cfg!(feature = "messaging-fabric") {
+            count += 4;
+        }
+        count
+    }
+
     #[test]
     fn all_oracle_invariants_count() {
-        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 17);
+        assert_eq!(
+            ALL_ORACLE_INVARIANTS.len(),
+            expected_oracle_invariant_count()
+        );
     }
 
     #[test]
@@ -631,7 +892,7 @@ mod tests {
 
     #[test]
     fn builtin_mutations_count() {
-        assert_eq!(builtin_mutations().len(), 13);
+        assert_eq!(builtin_mutations().len(), expected_builtin_mutation_count());
     }
 
     #[test]
@@ -698,6 +959,25 @@ mod tests {
             BuiltinMutation::CrossRegionRRefAccess.name(),
             "mutation_cross_region_rref_access"
         );
+        #[cfg(feature = "messaging-fabric")]
+        {
+            assert_eq!(
+                BuiltinMutation::FabricPublishMissingSubscriberDelivery.name(),
+                "mutation_fabric_publish_missing_subscriber_delivery"
+            );
+            assert_eq!(
+                BuiltinMutation::FabricReplyUnresolvedOnClose.name(),
+                "mutation_fabric_reply_unresolved_on_close"
+            );
+            assert_eq!(
+                BuiltinMutation::FabricQuiescenceBusyCellOnClose.name(),
+                "mutation_fabric_quiescence_busy_cell_on_close"
+            );
+            assert_eq!(
+                BuiltinMutation::FabricRedeliveryBoundExceeded.name(),
+                "mutation_fabric_redelivery_bound_exceeded"
+            );
+        }
     }
 
     #[test]
@@ -745,6 +1025,25 @@ mod tests {
             BuiltinMutation::CrossRegionRRefAccess.invariant(),
             INVARIANT_RREF_ACCESS
         );
+        #[cfg(feature = "messaging-fabric")]
+        {
+            assert_eq!(
+                BuiltinMutation::FabricPublishMissingSubscriberDelivery.invariant(),
+                INVARIANT_FABRIC_PUBLISH
+            );
+            assert_eq!(
+                BuiltinMutation::FabricReplyUnresolvedOnClose.invariant(),
+                INVARIANT_FABRIC_REPLY
+            );
+            assert_eq!(
+                BuiltinMutation::FabricQuiescenceBusyCellOnClose.invariant(),
+                INVARIANT_FABRIC_QUIESCENCE
+            );
+            assert_eq!(
+                BuiltinMutation::FabricRedeliveryBoundExceeded.invariant(),
+                INVARIANT_FABRIC_REDELIVERY
+            );
+        }
     }
 
     #[test]

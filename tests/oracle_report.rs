@@ -5,7 +5,7 @@
 //! - JSON serialization roundtrip
 //! - Deterministic report output across identical lab runs
 //! - New mutations (actor_leak, supervision, mailbox) work end-to-end
-//! - MetaRunner produces correct coverage with all 13 mutations
+//! - MetaRunner produces correct coverage across the full mutation set
 
 mod common;
 use common::*;
@@ -16,6 +16,14 @@ use asupersync::lab::oracle::eprocess::{EProcessConfig, EProcessMonitor};
 use asupersync::lab::oracle::evidence::{DetectionModel, EvidenceLedger, EvidenceStrength};
 use asupersync::lab::{ALL_ORACLE_INVARIANTS, OracleReport};
 use asupersync::types::Time;
+
+fn expected_builtin_mutation_count() -> usize {
+    let mut count = 13;
+    if cfg!(feature = "messaging-fabric") {
+        count += 4;
+    }
+    count
+}
 
 // ==================== Unified Report Tests ====================
 
@@ -182,8 +190,11 @@ fn meta_mutations_all_12_covered() {
     let runner = MetaRunner::new(DEFAULT_TEST_SEED);
     let report = runner.run(builtin_mutations());
 
-    // Should have 13 mutations now (9 original + 3 new + CrossRegionRRefAccess).
-    assert_eq!(report.results().len(), 13, "should run 13 mutations");
+    assert_eq!(
+        report.results().len(),
+        expected_builtin_mutation_count(),
+        "should run the full mutation set"
+    );
 
     // AmbientAuthority oracle has a known detection gap.
     let has_unexpected = report
@@ -197,6 +208,62 @@ fn meta_mutations_all_12_covered() {
     );
 
     test_complete!("meta_mutations_all_12_covered");
+}
+
+#[cfg(feature = "messaging-fabric")]
+#[test]
+fn unified_report_contains_fabric_oracles_when_enabled() {
+    init_test_logging();
+    test_phase!("unified_report_contains_fabric_oracles_when_enabled");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::ZERO);
+
+    for invariant in [
+        "fabric_publish",
+        "fabric_reply",
+        "fabric_quiescence",
+        "fabric_redelivery",
+    ] {
+        let entry = report.entry(invariant);
+        assert!(
+            entry.is_some(),
+            "missing feature-gated invariant {invariant}"
+        );
+        assert!(entry.unwrap().passed, "clean suite should pass {invariant}");
+    }
+
+    test_complete!("unified_report_contains_fabric_oracles_when_enabled");
+}
+
+#[cfg(feature = "messaging-fabric")]
+#[test]
+fn meta_mutations_fabric_oracles_detected_when_enabled() {
+    init_test_logging();
+    test_phase!("meta_mutations_fabric_oracles_detected_when_enabled");
+
+    let runner = MetaRunner::new(DEFAULT_TEST_SEED);
+    let report = runner.run(builtin_mutations());
+
+    for mutation in [
+        "mutation_fabric_publish_missing_subscriber_delivery",
+        "mutation_fabric_reply_unresolved_on_close",
+        "mutation_fabric_quiescence_busy_cell_on_close",
+        "mutation_fabric_redelivery_bound_exceeded",
+    ] {
+        let result = report
+            .results()
+            .iter()
+            .find(|result| result.mutation == mutation)
+            .expect("feature-gated FABRIC mutation should exist");
+        assert!(
+            result.baseline_clean(),
+            "{mutation} baseline should be clean"
+        );
+        assert!(result.mutation_detected(), "{mutation} should be detected");
+    }
+
+    test_complete!("meta_mutations_fabric_oracles_detected_when_enabled");
 }
 
 #[test]

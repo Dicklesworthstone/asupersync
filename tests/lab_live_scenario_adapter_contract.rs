@@ -7,6 +7,7 @@
 
 mod common;
 
+use asupersync::lab::DrainStatus;
 use asupersync::lab::replay::{
     DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
 };
@@ -299,21 +300,35 @@ fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::Spo
 }
 
 fn cancellation_pilot_identity() -> DualRunScenarioIdentity {
-    let seed_plan = SeedPlan::inherit(0xCA11_CE11, "seed.phase1.cancel.protocol.drain_finalize.v1")
-        .with_live_override(0xCA11_CE12)
-        .with_entropy_seed(0xCA11_CE13);
-    DualRunScenarioIdentity::phase1(
+    cancellation_pilot_identity_with(
         "phase1.cancel.protocol.drain_finalize",
-        "cancellation.protocol",
-        "cancellation.protocol.v1",
         "Cancellation pilot preserves request, drain, finalize, and loser-drain semantics",
+        0xCA11_CE11,
+    )
+}
+
+const CANCELLATION_PROTOCOL_CONTRACT_VERSION: &str = "cancel.protocol.v1";
+
+fn cancellation_pilot_identity_with(
+    scenario_id: &str,
+    description: &str,
+    seed: u64,
+) -> DualRunScenarioIdentity {
+    let seed_plan = SeedPlan::inherit(seed, format!("seed.{scenario_id}.v1"))
+        .with_live_override(seed + 1)
+        .with_entropy_seed(seed + 2);
+    DualRunScenarioIdentity::phase1(
+        scenario_id,
+        "cancellation.protocol",
+        CANCELLATION_PROTOCOL_CONTRACT_VERSION,
+        description,
         seed_plan.canonical_seed,
     )
     .with_seed_plan(seed_plan)
 }
 
 fn cancellation_pilot_semantics(
-    loser_joined: bool,
+    loser_joined: &[bool],
     cleanup_completed: bool,
     finalization_completed: bool,
     checkpoint_observed: Option<bool>,
@@ -327,7 +342,7 @@ fn cancellation_pilot_semantics(
             finalization_completed,
             checkpoint_observed,
         ),
-        loser_drain: capture_loser_drain(&[loser_joined]),
+        loser_drain: capture_loser_drain(loser_joined),
         region_close: capture_region_close(cleanup_completed, finalization_completed),
         obligation_balance: capture_obligation_balance(1, 0, 1),
         resource_surface: asupersync::lab::ResourceSurfaceRecord::empty("cancellation.protocol")
@@ -340,7 +355,7 @@ fn cancellation_pilot_semantics(
 
 fn make_cancellation_live_result(
     identity: &DualRunScenarioIdentity,
-    loser_joined: bool,
+    loser_joined: &[bool],
     cleanup_completed: bool,
     finalization_completed: bool,
     checkpoint_observed: Option<bool>,
@@ -356,7 +371,7 @@ fn make_cancellation_live_result(
             finalization_completed,
             checkpoint_observed,
         ));
-        witness.set_loser_drain(capture_loser_drain(&[loser_joined]));
+        witness.set_loser_drain(capture_loser_drain(loser_joined));
         witness.set_region_close(capture_region_close(
             cleanup_completed,
             finalization_completed,
@@ -494,8 +509,8 @@ fn dual_run_failure_manifest_keeps_readable_provenance() {
 #[test]
 fn cancellation_dual_run_pilot_preserves_request_drain_finalize_semantics() {
     let identity = cancellation_pilot_identity();
-    let lab_semantics = cancellation_pilot_semantics(true, true, true, Some(true));
-    let live_result = make_cancellation_live_result(&identity, true, true, true, Some(true));
+    let lab_semantics = cancellation_pilot_semantics(&[true], true, true, Some(true));
+    let live_result = make_cancellation_live_result(&identity, &[true], true, true, Some(true));
 
     assert_eq!(
         live_result
@@ -520,15 +535,15 @@ fn cancellation_dual_run_pilot_preserves_request_drain_finalize_semantics() {
     assert_eq!(result.lab.surface_id, "cancellation.protocol");
     assert_eq!(
         result.live.surface_contract_version,
-        "cancellation.protocol.v1"
+        CANCELLATION_PROTOCOL_CONTRACT_VERSION
     );
 }
 
 #[test]
 fn cancellation_dual_run_pilot_failure_bundle_calls_out_drain_and_finalize_gaps() {
     let identity = cancellation_pilot_identity();
-    let lab_semantics = cancellation_pilot_semantics(true, true, true, Some(true));
-    let live_result = make_cancellation_live_result(&identity, false, false, false, Some(false));
+    let lab_semantics = cancellation_pilot_semantics(&[true], true, true, Some(true));
+    let live_result = make_cancellation_live_result(&identity, &[false], false, false, Some(false));
     let live_result_for_harness = live_result.clone();
 
     let result = DualRunHarness::from_identity(identity.clone())
@@ -601,5 +616,54 @@ fn cancellation_dual_run_pilot_failure_bundle_calls_out_drain_and_finalize_gaps(
             .as_deref(),
         Some("observed via witness.set_loser_drain"),
         "live failure path should preserve loser-drain capture provenance"
+    );
+}
+
+#[test]
+fn cancellation_dual_run_pilot_before_first_poll_keeps_checkpoint_false() {
+    let identity = cancellation_pilot_identity_with(
+        "phase1.cancel.protocol.before_first_poll",
+        "Cancellation before the first checkpoint still finalizes cleanly",
+        0xCA11_CE21,
+    );
+    let lab_semantics = cancellation_pilot_semantics(&[], true, true, Some(false));
+    let live_result = make_cancellation_live_result(&identity, &[], true, true, Some(false));
+
+    let result = DualRunHarness::from_identity(identity)
+        .lab(move |_config| lab_semantics)
+        .live_result(move |_seed, _entropy| live_result)
+        .run();
+
+    assert_dual_run_passes(&result);
+    assert_eq!(
+        result.live.semantics.cancellation.checkpoint_observed,
+        Some(false)
+    );
+    assert_eq!(
+        result.live.semantics.loser_drain.status,
+        DrainStatus::NotApplicable
+    );
+}
+
+#[test]
+fn cancellation_dual_run_pilot_child_await_records_loser_drain() {
+    let identity = cancellation_pilot_identity_with(
+        "phase1.cancel.protocol.child_await",
+        "Cancellation during child await drains the awaited child before finalize",
+        0xCA11_CE31,
+    );
+    let lab_semantics = cancellation_pilot_semantics(&[true], true, true, Some(true));
+    let live_result = make_cancellation_live_result(&identity, &[true], true, true, Some(true));
+
+    let result = DualRunHarness::from_identity(identity)
+        .lab(move |_config| lab_semantics)
+        .live_result(move |_seed, _entropy| live_result)
+        .run();
+
+    assert_dual_run_passes(&result);
+    assert_eq!(result.live.semantics.loser_drain.drained_losers, 1);
+    assert_eq!(
+        result.live.semantics.loser_drain.status,
+        DrainStatus::Complete
     );
 }

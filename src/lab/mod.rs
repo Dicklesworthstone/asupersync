@@ -125,12 +125,17 @@ pub use oracle::{
     EProcessMonitor, EValue, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
     EvidenceSummary, FinalizerId, FinalizerOracle, FinalizerViolation, LogLikelihoodContributions,
     LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
-    MonitorResult, ObligationLeakOracle, ObligationLeakViolation, OracleEntryReport, OracleReport,
-    OracleStats, OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation,
+    MonitorResult, ObligationLeakOracle, ObligationLeakViolation, Oracle, OracleEntryReport,
+    OracleReport, OracleStats, OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation,
     RegistryLeaseOracle, RegistryLeaseViolation, ReplyLinearityOracle, ReplyLinearityViolation,
     SupervisionOracle, SupervisionViolation, SupervisionViolationKind, SupervisorQuiescenceOracle,
     SupervisorQuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
     assert_deterministic, assert_deterministic_multi,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use oracle::{
+    FabricPublishOracle, FabricPublishViolation, FabricQuiescenceOracle, FabricQuiescenceViolation,
+    FabricRedeliveryOracle, FabricRedeliveryViolation, FabricReplyOracle, FabricReplyViolation,
 };
 pub use replay::{
     ExplorationFingerprintClass as ReplayExplorationFingerprintClass,

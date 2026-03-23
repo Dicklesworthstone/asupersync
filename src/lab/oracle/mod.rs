@@ -24,6 +24,15 @@
 //! - [`ActorLeakOracle`]: Detects actors not properly stopped before region close.
 //! - [`SupervisionOracle`]: Verifies supervision tree behavior (restarts, escalation).
 //! - [`MailboxOracle`]: Verifies mailbox invariants (capacity, backpressure).
+//!
+//! # FABRIC-Specific Oracles
+//!
+//! Available when the `messaging-fabric` feature is enabled:
+//!
+//! - `FabricPublishOracle`: committed publishes appear in the matching subscriber set.
+//! - `FabricReplyOracle`: obligation-backed replies resolve before region close.
+//! - `FabricQuiescenceOracle`: tracked FABRIC cells are empty when regions close.
+//! - `FabricRedeliveryOracle`: redelivery stays within an explicit bound.
 
 pub mod actor;
 pub mod ambient_authority;
@@ -32,6 +41,8 @@ pub mod deadline_monotone;
 pub mod determinism;
 pub mod eprocess;
 pub mod evidence;
+#[cfg(feature = "messaging-fabric")]
+pub mod fabric;
 pub mod finalizer;
 pub mod loser_drain;
 pub mod obligation_leak;
@@ -60,6 +71,11 @@ pub use eprocess::{EProcess, EProcessConfig, EProcessMonitor, EValue, MonitorRes
 pub use evidence::{
     BayesFactor, DetectionModel, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
     EvidenceSummary, LogLikelihoodContributions,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use fabric::{
+    FabricPublishOracle, FabricPublishViolation, FabricQuiescenceOracle, FabricQuiescenceViolation,
+    FabricRedeliveryOracle, FabricRedeliveryViolation, FabricReplyOracle, FabricReplyViolation,
 };
 pub use finalizer::{FinalizerId, FinalizerOracle, FinalizerViolation};
 pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
@@ -119,6 +135,18 @@ pub enum OracleViolation {
     DownOrder(DownOrderViolation),
     /// Supervisor region closed with active children.
     SupervisorQuiescence(SupervisorQuiescenceViolation),
+    /// FABRIC publish was not observed by the expected subscriber set.
+    #[cfg(feature = "messaging-fabric")]
+    FabricPublish(FabricPublishViolation),
+    /// FABRIC obligation-backed reply remained unresolved at region close.
+    #[cfg(feature = "messaging-fabric")]
+    FabricReply(FabricReplyViolation),
+    /// FABRIC cells remained non-quiescent when a region closed.
+    #[cfg(feature = "messaging-fabric")]
+    FabricQuiescence(FabricQuiescenceViolation),
+    /// FABRIC redelivery exceeded its configured bound.
+    #[cfg(feature = "messaging-fabric")]
+    FabricRedelivery(FabricRedeliveryViolation),
 }
 
 impl std::fmt::Display for OracleViolation {
@@ -141,6 +169,14 @@ impl std::fmt::Display for OracleViolation {
             Self::RegistryLease(v) => write!(f, "Registry lease violation: {v}"),
             Self::DownOrder(v) => write!(f, "DOWN order violation: {v}"),
             Self::SupervisorQuiescence(v) => write!(f, "Supervisor quiescence violation: {v}"),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricPublish(v) => write!(f, "FABRIC publish violation: {v}"),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricReply(v) => write!(f, "FABRIC reply violation: {v}"),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricQuiescence(v) => write!(f, "FABRIC quiescence violation: {v}"),
+            #[cfg(feature = "messaging-fabric")]
+            Self::FabricRedelivery(v) => write!(f, "FABRIC redelivery violation: {v}"),
         }
     }
 }
@@ -184,6 +220,18 @@ pub struct OracleSuite {
     pub down_order: DownOrderOracle,
     /// Spork: supervisor quiescence oracle.
     pub supervisor_quiescence: SupervisorQuiescenceOracle,
+    /// FABRIC: committed publishes appear in the matching subscriber set.
+    #[cfg(feature = "messaging-fabric")]
+    pub fabric_publish: FabricPublishOracle,
+    /// FABRIC: obligation-backed replies resolve before region close.
+    #[cfg(feature = "messaging-fabric")]
+    pub fabric_reply: FabricReplyOracle,
+    /// FABRIC: tracked cells are quiescent on region close.
+    #[cfg(feature = "messaging-fabric")]
+    pub fabric_quiescence: FabricQuiescenceOracle,
+    /// FABRIC: redelivery remains bounded.
+    #[cfg(feature = "messaging-fabric")]
+    pub fabric_redelivery: FabricRedeliveryOracle,
 }
 
 impl OracleSuite {
@@ -395,6 +443,26 @@ impl OracleSuite {
             violations.push(OracleViolation::SupervisorQuiescence(v));
         }
 
+        #[cfg(feature = "messaging-fabric")]
+        if let Err(v) = self.fabric_publish.check() {
+            violations.push(OracleViolation::FabricPublish(v));
+        }
+
+        #[cfg(feature = "messaging-fabric")]
+        if let Err(v) = self.fabric_reply.check() {
+            violations.push(OracleViolation::FabricReply(v));
+        }
+
+        #[cfg(feature = "messaging-fabric")]
+        if let Err(v) = self.fabric_quiescence.check() {
+            violations.push(OracleViolation::FabricQuiescence(v));
+        }
+
+        #[cfg(feature = "messaging-fabric")]
+        if let Err(v) = self.fabric_redelivery.check() {
+            violations.push(OracleViolation::FabricRedelivery(v));
+        }
+
         violations
     }
 
@@ -417,6 +485,14 @@ impl OracleSuite {
         self.registry_lease.reset();
         self.down_order.reset();
         self.supervisor_quiescence.reset();
+        #[cfg(feature = "messaging-fabric")]
+        self.fabric_publish.reset();
+        #[cfg(feature = "messaging-fabric")]
+        self.fabric_reply.reset();
+        #[cfg(feature = "messaging-fabric")]
+        self.fabric_quiescence.reset();
+        #[cfg(feature = "messaging-fabric")]
+        self.fabric_redelivery.reset();
     }
 
     /// Generates a unified oracle report with per-oracle status and statistics.
@@ -624,6 +700,14 @@ impl OracleSuite {
                         + self.supervisor_quiescence.closed_region_count(),
                 },
             ),
+            #[cfg(feature = "messaging-fabric")]
+            self.fabric_publish.report_entry(),
+            #[cfg(feature = "messaging-fabric")]
+            self.fabric_reply.report_entry(),
+            #[cfg(feature = "messaging-fabric")]
+            self.fabric_quiescence.report_entry(),
+            #[cfg(feature = "messaging-fabric")]
+            self.fabric_redelivery.report_entry(),
         ];
 
         let total = entries.len();
@@ -675,6 +759,23 @@ impl OracleEntryReport {
             violation: violation.map(|v| v.to_string()),
             stats,
         }
+    }
+}
+
+/// Common adapter for oracles that can emit a single report row.
+pub trait Oracle {
+    /// Stable invariant name used in reports, coverage, and evidence ledgers.
+    fn invariant_name(&self) -> &'static str;
+
+    /// The current violation, if any.
+    fn violation(&self) -> Option<OracleViolation>;
+
+    /// Snapshot statistics for the oracle.
+    fn stats(&self) -> OracleStats;
+
+    /// Convert the oracle into a report row.
+    fn report_entry(&self) -> OracleEntryReport {
+        OracleEntryReport::from_result(self.invariant_name(), self.violation(), self.stats())
     }
 }
 

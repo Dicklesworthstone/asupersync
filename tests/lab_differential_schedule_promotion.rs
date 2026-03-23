@@ -89,6 +89,31 @@ fn make_obligation_leak_semantics() -> asupersync::lab::NormalizedSemantics {
     semantics
 }
 
+fn make_cancellation_finalizing_semantics() -> asupersync::lab::NormalizedSemantics {
+    let mut semantics = make_happy_semantics();
+    semantics.cancellation = asupersync::lab::CancellationRecord {
+        requested: true,
+        acknowledged: true,
+        cleanup_completed: true,
+        finalization_completed: false,
+        terminal_phase: asupersync::lab::dual_run::CancelTerminalPhase::Finalizing,
+        checkpoint_observed: Some(true),
+    };
+    semantics
+}
+
+fn make_region_draining_semantics() -> asupersync::lab::NormalizedSemantics {
+    let mut semantics = make_happy_semantics();
+    semantics.region_close = asupersync::lab::RegionCloseRecord {
+        root_state: asupersync::lab::dual_run::RegionState::Draining,
+        quiescent: false,
+        live_children: 2,
+        finalizers_pending: 1,
+        close_completed: false,
+    };
+    semantics
+}
+
 #[test]
 fn promoted_schedule_scenarios_preserve_lineage_and_class_shape() {
     let promoted = promote_exploration_report(&sample_report(), "scheduler.surface", "v1");
@@ -222,5 +247,103 @@ fn promoted_schedule_divergence_builds_retained_bundle_with_lineage() {
             .iter()
             .any(|mismatch| mismatch.field == "semantics.obligation_balance.balanced"),
         "obligation balance divergence should be retained in the bundle"
+    );
+}
+
+#[test]
+fn promoted_schedule_divergence_bundle_retains_cancellation_mismatch() {
+    let promoted = promote_exploration_report(&sample_report(), "scheduler.surface", "v1");
+    let promoted = promoted[0]
+        .clone()
+        .with_source_artifact_path("/tmp/exploration/report.json");
+
+    let result = DualRunHarness::from_identity(promoted.identity.clone())
+        .lab(|_config| make_happy_semantics())
+        .live(|_seed, _entropy| make_cancellation_finalizing_semantics())
+        .run();
+
+    assert!(
+        !result.passed(),
+        "incomplete cancellation finalization should create a divergence"
+    );
+
+    let entry = DivergenceCorpusEntry::from_dual_run_result(
+        &result,
+        "smoke",
+        "cancellation_terminal_phase_mismatch",
+        DifferentialPolicyClass::RuntimeSemanticBug,
+        "artifacts/differential/scheduler/promoted-cancellation",
+    );
+
+    let bundle = DifferentialBundleArtifacts::from_dual_run_result(&entry, &result);
+
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.cancellation.terminal_phase"),
+        "cancellation terminal phase divergence should be retained in the bundle"
+    );
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.cancellation.requested"),
+        "cancellation request divergence should be retained in the bundle"
+    );
+}
+
+#[test]
+fn promoted_schedule_divergence_bundle_retains_region_close_mismatch() {
+    let promoted = promote_exploration_report(&sample_report(), "scheduler.surface", "v1");
+    let promoted = promoted[0]
+        .clone()
+        .with_source_artifact_path("/tmp/exploration/report.json");
+
+    let result = DualRunHarness::from_identity(promoted.identity.clone())
+        .lab(|_config| make_happy_semantics())
+        .live(|_seed, _entropy| make_region_draining_semantics())
+        .run();
+
+    assert!(
+        !result.passed(),
+        "non-quiescent region close state should create a divergence"
+    );
+
+    let entry = DivergenceCorpusEntry::from_dual_run_result(
+        &result,
+        "smoke",
+        "region_close_quiescence_mismatch",
+        DifferentialPolicyClass::RuntimeSemanticBug,
+        "artifacts/differential/scheduler/promoted-region-close",
+    );
+
+    let bundle = DifferentialBundleArtifacts::from_dual_run_result(&entry, &result);
+
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.region_close.quiescent"),
+        "region quiescence divergence should be retained in the bundle"
+    );
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.region_close.live_children"),
+        "region live child count divergence should be retained in the bundle"
+    );
+    assert!(
+        bundle
+            .deviations
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "semantics.region_close.close_completed"),
+        "region close completion divergence should be retained in the bundle"
     );
 }

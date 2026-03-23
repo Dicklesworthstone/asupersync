@@ -35,7 +35,7 @@ use asupersync::cli::{
     screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
     validate_core_diagnostics_report_contract,
 };
-use asupersync::lab::dual_run::FinalDivergenceClass;
+use asupersync::lab::dual_run::{FinalDivergenceClass, ReplayPolicy, RerunDecision, SeedPlan};
 use asupersync::lab::replay::{
     DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
 };
@@ -3910,8 +3910,11 @@ struct LabDifferentialRunSummary {
     runner_profile: String,
     expectation: String,
     status: LabDifferentialScenarioStatus,
+    attempt_count: u32,
+    rerun_count: u32,
     seed_lineage_id: String,
     verdict_summary: String,
+    initial_policy_summary: String,
     policy_summary: String,
     observed_provisional_class: String,
     observed_final_policy_class: Option<String>,
@@ -3942,8 +3945,11 @@ struct LabDifferentialEventLogEntry {
     status: LabDifferentialScenarioStatus,
     attempt_index: u32,
     rerun_count: u32,
+    attempt_kind: LabDifferentialAttemptKind,
+    attempt_seed: u64,
     verdict_summary: String,
     policy_summary: String,
+    resolution_summary: String,
     provisional_class: String,
     final_policy_class: Option<String>,
     summary_path: String,
@@ -3959,6 +3965,46 @@ struct LabDifferentialEventLogEntry {
     lab_obligation_balanced: bool,
     live_obligation_balanced: bool,
     repro_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LabDifferentialAttemptKind {
+    Initial,
+    DeterministicLabReplay,
+    LiveConfirmation,
+    InstrumentationConfirmation,
+}
+
+#[derive(Debug, Clone)]
+struct LabDifferentialAttempt {
+    attempt_index: u32,
+    kind: LabDifferentialAttemptKind,
+    canonical_seed: u64,
+    result: asupersync::lab::DualRunResult,
+}
+
+#[derive(Debug, Clone)]
+struct LabDifferentialExecution {
+    attempts: Vec<LabDifferentialAttempt>,
+    final_policy_class: Option<DifferentialPolicyClass>,
+    final_policy_summary: String,
+}
+
+impl LabDifferentialExecution {
+    fn initial_attempt(&self) -> &LabDifferentialAttempt {
+        self.attempts
+            .first()
+            .expect("differential execution always has an initial attempt")
+    }
+
+    fn attempt_count(&self) -> u32 {
+        self.attempts.len() as u32
+    }
+
+    fn rerun_count(&self) -> u32 {
+        self.attempt_count().saturating_sub(1)
+    }
 }
 
 fn lab_differential(args: &LabDifferentialArgs, output: &mut Output) -> Result<(), CliError> {
@@ -3993,20 +4039,20 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
 
     for definition in selected {
         let canonical_seed = derive_scenario_seed(args.seed, definition.id);
-        let result = (definition.execute)(canonical_seed);
+        let execution = execute_lab_differential_scenario(definition, canonical_seed);
+        let initial_attempt = execution.initial_attempt();
+        let result = &initial_attempt.result;
 
-        let observed_final_policy = result
-            .policy
-            .suggested_final_class
-            .map(differential_policy_class_from_final);
+        let observed_final_policy = execution.final_policy_class;
         let observed_final_policy_string =
             observed_final_policy.map(|policy| policy.as_str().to_string());
         let observed_provisional = result.policy.provisional_class.to_string();
+        let workflow_passed = result.passed() && observed_final_policy.is_none();
 
         let (status, expected_provisional, expected_final_policy) =
             evaluate_lab_differential_expectation(
                 definition.expectation,
-                result.passed(),
+                workflow_passed,
                 &observed_provisional,
                 observed_final_policy,
             );
@@ -4032,23 +4078,26 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
         let lab_normalized_path = scenario_root.join("lab_normalized.json");
         let live_normalized_path = scenario_root.join("live_normalized.json");
 
-        write_json_artifact(&lab_normalized_path, &result.lab)?;
-        write_json_artifact(&live_normalized_path, &result.live)?;
+        for attempt in &execution.attempts {
+            let (attempt_lab_path, attempt_live_path) =
+                differential_attempt_paths(&scenario_root, attempt.attempt_index);
+            write_json_artifact(&attempt_lab_path, &attempt.result.lab)?;
+            write_json_artifact(&attempt_live_path, &attempt.result.live)?;
+        }
 
         let repro_commands = build_differential_rerun_commands(args, definition.id, &scenario_root);
 
-        let bundle = observed_final_policy
-            .filter(|_| !result.passed())
-            .map(|final_policy| {
-                let entry = DivergenceCorpusEntry::from_dual_run_result(
-                    &result,
-                    args.profile.as_str(),
-                    result.policy.provisional_class.to_string(),
-                    final_policy,
-                    bundle_root.clone(),
-                );
-                DifferentialBundleArtifacts::from_dual_run_result(&entry, &result)
-            });
+        let bundle = observed_final_policy.map(|final_policy| {
+            let entry = DivergenceCorpusEntry::from_dual_run_result(
+                result,
+                args.profile.as_str(),
+                observed_provisional.clone(),
+                final_policy,
+                bundle_root.clone(),
+            )
+            .with_first_seen_attempt(0, execution.rerun_count());
+            DifferentialBundleArtifacts::from_dual_run_result(&entry, result)
+        });
 
         if let Some(artifacts) = &bundle {
             write_json_artifact(
@@ -4074,16 +4123,19 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
             runner_profile: args.profile.as_str().to_string(),
             expectation: definition.expectation.label().to_string(),
             status,
+            attempt_count: execution.attempt_count(),
+            rerun_count: execution.rerun_count(),
             seed_lineage_id: result.seed_lineage.seed_lineage_id.clone(),
             verdict_summary: result.verdict.summary(),
-            policy_summary: result.policy.summary(),
+            initial_policy_summary: result.policy.summary(),
+            policy_summary: execution.final_policy_summary.clone(),
             observed_provisional_class: observed_provisional.clone(),
             observed_final_policy_class: observed_final_policy_string.clone(),
             expected_provisional_class: expected_provisional.clone(),
             expected_final_policy_class: expected_final_policy
                 .as_ref()
                 .map(|policy| policy.as_str().to_string()),
-            passed: result.passed(),
+            passed: workflow_passed,
             bundle_root: bundle_root.clone(),
             event_log_path: event_log_path.display().to_string(),
             lab_normalized_path: lab_normalized_path.display().to_string(),
@@ -4110,40 +4162,78 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
         };
         write_json_artifact(&summary_path, &summary)?;
 
-        let event_entry = LabDifferentialEventLogEntry {
-            schema_version: LAB_DIFFERENTIAL_EVENT_SCHEMA_VERSION.to_string(),
-            suite_id: "lab_live_differential".to_string(),
-            scenario_id: definition.id.to_string(),
-            surface_id: definition.surface_id.to_string(),
-            surface_contract_version: definition.surface_contract_version.to_string(),
-            description: definition.description.to_string(),
-            seed_lineage_id: result.seed_lineage.seed_lineage_id.clone(),
-            runner_profile: args.profile.as_str().to_string(),
-            expectation: definition.expectation.label().to_string(),
-            status,
-            attempt_index: 0,
-            rerun_count: 0,
-            verdict_summary: result.verdict.summary(),
-            policy_summary: result.policy.summary(),
-            provisional_class: observed_provisional,
-            final_policy_class: observed_final_policy_string,
-            summary_path: summary_path.display().to_string(),
-            lab_normalized_path: lab_normalized_path.display().to_string(),
-            live_normalized_path: live_normalized_path.display().to_string(),
-            failures_path: summary.failures_path.clone(),
-            deviations_path: summary.deviations_path.clone(),
-            repro_manifest_path: summary.repro_manifest_path.clone(),
-            lab_terminal_outcome: result.lab.semantics.terminal_outcome.class.to_string(),
-            live_terminal_outcome: result.live.semantics.terminal_outcome.class.to_string(),
-            lab_loser_drain: drain_status_label(result.lab.semantics.loser_drain.status)
-                .to_string(),
-            live_loser_drain: drain_status_label(result.live.semantics.loser_drain.status)
-                .to_string(),
-            lab_obligation_balanced: result.lab.semantics.obligation_balance.balanced,
-            live_obligation_balanced: result.live.semantics.obligation_balance.balanced,
-            repro_commands: repro_commands.clone(),
-        };
-        write_jsonl_artifact(&event_log_path, std::slice::from_ref(&event_entry))?;
+        let event_entries = execution
+            .attempts
+            .iter()
+            .map(|attempt| {
+                let (attempt_lab_path, attempt_live_path) =
+                    differential_attempt_paths(&scenario_root, attempt.attempt_index);
+                LabDifferentialEventLogEntry {
+                    schema_version: LAB_DIFFERENTIAL_EVENT_SCHEMA_VERSION.to_string(),
+                    suite_id: "lab_live_differential".to_string(),
+                    scenario_id: definition.id.to_string(),
+                    surface_id: definition.surface_id.to_string(),
+                    surface_contract_version: definition.surface_contract_version.to_string(),
+                    description: definition.description.to_string(),
+                    seed_lineage_id: attempt.result.seed_lineage.seed_lineage_id.clone(),
+                    runner_profile: args.profile.as_str().to_string(),
+                    expectation: definition.expectation.label().to_string(),
+                    status,
+                    attempt_index: attempt.attempt_index,
+                    rerun_count: execution.rerun_count(),
+                    attempt_kind: attempt.kind,
+                    attempt_seed: attempt.canonical_seed,
+                    verdict_summary: attempt.result.verdict.summary(),
+                    policy_summary: attempt.result.policy.summary(),
+                    resolution_summary: execution.final_policy_summary.clone(),
+                    provisional_class: attempt.result.policy.provisional_class.to_string(),
+                    final_policy_class: observed_final_policy
+                        .map(|policy| policy.as_str().to_string()),
+                    summary_path: summary_path.display().to_string(),
+                    lab_normalized_path: attempt_lab_path.display().to_string(),
+                    live_normalized_path: attempt_live_path.display().to_string(),
+                    failures_path: summary.failures_path.clone(),
+                    deviations_path: summary.deviations_path.clone(),
+                    repro_manifest_path: summary.repro_manifest_path.clone(),
+                    lab_terminal_outcome: attempt
+                        .result
+                        .lab
+                        .semantics
+                        .terminal_outcome
+                        .class
+                        .to_string(),
+                    live_terminal_outcome: attempt
+                        .result
+                        .live
+                        .semantics
+                        .terminal_outcome
+                        .class
+                        .to_string(),
+                    lab_loser_drain: drain_status_label(
+                        attempt.result.lab.semantics.loser_drain.status,
+                    )
+                    .to_string(),
+                    live_loser_drain: drain_status_label(
+                        attempt.result.live.semantics.loser_drain.status,
+                    )
+                    .to_string(),
+                    lab_obligation_balanced: attempt
+                        .result
+                        .lab
+                        .semantics
+                        .obligation_balance
+                        .balanced,
+                    live_obligation_balanced: attempt
+                        .result
+                        .live
+                        .semantics
+                        .obligation_balance
+                        .balanced,
+                    repro_commands: repro_commands.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        write_jsonl_artifact(&event_log_path, &event_entries)?;
 
         scenario_reports.push(LabDifferentialScenarioReport {
             scenario_id: definition.id.to_string(),
@@ -4154,9 +4244,9 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
             expectation: definition.expectation.label().to_string(),
             runner_profile: args.profile.as_str().to_string(),
             seed_lineage_id: result.seed_lineage.seed_lineage_id.clone(),
-            passed: result.passed(),
-            observed_provisional_class: event_entry.provisional_class.clone(),
-            observed_final_policy_class: event_entry.final_policy_class.clone(),
+            passed: workflow_passed,
+            observed_provisional_class: observed_provisional.clone(),
+            observed_final_policy_class: observed_final_policy_string.clone(),
             expected_provisional_class: expected_provisional,
             expected_final_policy_class: expected_final_policy
                 .map(|policy| policy.as_str().to_string()),
@@ -4170,7 +4260,7 @@ fn run_lab_differential(args: &LabDifferentialArgs) -> Result<LabDifferentialOut
             repro_manifest_path: summary.repro_manifest_path.clone(),
             repro_commands,
         });
-        aggregate_event_log.push(event_entry);
+        aggregate_event_log.extend(event_entries);
     }
 
     let aggregate_event_log_path = profile_root.join("differential_event_log.jsonl");
@@ -4280,6 +4370,30 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
             execute: run_phase1_cancel_protocol_scenario,
         },
         LabDifferentialScenarioDefinition {
+            id: "phase1.cancel.protocol.before_first_poll",
+            surface_id: "cancellation.protocol",
+            surface_contract_version: "cancel.protocol.v1",
+            description: "Cancellation requested before the first checkpoint still finalizes cleanly.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_cancel_before_first_poll_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "phase1.cancel.protocol.child_await",
+            surface_id: "cancellation.protocol",
+            surface_contract_version: "cancel.protocol.v1",
+            description: "Cancellation during a child await drains the child before finalization.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_cancel_child_await_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "phase1.cancel.protocol.cleanup_budget",
+            surface_id: "cancellation.protocol",
+            surface_contract_version: "cancel.protocol.v1",
+            description: "Cancellation during bounded cleanup completes within the cleanup budget.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_cancel_cleanup_budget_scenario,
+        },
+        LabDifferentialScenarioDefinition {
             id: "phase1.combinator.race.one_loser",
             surface_id: "combinator.race",
             surface_contract_version: "combinator.race.v1",
@@ -4312,6 +4426,17 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
             execute: run_phase1_region_close_scenario,
         },
         LabDifferentialScenarioDefinition {
+            id: "calibration.combinator.loser_not_drained",
+            surface_id: "combinator.race",
+            surface_contract_version: "combinator.race.v1",
+            description: "Intentional live-side undrained loser to prove combinator drain violations stay loud.",
+            expectation: LabDifferentialExpectation::Divergence {
+                provisional: "hard_contract_break",
+                final_policy: Some(DifferentialPolicyClass::RuntimeSemanticBug),
+            },
+            execute: run_calibration_combinator_loser_not_drained_scenario,
+        },
+        LabDifferentialScenarioDefinition {
             id: "calibration.cancellation.cleanup_missing",
             surface_id: "cancellation.protocol",
             surface_contract_version: "cancel.protocol.v1",
@@ -4321,6 +4446,17 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
                 final_policy: Some(DifferentialPolicyClass::RuntimeSemanticBug),
             },
             execute: run_calibration_cleanup_missing_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "calibration.cancellation.cleanup_budget_exhausted",
+            surface_id: "cancellation.protocol",
+            surface_contract_version: "cancel.protocol.v1",
+            description: "Intentional cleanup-budget exhaustion to prove cancellation-budget mismatches stay loud.",
+            expectation: LabDifferentialExpectation::Divergence {
+                provisional: "hard_contract_break",
+                final_policy: Some(DifferentialPolicyClass::RuntimeSemanticBug),
+            },
+            execute: run_calibration_cleanup_budget_exhausted_scenario,
         },
         LabDifferentialScenarioDefinition {
             id: "calibration.comparator.resource_counter_mismatch",
@@ -4383,6 +4519,9 @@ fn profile_includes_lab_differential_scenario(
         LabDifferentialProfile::Phase1Core => matches!(
             scenario_id,
             "phase1.cancel.protocol.drain_finalize"
+                | "phase1.cancel.protocol.before_first_poll"
+                | "phase1.cancel.protocol.child_await"
+                | "phase1.cancel.protocol.cleanup_budget"
                 | "phase1.combinator.race.one_loser"
                 | "phase1.channel.reserve_send.commit"
                 | "phase1.channel.reserve_send.abort_visible"
@@ -4391,7 +4530,9 @@ fn profile_includes_lab_differential_scenario(
         LabDifferentialProfile::Calibration => matches!(
             scenario_id,
             "phase1.cancel.protocol.drain_finalize"
+                | "calibration.combinator.loser_not_drained"
                 | "calibration.cancellation.cleanup_missing"
+                | "calibration.cancellation.cleanup_budget_exhausted"
                 | "calibration.comparator.resource_counter_mismatch"
                 | "calibration.channel.commit_visibility_mismatch"
                 | "calibration.obligation.leak_detected"
@@ -4431,12 +4572,13 @@ fn evaluate_lab_differential_expectation(
                 );
             }
 
-            let status =
-                if observed_provisional == provisional && observed_final_policy == final_policy {
-                    LabDifferentialScenarioStatus::ExpectedDivergence
-                } else {
-                    LabDifferentialScenarioStatus::UnexpectedDivergence
-                };
+            let final_policy_matches =
+                final_policy.is_none() || observed_final_policy == final_policy;
+            let status = if observed_provisional == provisional && final_policy_matches {
+                LabDifferentialScenarioStatus::ExpectedDivergence
+            } else {
+                LabDifferentialScenarioStatus::UnexpectedDivergence
+            };
             (status, Some(provisional.to_string()), final_policy)
         }
     }
@@ -4463,6 +4605,20 @@ fn build_differential_rerun_commands(
             args.out_dir.display()
         ),
     ]
+}
+
+fn differential_attempt_paths(scenario_root: &Path, attempt_index: u32) -> (PathBuf, PathBuf) {
+    let attempt_root = if attempt_index == 0 {
+        scenario_root.to_path_buf()
+    } else {
+        scenario_root
+            .join("attempts")
+            .join(format!("attempt-{attempt_index:02}"))
+    };
+    (
+        attempt_root.join("lab_normalized.json"),
+        attempt_root.join("live_normalized.json"),
+    )
 }
 
 fn sanitize_artifact_component(input: &str) -> String {
@@ -4498,6 +4654,262 @@ fn differential_policy_class_from_final(
             DifferentialPolicyClass::SchedulerNoiseSuspected
         }
     }
+}
+
+fn execute_lab_differential_scenario(
+    definition: LabDifferentialScenarioDefinition,
+    canonical_seed: u64,
+) -> LabDifferentialExecution {
+    let mut attempts = vec![LabDifferentialAttempt {
+        attempt_index: 0,
+        kind: LabDifferentialAttemptKind::Initial,
+        canonical_seed,
+        result: (definition.execute)(canonical_seed),
+    }];
+
+    match attempts[0].result.policy.rerun_decision {
+        RerunDecision::None => {}
+        RerunDecision::LiveConfirmations { additional_runs } => {
+            for seed in differential_confirmation_seeds(
+                canonical_seed,
+                definition.id,
+                usize::from(additional_runs),
+            ) {
+                attempts.push(LabDifferentialAttempt {
+                    attempt_index: attempts.len() as u32,
+                    kind: LabDifferentialAttemptKind::LiveConfirmation,
+                    canonical_seed: seed,
+                    result: (definition.execute)(seed),
+                });
+            }
+        }
+        RerunDecision::DeterministicLabReplayAndLiveConfirmations {
+            additional_live_runs,
+        } => {
+            attempts.push(LabDifferentialAttempt {
+                attempt_index: attempts.len() as u32,
+                kind: LabDifferentialAttemptKind::DeterministicLabReplay,
+                canonical_seed,
+                result: (definition.execute)(canonical_seed),
+            });
+            for seed in differential_confirmation_seeds(
+                canonical_seed,
+                definition.id,
+                usize::from(additional_live_runs),
+            ) {
+                attempts.push(LabDifferentialAttempt {
+                    attempt_index: attempts.len() as u32,
+                    kind: LabDifferentialAttemptKind::LiveConfirmation,
+                    canonical_seed: seed,
+                    result: (definition.execute)(seed),
+                });
+            }
+        }
+        RerunDecision::ConfirmationIfRicherInstrumentationEnabled { additional_runs } => {
+            for _ in 0..additional_runs {
+                attempts.push(LabDifferentialAttempt {
+                    attempt_index: attempts.len() as u32,
+                    kind: LabDifferentialAttemptKind::InstrumentationConfirmation,
+                    canonical_seed,
+                    result: (definition.execute)(canonical_seed),
+                });
+            }
+        }
+    }
+
+    let (final_policy_class, final_policy_summary) = resolve_lab_differential_policy(&attempts);
+    LabDifferentialExecution {
+        attempts,
+        final_policy_class,
+        final_policy_summary,
+    }
+}
+
+fn differential_confirmation_seeds(
+    canonical_seed: u64,
+    scenario_id: &str,
+    count: usize,
+) -> Vec<u64> {
+    SeedPlan::inherit(canonical_seed, scenario_id)
+        .with_replay_policy(ReplayPolicy::SeedSweep)
+        .sweep_seeds(count)
+}
+
+fn resolve_lab_differential_policy(
+    attempts: &[LabDifferentialAttempt],
+) -> (Option<DifferentialPolicyClass>, String) {
+    let initial = attempts
+        .first()
+        .expect("differential policy resolution requires an initial attempt");
+    let initial_result = &initial.result;
+    let initial_final_policy = initial_result
+        .policy
+        .suggested_final_class
+        .map(differential_policy_class_from_final);
+
+    match initial_result.policy.rerun_decision {
+        RerunDecision::None => (initial_final_policy, initial_result.policy.summary()),
+        RerunDecision::LiveConfirmations { additional_runs } => {
+            if attempts
+                .iter()
+                .filter(|attempt| attempt.kind == LabDifferentialAttemptKind::LiveConfirmation)
+                .all(|attempt| attempt.result.passed())
+            {
+                return (
+                    Some(DifferentialPolicyClass::SchedulerNoiseSuspected),
+                    format!(
+                        "scheduler/provenance drift stayed semantically equal across {} total live observations; finalize scheduler_noise_suspected",
+                        1 + additional_runs
+                    ),
+                );
+            }
+
+            (
+                Some(DifferentialPolicyClass::IrreproducibleDivergence),
+                format!(
+                    "scheduler-noise candidate produced semantic drift during {} live confirmation rerun(s) and did not stabilize",
+                    additional_runs
+                ),
+            )
+        }
+        RerunDecision::DeterministicLabReplayAndLiveConfirmations {
+            additional_live_runs,
+        } => {
+            if let Some(replay_attempt) = attempts
+                .iter()
+                .find(|attempt| attempt.kind == LabDifferentialAttemptKind::DeterministicLabReplay)
+            {
+                let lab_replay = asupersync::lab::compare_observables(
+                    &initial_result.lab,
+                    &replay_attempt.result.lab,
+                    initial_result.seed_lineage.clone(),
+                );
+                if !lab_replay.passed
+                    || initial_result.lab_invariant_violations
+                        != replay_attempt.result.lab_invariant_violations
+                {
+                    return (
+                        Some(DifferentialPolicyClass::LabModelOrMappingBug),
+                        format!(
+                            "deterministic lab replay changed its normalized answer on attempt {}; finalize lab_model_or_mapping_bug",
+                            replay_attempt.attempt_index
+                        ),
+                    );
+                }
+            }
+
+            let live_attempts = attempts
+                .iter()
+                .filter(|attempt| {
+                    matches!(
+                        attempt.kind,
+                        LabDifferentialAttemptKind::Initial
+                            | LabDifferentialAttemptKind::LiveConfirmation
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            if live_attempts
+                .iter()
+                .any(|attempt| is_immediate_runtime_bug(&attempt.result))
+            {
+                return (
+                    Some(DifferentialPolicyClass::RuntimeSemanticBug),
+                    "at least one live observation showed a hard contract break; finalize runtime_semantic_bug"
+                        .to_string(),
+                );
+            }
+
+            let mut mismatch_counts = BTreeMap::<String, usize>::new();
+            for attempt in &live_attempts {
+                if let Some(signature) = mismatch_signature(&attempt.result) {
+                    *mismatch_counts.entry(signature).or_default() += 1;
+                }
+            }
+
+            if let Some((signature, count)) = mismatch_counts.iter().find(|(_, count)| **count >= 2)
+            {
+                return (
+                    Some(DifferentialPolicyClass::RuntimeSemanticBug),
+                    format!(
+                        "semantic mismatch signature '{signature}' survived in {count} of {} live observations; finalize runtime_semantic_bug",
+                        live_attempts.len()
+                    ),
+                );
+            }
+
+            if live_attempts
+                .iter()
+                .skip(1)
+                .all(|attempt| attempt.result.passed())
+            {
+                return (
+                    Some(DifferentialPolicyClass::SchedulerNoiseSuspected),
+                    format!(
+                        "semantic mismatch disappeared across {} live confirmation rerun(s); finalize scheduler_noise_suspected",
+                        additional_live_runs
+                    ),
+                );
+            }
+
+            (
+                Some(DifferentialPolicyClass::IrreproducibleDivergence),
+                format!(
+                    "semantic mismatch did not stabilize across the deterministic lab replay plus {} live confirmation rerun(s); finalize irreproducible_divergence",
+                    additional_live_runs
+                ),
+            )
+        }
+        RerunDecision::ConfirmationIfRicherInstrumentationEnabled { additional_runs } => {
+            if let Some(final_policy) = attempts
+                .iter()
+                .skip(1)
+                .filter_map(|attempt| {
+                    attempt
+                        .result
+                        .policy
+                        .suggested_final_class
+                        .map(differential_policy_class_from_final)
+                })
+                .find(|policy| *policy != DifferentialPolicyClass::InsufficientObservability)
+            {
+                return (
+                    Some(final_policy),
+                    format!(
+                        "instrumentation confirmation rerun produced a stronger final class ({final_policy}); finalize with that class"
+                    ),
+                );
+            }
+
+            (
+                Some(DifferentialPolicyClass::InsufficientObservability),
+                format!(
+                    "required evidence remained insufficient after {} confirmation rerun(s); finalize insufficient_observability",
+                    additional_runs
+                ),
+            )
+        }
+    }
+}
+
+fn is_immediate_runtime_bug(result: &asupersync::lab::DualRunResult) -> bool {
+    result.policy.suggested_final_class == Some(FinalDivergenceClass::RuntimeSemanticBug)
+}
+
+fn mismatch_signature(result: &asupersync::lab::DualRunResult) -> Option<String> {
+    if result.passed() {
+        return None;
+    }
+
+    let mut fields = result
+        .verdict
+        .mismatches
+        .iter()
+        .map(|mismatch| mismatch.field.as_str())
+        .collect::<Vec<_>>();
+    fields.sort_unstable();
+    fields.dedup();
+    Some(fields.join("|"))
 }
 
 fn drain_status_label(status: asupersync::lab::DrainStatus) -> &'static str {
@@ -4641,34 +5053,98 @@ fn run_configured_differential_scenario(
         .run()
 }
 
-fn run_phase1_cancel_protocol_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
-    let cancellation = capture_cancellation(true, true, true, true, Some(true));
+fn run_configured_cancellation_protocol_scenario(
+    canonical_seed: u64,
+    scenario_id: &'static str,
+    description: &'static str,
+    cancel_reason: &'static str,
+    checkpoint_observed: Option<bool>,
+    loser_joined: &'static [bool],
+    counters: &'static [(&'static str, i64)],
+) -> asupersync::lab::DualRunResult {
+    let cancellation = capture_cancellation(true, true, true, true, checkpoint_observed);
+    let loser_drain = capture_loser_drain(loser_joined);
     let obligation = capture_obligation_balance(1, 0, 1);
     let region = capture_region_close(true, true);
     let lab_semantics = make_normalized_semantics(
         "cancellation.protocol",
-        TerminalOutcome::cancelled("explicit_cancel"),
+        TerminalOutcome::cancelled(cancel_reason),
         cancellation.clone(),
-        LoserDrainRecord::not_applicable(),
+        loser_drain.clone(),
         region.clone(),
         obligation.clone(),
-        &[("cleanup_steps", 1)],
+        counters,
     );
 
     run_configured_differential_scenario(
         canonical_seed,
-        "phase1.cancel.protocol.drain_finalize",
+        scenario_id,
         "cancellation.protocol",
         "cancel.protocol.v1",
-        "Completed cancellation protocol with balanced cleanup.",
+        description,
         lab_semantics,
         move |witness| {
-            witness.set_outcome(TerminalOutcome::cancelled("explicit_cancel"));
+            witness.set_outcome(TerminalOutcome::cancelled(cancel_reason));
             witness.set_cancellation(cancellation);
+            witness.set_loser_drain(loser_drain);
             witness.set_region_close(region);
             witness.set_obligation_balance(obligation);
-            witness.record_counter("cleanup_steps", 1);
+            for &(name, value) in counters {
+                witness.record_counter(name, value);
+            }
         },
+    )
+}
+
+fn run_phase1_cancel_protocol_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    run_configured_cancellation_protocol_scenario(
+        canonical_seed,
+        "phase1.cancel.protocol.drain_finalize",
+        "Completed cancellation protocol with balanced cleanup.",
+        "explicit_cancel",
+        Some(true),
+        &[],
+        &[("cleanup_steps", 1)],
+    )
+}
+
+fn run_phase1_cancel_before_first_poll_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    run_configured_cancellation_protocol_scenario(
+        canonical_seed,
+        "phase1.cancel.protocol.before_first_poll",
+        "Cancellation requested before the first checkpoint still finalizes cleanly.",
+        "before_first_poll",
+        Some(false),
+        &[],
+        &[("pre_poll_cancel_requests", 1), ("cleanup_steps", 0)],
+    )
+}
+
+fn run_phase1_cancel_child_await_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    run_configured_cancellation_protocol_scenario(
+        canonical_seed,
+        "phase1.cancel.protocol.child_await",
+        "Cancellation during a child await drains the child before finalization.",
+        "child_await_cancel",
+        Some(true),
+        &[true],
+        &[("awaited_children", 1), ("cleanup_steps", 2)],
+    )
+}
+
+fn run_phase1_cancel_cleanup_budget_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    run_configured_cancellation_protocol_scenario(
+        canonical_seed,
+        "phase1.cancel.protocol.cleanup_budget",
+        "Cancellation during bounded cleanup completes within the cleanup budget.",
+        "cleanup_budget_cancel",
+        Some(true),
+        &[],
+        &[("cleanup_steps", 3), ("cleanup_budget_ticks", 2)],
     )
 }
 
@@ -4698,6 +5174,41 @@ fn run_phase1_combinator_race_scenario(canonical_seed: u64) -> asupersync::lab::
             witness.set_outcome(TerminalOutcome::ok());
             witness.set_cancellation(cancellation);
             witness.set_loser_drain(loser_drain);
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("winner_index", 0);
+            witness.record_counter("loser_count", 1);
+        },
+    )
+}
+
+fn run_calibration_combinator_loser_not_drained_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    let cancellation = capture_cancellation(true, true, true, true, Some(true));
+    let region = capture_region_close(true, true);
+    let obligation = ObligationBalanceRecord::zero();
+    let lab_semantics = make_normalized_semantics(
+        "combinator.race",
+        TerminalOutcome::ok(),
+        cancellation.clone(),
+        capture_loser_drain(&[true]),
+        region.clone(),
+        obligation.clone(),
+        &[("winner_index", 0), ("loser_count", 1)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "calibration.combinator.loser_not_drained",
+        "combinator.race",
+        "combinator.race.v1",
+        "Intentional live-side undrained loser to prove combinator drain violations stay loud.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_cancellation(cancellation);
+            witness.set_loser_drain(capture_loser_drain(&[false]));
             witness.set_region_close(region);
             witness.set_obligation_balance(obligation);
             witness.record_counter("winner_index", 0);
@@ -4830,6 +5341,43 @@ fn run_calibration_cleanup_missing_scenario(canonical_seed: u64) -> asupersync::
             witness.set_region_close(region);
             witness.set_obligation_balance(obligation);
             witness.record_counter("cleanup_steps", 1);
+        },
+    )
+}
+
+fn run_calibration_cleanup_budget_exhausted_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    let lab_cancellation = capture_cancellation(true, true, true, true, Some(true));
+    let live_cancellation = capture_cancellation(true, true, false, false, Some(true));
+    let lab_region = capture_region_close(true, true);
+    let live_region = capture_region_close(false, false);
+    let obligation = capture_obligation_balance(1, 0, 1);
+    let lab_semantics = make_normalized_semantics(
+        "cancellation.protocol",
+        TerminalOutcome::cancelled("cleanup_budget_cancel"),
+        lab_cancellation,
+        LoserDrainRecord::not_applicable(),
+        lab_region,
+        obligation.clone(),
+        &[("cleanup_steps", 3), ("cleanup_budget_ticks", 2)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "calibration.cancellation.cleanup_budget_exhausted",
+        "cancellation.protocol",
+        "cancel.protocol.v1",
+        "Intentional cleanup-budget exhaustion to prove cancellation-budget mismatches stay loud.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::cancelled("cleanup_budget_cancel"));
+            witness.set_cancellation(live_cancellation);
+            witness.set_region_close(live_region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("cleanup_steps", 3);
+            witness.record_counter("cleanup_budget_ticks", 2);
+            witness.record_counter("cleanup_budget_exhausted", 1);
         },
     )
 }
@@ -6206,6 +6754,203 @@ mod tests {
     }
 
     #[test]
+    fn lab_differential_phase1_core_profile_covers_cancel_before_first_poll_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Phase1Core,
+            scenarios: vec!["phase1.cancel.protocol.before_first_poll".to_string()],
+            seed: 2112,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run before-first-poll cancellation");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            live_normalized["semantics"]["cancellation"]["checkpoint_observed"],
+            false
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["pre_poll_cancel_requests"],
+            1
+        );
+    }
+
+    #[test]
+    fn lab_differential_phase1_core_profile_covers_cancel_during_child_await_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Phase1Core,
+            scenarios: vec!["phase1.cancel.protocol.child_await".to_string()],
+            seed: 2330,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run child-await cancellation");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            live_normalized["semantics"]["loser_drain"]["drained_losers"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["awaited_children"],
+            1
+        );
+    }
+
+    #[test]
+    fn lab_differential_phase1_core_profile_covers_combinator_one_loser_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Phase1Core,
+            scenarios: vec!["phase1.combinator.race.one_loser".to_string()],
+            seed: 2446,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run combinator one-loser profile");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            live_normalized["semantics"]["loser_drain"]["status"],
+            "complete"
+        );
+        assert_eq!(
+            live_normalized["semantics"]["loser_drain"]["expected_losers"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["loser_drain"]["drained_losers"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["winner_index"],
+            0
+        );
+    }
+
+    #[test]
+    fn lab_differential_phase1_core_profile_covers_cleanup_budget_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Phase1Core,
+            scenarios: vec!["phase1.cancel.protocol.cleanup_budget".to_string()],
+            seed: 2552,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run cleanup-budget cancellation");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["cleanup_budget_ticks"],
+            2
+        );
+        assert_eq!(
+            live_normalized["semantics"]["cancellation"]["cleanup_completed"],
+            true
+        );
+        assert_eq!(
+            live_normalized["semantics"]["cancellation"]["finalization_completed"],
+            true
+        );
+    }
+
+    #[test]
+    fn lab_differential_phase1_core_profile_covers_quiescent_region_close_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Phase1Core,
+            scenarios: vec!["phase1.region.close.quiescent".to_string()],
+            seed: 3131,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run quiescent region-close profile");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            live_normalized["semantics"]["region_close"]["quiescent"],
+            true
+        );
+        assert_eq!(
+            live_normalized["semantics"]["region_close"]["live_children"],
+            0
+        );
+        assert_eq!(
+            live_normalized["semantics"]["region_close"]["finalizers_pending"],
+            0
+        );
+        assert_eq!(
+            live_normalized["semantics"]["region_close"]["close_completed"],
+            true
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["balanced"],
+            true
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["committed"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["aborted"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["nested_children"],
+            2
+        );
+    }
+
+    #[test]
     fn lab_differential_calibration_profile_retains_expected_divergence_bundle() {
         let temp = tempfile::tempdir().expect("tempdir");
         let args = LabDifferentialArgs {
@@ -6261,6 +7006,123 @@ mod tests {
     }
 
     #[test]
+    fn lab_differential_calibration_profile_covers_combinator_loser_not_drained() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: vec!["calibration.combinator.loser_not_drained".to_string()],
+            seed: 5224,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run combinator loser-not-drained profile");
+        assert!(report.success);
+        assert_eq!(report.expected_divergence_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(
+            scenario.status,
+            LabDifferentialScenarioStatus::ExpectedDivergence
+        );
+        assert_eq!(scenario.observed_provisional_class, "hard_contract_break");
+        assert_eq!(
+            scenario.observed_final_policy_class.as_deref(),
+            Some("runtime_semantic_bug")
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .failures_path
+                    .as_deref()
+                    .expect("failures path must exist for combinator divergence")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .deviations_path
+                    .as_deref()
+                    .expect("deviations path must exist for combinator divergence")
+            )
+            .exists()
+        );
+
+        let lab_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.lab_normalized_path).expect("read lab normalized"),
+        )
+        .expect("parse lab normalized");
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            lab_normalized["semantics"]["loser_drain"]["status"],
+            "complete"
+        );
+        assert_eq!(
+            live_normalized["semantics"]["loser_drain"]["status"],
+            "incomplete"
+        );
+        assert_eq!(
+            live_normalized["semantics"]["loser_drain"]["expected_losers"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["loser_drain"]["drained_losers"],
+            0
+        );
+
+        let event_log =
+            fs::read_to_string(&scenario.event_log_path).expect("read combinator event log");
+        assert!(event_log.contains("\"provisional_class\":\"hard_contract_break\""));
+        assert!(event_log.contains("\"final_policy_class\":\"runtime_semantic_bug\""));
+        assert!(event_log.contains("\"lab_loser_drain\":\"complete\""));
+        assert!(event_log.contains("\"live_loser_drain\":\"incomplete\""));
+    }
+
+    #[test]
+    fn lab_differential_calibration_profile_covers_cleanup_budget_exhaustion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: vec!["calibration.cancellation.cleanup_budget_exhausted".to_string()],
+            seed: 5252,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run cleanup-budget calibration profile");
+        assert!(report.success);
+        assert_eq!(report.expected_divergence_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(
+            scenario.status,
+            LabDifferentialScenarioStatus::ExpectedDivergence
+        );
+        assert_eq!(scenario.observed_provisional_class, "hard_contract_break");
+        assert_eq!(
+            scenario.observed_final_policy_class.as_deref(),
+            Some("runtime_semantic_bug")
+        );
+
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["cleanup_budget_exhausted"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["region_close"]["quiescent"],
+            false
+        );
+    }
+
+    #[test]
     fn lab_differential_calibration_profile_covers_comparator_mismatch_and_report_fields() {
         let temp = tempfile::tempdir().expect("tempdir");
         let args = LabDifferentialArgs {
@@ -6284,15 +7146,42 @@ mod tests {
             scenario.observed_provisional_class,
             "semantic_mismatch_admitted_surface"
         );
-        assert_eq!(scenario.observed_final_policy_class, None);
+        assert_eq!(
+            scenario.observed_final_policy_class.as_deref(),
+            Some("runtime_semantic_bug")
+        );
         assert_eq!(
             scenario.expected_provisional_class.as_deref(),
             Some("semantic_mismatch_admitted_surface")
         );
         assert_eq!(scenario.expected_final_policy_class, None);
-        assert_eq!(scenario.failures_path, None);
-        assert_eq!(scenario.deviations_path, None);
-        assert_eq!(scenario.repro_manifest_path, None);
+        assert!(
+            Path::new(
+                scenario
+                    .failures_path
+                    .as_deref()
+                    .expect("failures path must exist for comparator mismatch")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .deviations_path
+                    .as_deref()
+                    .expect("deviations path must exist for comparator mismatch")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .repro_manifest_path
+                    .as_deref()
+                    .expect("repro manifest must exist for comparator mismatch")
+            )
+            .exists()
+        );
 
         let summary = fs::read_to_string(&scenario.summary_path).expect("read comparator summary");
         assert!(summary.contains("\"description\":"));
@@ -6302,15 +7191,25 @@ mod tests {
                 .contains("\"expected_provisional_class\": \"semantic_mismatch_admitted_surface\"")
         );
         assert!(summary.contains("\"expected_final_policy_class\": null"));
+        assert!(summary.contains("\"attempt_count\": 4"));
+        assert!(summary.contains("\"rerun_count\": 3"));
+        assert!(summary.contains("\"policy_summary\":"));
 
         let event_log =
             fs::read_to_string(&scenario.event_log_path).expect("read comparator event log");
         assert!(event_log.contains("\"provisional_class\":\"semantic_mismatch_admitted_surface\""));
-        assert!(event_log.contains("\"final_policy_class\":null"));
+        assert!(event_log.contains("\"final_policy_class\":\"runtime_semantic_bug\""));
+        assert!(event_log.contains("\"attempt_index\":0"));
+        assert!(event_log.contains("\"attempt_index\":1"));
+        assert!(event_log.contains("\"attempt_index\":2"));
+        assert!(event_log.contains("\"attempt_index\":3"));
+        assert!(event_log.contains("\"attempt_kind\":\"deterministic_lab_replay\""));
+        assert!(event_log.contains("\"attempt_kind\":\"live_confirmation\""));
+        assert!(event_log.contains("\"rerun_count\":3"));
 
         let human = report.human_format();
         assert!(human.contains("provisional=semantic_mismatch_admitted_surface"));
-        assert!(human.contains("final=pending"));
+        assert!(human.contains("final=runtime_semantic_bug"));
         assert!(human.contains("summary="));
     }
 
@@ -6338,7 +7237,37 @@ mod tests {
             scenario.observed_provisional_class,
             "semantic_mismatch_admitted_surface"
         );
-        assert_eq!(scenario.observed_final_policy_class, None);
+        assert_eq!(
+            scenario.observed_final_policy_class.as_deref(),
+            Some("runtime_semantic_bug")
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .failures_path
+                    .as_deref()
+                    .expect("failures path must exist for channel mismatch")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .deviations_path
+                    .as_deref()
+                    .expect("deviations path must exist for channel mismatch")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .repro_manifest_path
+                    .as_deref()
+                    .expect("repro manifest must exist for channel mismatch")
+            )
+            .exists()
+        );
 
         let lab_normalized: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(&scenario.lab_normalized_path).expect("read lab normalized"),
@@ -6364,6 +7293,102 @@ mod tests {
             live_normalized["semantics"]["obligation_balance"]["committed"],
             1
         );
+    }
+
+    #[test]
+    fn lab_differential_calibration_profile_covers_obligation_leak_detection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: vec!["calibration.obligation.leak_detected".to_string()],
+            seed: 9170,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run obligation calibration profile");
+        assert!(report.success);
+        assert_eq!(report.expected_divergence_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(
+            scenario.status,
+            LabDifferentialScenarioStatus::ExpectedDivergence
+        );
+        assert_eq!(scenario.observed_provisional_class, "hard_contract_break");
+        assert_eq!(
+            scenario.observed_final_policy_class.as_deref(),
+            Some("runtime_semantic_bug")
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .failures_path
+                    .as_deref()
+                    .expect("failures path must exist for obligation divergence")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .deviations_path
+                    .as_deref()
+                    .expect("deviations path must exist for obligation divergence")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .repro_manifest_path
+                    .as_deref()
+                    .expect("repro manifest must exist for obligation divergence")
+            )
+            .exists()
+        );
+
+        let lab_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.lab_normalized_path).expect("read lab normalized"),
+        )
+        .expect("parse lab normalized");
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            lab_normalized["semantics"]["obligation_balance"]["balanced"],
+            true
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["balanced"],
+            false
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["reserved"],
+            2
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["committed"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["aborted"],
+            0
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["leaked"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["reserved_slots"],
+            2
+        );
+
+        let event_log =
+            fs::read_to_string(&scenario.event_log_path).expect("read obligation event log");
+        assert!(event_log.contains("\"provisional_class\":\"hard_contract_break\""));
+        assert!(event_log.contains("\"final_policy_class\":\"runtime_semantic_bug\""));
     }
 
     #[test]
@@ -6454,23 +7479,33 @@ mod tests {
 
         let report = run_lab_differential(&args).expect("run full calibration profile");
         assert!(report.success);
-        assert_eq!(report.scenario_count, 6);
+        assert_eq!(report.scenario_count, 8);
         assert_eq!(report.pass_count, 1);
-        assert_eq!(report.expected_divergence_count, 5);
+        assert_eq!(report.expected_divergence_count, 7);
         assert_eq!(report.unexpected_divergence_count, 0);
         assert_eq!(report.missing_expected_divergence_count, 0);
         assert!(report.scenarios.iter().any(|scenario| {
+            scenario.scenario_id == "calibration.combinator.loser_not_drained"
+                && scenario.observed_provisional_class == "hard_contract_break"
+                && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
+        }));
+        assert!(report.scenarios.iter().any(|scenario| {
             scenario.scenario_id == "calibration.comparator.resource_counter_mismatch"
                 && scenario.observed_provisional_class == "semantic_mismatch_admitted_surface"
-                && scenario.observed_final_policy_class.is_none()
+                && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
         }));
         assert!(report.scenarios.iter().any(|scenario| {
             scenario.scenario_id == "calibration.channel.commit_visibility_mismatch"
                 && scenario.observed_provisional_class == "semantic_mismatch_admitted_surface"
-                && scenario.observed_final_policy_class.is_none()
+                && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
         }));
         assert!(report.scenarios.iter().any(|scenario| {
             scenario.scenario_id == "calibration.cancellation.cleanup_missing"
+                && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
+        }));
+        assert!(report.scenarios.iter().any(|scenario| {
+            scenario.scenario_id == "calibration.cancellation.cleanup_budget_exhausted"
+                && scenario.observed_provisional_class == "hard_contract_break"
                 && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
         }));
         assert!(report.scenarios.iter().any(|scenario| {

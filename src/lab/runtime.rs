@@ -176,6 +176,14 @@ const TEMPORAL_ORACLE_INVARIANTS: &[&str] = &[
     "loser_drain",
     "region_tree",
     "deadline_monotone",
+    #[cfg(feature = "messaging-fabric")]
+    "fabric_publish",
+    #[cfg(feature = "messaging-fabric")]
+    "fabric_reply",
+    #[cfg(feature = "messaging-fabric")]
+    "fabric_quiescence",
+    #[cfg(feature = "messaging-fabric")]
+    "fabric_redelivery",
 ];
 
 // ---------------------------------------------------------------------------

@@ -399,12 +399,12 @@ impl SupervisionOracle {
                 let restart_count =
                     self.restart_attempt_in_window(failure.child, failure.time, next_failure_time);
 
-                // Check if restart limit was exceeded without escalation
+                // Check if restart limit was exceeded
                 let escalated =
                     self.escalated_in_window(failure.parent, failure.time, next_failure_time);
 
                 if restart_count > config.max_restarts {
-                    // Verify escalation happened (e.from is parent, not failure.from)
+                    // Verify escalation happened (e.from is parent, not failure.from) and it was NOT restarted.
                     if !escalated && config.escalation_policy != EscalationPolicy::Stop {
                         return Err(SupervisionViolation {
                             kind: SupervisionViolationKind::RestartLimitExceeded {
@@ -417,6 +417,7 @@ impl SupervisionOracle {
                             time: failure.time,
                         });
                     }
+                    continue; // Do not check sibling restarts if we correctly escalated/stopped
                 }
 
                 // Check OneForAll policy
