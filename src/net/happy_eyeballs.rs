@@ -73,12 +73,10 @@ impl Default for HappyEyeballsConfig {
 /// family appended at the end.
 #[must_use]
 pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
-    let v6: Vec<IpAddr> = addrs.iter().copied().filter(IpAddr::is_ipv6).collect();
-    let v4: Vec<IpAddr> = addrs.iter().copied().filter(IpAddr::is_ipv4).collect();
+    let mut v6_iter = addrs.iter().copied().filter(IpAddr::is_ipv6);
+    let mut v4_iter = addrs.iter().copied().filter(IpAddr::is_ipv4);
 
-    let mut result = Vec::with_capacity(v6.len() + v4.len());
-    let mut v6_iter = v6.into_iter();
-    let mut v4_iter = v4.into_iter();
+    let mut result = Vec::with_capacity(addrs.len());
 
     loop {
         match (v6_iter.next(), v4_iter.next()) {
@@ -109,12 +107,10 @@ pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
 /// operates on full `SocketAddr` values so each address keeps its original port.
 #[must_use]
 fn sort_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
-    let v6: Vec<SocketAddr> = addrs.iter().copied().filter(SocketAddr::is_ipv6).collect();
-    let v4: Vec<SocketAddr> = addrs.iter().copied().filter(SocketAddr::is_ipv4).collect();
+    let mut v6_iter = addrs.iter().copied().filter(SocketAddr::is_ipv6);
+    let mut v4_iter = addrs.iter().copied().filter(SocketAddr::is_ipv4);
 
-    let mut result = Vec::with_capacity(v6.len() + v4.len());
-    let mut v6_iter = v6.into_iter();
-    let mut v4_iter = v4.into_iter();
+    let mut result = Vec::with_capacity(addrs.len());
 
     loop {
         match (v6_iter.next(), v4_iter.next()) {

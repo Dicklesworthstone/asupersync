@@ -1544,4 +1544,12 @@ mod tests {
         let result = decode_one(&mut codec, raw);
         assert!(matches!(result, Err(HttpError::BadHeader)));
     }
+
+    #[test]
+    fn decode_obs_text_header_value() {
+        let mut codec = Http1Codec::new();
+        let raw = b"GET / HTTP/1.1\r\nTest-Header: \xff\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Ok(Some(_))));
+    }
 }
