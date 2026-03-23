@@ -131,8 +131,10 @@ pub use cut::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use fabric::{
-    CapturePolicy, Fabric, FabricCertifiedReply, FabricMessage, FabricReply, FabricReplyDelivery,
-    FabricStreamConfig, FabricStreamHandle, FabricSubscription, PublishReceipt,
+    CapturePolicy, Fabric, FabricCapabilityDecision, FabricCertifiedReply, FabricDecisionKind,
+    FabricDecisionRecord, FabricDeliveryClassEscalation, FabricMessage, FabricReply,
+    FabricReplyDelivery, FabricRetryDecision, FabricRoutingDecision, FabricStreamConfig,
+    FabricStreamHandle, FabricSubscription, PublishPermit, PublishReceipt,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use federation::{

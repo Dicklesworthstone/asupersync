@@ -3,8 +3,12 @@
 use super::class::DeliveryClass;
 use super::subject::{Subject, SubjectPattern};
 use crate::types::{RegionId, Time};
-use std::collections::{BTreeSet, VecDeque};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::ops::RangeInclusive;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -118,7 +122,7 @@ pub enum StreamLifecycle {
 }
 
 /// A single durably retained stream record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamRecord {
     /// Monotonic stream-local sequence number.
     pub seq: u64,
@@ -167,19 +171,19 @@ pub struct StreamSnapshot {
 /// Storage backend used by a FABRIC stream.
 pub trait StorageBackend {
     /// Append a new record to the backend.
-    fn append(&mut self, record: StreamRecord);
+    fn append(&mut self, record: StreamRecord) -> Result<(), StreamError>;
 
     /// Fetch a record by exact sequence number.
-    fn get(&self, seq: u64) -> Option<StreamRecord>;
+    fn get(&self, seq: u64) -> Result<Option<StreamRecord>, StreamError>;
 
     /// Fetch records in the inclusive sequence range.
-    fn range(&self, seqs: RangeInclusive<u64>) -> Vec<StreamRecord>;
+    fn range(&self, seqs: RangeInclusive<u64>) -> Result<Vec<StreamRecord>, StreamError>;
 
     /// Truncate all records up to and including `through_seq`.
-    fn truncate_through(&mut self, through_seq: u64) -> Vec<StreamRecord>;
+    fn truncate_through(&mut self, through_seq: u64) -> Result<Vec<StreamRecord>, StreamError>;
 
     /// Return a full snapshot of retained records.
-    fn snapshot(&self) -> StorageSnapshot;
+    fn snapshot(&self) -> Result<StorageSnapshot, StreamError>;
 }
 
 /// Deterministic in-memory storage backend for early FABRIC stream work.
@@ -189,26 +193,29 @@ pub struct InMemoryStorageBackend {
 }
 
 impl StorageBackend for InMemoryStorageBackend {
-    fn append(&mut self, record: StreamRecord) {
+    fn append(&mut self, record: StreamRecord) -> Result<(), StreamError> {
         self.records.push_back(record);
+        Ok(())
     }
 
-    fn get(&self, seq: u64) -> Option<StreamRecord> {
-        self.records
+    fn get(&self, seq: u64) -> Result<Option<StreamRecord>, StreamError> {
+        Ok(self
+            .records
             .iter()
             .find(|record| record.seq == seq)
-            .cloned()
+            .cloned())
     }
 
-    fn range(&self, seqs: RangeInclusive<u64>) -> Vec<StreamRecord> {
-        self.records
+    fn range(&self, seqs: RangeInclusive<u64>) -> Result<Vec<StreamRecord>, StreamError> {
+        Ok(self
+            .records
             .iter()
             .filter(|record| seqs.contains(&record.seq))
             .cloned()
-            .collect()
+            .collect())
     }
 
-    fn truncate_through(&mut self, through_seq: u64) -> Vec<StreamRecord> {
+    fn truncate_through(&mut self, through_seq: u64) -> Result<Vec<StreamRecord>, StreamError> {
         let mut removed = Vec::new();
         while self
             .records
@@ -219,13 +226,480 @@ impl StorageBackend for InMemoryStorageBackend {
                 removed.push(record);
             }
         }
-        removed
+        Ok(removed)
     }
 
-    fn snapshot(&self) -> StorageSnapshot {
-        StorageSnapshot {
+    fn snapshot(&self) -> Result<StorageSnapshot, StreamError> {
+        Ok(StorageSnapshot {
             records: self.records.iter().cloned().collect(),
+        })
+    }
+}
+
+fn validate_retained_records<'a, I>(records: I) -> Result<(), StreamError>
+where
+    I: IntoIterator<Item = &'a StreamRecord>,
+{
+    let mut previous_seq = None;
+    for record in records {
+        match previous_seq {
+            None => {
+                if record.seq == 0 {
+                    return Err(StreamError::InvalidRecoveredSequence {
+                        previous_seq: None,
+                        current_seq: record.seq,
+                    });
+                }
+            }
+            Some(previous_seq_value) => {
+                if record.seq != previous_seq_value.saturating_add(1) {
+                    return Err(StreamError::InvalidRecoveredSequence {
+                        previous_seq: Some(previous_seq_value),
+                        current_seq: record.seq,
+                    });
+                }
+            }
         }
+        previous_seq = Some(record.seq);
+    }
+
+    Ok(())
+}
+
+/// Durability policy used when advancing the on-disk WAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalFsyncPolicy {
+    /// Never force the WAL to stable storage automatically.
+    Never,
+    /// Force the active segment at rotation boundaries.
+    SegmentBoundary,
+    /// Force every append/truncate control entry before returning.
+    Always,
+}
+
+impl WalFsyncPolicy {
+    /// Select the default sync policy for a delivery class.
+    #[must_use]
+    pub const fn for_delivery_class(delivery_class: DeliveryClass) -> Self {
+        match delivery_class {
+            DeliveryClass::EphemeralInteractive => Self::Never,
+            DeliveryClass::DurableOrdered => Self::SegmentBoundary,
+            DeliveryClass::ObligationBacked
+            | DeliveryClass::MobilitySafe
+            | DeliveryClass::ForensicReplayable => Self::Always,
+        }
+    }
+}
+
+/// Configuration for the file-backed WAL storage backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalStorageConfig {
+    root_dir: PathBuf,
+    segment_max_bytes: u64,
+    fsync_policy: WalFsyncPolicy,
+}
+
+impl WalStorageConfig {
+    /// Default segment size used when callers do not provide one explicitly.
+    pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 256 * 1024;
+
+    /// Build a WAL config rooted at `root_dir` with defaults for `delivery_class`.
+    #[must_use]
+    pub fn new(root_dir: impl Into<PathBuf>, delivery_class: DeliveryClass) -> Self {
+        Self {
+            root_dir: root_dir.into(),
+            segment_max_bytes: Self::DEFAULT_SEGMENT_MAX_BYTES,
+            fsync_policy: WalFsyncPolicy::for_delivery_class(delivery_class),
+        }
+    }
+
+    /// Override the maximum size of a single segment before rotation.
+    #[must_use]
+    pub fn with_segment_max_bytes(mut self, segment_max_bytes: u64) -> Self {
+        self.segment_max_bytes = segment_max_bytes;
+        self
+    }
+
+    /// Override the sync policy derived from the delivery class.
+    #[must_use]
+    pub const fn with_fsync_policy(mut self, fsync_policy: WalFsyncPolicy) -> Self {
+        self.fsync_policy = fsync_policy;
+        self
+    }
+
+    /// Return the directory that stores WAL segments for the stream.
+    #[must_use]
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+
+    /// Return the configured maximum size of a single segment.
+    #[must_use]
+    pub const fn segment_max_bytes(&self) -> u64 {
+        self.segment_max_bytes
+    }
+
+    /// Return the configured filesystem sync policy.
+    #[must_use]
+    pub const fn fsync_policy(&self) -> WalFsyncPolicy {
+        self.fsync_policy
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WalSegmentMeta {
+    id: u64,
+    path: PathBuf,
+    bytes: u64,
+    record_count: usize,
+    first_seq: Option<u64>,
+    last_seq: Option<u64>,
+}
+
+impl WalSegmentMeta {
+    fn record_append(&mut self, record: &StreamRecord, bytes: u64) {
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.record_count = self.record_count.saturating_add(1);
+        self.first_seq.get_or_insert(record.seq);
+        self.last_seq = Some(record.seq);
+    }
+
+    fn note_control_entry(&mut self, bytes: u64) {
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WalEntry {
+    Append { record: StreamRecord },
+    TruncateThrough { through_seq: u64 },
+}
+
+/// Append-only WAL-backed stream storage with deterministic recovery semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalStorageBackend {
+    config: WalStorageConfig,
+    records: VecDeque<StreamRecord>,
+    segments: Vec<WalSegmentMeta>,
+    next_segment_id: u64,
+}
+
+impl WalStorageBackend {
+    /// Open or create a WAL directory and replay retained stream state from it.
+    pub fn open(config: WalStorageConfig) -> Result<Self, StreamError> {
+        if config.segment_max_bytes == 0 {
+            return Err(StreamError::InvalidWalConfig {
+                field: "segment_max_bytes",
+                detail: "segment size must be greater than zero".to_owned(),
+            });
+        }
+
+        fs::create_dir_all(config.root_dir())
+            .map_err(|error| StreamError::wal_io("create_dir_all", config.root_dir(), &error))?;
+
+        let mut records = VecDeque::new();
+        let mut segments = Vec::new();
+        let mut next_segment_id = 0;
+
+        for (segment_id, path) in Self::segment_paths(config.root_dir())? {
+            let (segment, loaded_records) = Self::load_segment(segment_id, &path)?;
+            Self::apply_entries(&mut records, &loaded_records);
+            next_segment_id = next_segment_id.max(segment_id.saturating_add(1));
+            segments.push(segment);
+        }
+        validate_retained_records(records.iter())?;
+
+        Ok(Self {
+            config,
+            records,
+            segments,
+            next_segment_id,
+        })
+    }
+
+    /// Create a new WAL backend from an in-memory storage snapshot.
+    pub fn from_snapshot(
+        config: WalStorageConfig,
+        snapshot: &StorageSnapshot,
+    ) -> Result<Self, StreamError> {
+        fs::create_dir_all(config.root_dir())
+            .map_err(|error| StreamError::wal_io("create_dir_all", config.root_dir(), &error))?;
+        let has_existing_entries = fs::read_dir(config.root_dir())
+            .map_err(|error| StreamError::wal_io("read_dir", config.root_dir(), &error))?
+            .next()
+            .transpose()
+            .map_err(|error| StreamError::wal_io("read_dir_entry", config.root_dir(), &error))?
+            .is_some();
+        if has_existing_entries {
+            return Err(StreamError::WalAlreadyInitialized {
+                path: config.root_dir().display().to_string(),
+            });
+        }
+        validate_retained_records(snapshot.records.iter())?;
+
+        let mut backend = Self::open(config)?;
+        for record in snapshot.records.iter().cloned() {
+            backend.append(record)?;
+        }
+        Ok(backend)
+    }
+
+    /// Return the number of segment files currently known to the backend.
+    #[must_use]
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    fn apply_entries(records: &mut VecDeque<StreamRecord>, entries: &[WalEntry]) {
+        for entry in entries {
+            match entry {
+                WalEntry::Append { record } => records.push_back(record.clone()),
+                WalEntry::TruncateThrough { through_seq } => {
+                    while records
+                        .front()
+                        .is_some_and(|record| record.seq <= *through_seq)
+                    {
+                        let _ = records.pop_front();
+                    }
+                }
+            }
+        }
+    }
+
+    fn load_segment(
+        segment_id: u64,
+        path: &Path,
+    ) -> Result<(WalSegmentMeta, Vec<WalEntry>), StreamError> {
+        let file = File::open(path).map_err(|error| StreamError::wal_io("open", path, &error))?;
+        let mut reader = BufReader::new(file);
+        let mut entries = Vec::new();
+        let mut line = Vec::new();
+        let mut line_number = 0usize;
+        let mut valid_len = 0_u64;
+
+        loop {
+            line.clear();
+            let bytes_read = reader
+                .read_until(b'\n', &mut line)
+                .map_err(|error| StreamError::wal_io("read_until", path, &error))?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            if !line.ends_with(b"\n") {
+                break;
+            }
+
+            line_number = line_number.saturating_add(1);
+            valid_len = valid_len.saturating_add(u64::try_from(bytes_read).unwrap_or(u64::MAX));
+            let payload = &line[..line.len().saturating_sub(1)];
+            if payload.is_empty() {
+                continue;
+            }
+
+            let entry = serde_json::from_slice::<WalEntry>(payload).map_err(|error| {
+                StreamError::WalFormat {
+                    path: path.display().to_string(),
+                    line: line_number,
+                    detail: error.to_string(),
+                }
+            })?;
+            entries.push(entry);
+        }
+
+        let mut writable = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|error| StreamError::wal_io("open_write", path, &error))?;
+        writable
+            .set_len(valid_len)
+            .map_err(|error| StreamError::wal_io("set_len", path, &error))?;
+        writable
+            .seek(SeekFrom::Start(valid_len))
+            .map_err(|error| StreamError::wal_io("seek", path, &error))?;
+
+        let mut segment = WalSegmentMeta {
+            id: segment_id,
+            path: path.to_path_buf(),
+            bytes: valid_len,
+            record_count: 0,
+            first_seq: None,
+            last_seq: None,
+        };
+        for entry in &entries {
+            if let WalEntry::Append { record } = entry {
+                segment.record_count = segment.record_count.saturating_add(1);
+                segment.first_seq.get_or_insert(record.seq);
+                segment.last_seq = Some(record.seq);
+            }
+        }
+
+        Ok((segment, entries))
+    }
+
+    fn segment_paths(root_dir: &Path) -> Result<Vec<(u64, PathBuf)>, StreamError> {
+        let mut paths = fs::read_dir(root_dir)
+            .map_err(|error| StreamError::wal_io("read_dir", root_dir, &error))?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                if !file_type.is_file() {
+                    return None;
+                }
+                let file_name = entry.file_name();
+                let file_name = file_name.to_str()?;
+                let id = file_name
+                    .strip_prefix("segment-")?
+                    .strip_suffix(".wal")?
+                    .parse::<u64>()
+                    .ok()?;
+                Some((id, entry.path()))
+            })
+            .collect::<Vec<_>>();
+        paths.sort_unstable_by_key(|(id, _)| *id);
+        Ok(paths)
+    }
+
+    fn current_segment_needs_rotation(&self, entry_len: u64) -> bool {
+        self.segments.last().is_some_and(|segment| {
+            segment.bytes != 0
+                && segment.bytes.saturating_add(entry_len) > self.config.segment_max_bytes()
+        })
+    }
+
+    fn ensure_segment_for_entry(&mut self, entry_len: u64) -> Result<usize, StreamError> {
+        if self.segments.is_empty() || self.current_segment_needs_rotation(entry_len) {
+            if self.current_segment_needs_rotation(entry_len)
+                && self.config.fsync_policy() == WalFsyncPolicy::SegmentBoundary
+            {
+                self.sync_last_segment()?;
+            }
+
+            let segment_id = self.next_segment_id;
+            self.next_segment_id = self.next_segment_id.saturating_add(1);
+            let path = self
+                .config
+                .root_dir()
+                .join(format!("segment-{segment_id:020}.wal"));
+            let _file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|error| StreamError::wal_io("create_segment", &path, &error))?;
+            self.segments.push(WalSegmentMeta {
+                id: segment_id,
+                path,
+                bytes: 0,
+                record_count: 0,
+                first_seq: None,
+                last_seq: None,
+            });
+        }
+
+        Ok(self.segments.len().saturating_sub(1))
+    }
+
+    fn sync_last_segment(&self) -> Result<(), StreamError> {
+        let Some(segment) = self.segments.last() else {
+            return Ok(());
+        };
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&segment.path)
+            .map_err(|error| StreamError::wal_io("open_sync", &segment.path, &error))?;
+        file.sync_all()
+            .map_err(|error| StreamError::wal_io("sync_all", &segment.path, &error))
+    }
+
+    fn append_entry(&mut self, entry: &WalEntry) -> Result<u64, StreamError> {
+        let mut encoded = serde_json::to_vec(entry).map_err(|error| StreamError::WalFormat {
+            path: self.config.root_dir().display().to_string(),
+            line: 0,
+            detail: error.to_string(),
+        })?;
+        encoded.push(b'\n');
+        let entry_len = u64::try_from(encoded.len()).map_err(|_| StreamError::PayloadTooLarge {
+            bytes: encoded.len(),
+        })?;
+        let segment_index = self.ensure_segment_for_entry(entry_len)?;
+        let segment_path = self.segments[segment_index].path.clone();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&segment_path)
+            .map_err(|error| StreamError::wal_io("open_append", &segment_path, &error))?;
+        file.write_all(&encoded)
+            .map_err(|error| StreamError::wal_io("write_all", &segment_path, &error))?;
+        if self.config.fsync_policy() == WalFsyncPolicy::Always {
+            file.sync_all()
+                .map_err(|error| StreamError::wal_io("sync_all", &segment_path, &error))?;
+        }
+        Ok(entry_len)
+    }
+}
+
+impl StorageBackend for WalStorageBackend {
+    fn append(&mut self, record: StreamRecord) -> Result<(), StreamError> {
+        let entry = WalEntry::Append {
+            record: record.clone(),
+        };
+        let bytes = self.append_entry(&entry)?;
+        let Some(segment) = self.segments.last_mut() else {
+            return Err(StreamError::WalFormat {
+                path: self.config.root_dir().display().to_string(),
+                line: 0,
+                detail: "append completed without an active WAL segment".to_owned(),
+            });
+        };
+        segment.record_append(&record, bytes);
+        self.records.push_back(record);
+        Ok(())
+    }
+
+    fn get(&self, seq: u64) -> Result<Option<StreamRecord>, StreamError> {
+        Ok(self
+            .records
+            .iter()
+            .find(|record| record.seq == seq)
+            .cloned())
+    }
+
+    fn range(&self, seqs: RangeInclusive<u64>) -> Result<Vec<StreamRecord>, StreamError> {
+        Ok(self
+            .records
+            .iter()
+            .filter(|record| seqs.contains(&record.seq))
+            .cloned()
+            .collect())
+    }
+
+    fn truncate_through(&mut self, through_seq: u64) -> Result<Vec<StreamRecord>, StreamError> {
+        let mut removed = Vec::new();
+        while self
+            .records
+            .front()
+            .is_some_and(|record| record.seq <= through_seq)
+        {
+            if let Some(record) = self.records.pop_front() {
+                removed.push(record);
+            }
+        }
+        if removed.is_empty() {
+            return Ok(removed);
+        }
+
+        let entry = WalEntry::TruncateThrough { through_seq };
+        let bytes = self.append_entry(&entry)?;
+        if let Some(segment) = self.segments.last_mut() {
+            segment.note_control_entry(bytes);
+        }
+        Ok(removed)
+    }
+
+    fn snapshot(&self) -> Result<StorageSnapshot, StreamError> {
+        Ok(StorageSnapshot {
+            records: self.records.iter().cloned().collect(),
+        })
     }
 }
 
@@ -279,6 +753,104 @@ pub enum StreamError {
         /// Active source child regions.
         sources: usize,
     },
+    /// The configured WAL backend options are not internally consistent.
+    #[error("wal config field `{field}` is invalid: {detail}")]
+    InvalidWalConfig {
+        /// Offending configuration field.
+        field: &'static str,
+        /// Human-readable failure reason.
+        detail: String,
+    },
+    /// Filesystem access for the WAL backend failed.
+    #[error("wal {operation} failed for `{path}`: {detail}")]
+    WalIo {
+        /// Operation attempted on the WAL.
+        operation: &'static str,
+        /// File or directory path.
+        path: String,
+        /// Human-readable failure reason.
+        detail: String,
+    },
+    /// A WAL segment contained malformed durable data.
+    #[error("wal format error in `{path}` at line {line}: {detail}")]
+    WalFormat {
+        /// Segment path that failed to decode.
+        path: String,
+        /// 1-based line number within the segment, or 0 for out-of-band format faults.
+        line: usize,
+        /// Human-readable parse error.
+        detail: String,
+    },
+    /// A snapshot-based restore requires an empty WAL directory.
+    #[error("wal directory `{path}` must be empty before snapshot restore")]
+    WalAlreadyInitialized {
+        /// WAL root directory that already contains data.
+        path: String,
+    },
+    /// Recovered storage contents violate stream sequence invariants.
+    #[error("recovered storage contains invalid sequence {current_seq} after {previous_seq:?}")]
+    InvalidRecoveredSequence {
+        /// Previous retained sequence, or `None` when validating the first record.
+        previous_seq: Option<u64>,
+        /// Sequence number that violated the retained ordering invariant.
+        current_seq: u64,
+    },
+    /// A stream append permit was committed more than once.
+    #[error("stream append permit for seq {seq} has already been committed")]
+    PermitAlreadyCommitted {
+        /// Sequence number of the already-committed permit.
+        seq: u64,
+    },
+    /// The message is a duplicate within the configured dedup window.
+    #[error("duplicate detected for subject `{subject}` (existing seq {existing_seq})")]
+    DuplicateDetected {
+        /// Subject of the duplicate message.
+        subject: String,
+        /// Sequence number of the previously stored message.
+        existing_seq: u64,
+    },
+}
+
+impl StreamError {
+    fn wal_io(operation: &'static str, path: &Path, error: &std::io::Error) -> Self {
+        Self::WalIo {
+            operation,
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        }
+    }
+}
+
+/// Two-phase append permit for stream storage.
+///
+/// Represents a reserved sequence slot.  The holder must call
+/// [`Stream::commit_append`] with a payload to durably commit the
+/// record, or drop the permit (the gap in sequence numbers is harmless
+/// and detectable by consumers).
+#[derive(Debug, Clone)]
+#[must_use = "a StreamAppendPermit must be committed or explicitly dropped"]
+pub struct StreamAppendPermit {
+    /// Reserved sequence number.
+    pub seq: u64,
+    /// Subject for the record.
+    pub subject: Subject,
+    /// Logical publish time for retention.
+    pub published_at: Time,
+    /// Whether commit_append has been called.
+    committed: bool,
+}
+
+impl StreamAppendPermit {
+    /// Explicitly abort the permit without committing.
+    pub fn abort(mut self) {
+        self.committed = true; // Prevent double-abort noise.
+    }
+
+    /// Returns true if the permit has been committed.
+    #[must_use]
+    pub fn is_committed(&self) -> bool {
+        self.committed
+    }
 }
 
 /// Region-owned durable stream state machine for the FABRIC lane.
@@ -294,6 +866,9 @@ pub struct Stream<B: StorageBackend = InMemoryStorageBackend> {
     consumer_ids: BTreeSet<u64>,
     mirror_regions: BTreeSet<RegionId>,
     source_regions: BTreeSet<RegionId>,
+    /// Dedup index: (subject_str, payload_hash) → (published_at, seq).
+    /// Used when `config.dedupe_window` is `Some`.
+    dedup_index: BTreeMap<(String, u64), (Time, u64)>,
 }
 
 impl<B: StorageBackend> Stream<B> {
@@ -310,17 +885,48 @@ impl<B: StorageBackend> Stream<B> {
             return Err(StreamError::EmptyName);
         }
 
+        let storage_snapshot = storage.snapshot()?;
+        validate_retained_records(storage_snapshot.records.iter())?;
+        let msg_count = u64::try_from(storage_snapshot.records.len()).map_err(|_| {
+            StreamError::PayloadTooLarge {
+                bytes: storage_snapshot.records.len(),
+            }
+        })?;
+        let byte_count = storage_snapshot
+            .records
+            .iter()
+            .try_fold(0_u64, |acc, record| {
+                record.payload_len().map(|len| acc.saturating_add(len))
+            })?;
+        let first_seq = storage_snapshot
+            .records
+            .first()
+            .map_or(0, |record| record.seq);
+        let last_seq = storage_snapshot
+            .records
+            .last()
+            .map_or(0, |record| record.seq);
+
         Ok(Self {
             name,
             region_id,
             config,
-            state: StreamState::new(created_at),
+            state: StreamState {
+                msg_count,
+                byte_count,
+                first_seq,
+                last_seq,
+                consumer_count: 0,
+                created_at,
+                lifecycle: StreamLifecycle::Open,
+            },
             storage,
-            next_seq: 1,
+            next_seq: last_seq.saturating_add(1).max(1),
             next_consumer_id: 1,
             consumer_ids: BTreeSet::new(),
             mirror_regions: BTreeSet::new(),
             source_regions: BTreeSet::new(),
+            dedup_index: BTreeMap::new(),
         })
     }
 
@@ -348,6 +954,47 @@ impl<B: StorageBackend> Stream<B> {
         &self.state
     }
 
+    /// Check whether a (subject, payload) pair is a duplicate within
+    /// the configured dedup window.  Returns `Ok(())` if the message
+    /// is fresh or dedup is disabled.
+    fn check_dedup(&mut self, subject: &Subject, payload: &[u8], now: Time) -> Result<(), StreamError> {
+        let Some(window) = self.config.dedupe_window else {
+            return Ok(());
+        };
+
+        // Evict expired entries.
+        let window_nanos = window.as_nanos() as u64;
+        self.dedup_index.retain(|_, (ts, _)| {
+            now.duration_since(*ts) < window_nanos
+        });
+
+        let key = (subject.as_str().to_owned(), Self::payload_hash(payload));
+        if let Some((_ts, existing_seq)) = self.dedup_index.get(&key) {
+            return Err(StreamError::DuplicateDetected {
+                subject: subject.as_str().to_owned(),
+                existing_seq: *existing_seq,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Record a message in the dedup index after successful commit.
+    fn record_dedup(&mut self, subject: &Subject, payload: &[u8], published_at: Time, seq: u64) {
+        if self.config.dedupe_window.is_some() {
+            let key = (subject.as_str().to_owned(), Self::payload_hash(payload));
+            self.dedup_index.insert(key, (published_at, seq));
+        }
+    }
+
+    /// Simple non-cryptographic hash of a payload for dedup keying.
+    fn payload_hash(payload: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        payload.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Append a captured record to the stream.
     pub fn append(
         &mut self,
@@ -364,30 +1011,96 @@ impl<B: StorageBackend> Stream<B> {
             });
         }
 
+        let payload = payload.into();
+        self.check_dedup(&subject, &payload, published_at)?;
+
         let record = StreamRecord {
             seq: self.next_seq,
             subject,
-            payload: payload.into(),
+            payload,
             published_at,
         };
         let _ = record.payload_len()?;
 
-        self.storage.append(record.clone());
+        self.storage.append(record.clone())?;
+        self.record_dedup(&record.subject, &record.payload, published_at, record.seq);
         self.next_seq = self.next_seq.saturating_add(1);
         self.enforce_retention(published_at)?;
         self.rebuild_state()?;
         Ok(record)
     }
 
+    /// Reserve an append slot without committing payload.
+    ///
+    /// Returns a [`StreamAppendPermit`] that the caller must either
+    /// [`commit`](StreamAppendPermit::commit) with a payload or
+    /// [`abort`](StreamAppendPermit::abort).  Dropping the permit without
+    /// committing aborts cleanly and does not allocate a sequence number.
+    pub fn reserve_append(
+        &mut self,
+        subject: Subject,
+        published_at: Time,
+    ) -> Result<StreamAppendPermit, StreamError> {
+        self.ensure_accepting_appends()?;
+
+        if !self.captures(&subject) {
+            return Err(StreamError::SubjectNotCaptured {
+                subject: subject.as_str().to_owned(),
+                filter: self.config.subject_filter.as_str().to_owned(),
+            });
+        }
+
+        let reserved_seq = self.next_seq;
+        // Optimistically advance the sequence counter.  If the permit
+        // is aborted the sequence gap is harmless — monotonicity is
+        // preserved and consumers can detect gaps explicitly.
+        self.next_seq = self.next_seq.saturating_add(1);
+
+        Ok(StreamAppendPermit {
+            seq: reserved_seq,
+            subject,
+            published_at,
+            committed: false,
+        })
+    }
+
+    /// Commit a previously reserved append permit by writing the record
+    /// to storage and enforcing retention.
+    pub fn commit_append(
+        &mut self,
+        permit: &mut StreamAppendPermit,
+        payload: impl Into<Vec<u8>>,
+    ) -> Result<StreamRecord, StreamError> {
+        if permit.committed {
+            return Err(StreamError::PermitAlreadyCommitted { seq: permit.seq });
+        }
+
+        let payload = payload.into();
+        self.check_dedup(&permit.subject, &payload, permit.published_at)?;
+        permit.committed = true;
+
+        let record = StreamRecord {
+            seq: permit.seq,
+            subject: permit.subject.clone(),
+            payload,
+            published_at: permit.published_at,
+        };
+        let _ = record.payload_len()?;
+
+        self.storage.append(record.clone())?;
+        self.record_dedup(&record.subject, &record.payload, permit.published_at, record.seq);
+        self.enforce_retention(permit.published_at)?;
+        self.rebuild_state()?;
+        Ok(record)
+    }
+
     /// Fetch a retained record by sequence number.
-    #[must_use]
-    pub fn get(&self, seq: u64) -> Option<StreamRecord> {
+    pub fn get(&self, seq: u64) -> Result<Option<StreamRecord>, StreamError> {
         self.storage.get(seq)
     }
 
     /// Fetch retained records within the inclusive sequence range.
-    #[must_use]
-    pub fn range(&self, seqs: RangeInclusive<u64>) -> Vec<StreamRecord> {
+    pub fn range(&self, seqs: RangeInclusive<u64>) -> Result<Vec<StreamRecord>, StreamError> {
         self.storage.range(seqs)
     }
 
@@ -466,17 +1179,16 @@ impl<B: StorageBackend> Stream<B> {
     }
 
     /// Snapshot the current stream state and retained records.
-    #[must_use]
-    pub fn snapshot(&self) -> StreamSnapshot {
-        StreamSnapshot {
+    pub fn snapshot(&self) -> Result<StreamSnapshot, StreamError> {
+        Ok(StreamSnapshot {
             name: self.name.clone(),
             region_id: self.region_id,
             config: self.config.clone(),
             state: self.state.clone(),
-            storage: self.storage.snapshot(),
+            storage: self.storage.snapshot()?,
             mirror_regions: self.mirror_regions.iter().copied().collect(),
             source_regions: self.source_regions.iter().copied().collect(),
-        }
+        })
     }
 
     fn captures(&self, subject: &Subject) -> bool {
@@ -513,7 +1225,7 @@ impl<B: StorageBackend> Stream<B> {
         }
 
         loop {
-            let snapshot = self.storage.snapshot();
+            let snapshot = self.storage.snapshot()?;
             let Some(oldest) = snapshot.records.first() else {
                 return Ok(());
             };
@@ -540,12 +1252,12 @@ impl<B: StorageBackend> Stream<B> {
                 return Ok(());
             }
 
-            let _removed = self.storage.truncate_through(oldest.seq);
+            let _removed = self.storage.truncate_through(oldest.seq)?;
         }
     }
 
     fn rebuild_state(&mut self) -> Result<(), StreamError> {
-        let snapshot = self.storage.snapshot();
+        let snapshot = self.storage.snapshot()?;
         self.state.msg_count =
             u64::try_from(snapshot.records.len()).map_err(|_| StreamError::PayloadTooLarge {
                 bytes: snapshot.records.len(),
@@ -563,6 +1275,14 @@ impl<B: StorageBackend> Stream<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn test_region(index: u32) -> RegionId {
         RegionId::new_for_test(index, 1)
@@ -603,8 +1323,8 @@ mod tests {
 
         assert_eq!(first.seq, 1);
         assert_eq!(second.seq, 2);
-        assert_eq!(stream.get(1), Some(first));
-        assert_eq!(stream.range(1..=2).len(), 2);
+        assert_eq!(stream.get(1).expect("get first"), Some(first));
+        assert_eq!(stream.range(1..=2).expect("range").len(), 2);
         assert_eq!(stream.state().msg_count, 2);
         assert_eq!(stream.state().first_seq, 1);
         assert_eq!(stream.state().last_seq, 2);
@@ -707,9 +1427,9 @@ mod tests {
         assert_eq!(stream.state().msg_count, 2);
         assert_eq!(stream.state().first_seq, 2);
         assert_eq!(stream.state().last_seq, 3);
-        assert!(stream.get(1).is_none());
-        assert!(stream.get(2).is_some());
-        assert!(stream.get(3).is_some());
+        assert!(stream.get(1).expect("get first").is_none());
+        assert!(stream.get(2).expect("get second").is_some());
+        assert!(stream.get(3).expect("get third").is_some());
     }
 
     #[test]
@@ -744,9 +1464,13 @@ mod tests {
         assert_eq!(stream.state().byte_count, 5);
         assert_eq!(stream.state().first_seq, 2);
         assert_eq!(stream.state().last_seq, 2);
-        assert!(stream.get(1).is_none());
+        assert!(stream.get(1).expect("get first").is_none());
         assert_eq!(
-            stream.get(2).expect("retained second").payload,
+            stream
+                .get(2)
+                .expect("get second")
+                .expect("retained second")
+                .payload,
             b"five!".to_vec()
         );
     }
@@ -781,7 +1505,7 @@ mod tests {
 
         assert_eq!(stream.state().msg_count, 2);
         assert!(
-            stream.get(1).is_some(),
+            stream.get(1).expect("get first").is_some(),
             "age equal to limit should be retained"
         );
 
@@ -797,11 +1521,11 @@ mod tests {
         assert_eq!(stream.state().first_seq, 2);
         assert_eq!(stream.state().last_seq, 3);
         assert!(
-            stream.get(1).is_none(),
+            stream.get(1).expect("get first").is_none(),
             "age above limit should prune oldest"
         );
-        assert!(stream.get(2).is_some());
-        assert!(stream.get(3).is_some());
+        assert!(stream.get(2).expect("get second").is_some());
+        assert!(stream.get(3).expect("get third").is_some());
     }
 
     #[test]
@@ -839,8 +1563,14 @@ mod tests {
             assert_eq!(stream.state().msg_count, 2, "retention={retention:?}");
             assert_eq!(stream.state().first_seq, 1, "retention={retention:?}");
             assert_eq!(stream.state().last_seq, 2, "retention={retention:?}");
-            assert!(stream.get(1).is_some(), "retention={retention:?}");
-            assert!(stream.get(2).is_some(), "retention={retention:?}");
+            assert!(
+                stream.get(1).expect("get first").is_some(),
+                "retention={retention:?}"
+            );
+            assert!(
+                stream.get(2).expect("get second").is_some(),
+                "retention={retention:?}"
+            );
         }
     }
 
@@ -1008,7 +1738,7 @@ mod tests {
             .expect("source region");
         let consumer = stream.attach_consumer();
 
-        let snapshot = stream.snapshot();
+        let snapshot = stream.snapshot().expect("snapshot");
         assert_eq!(snapshot.name, "orders");
         assert_eq!(snapshot.region_id, test_region(20));
         assert_eq!(snapshot.state.msg_count, 1);
@@ -1017,5 +1747,460 @@ mod tests {
         assert_eq!(snapshot.source_regions, vec![test_region(22)]);
 
         assert!(stream.detach_consumer(consumer));
+    }
+
+    fn temp_wal_dir(test_name: &str) -> PathBuf {
+        let unique = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock drift")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "asupersync-stream-wal-{test_name}-{nanos}-{unique}"
+        ));
+        fs::create_dir_all(&path).expect("create temp wal dir");
+        path
+    }
+
+    fn wal_record(seq: u64, subject: &str, payload: &[u8], published_at: Time) -> StreamRecord {
+        StreamRecord {
+            seq,
+            subject: Subject::new(subject),
+            payload: payload.to_vec(),
+            published_at,
+        }
+    }
+
+    #[test]
+    fn wal_backend_round_trips_records_after_reopen() {
+        let dir = temp_wal_dir("round-trip");
+        let config =
+            WalStorageConfig::new(&dir, DeliveryClass::DurableOrdered).with_segment_max_bytes(1024);
+        let first = wal_record(1, "orders.created", b"alpha", Time::from_secs(1));
+        let second = wal_record(2, "orders.updated", b"beta", Time::from_secs(2));
+
+        let mut backend = WalStorageBackend::open(config.clone()).expect("open wal");
+        backend.append(first.clone()).expect("append first");
+        backend.append(second.clone()).expect("append second");
+        assert_eq!(backend.segment_count(), 1);
+
+        let reopened = WalStorageBackend::open(config).expect("reopen wal");
+        assert_eq!(reopened.get(1).expect("get first"), Some(first));
+        assert_eq!(reopened.get(2).expect("get second"), Some(second));
+        assert_eq!(reopened.snapshot().expect("snapshot").records.len(), 2);
+    }
+
+    #[test]
+    fn wal_backend_rotates_segments_and_replays_truncation_markers() {
+        let dir = temp_wal_dir("rotate-truncate");
+        let config =
+            WalStorageConfig::new(&dir, DeliveryClass::DurableOrdered).with_segment_max_bytes(1);
+        let mut backend = WalStorageBackend::open(config.clone()).expect("open wal");
+
+        backend
+            .append(wal_record(1, "orders.created", b"one", Time::from_secs(1)))
+            .expect("append one");
+        backend
+            .append(wal_record(2, "orders.updated", b"two", Time::from_secs(2)))
+            .expect("append two");
+        backend
+            .append(wal_record(
+                3,
+                "orders.cancelled",
+                b"three",
+                Time::from_secs(3),
+            ))
+            .expect("append three");
+
+        assert_eq!(backend.segment_count(), 3);
+        let removed = backend.truncate_through(2).expect("truncate through");
+        assert_eq!(removed.len(), 2);
+        assert_eq!(backend.segment_count(), 4);
+
+        let reopened = WalStorageBackend::open(config).expect("reopen wal");
+        assert!(reopened.get(1).expect("get first").is_none());
+        assert!(reopened.get(2).expect("get second").is_none());
+        assert_eq!(
+            reopened
+                .get(3)
+                .expect("get third")
+                .expect("retained third")
+                .payload,
+            b"three".to_vec()
+        );
+    }
+
+    #[test]
+    fn wal_backend_truncates_torn_tail_during_recovery() {
+        let dir = temp_wal_dir("torn-tail");
+        let config =
+            WalStorageConfig::new(&dir, DeliveryClass::DurableOrdered).with_segment_max_bytes(1024);
+        let mut backend = WalStorageBackend::open(config.clone()).expect("open wal");
+        let record = wal_record(1, "orders.created", b"alpha", Time::from_secs(1));
+        backend.append(record.clone()).expect("append record");
+
+        let segment_path = backend.segments[0].path.clone();
+        let valid_len = fs::metadata(&segment_path).expect("segment metadata").len();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&segment_path)
+            .expect("open append");
+        file.write_all(br#"{"kind":"append","record":"torn"#)
+            .expect("write torn tail");
+        drop(file);
+
+        let recovered = WalStorageBackend::open(config).expect("recover wal");
+        let repaired_len = fs::metadata(&segment_path).expect("segment metadata").len();
+        assert_eq!(repaired_len, valid_len);
+        assert_eq!(recovered.get(1).expect("get first"), Some(record));
+        assert_eq!(recovered.snapshot().expect("snapshot").records.len(), 1);
+    }
+
+    #[test]
+    fn wal_backend_can_restore_from_snapshot() {
+        let dir = temp_wal_dir("snapshot-restore");
+        let config = WalStorageConfig::new(&dir, DeliveryClass::ForensicReplayable)
+            .with_segment_max_bytes(1024);
+        let snapshot = StorageSnapshot {
+            records: vec![
+                wal_record(1, "orders.created", b"alpha", Time::from_secs(1)),
+                wal_record(2, "orders.updated", b"beta", Time::from_secs(2)),
+            ],
+        };
+
+        let restored = WalStorageBackend::from_snapshot(config.clone(), &snapshot)
+            .expect("restore from snapshot");
+        assert_eq!(restored.snapshot().expect("snapshot"), snapshot);
+
+        let reopened = WalStorageBackend::open(config).expect("reopen wal");
+        assert_eq!(reopened.snapshot().expect("snapshot"), snapshot);
+    }
+
+    #[test]
+    fn wal_backend_restore_rejects_non_empty_directory() {
+        let dir = temp_wal_dir("restore-non-empty");
+        fs::write(dir.join("stray.txt"), b"occupied").expect("write stray file");
+        let config =
+            WalStorageConfig::new(&dir, DeliveryClass::DurableOrdered).with_segment_max_bytes(1024);
+
+        let error = WalStorageBackend::from_snapshot(config, &StorageSnapshot::default())
+            .expect_err("non-empty wal directory must be rejected");
+        assert_eq!(
+            error,
+            StreamError::WalAlreadyInitialized {
+                path: dir.display().to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wal_backend_open_rejects_non_contiguous_recovered_records() {
+        let dir = temp_wal_dir("open-gap");
+        let segment_path = dir.join("segment-00000000000000000000.wal");
+        let first = serde_json::to_string(&WalEntry::Append {
+            record: wal_record(1, "orders.created", b"alpha", Time::from_secs(1)),
+        })
+        .expect("serialize first");
+        let third = serde_json::to_string(&WalEntry::Append {
+            record: wal_record(3, "orders.updated", b"beta", Time::from_secs(2)),
+        })
+        .expect("serialize third");
+        fs::write(&segment_path, format!("{first}\n{third}\n")).expect("write wal segment");
+
+        let config =
+            WalStorageConfig::new(&dir, DeliveryClass::DurableOrdered).with_segment_max_bytes(1024);
+        let error =
+            WalStorageBackend::open(config).expect_err("corrupted recovered wal must be rejected");
+        assert_eq!(
+            error,
+            StreamError::InvalidRecoveredSequence {
+                previous_seq: Some(1),
+                current_seq: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn stream_rejects_recovered_storage_with_non_contiguous_sequences() {
+        let storage = InMemoryStorageBackend {
+            records: VecDeque::from([
+                wal_record(2, "orders.created", b"alpha", Time::from_secs(1)),
+                wal_record(4, "orders.updated", b"beta", Time::from_secs(2)),
+            ]),
+        };
+
+        let error = Stream::new(
+            "orders",
+            test_region(31),
+            Time::from_secs(10),
+            stream_config("orders.>"),
+            storage,
+        )
+        .expect_err("corrupted retained window must be rejected");
+        assert_eq!(
+            error,
+            StreamError::InvalidRecoveredSequence {
+                previous_seq: Some(2),
+                current_seq: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn stream_new_rehydrates_state_from_recovered_wal_storage() {
+        let dir = temp_wal_dir("stream-rehydrate");
+        let config =
+            WalStorageConfig::new(&dir, DeliveryClass::DurableOrdered).with_segment_max_bytes(1024);
+        let mut backend = WalStorageBackend::open(config.clone()).expect("open wal");
+        backend
+            .append(wal_record(
+                1,
+                "orders.created",
+                b"alpha",
+                Time::from_secs(1),
+            ))
+            .expect("append first");
+        backend
+            .append(wal_record(2, "orders.updated", b"beta", Time::from_secs(2)))
+            .expect("append second");
+
+        let reopened_backend = WalStorageBackend::open(config).expect("reopen wal");
+        let mut stream = Stream::new(
+            "orders",
+            test_region(30),
+            Time::from_secs(10),
+            stream_config("orders.>"),
+            reopened_backend,
+        )
+        .expect("stream");
+
+        assert_eq!(stream.state().msg_count, 2);
+        assert_eq!(stream.state().first_seq, 1);
+        assert_eq!(stream.state().last_seq, 2);
+        let appended = stream
+            .append(
+                Subject::new("orders.cancelled"),
+                b"gamma".to_vec(),
+                Time::from_secs(11),
+            )
+            .expect("append third");
+        assert_eq!(appended.seq, 3);
+    }
+
+    // ── Two-phase append tests ────────────────────────────────────
+
+    #[test]
+    fn reserve_then_commit_append() {
+        let mut stream = make_default_stream();
+        let mut permit = stream
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+            .expect("reserve");
+
+        let record = stream
+            .commit_append(&mut permit, b"payload".to_vec())
+            .expect("commit");
+
+        assert_eq!(record.seq, 1);
+        assert_eq!(record.payload, b"payload".to_vec());
+        assert!(permit.is_committed());
+        assert_eq!(stream.state().msg_count, 1);
+    }
+
+    #[test]
+    fn reserve_then_abort_leaves_stream_empty() {
+        let mut stream = make_default_stream();
+        let permit = stream
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+            .expect("reserve");
+
+        permit.abort();
+        assert_eq!(stream.state().msg_count, 0, "aborted permit must not store anything");
+    }
+
+    #[test]
+    fn reserve_then_drop_leaves_stream_empty() {
+        let mut stream = make_default_stream();
+        {
+            let _permit = stream
+                .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+                .expect("reserve");
+            // dropped without commit
+        }
+        assert_eq!(stream.state().msg_count, 0, "dropped permit must not store anything");
+    }
+
+    #[test]
+    fn double_commit_returns_error() {
+        let mut stream = make_default_stream();
+        let mut permit = stream
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+            .expect("reserve");
+
+        let _ = stream
+            .commit_append(&mut permit, b"first".to_vec())
+            .expect("first commit");
+
+        let err = stream
+            .commit_append(&mut permit, b"second".to_vec())
+            .expect_err("second commit must fail");
+
+        assert!(
+            matches!(err, StreamError::PermitAlreadyCommitted { seq: 1 }),
+            "expected PermitAlreadyCommitted, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reserve_preserves_sequence_monotonicity() {
+        let mut stream = make_default_stream();
+
+        let mut permit1 = stream
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+            .expect("reserve 1");
+        let mut permit2 = stream
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(2))
+            .expect("reserve 2");
+
+        // Commit in reverse order — sequences should still be monotone.
+        let r2 = stream
+            .commit_append(&mut permit2, b"second".to_vec())
+            .expect("commit 2");
+        let r1 = stream
+            .commit_append(&mut permit1, b"first".to_vec())
+            .expect("commit 1");
+
+        assert!(r1.seq < r2.seq, "sequence monotonicity violated");
+    }
+
+    // ── Dedup window tests ────────────────────────────────────────
+
+    #[test]
+    fn dedup_window_rejects_duplicate_within_window() {
+        let config = StreamConfig {
+            dedupe_window: Some(Duration::from_secs(60)),
+            ..StreamConfig::default()
+        };
+        let mut stream = Stream::new(
+            "dedup-stream",
+            RegionId::first(),
+            Time::from_secs(0),
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("create stream");
+
+        stream
+            .append(Subject::new("fabric.default"), b"unique".to_vec(), Time::from_secs(1))
+            .expect("first append");
+
+        let err = stream
+            .append(Subject::new("fabric.default"), b"unique".to_vec(), Time::from_secs(2))
+            .expect_err("duplicate must be rejected");
+
+        assert!(
+            matches!(err, StreamError::DuplicateDetected { .. }),
+            "expected DuplicateDetected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn dedup_window_allows_same_payload_after_window_expires() {
+        let config = StreamConfig {
+            dedupe_window: Some(Duration::from_secs(10)),
+            ..StreamConfig::default()
+        };
+        let mut stream = Stream::new(
+            "dedup-expire-stream",
+            RegionId::first(),
+            Time::from_secs(0),
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("create stream");
+
+        stream
+            .append(Subject::new("fabric.default"), b"data".to_vec(), Time::from_secs(1))
+            .expect("first append");
+
+        // 15 seconds later — outside the 10s window.
+        stream
+            .append(Subject::new("fabric.default"), b"data".to_vec(), Time::from_secs(16))
+            .expect("append after window expiry should succeed");
+
+        assert_eq!(stream.state().msg_count, 2);
+    }
+
+    #[test]
+    fn dedup_window_allows_different_payload_same_subject() {
+        let config = StreamConfig {
+            dedupe_window: Some(Duration::from_secs(60)),
+            ..StreamConfig::default()
+        };
+        let mut stream = Stream::new(
+            "dedup-diff-stream",
+            RegionId::first(),
+            Time::from_secs(0),
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("create stream");
+
+        stream
+            .append(Subject::new("fabric.default"), b"data-1".to_vec(), Time::from_secs(1))
+            .expect("first append");
+
+        stream
+            .append(Subject::new("fabric.default"), b"data-2".to_vec(), Time::from_secs(2))
+            .expect("different payload should not be a dup");
+
+        assert_eq!(stream.state().msg_count, 2);
+    }
+
+    #[test]
+    fn dedup_disabled_by_default() {
+        let mut stream = make_default_stream();
+
+        stream
+            .append(Subject::new("orders.created"), b"same".to_vec(), Time::from_secs(1))
+            .expect("first");
+        stream
+            .append(Subject::new("orders.created"), b"same".to_vec(), Time::from_secs(2))
+            .expect("second — dedup disabled by default");
+
+        assert_eq!(stream.state().msg_count, 2);
+    }
+
+    #[test]
+    fn dedup_works_with_reserve_commit_path() {
+        let config = StreamConfig {
+            dedupe_window: Some(Duration::from_secs(60)),
+            ..StreamConfig::default()
+        };
+        let mut stream = Stream::new(
+            "dedup-reserve-stream",
+            RegionId::first(),
+            Time::from_secs(0),
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("create stream");
+
+        stream
+            .append(Subject::new("fabric.default"), b"data".to_vec(), Time::from_secs(1))
+            .expect("direct append");
+
+        let mut permit = stream
+            .reserve_append(Subject::new("fabric.default"), Time::from_secs(2))
+            .expect("reserve");
+
+        let err = stream
+            .commit_append(&mut permit, b"data".to_vec())
+            .expect_err("dedup should catch duplicate at commit time");
+
+        assert!(
+            matches!(err, StreamError::DuplicateDetected { .. }),
+            "expected DuplicateDetected, got {err:?}"
+        );
+        assert!(!permit.is_committed(), "permit should not be marked committed on dedup failure");
     }
 }

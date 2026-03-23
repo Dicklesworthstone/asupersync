@@ -9,6 +9,8 @@
 use super::capability::FabricCapability;
 use super::class::{AckKind, DeliveryClass};
 use super::control::MembershipRecord;
+use super::explain::{DataPlaneDecisionKind, ExplainDecisionSpec, ExplainPlan};
+use super::ir::{CostVector, RetentionPolicy, SubjectFamily};
 use super::policy::SemanticServiceClass;
 use super::service::{ReplyCertificate, RequestCertificate, ServiceAdmission, ServiceObligation};
 pub use super::subject::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
@@ -20,6 +22,11 @@ use crate::obligation::ledger::ObligationLedger;
 use crate::remote::NodeId;
 use crate::types::ObligationId;
 use crate::util::DetHasher;
+use franken_decision::{
+    DecisionAuditEntry, DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior,
+    evaluate,
+};
+use franken_kernel::{DecisionId, TraceId};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -79,6 +86,7 @@ struct FabricState {
     cells: BTreeMap<String, FabricCellRuntime>,
     cell_routes: BTreeMap<SubscriptionId, String>,
     subscribers: BTreeMap<u64, FabricSubscriberState>,
+    decision_records: Vec<FabricDecisionRecord>,
     routing: Arc<Sublist>,
     next_sequence: u64,
     next_subscriber_id: u64,
@@ -163,6 +171,7 @@ impl FabricState {
             cells: BTreeMap::new(),
             cell_routes: BTreeMap::new(),
             subscribers: BTreeMap::new(),
+            decision_records: Vec::new(),
             routing: Arc::new(Sublist::new()),
             next_sequence: 0,
             next_subscriber_id: 1,
@@ -187,6 +196,17 @@ impl FabricState {
 
     fn effective_cell_buffer_capacity(&self) -> usize {
         self.cell_buffer_capacity.max(1)
+    }
+
+    fn push_decision(&mut self, cx: &Cx, record: FabricDecisionRecord) {
+        trace_fabric_decision_recorded(cx, &record);
+        self.decision_records.push(record);
+    }
+
+    fn primary_cell_id_for_routed_keys(&self, routed_cells: &[String]) -> Option<CellId> {
+        routed_cells
+            .first()
+            .and_then(|cell_key| self.cells.get(cell_key).map(|cell| cell.cell.cell_id))
     }
 
     fn register_subscription(&mut self, pattern: SubjectPattern, next_sequence: u64) -> u64 {
@@ -256,6 +276,7 @@ impl FabricState {
         &mut self,
         cx: &Cx,
         subject: &Subject,
+        delivery_class: DeliveryClass,
     ) -> Result<Vec<String>, AsupersyncError> {
         let expected_cell = self.ensure_cell_for_subject(cx, subject)?;
         let matches = self.routing.lookup(subject);
@@ -268,11 +289,22 @@ impl FabricState {
         }
 
         if routed.is_empty() {
-            routed.push(expected_cell);
+            routed.push(expected_cell.clone());
         }
 
         routed.sort();
         routed.dedup();
+
+        if let Some(cell_id) = self.cells.get(&expected_cell).map(|cell| cell.cell.cell_id) {
+            let decision = FabricRoutingDecision::new(
+                cell_id,
+                subject.as_str(),
+                delivery_class,
+                routed.clone(),
+            )
+            .evaluate();
+            self.push_decision(cx, decision);
+        }
         Ok(routed)
     }
 
@@ -299,7 +331,7 @@ impl FabricState {
     ) -> Result<PreparedFabricPublish, AsupersyncError> {
         self.prune_cells(cx);
 
-        let routed_cells = self.route_keys_for_subject(cx, &subject)?;
+        let routed_cells = self.route_keys_for_subject(cx, &subject, delivery_class)?;
         let capacity = self.effective_cell_buffer_capacity();
         let message = FabricMessage {
             subject: subject.clone(),
@@ -308,30 +340,49 @@ impl FabricState {
         };
 
         for cell_key in &routed_cells {
-            let Some(cell) = self.cells.get_mut(cell_key) else {
-                return Err(AsupersyncError::new(ErrorKind::RoutingFailed)
-                    .with_message(format!("missing fabric cell runtime for {cell_key}")));
+            let full_cell = {
+                let Some(cell) = self.cells.get_mut(cell_key) else {
+                    return Err(AsupersyncError::new(ErrorKind::RoutingFailed)
+                        .with_message(format!("missing fabric cell runtime for {cell_key}")));
+                };
+
+                if cell.buffer.len() < capacity {
+                    None
+                } else {
+                    let cell_id = cell.cell.cell_id;
+                    let queued_messages = cell.buffer.len();
+                    let from_state = cell.state;
+                    if from_state != FabricCellBufferState::Backpressured {
+                        cell.state = FabricCellBufferState::Backpressured;
+                        trace_fabric_cell_state_transition(
+                            cx,
+                            cell_id,
+                            Some(from_state),
+                            FabricCellBufferState::Backpressured,
+                            "buffer capacity exhausted",
+                        );
+                    }
+                    let error = AsupersyncError::new(ErrorKind::ChannelFull).with_message(
+                        format!(
+                            "fabric cell {cell_id} is backpressured at capacity {capacity} for subject {}",
+                            subject.as_str()
+                        ),
+                    );
+                    let decision = FabricRetryDecision::new(
+                        cell_id,
+                        subject.as_str(),
+                        delivery_class,
+                        queued_messages,
+                        capacity,
+                    )
+                    .evaluate();
+                    Some((decision, error))
+                }
             };
 
-            if cell.buffer.len() >= capacity {
-                let cell_id = cell.cell.cell_id;
-                let from_state = cell.state;
-                if from_state != FabricCellBufferState::Backpressured {
-                    cell.state = FabricCellBufferState::Backpressured;
-                    trace_fabric_cell_state_transition(
-                        cx,
-                        cell_id,
-                        Some(from_state),
-                        FabricCellBufferState::Backpressured,
-                        "buffer capacity exhausted",
-                    );
-                }
-                return Err(AsupersyncError::new(ErrorKind::ChannelFull).with_message(
-                    format!(
-                        "fabric cell {cell_id} is backpressured at capacity {capacity} for subject {}",
-                        subject.as_str()
-                    ),
-                ));
+            if let Some((decision, error)) = full_cell {
+                self.push_decision(cx, decision);
+                return Err(error);
             }
         }
 
@@ -454,6 +505,901 @@ fn trace_fabric_cell_state_transition(
     );
 }
 
+fn trace_publish_reserve(cx: &Cx, subject: &Subject, delivery_class: DeliveryClass, obligation_id: Option<ObligationId>) {
+    let subject_str = subject.as_str();
+    let class_str = delivery_class.to_string();
+    let obligation_str = obligation_id.map_or_else(String::new, |id| format!("{id}"));
+    cx.trace_with_fields(
+        "fabric.publish_reserve",
+        &[
+            ("event", "publish_reserve"),
+            ("subject", subject_str),
+            ("delivery_class", class_str.as_str()),
+            ("obligation_id", obligation_str.as_str()),
+        ],
+    );
+}
+
+fn trace_publish_commit(cx: &Cx, subject: &Subject, delivery_class: DeliveryClass, obligation_id: Option<ObligationId>, payload_len: usize) {
+    let subject_str = subject.as_str();
+    let class_str = delivery_class.to_string();
+    let obligation_str = obligation_id.map_or_else(String::new, |id| format!("{id}"));
+    let len_str = payload_len.to_string();
+    cx.trace_with_fields(
+        "fabric.publish_commit",
+        &[
+            ("event", "publish_commit"),
+            ("subject", subject_str),
+            ("delivery_class", class_str.as_str()),
+            ("obligation_id", obligation_str.as_str()),
+            ("payload_len", len_str.as_str()),
+        ],
+    );
+}
+
+fn trace_publish_abort(cx: &Cx, subject: &Subject, delivery_class: DeliveryClass, obligation_id: Option<ObligationId>, reason: &str) {
+    let subject_str = subject.as_str();
+    let class_str = delivery_class.to_string();
+    let obligation_str = obligation_id.map_or_else(String::new, |id| format!("{id}"));
+    cx.trace_with_fields(
+        "fabric.publish_abort",
+        &[
+            ("event", "publish_abort"),
+            ("subject", subject_str),
+            ("delivery_class", class_str.as_str()),
+            ("obligation_id", obligation_str.as_str()),
+            ("reason", reason),
+        ],
+    );
+}
+
+/// Operator-visible FABRIC decision classes backed by Franken decision
+/// contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FabricDecisionKind {
+    /// Route a subject across one or more canonical cells.
+    Routing,
+    /// Decide whether a bounded publish should retry, back off, or fail closed.
+    Retry,
+    /// Accept or reject a capability-bearing operation.
+    Capability,
+    /// Select the effective delivery class once semantic floors apply.
+    DeliveryClassEscalation,
+}
+
+impl FabricDecisionKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Routing => "routing",
+            Self::Retry => "retry",
+            Self::Capability => "capability",
+            Self::DeliveryClassEscalation => "delivery_class_escalation",
+        }
+    }
+
+    const fn explain_kind(self) -> DataPlaneDecisionKind {
+        match self {
+            Self::Routing => DataPlaneDecisionKind::SecuritySensitiveRouting,
+            Self::Retry => DataPlaneDecisionKind::DistributedFailover,
+            Self::Capability => DataPlaneDecisionKind::MultiTenantGovernance,
+            Self::DeliveryClassEscalation => DataPlaneDecisionKind::AdaptiveDeliveryPolicy,
+        }
+    }
+
+    fn retention(self) -> RetentionPolicy {
+        match self {
+            Self::Routing | Self::Retry => RetentionPolicy::RetainFor {
+                duration: Duration::from_secs(300),
+            },
+            Self::Capability | Self::DeliveryClassEscalation => RetentionPolicy::RetainFor {
+                duration: Duration::from_secs(900),
+            },
+        }
+    }
+}
+
+/// Materialized FABRIC decision record ready for explain-plan rendering.
+#[derive(Debug, Clone)]
+pub struct FabricDecisionRecord {
+    /// High-level FABRIC decision class.
+    pub kind: FabricDecisionKind,
+    /// Canonical subject cell anchoring the decision.
+    pub cell_id: CellId,
+    /// Subject or subject-pattern scope for the decision.
+    pub subject: String,
+    /// Effective delivery class when the decision was made.
+    pub delivery_class: DeliveryClass,
+    /// Deterministic annotations for operator tooling.
+    pub annotations: BTreeMap<String, String>,
+    /// Franken decision-contract audit payload.
+    pub audit: DecisionAuditEntry,
+}
+
+impl FabricDecisionRecord {
+    /// Stable identifier for the underlying decision audit record.
+    #[must_use]
+    pub fn decision_id(&self) -> DecisionId {
+        self.audit.decision_id
+    }
+
+    /// Number of evidence slots carried by the posterior snapshot.
+    #[must_use]
+    pub fn evidence_count(&self) -> usize {
+        self.audit.posterior_snapshot.len()
+    }
+
+    /// Decision-contract name for filtering and operator search.
+    #[must_use]
+    pub fn contract_name(&self) -> &str {
+        &self.audit.contract_name
+    }
+
+    fn explain_summary(&self) -> String {
+        match self.kind {
+            FabricDecisionKind::Routing => format!(
+                "route `{}` using fabric action `{}`",
+                self.subject, self.audit.action_chosen
+            ),
+            FabricDecisionKind::Retry => format!(
+                "retry posture `{}` for `{}`",
+                self.audit.action_chosen, self.subject
+            ),
+            FabricDecisionKind::Capability => format!(
+                "capability decision `{}` for `{}`",
+                self.audit.action_chosen, self.subject
+            ),
+            FabricDecisionKind::DeliveryClassEscalation => format!(
+                "selected delivery class `{}` for `{}`",
+                self.audit.action_chosen, self.subject
+            ),
+        }
+    }
+
+    fn explain_spec(&self) -> ExplainDecisionSpec {
+        let mut spec = ExplainDecisionSpec::new(
+            self.kind.explain_kind(),
+            self.subject.clone(),
+            fabric_subject_family(&self.subject),
+            self.delivery_class,
+            self.explain_summary(),
+            self.kind.retention(),
+        )
+        .with_estimated_cost(CostVector::baseline_for_delivery_class(self.delivery_class))
+        .with_annotation("cell_id", self.cell_id.to_string())
+        .with_annotation("contract", self.contract_name())
+        .with_annotation("evidence_count", self.evidence_count().to_string())
+        .with_annotation("fabric_decision_kind", self.kind.as_str());
+
+        for (key, value) in &self.annotations {
+            spec = spec.with_annotation(key.clone(), value.clone());
+        }
+
+        spec
+    }
+
+    /// Attach this FABRIC decision record to an explain plan.
+    pub fn record_into_plan(&self, plan: &mut ExplainPlan) {
+        plan.record_audit_entry(self.explain_spec(), self.audit.clone());
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StaticActionDecisionContract {
+    name: &'static str,
+    states: Vec<String>,
+    actions: Vec<String>,
+    losses: LossMatrix,
+    chosen_action: usize,
+    fallback: FallbackPolicy,
+}
+
+impl DecisionContract for StaticActionDecisionContract {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn state_space(&self) -> &[String] {
+        &self.states
+    }
+
+    fn action_set(&self) -> &[String] {
+        &self.actions
+    }
+
+    fn loss_matrix(&self) -> &LossMatrix {
+        &self.losses
+    }
+
+    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+        let mut likelihoods = vec![0.1; self.states.len()];
+        if let Some(slot) = likelihoods.get_mut(observation) {
+            *slot = 0.9;
+        }
+        posterior.bayesian_update(&likelihoods);
+    }
+
+    fn choose_action(&self, _posterior: &Posterior) -> usize {
+        self.chosen_action
+    }
+
+    fn fallback_action(&self) -> usize {
+        self.chosen_action
+    }
+
+    fn fallback_policy(&self) -> &FallbackPolicy {
+        &self.fallback
+    }
+}
+
+fn normalize_decision_posterior<const N: usize>(mut weights: [f64; N]) -> Posterior {
+    for weight in &mut weights {
+        if *weight <= 0.0 {
+            *weight = 0.01;
+        }
+    }
+    let total = weights.iter().sum::<f64>().max(f64::EPSILON);
+    Posterior::new(
+        weights
+            .into_iter()
+            .map(|weight| weight / total)
+            .collect::<Vec<_>>(),
+    )
+    .expect("fabric decision posterior should normalize")
+}
+
+fn fabric_decision_context<T: Hash>(
+    contract_name: &'static str,
+    cell_id: CellId,
+    subject: &str,
+    seed: &T,
+    calibration_score: f64,
+    e_process: f64,
+    ci_width: f64,
+) -> EvalContext {
+    let ts_unix_ms = 1_700_000_000_000_u64.saturating_add(stable_hash((
+        "fabric-decision-ts",
+        contract_name,
+        cell_id.raw(),
+        subject,
+        seed,
+    )));
+    let fingerprint = u128::from(stable_hash((
+        "fabric-decision",
+        contract_name,
+        cell_id.raw(),
+        subject,
+        seed,
+    )));
+
+    EvalContext {
+        calibration_score,
+        e_process,
+        ci_width,
+        decision_id: DecisionId::from_parts(ts_unix_ms, fingerprint),
+        trace_id: TraceId::from_parts(ts_unix_ms, fingerprint ^ 0xFABA_1C00_5EED_u128),
+        ts_unix_ms,
+    }
+}
+
+fn fabric_subject_family(subject: &str) -> SubjectFamily {
+    if subject.starts_with("_INBOX.") {
+        SubjectFamily::Reply
+    } else if subject.starts_with("service.") || subject.starts_with("svc.") {
+        SubjectFamily::Command
+    } else if subject.starts_with("control.") || subject.starts_with("$SYS.") {
+        SubjectFamily::Control
+    } else {
+        SubjectFamily::Event
+    }
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+const fn delivery_class_index(class: DeliveryClass) -> usize {
+    match class {
+        DeliveryClass::EphemeralInteractive => 0,
+        DeliveryClass::DurableOrdered => 1,
+        DeliveryClass::ObligationBacked => 2,
+        DeliveryClass::MobilitySafe => 3,
+        DeliveryClass::ForensicReplayable => 4,
+    }
+}
+
+const fn delivery_class_rank(class: DeliveryClass) -> u8 {
+    match class {
+        DeliveryClass::EphemeralInteractive => 0,
+        DeliveryClass::DurableOrdered => 1,
+        DeliveryClass::ObligationBacked => 2,
+        DeliveryClass::MobilitySafe => 3,
+        DeliveryClass::ForensicReplayable => 4,
+    }
+}
+
+fn evaluate_fabric_decision(
+    kind: FabricDecisionKind,
+    cell_id: CellId,
+    subject: &str,
+    delivery_class: DeliveryClass,
+    annotations: BTreeMap<String, String>,
+    contract: &StaticActionDecisionContract,
+    posterior: Posterior,
+    ctx: EvalContext,
+) -> FabricDecisionRecord {
+    let outcome = evaluate(contract, &posterior, &ctx);
+    FabricDecisionRecord {
+        kind,
+        cell_id,
+        subject: subject.to_owned(),
+        delivery_class,
+        annotations,
+        audit: outcome.audit_entry,
+    }
+}
+
+fn trace_fabric_decision_recorded(cx: &Cx, record: &FabricDecisionRecord) {
+    let cell_id = record.cell_id.to_string();
+    let evidence_count = record.evidence_count().to_string();
+    cx.trace_with_fields(
+        "fabric.decision_recorded",
+        &[
+            ("event", "fabric.decision_recorded"),
+            ("contract", record.contract_name()),
+            ("cell_id", cell_id.as_str()),
+            ("evidence_count", evidence_count.as_str()),
+            ("action", record.audit.action_chosen.as_str()),
+        ],
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FabricRoutingDecisionSnapshot {
+    routed_cell_count: usize,
+    delivery_class: DeliveryClass,
+}
+
+impl FabricRoutingDecisionSnapshot {
+    fn posterior(self) -> Posterior {
+        let weights = if self.routed_cell_count > 1 {
+            [0.08, 0.84, 0.08]
+        } else if self.delivery_class >= DeliveryClass::MobilitySafe {
+            [0.18, 0.12, 0.70]
+        } else {
+            [0.84, 0.08, 0.08]
+        };
+        normalize_decision_posterior(weights)
+    }
+
+    fn calibration_score(self) -> f64 {
+        if self.routed_cell_count > 1 {
+            0.9
+        } else {
+            0.96
+        }
+    }
+
+    fn e_process(self) -> f64 {
+        1.0 + usize_to_f64(self.routed_cell_count) / 2.0
+    }
+
+    fn ci_width(self) -> f64 {
+        0.08 + usize_to_f64(self.routed_cell_count) / 20.0
+    }
+}
+
+/// Decision contract for routing one subject through canonical FABRIC cells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricRoutingDecision {
+    /// Canonical cell owning the subject being routed.
+    pub cell_id: CellId,
+    /// Subject being routed.
+    pub subject: String,
+    /// Delivery class in force at the routing boundary.
+    pub delivery_class: DeliveryClass,
+    /// Canonical cell keys selected by the runtime.
+    pub routed_cell_keys: Vec<String>,
+}
+
+impl FabricRoutingDecision {
+    /// Construct a routing decision from the resolved route set.
+    #[must_use]
+    pub fn new(
+        cell_id: CellId,
+        subject: impl Into<String>,
+        delivery_class: DeliveryClass,
+        routed_cell_keys: Vec<String>,
+    ) -> Self {
+        Self {
+            cell_id,
+            subject: subject.into(),
+            delivery_class,
+            routed_cell_keys,
+        }
+    }
+
+    /// Evaluate the routing contract into a materialized audit record.
+    #[must_use]
+    pub fn evaluate(&self) -> FabricDecisionRecord {
+        let snapshot = FabricRoutingDecisionSnapshot {
+            routed_cell_count: self.routed_cell_keys.len().max(1),
+            delivery_class: self.delivery_class,
+        };
+        let contract = StaticActionDecisionContract {
+            name: "fabric_routing_decision",
+            states: vec![
+                "single_cell_route".into(),
+                "fanout_route".into(),
+                "high_assurance_route".into(),
+            ],
+            actions: vec!["single_cell".into(), "fanout_cells".into()],
+            losses: LossMatrix::new(
+                vec![
+                    "single_cell_route".into(),
+                    "fanout_route".into(),
+                    "high_assurance_route".into(),
+                ],
+                vec!["single_cell".into(), "fanout_cells".into()],
+                vec![
+                    1.0, 6.0, // single
+                    8.0, 1.0, // fanout
+                    2.0, 4.0, // high assurance
+                ],
+            )
+            .expect("fabric routing losses should be valid"),
+            chosen_action: usize::from(self.routed_cell_keys.len() > 1),
+            fallback: FallbackPolicy::default(),
+        };
+        let ctx = fabric_decision_context(
+            contract.name,
+            self.cell_id,
+            &self.subject,
+            &snapshot,
+            snapshot.calibration_score(),
+            snapshot.e_process(),
+            snapshot.ci_width(),
+        );
+        evaluate_fabric_decision(
+            FabricDecisionKind::Routing,
+            self.cell_id,
+            &self.subject,
+            self.delivery_class,
+            BTreeMap::from([
+                (
+                    "routed_cell_count".to_owned(),
+                    self.routed_cell_keys.len().to_string(),
+                ),
+                (
+                    "routed_cell_keys".to_owned(),
+                    self.routed_cell_keys.join(","),
+                ),
+            ]),
+            &contract,
+            snapshot.posterior(),
+            ctx,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FabricRetryDecisionSnapshot {
+    queued_messages: usize,
+    capacity: usize,
+    delivery_class: DeliveryClass,
+}
+
+impl FabricRetryDecisionSnapshot {
+    fn posterior(self) -> Posterior {
+        if self.queued_messages >= self.capacity {
+            normalize_decision_posterior([0.05, 0.10, 0.85])
+        } else if self.queued_messages.saturating_add(1) >= self.capacity {
+            normalize_decision_posterior([0.12, 0.72, 0.16])
+        } else if self.delivery_class >= DeliveryClass::MobilitySafe {
+            normalize_decision_posterior([0.68, 0.22, 0.10])
+        } else {
+            normalize_decision_posterior([0.84, 0.10, 0.06])
+        }
+    }
+
+    fn calibration_score(self) -> f64 {
+        if self.queued_messages >= self.capacity {
+            0.93
+        } else {
+            0.88
+        }
+    }
+
+    fn e_process(self) -> f64 {
+        1.0 + usize_to_f64(self.queued_messages) / usize_to_f64(self.capacity.max(1))
+    }
+
+    fn ci_width(self) -> f64 {
+        0.09 + usize_to_f64(self.queued_messages) / (usize_to_f64(self.capacity.max(1)) * 2.0)
+    }
+}
+
+/// Decision contract describing bounded publish retry posture for one cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricRetryDecision {
+    /// Canonical cell under pressure.
+    pub cell_id: CellId,
+    /// Subject being published.
+    pub subject: String,
+    /// Delivery class in force for the publish.
+    pub delivery_class: DeliveryClass,
+    /// Messages currently buffered in the target cell.
+    pub queued_messages: usize,
+    /// Effective cell capacity.
+    pub capacity: usize,
+}
+
+impl FabricRetryDecision {
+    /// Construct a retry decision from the current cell-buffer snapshot.
+    #[must_use]
+    pub fn new(
+        cell_id: CellId,
+        subject: impl Into<String>,
+        delivery_class: DeliveryClass,
+        queued_messages: usize,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            cell_id,
+            subject: subject.into(),
+            delivery_class,
+            queued_messages,
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Evaluate the retry contract into a materialized audit record.
+    #[must_use]
+    pub fn evaluate(&self) -> FabricDecisionRecord {
+        let snapshot = FabricRetryDecisionSnapshot {
+            queued_messages: self.queued_messages,
+            capacity: self.capacity,
+            delivery_class: self.delivery_class,
+        };
+        let chosen_action = if self.queued_messages >= self.capacity {
+            2
+        } else {
+            0
+        };
+        let contract = StaticActionDecisionContract {
+            name: "fabric_retry_decision",
+            states: vec![
+                "transient_headroom".into(),
+                "pressure_building".into(),
+                "buffer_exhausted".into(),
+            ],
+            actions: vec!["retry_now".into(), "backoff".into(), "fail_closed".into()],
+            losses: LossMatrix::new(
+                vec![
+                    "transient_headroom".into(),
+                    "pressure_building".into(),
+                    "buffer_exhausted".into(),
+                ],
+                vec!["retry_now".into(), "backoff".into(), "fail_closed".into()],
+                vec![
+                    1.0, 4.0, 12.0, // transient
+                    5.0, 1.0, 3.0, // pressure
+                    10.0, 4.0, 1.0, // exhausted
+                ],
+            )
+            .expect("fabric retry losses should be valid"),
+            chosen_action,
+            fallback: FallbackPolicy::default(),
+        };
+        let ctx = fabric_decision_context(
+            contract.name,
+            self.cell_id,
+            &self.subject,
+            &snapshot,
+            snapshot.calibration_score(),
+            snapshot.e_process(),
+            snapshot.ci_width(),
+        );
+        evaluate_fabric_decision(
+            FabricDecisionKind::Retry,
+            self.cell_id,
+            &self.subject,
+            self.delivery_class,
+            BTreeMap::from([
+                (
+                    "queued_messages".to_owned(),
+                    self.queued_messages.to_string(),
+                ),
+                ("capacity".to_owned(), self.capacity.to_string()),
+            ]),
+            &contract,
+            snapshot.posterior(),
+            ctx,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FabricCapabilityDecisionSnapshot {
+    allowed: bool,
+    granted_capability_count: usize,
+    admin_requested: bool,
+}
+
+impl FabricCapabilityDecisionSnapshot {
+    fn posterior(self) -> Posterior {
+        if self.allowed {
+            normalize_decision_posterior([0.82, 0.08, 0.05, 0.05])
+        } else if self.admin_requested {
+            normalize_decision_posterior([0.05, 0.10, 0.75, 0.10])
+        } else if self.granted_capability_count == 0 {
+            normalize_decision_posterior([0.05, 0.25, 0.10, 0.60])
+        } else {
+            normalize_decision_posterior([0.05, 0.68, 0.12, 0.15])
+        }
+    }
+
+    fn calibration_score(self) -> f64 {
+        if self.allowed { 0.95 } else { 0.9 }
+    }
+
+    fn e_process(self) -> f64 {
+        1.0 + usize_to_f64(self.granted_capability_count) / 4.0
+    }
+
+    fn ci_width(self) -> f64 {
+        if self.allowed { 0.08 } else { 0.15 }
+    }
+}
+
+/// Decision contract for capability-scoped FABRIC operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricCapabilityDecision {
+    /// Canonical cell associated with the capability-bearing operation.
+    pub cell_id: CellId,
+    /// Subject or subject-pattern scope being checked.
+    pub subject: String,
+    /// Delivery class promised for the operation.
+    pub delivery_class: DeliveryClass,
+    /// Requested capability rendered in deterministic operator form.
+    pub requested_capability: String,
+    /// Number of grants that were available at decision time.
+    pub granted_capability_count: usize,
+    /// Whether the operation was allowed.
+    pub allowed: bool,
+}
+
+impl FabricCapabilityDecision {
+    /// Construct a capability decision.
+    #[must_use]
+    pub fn new(
+        cell_id: CellId,
+        subject: impl Into<String>,
+        delivery_class: DeliveryClass,
+        requested_capability: impl Into<String>,
+        granted_capability_count: usize,
+        allowed: bool,
+    ) -> Self {
+        Self {
+            cell_id,
+            subject: subject.into(),
+            delivery_class,
+            requested_capability: requested_capability.into(),
+            granted_capability_count,
+            allowed,
+        }
+    }
+
+    /// Evaluate the capability contract into a materialized audit record.
+    #[must_use]
+    pub fn evaluate(&self) -> FabricDecisionRecord {
+        let snapshot = FabricCapabilityDecisionSnapshot {
+            allowed: self.allowed,
+            granted_capability_count: self.granted_capability_count,
+            admin_requested: self.requested_capability == "admin_control",
+        };
+        let contract = StaticActionDecisionContract {
+            name: "fabric_capability_decision",
+            states: vec![
+                "scope_covered".into(),
+                "scope_mismatch".into(),
+                "admin_mismatch".into(),
+                "escalation_detected".into(),
+            ],
+            actions: vec!["allow".into(), "reject".into()],
+            losses: LossMatrix::new(
+                vec![
+                    "scope_covered".into(),
+                    "scope_mismatch".into(),
+                    "admin_mismatch".into(),
+                    "escalation_detected".into(),
+                ],
+                vec!["allow".into(), "reject".into()],
+                vec![
+                    1.0, 8.0, // covered
+                    9.0, 1.0, // mismatch
+                    12.0, 1.0, // admin mismatch
+                    14.0, 1.0, // escalation
+                ],
+            )
+            .expect("fabric capability losses should be valid"),
+            chosen_action: usize::from(!self.allowed),
+            fallback: FallbackPolicy::default(),
+        };
+        let ctx = fabric_decision_context(
+            contract.name,
+            self.cell_id,
+            &self.subject,
+            &snapshot,
+            snapshot.calibration_score(),
+            snapshot.e_process(),
+            snapshot.ci_width(),
+        );
+        evaluate_fabric_decision(
+            FabricDecisionKind::Capability,
+            self.cell_id,
+            &self.subject,
+            self.delivery_class,
+            BTreeMap::from([
+                (
+                    "requested_capability".to_owned(),
+                    self.requested_capability.clone(),
+                ),
+                (
+                    "granted_capability_count".to_owned(),
+                    self.granted_capability_count.to_string(),
+                ),
+            ]),
+            &contract,
+            snapshot.posterior(),
+            ctx,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FabricDeliveryClassEscalationSnapshot {
+    requested: DeliveryClass,
+    selected: DeliveryClass,
+}
+
+impl FabricDeliveryClassEscalationSnapshot {
+    fn posterior(self) -> Posterior {
+        if self.selected == self.requested {
+            normalize_decision_posterior([0.84, 0.10, 0.06])
+        } else if self.selected == DeliveryClass::ForensicReplayable {
+            normalize_decision_posterior([0.05, 0.20, 0.75])
+        } else {
+            normalize_decision_posterior([0.10, 0.80, 0.10])
+        }
+    }
+
+    fn calibration_score(self) -> f64 {
+        if self.selected == self.requested {
+            0.95
+        } else {
+            0.9
+        }
+    }
+
+    fn e_process(self) -> f64 {
+        1.0 + f64::from(delivery_class_rank(self.selected)) / 2.0
+    }
+
+    fn ci_width(self) -> f64 {
+        if self.selected == self.requested {
+            0.08
+        } else {
+            0.12
+        }
+    }
+}
+
+/// Decision contract for selecting the effective delivery class after applying
+/// semantic floors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricDeliveryClassEscalation {
+    /// Canonical cell associated with the escalation surface.
+    pub cell_id: CellId,
+    /// Subject being evaluated.
+    pub subject: String,
+    /// Delivery class originally requested by the caller.
+    pub requested_delivery_class: DeliveryClass,
+    /// Minimum delivery class required by the semantic surface.
+    pub minimum_delivery_class: DeliveryClass,
+    /// Effective delivery class selected after applying the floor.
+    pub selected_delivery_class: DeliveryClass,
+}
+
+impl FabricDeliveryClassEscalation {
+    /// Construct a delivery-class selection from a requested class and floor.
+    #[must_use]
+    pub fn new(
+        cell_id: CellId,
+        subject: impl Into<String>,
+        requested_delivery_class: DeliveryClass,
+        minimum_delivery_class: DeliveryClass,
+    ) -> Self {
+        let selected_delivery_class = requested_delivery_class.max(minimum_delivery_class);
+        Self {
+            cell_id,
+            subject: subject.into(),
+            requested_delivery_class,
+            minimum_delivery_class,
+            selected_delivery_class,
+        }
+    }
+
+    /// Evaluate the delivery-class selection into a materialized audit record.
+    #[must_use]
+    pub fn evaluate(&self) -> FabricDecisionRecord {
+        let snapshot = FabricDeliveryClassEscalationSnapshot {
+            requested: self.requested_delivery_class,
+            selected: self.selected_delivery_class,
+        };
+        let actions = DeliveryClass::ALL
+            .into_iter()
+            .map(|class| class.to_string())
+            .collect::<Vec<_>>();
+        let contract = StaticActionDecisionContract {
+            name: "fabric_delivery_class_escalation",
+            states: vec![
+                "no_escalation".into(),
+                "floor_escalation".into(),
+                "forensic_escalation".into(),
+            ],
+            actions: actions.clone(),
+            losses: LossMatrix::new(
+                vec![
+                    "no_escalation".into(),
+                    "floor_escalation".into(),
+                    "forensic_escalation".into(),
+                ],
+                actions,
+                vec![
+                    1.0, 2.0, 4.0, 8.0, 14.0, // no escalation
+                    8.0, 4.0, 1.0, 2.0, 5.0, // floor escalation
+                    16.0, 12.0, 8.0, 4.0, 1.0, // forensic escalation
+                ],
+            )
+            .expect("fabric delivery-class losses should be valid"),
+            chosen_action: delivery_class_index(self.selected_delivery_class),
+            fallback: FallbackPolicy::default(),
+        };
+        let ctx = fabric_decision_context(
+            contract.name,
+            self.cell_id,
+            &self.subject,
+            &snapshot,
+            snapshot.calibration_score(),
+            snapshot.e_process(),
+            snapshot.ci_width(),
+        );
+        evaluate_fabric_decision(
+            FabricDecisionKind::DeliveryClassEscalation,
+            self.cell_id,
+            &self.subject,
+            self.selected_delivery_class,
+            BTreeMap::from([
+                (
+                    "requested_delivery_class".to_owned(),
+                    self.requested_delivery_class.to_string(),
+                ),
+                (
+                    "minimum_delivery_class".to_owned(),
+                    self.minimum_delivery_class.to_string(),
+                ),
+                (
+                    "selected_delivery_class".to_owned(),
+                    self.selected_delivery_class.to_string(),
+                ),
+            ]),
+            &contract,
+            snapshot.posterior(),
+            ctx,
+        )
+    }
+}
+
 /// Published or received packet-plane message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FabricMessage {
@@ -476,6 +1422,123 @@ pub struct PublishReceipt {
     pub ack_kind: AckKind,
     /// Delivery class used for the publish.
     pub delivery_class: DeliveryClass,
+}
+
+/// Two-phase publish permit.
+///
+/// Represents a reserved slot in the fabric packet plane.  The holder
+/// **must** call [`PublishPermit::send`] to commit the publish or
+/// [`PublishPermit::abort`] to release the slot.  Dropping without
+/// calling either method aborts cleanly (no data committed, no
+/// obligation leaked).
+///
+/// For [`DeliveryClass::EphemeralInteractive`] the permit is lightweight
+/// (no obligation token).  For durable or obligation-backed classes an
+/// [`ObligationId`] is allocated during [`Fabric::reserve_publish`] and
+/// committed or aborted together with the payload.
+#[must_use = "a PublishPermit must be sent or explicitly aborted"]
+pub struct PublishPermit {
+    /// Fabric shared state handle.
+    state: Arc<Mutex<FabricState>>,
+    /// Pre-validated subject.
+    subject: Subject,
+    /// Delivery class selected for the publish.
+    delivery_class: DeliveryClass,
+    /// Pre-computed routing and capacity snapshot from `prepare_publish_message`.
+    prepared: Option<PreparedFabricPublish>,
+    /// Obligation token for durable delivery classes (None for ephemeral).
+    obligation_id: Option<ObligationId>,
+    /// Whether `send` or `abort` has been called.  Guards against
+    /// double-consume and ensures `Drop` only fires the abort path once.
+    consumed: bool,
+}
+
+impl fmt::Debug for PublishPermit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublishPermit")
+            .field("subject", &self.subject)
+            .field("delivery_class", &self.delivery_class)
+            .field("obligation_id", &self.obligation_id)
+            .field("consumed", &self.consumed)
+            .finish()
+    }
+}
+
+impl PublishPermit {
+    /// Commit the publish by supplying the payload.
+    ///
+    /// The payload is enqueued to all routed cells, the obligation (if any)
+    /// is committed, and a [`PublishReceipt`] is returned.  This method
+    /// consumes the permit; calling it a second time is a compile error.
+    pub fn send(mut self, cx: &Cx, payload: impl Into<Vec<u8>>) -> PublishReceipt {
+        self.consumed = true;
+        let payload = payload.into();
+        let payload_len = payload.len();
+        let delivery_class = self.delivery_class;
+        let subject = self.subject.clone();
+        let obligation_id = self.obligation_id;
+
+        // Rebuild the prepared publish with the actual payload.
+        if let Some(mut prepared) = self.prepared.take() {
+            prepared.message.payload = payload;
+            self.state.lock().apply_prepared_publish(cx, prepared);
+        }
+
+        trace_publish_commit(cx, &subject, delivery_class, obligation_id, payload_len);
+
+        let ack_kind = match delivery_class {
+            DeliveryClass::EphemeralInteractive => AckKind::Accepted,
+            _ => AckKind::Persisted,
+        };
+
+        PublishReceipt {
+            subject,
+            payload_len,
+            ack_kind,
+            delivery_class,
+        }
+    }
+
+    /// Explicitly abort the publish, releasing the reserved slot and any
+    /// associated obligation without committing data.
+    ///
+    /// For durable delivery classes, the caller is responsible for aborting
+    /// the obligation token in the ledger using
+    /// [`obligation_id`](Self::obligation_id).
+    pub fn abort(mut self, cx: &Cx) {
+        self.consumed = true;
+        trace_publish_abort(cx, &self.subject, self.delivery_class, self.obligation_id, "explicit");
+        self.prepared = None;
+    }
+
+    /// Returns the subject that was reserved.
+    #[must_use]
+    pub fn subject(&self) -> &Subject {
+        &self.subject
+    }
+
+    /// Returns the delivery class for this permit.
+    #[must_use]
+    pub fn delivery_class(&self) -> DeliveryClass {
+        self.delivery_class
+    }
+
+    /// Returns the obligation ID allocated for durable delivery classes,
+    /// or `None` for ephemeral publishes.
+    #[must_use]
+    pub fn obligation_id(&self) -> Option<ObligationId> {
+        self.obligation_id
+    }
+}
+
+impl Drop for PublishPermit {
+    fn drop(&mut self) {
+        if !self.consumed {
+            // Silent abort — the slot is released and the obligation (if any)
+            // will be cleaned up by region drain or leak detection.
+            self.prepared = None;
+        }
+    }
 }
 
 /// Request/reply response envelope.
@@ -655,7 +1718,102 @@ impl Fabric {
         &self.endpoint
     }
 
+    /// Reserve a publish slot on the fabric packet plane.
+    ///
+    /// Returns a [`PublishPermit`] that the caller **must** either
+    /// [`send`](PublishPermit::send) (committing payload to routed cells)
+    /// or [`abort`](PublishPermit::abort).  Dropping the permit without
+    /// calling either method aborts cleanly.
+    ///
+    /// For [`DeliveryClass::EphemeralInteractive`] the permit is
+    /// lightweight.  For durable classes, pass an [`ObligationLedger`] to
+    /// [`reserve_publish_durable`] instead, which allocates an obligation
+    /// token that participates in region drain.
+    #[allow(clippy::unused_async)]
+    pub async fn reserve_publish(
+        &self,
+        cx: &Cx,
+        subject: impl AsRef<str>,
+        delivery_class: DeliveryClass,
+    ) -> Result<PublishPermit, AsupersyncError> {
+        cx.checkpoint()?;
+
+        let subject = parse_subject(subject)?;
+        // Prepare with an empty payload — the real payload is supplied at
+        // send time.  The prepare phase validates routing and capacity.
+        let prepared = self.state.lock().prepare_publish_message(
+            cx,
+            &subject,
+            Vec::new(),
+            delivery_class,
+        )?;
+
+        trace_publish_reserve(cx, &subject, delivery_class, None);
+
+        Ok(PublishPermit {
+            state: Arc::clone(&self.state),
+            subject,
+            delivery_class,
+            prepared: Some(prepared),
+            obligation_id: None,
+            consumed: false,
+        })
+    }
+
+    /// Reserve a publish slot with obligation tracking for durable delivery.
+    ///
+    /// Like [`reserve_publish`](Self::reserve_publish) but allocates an
+    /// [`ObligationId`] in the provided ledger.  The obligation is
+    /// committed when [`PublishPermit::send`] is called and aborted on
+    /// drop or explicit [`PublishPermit::abort`].
+    #[allow(clippy::unused_async)]
+    pub async fn reserve_publish_durable(
+        &self,
+        cx: &Cx,
+        ledger: &mut ObligationLedger,
+        subject: impl AsRef<str>,
+        delivery_class: DeliveryClass,
+    ) -> Result<PublishPermit, AsupersyncError> {
+        cx.checkpoint()?;
+
+        let subject = parse_subject(subject)?;
+        let prepared = self.state.lock().prepare_publish_message(
+            cx,
+            &subject,
+            Vec::new(),
+            delivery_class,
+        )?;
+
+        let obligation_id = if delivery_class > DeliveryClass::EphemeralInteractive {
+            use crate::record::ObligationKind;
+            let now = cx.now();
+            let token = ledger.acquire(
+                ObligationKind::SendPermit,
+                cx.task_id(),
+                cx.region_id(),
+                now,
+            );
+            Some(token.id())
+        } else {
+            None
+        };
+
+        trace_publish_reserve(cx, &subject, delivery_class, obligation_id);
+
+        Ok(PublishPermit {
+            state: Arc::clone(&self.state),
+            subject,
+            delivery_class,
+            prepared: Some(prepared),
+            obligation_id,
+            consumed: false,
+        })
+    }
+
     /// Publish a packet-plane message with the default delivery class.
+    ///
+    /// Convenience wrapper around [`reserve_publish`](Self::reserve_publish)
+    /// followed by [`PublishPermit::send`].
     #[allow(clippy::unused_async)]
     pub async fn publish(
         &self,
@@ -663,23 +1821,10 @@ impl Fabric {
         subject: impl AsRef<str>,
         payload: impl Into<Vec<u8>>,
     ) -> Result<PublishReceipt, AsupersyncError> {
-        cx.checkpoint()?;
-
-        let subject = parse_subject(subject)?;
-        let payload = payload.into();
-        self.state.lock().publish_message(
-            cx,
-            subject.clone(),
-            payload.clone(),
-            DeliveryClass::EphemeralInteractive,
-        )?;
-
-        Ok(PublishReceipt {
-            subject,
-            payload_len: payload.len(),
-            ack_kind: AckKind::Accepted,
-            delivery_class: DeliveryClass::EphemeralInteractive,
-        })
+        let permit = self
+            .reserve_publish(cx, subject, DeliveryClass::EphemeralInteractive)
+            .await?;
+        Ok(permit.send(cx, payload))
     }
 
     /// Subscribe to a packet-plane subject pattern.
@@ -778,6 +1923,17 @@ impl Fabric {
         let mut state = self.state.lock();
         let prepared_publish =
             state.prepare_publish_message(cx, &subject, payload.clone(), delivery_class)?;
+        if let Some(cell_id) = state.primary_cell_id_for_routed_keys(&prepared_publish.routed_cells)
+        {
+            let decision = FabricDeliveryClassEscalation::new(
+                cell_id,
+                subject.as_str(),
+                delivery_class,
+                DeliveryClass::ObligationBacked,
+            )
+            .evaluate();
+            state.push_decision(cx, decision);
+        }
         let mut obligation = ServiceObligation::allocate(
             ledger,
             admission.certificate.request_id.clone(),
@@ -844,6 +2000,35 @@ impl Fabric {
             endpoint: self.endpoint.clone(),
             config,
         })
+    }
+
+    /// Return a snapshot of the recorded FABRIC decision audits for this
+    /// endpoint.
+    #[must_use]
+    pub fn decision_records(&self) -> Vec<FabricDecisionRecord> {
+        self.state.lock().decision_records.clone()
+    }
+
+    /// Render the recorded FABRIC decision audits into an explain-plan payload.
+    #[must_use]
+    pub fn render_explain_plan(&self) -> ExplainPlan {
+        let records = self.decision_records();
+        let mut plan = ExplainPlan {
+            summary: format!(
+                "Rendered {} FABRIC decision record(s) for endpoint `{}`",
+                records.len(),
+                self.endpoint
+            ),
+            aggregate_cost: CostVector::default(),
+            breakdown: Vec::new(),
+            important_decisions: Vec::new(),
+        };
+
+        for record in &records {
+            record.record_into_plan(&mut plan);
+        }
+
+        plan
     }
 }
 
@@ -7716,5 +8901,171 @@ mod tests {
             first.serial_work_units() > first.projected_parallel_rounds(),
             "independent families should reduce projected serialized rounds"
         );
+    }
+
+    // ── Two-phase publish tests ───────────────────────────────────
+
+    #[test]
+    fn reserve_publish_then_send_delivers_message() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-send")
+                .await
+                .expect("connect");
+            let mut sub = fabric.subscribe(&cx, "orders.>").await.expect("subscribe");
+
+            let permit = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                .await
+                .expect("reserve");
+
+            assert_eq!(permit.subject().as_str(), "orders.created");
+            assert_eq!(permit.delivery_class(), DeliveryClass::EphemeralInteractive);
+            assert!(permit.obligation_id().is_none());
+
+            let receipt = permit.send(&cx, b"hello".to_vec());
+            assert_eq!(receipt.payload_len, 5);
+            assert_eq!(receipt.ack_kind, AckKind::Accepted);
+            assert_eq!(receipt.delivery_class, DeliveryClass::EphemeralInteractive);
+
+            let msg = sub.next(&cx).await.expect("message");
+            assert_eq!(msg.subject.as_str(), "orders.created");
+            assert_eq!(msg.payload, b"hello".to_vec());
+        });
+    }
+
+    #[test]
+    fn reserve_publish_then_abort_delivers_nothing() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-abort")
+                .await
+                .expect("connect");
+            let mut sub = fabric.subscribe(&cx, "orders.>").await.expect("subscribe");
+
+            let permit = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                .await
+                .expect("reserve");
+            permit.abort(&cx);
+
+            // Publish a second message to verify the first was not delivered.
+            let _ = fabric
+                .publish(&cx, "orders.other", b"after-abort".to_vec())
+                .await
+                .expect("publish after abort");
+
+            let msg = sub.next(&cx).await.expect("message");
+            assert_eq!(
+                msg.subject.as_str(),
+                "orders.other",
+                "aborted permit must not deliver its message"
+            );
+        });
+    }
+
+    #[test]
+    fn reserve_publish_drop_delivers_nothing() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-drop")
+                .await
+                .expect("connect");
+            let mut sub = fabric.subscribe(&cx, "orders.>").await.expect("subscribe");
+
+            {
+                let _permit = fabric
+                    .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                    .await
+                    .expect("reserve");
+                // permit dropped without send or abort
+            }
+
+            let _ = fabric
+                .publish(&cx, "orders.other", b"after-drop".to_vec())
+                .await
+                .expect("publish after drop");
+
+            let msg = sub.next(&cx).await.expect("message");
+            assert_eq!(
+                msg.subject.as_str(),
+                "orders.other",
+                "dropped permit must not deliver its message"
+            );
+        });
+    }
+
+    #[test]
+    fn reserve_publish_durable_allocates_obligation() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-durable")
+                .await
+                .expect("connect");
+            let mut ledger = ObligationLedger::new();
+
+            let permit = fabric
+                .reserve_publish_durable(
+                    &cx,
+                    &mut ledger,
+                    "orders.created",
+                    DeliveryClass::DurableOrdered,
+                )
+                .await
+                .expect("reserve durable");
+
+            assert!(
+                permit.obligation_id().is_some(),
+                "durable publish must allocate obligation"
+            );
+            assert_eq!(permit.delivery_class(), DeliveryClass::DurableOrdered);
+
+            let receipt = permit.send(&cx, b"durable-payload".to_vec());
+            assert_eq!(receipt.ack_kind, AckKind::Persisted);
+            assert_eq!(receipt.delivery_class, DeliveryClass::DurableOrdered);
+        });
+    }
+
+    #[test]
+    fn reserve_publish_ephemeral_via_durable_path_has_no_obligation() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-ephemeral-durable")
+                .await
+                .expect("connect");
+            let mut ledger = ObligationLedger::new();
+
+            let permit = fabric
+                .reserve_publish_durable(
+                    &cx,
+                    &mut ledger,
+                    "orders.created",
+                    DeliveryClass::EphemeralInteractive,
+                )
+                .await
+                .expect("reserve ephemeral via durable path");
+
+            assert!(
+                permit.obligation_id().is_none(),
+                "ephemeral publish must not allocate obligation even via durable path"
+            );
+        });
+    }
+
+    #[test]
+    fn publish_convenience_wrapper_works() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/publish-wrapper")
+                .await
+                .expect("connect");
+            let mut sub = fabric.subscribe(&cx, "events.>").await.expect("subscribe");
+
+            let receipt = fabric
+                .publish(&cx, "events.fired", b"wrapper".to_vec())
+                .await
+                .expect("publish via wrapper");
+
+            assert_eq!(receipt.ack_kind, AckKind::Accepted);
+            assert_eq!(receipt.delivery_class, DeliveryClass::EphemeralInteractive);
+
+            let msg = sub.next(&cx).await.expect("message");
+            assert_eq!(msg.subject.as_str(), "events.fired");
+            assert_eq!(msg.payload, b"wrapper".to_vec());
+        });
     }
 }

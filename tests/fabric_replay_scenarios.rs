@@ -689,7 +689,7 @@ fn schedule_replication_reorder(
 
                 let mut stream = stream.lock().expect("stream lock");
                 let closed_after_drain = stream.close().is_ok();
-                let snapshot_state = stream.snapshot();
+                let snapshot_state = stream.snapshot().expect("snapshot");
                 *summary.lock().expect("summary lock") = Some(ReplicationReorderSummary {
                     catch_up_action: catch_up.action,
                     snapshot_sequence: snapshot.sequence,

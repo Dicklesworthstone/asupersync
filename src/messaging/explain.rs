@@ -1292,6 +1292,35 @@ impl ExplainPlan {
             .filter(|record| record.kind == kind)
             .collect()
     }
+
+    /// Return all recorded decisions emitted by one decision contract.
+    #[must_use]
+    pub fn decisions_for_contract(&self, contract_name: &str) -> Vec<&ExplainDecisionRecord> {
+        self.important_decisions
+            .iter()
+            .filter(|record| record.audit_entry.contract_name == contract_name)
+            .collect()
+    }
+
+    /// Return all recorded decisions tagged with one annotation.
+    #[must_use]
+    pub fn decisions_with_annotation(&self, key: &str, value: &str) -> Vec<&ExplainDecisionRecord> {
+        self.important_decisions
+            .iter()
+            .filter(|record| {
+                record
+                    .annotations
+                    .get(key)
+                    .is_some_and(|entry| entry == value)
+            })
+            .collect()
+    }
+
+    /// Return all recorded decisions anchored to one subject cell.
+    #[must_use]
+    pub fn decisions_for_cell(&self, cell_id: CellId) -> Vec<&ExplainDecisionRecord> {
+        self.decisions_with_annotation("cell_id", &cell_id.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -1454,6 +1483,53 @@ mod tests {
             plan.retention_for(decision_id),
             Some(RetentionPolicy::RetainFor { duration }) if *duration == Duration::from_secs(90)
         ));
+    }
+
+    #[test]
+    fn explain_plan_queries_decisions_by_contract_and_cell() {
+        let epoch = CellEpoch::new(9, 2);
+        let cell_id = cell_id("tenant.fabric.orders", epoch);
+        let mut plan = ExplainPlan::default();
+        let audit_entry = DecisionAuditEntry {
+            decision_id: DecisionId::from_parts(1_700_000_000_010, 77),
+            trace_id: TraceId::from_parts(1_700_000_000_010, 77),
+            contract_name: "fabric_routing_decision".to_owned(),
+            action_chosen: "single_cell".to_owned(),
+            expected_loss: 0.12,
+            calibration_score: 0.95,
+            fallback_active: false,
+            posterior_snapshot: vec![0.84, 0.08, 0.08],
+            expected_loss_by_action: BTreeMap::from([
+                ("single_cell".to_owned(), 0.12),
+                ("fanout_cells".to_owned(), 0.9),
+            ]),
+            ts_unix_ms: 1_700_000_000_010,
+        };
+
+        plan.record_audit_entry(
+            ExplainDecisionSpec::new(
+                DataPlaneDecisionKind::SecuritySensitiveRouting,
+                "tenant.fabric.orders.created",
+                SubjectFamily::Event,
+                DeliveryClass::EphemeralInteractive,
+                "route through one canonical cell",
+                RetentionPolicy::Forever,
+            )
+            .with_annotation("cell_id", cell_id.to_string())
+            .with_annotation("contract", "fabric_routing_decision"),
+            audit_entry,
+        );
+
+        assert_eq!(
+            plan.decisions_for_contract("fabric_routing_decision").len(),
+            1
+        );
+        assert_eq!(plan.decisions_for_cell(cell_id).len(), 1);
+        assert_eq!(
+            plan.decisions_with_annotation("contract", "fabric_routing_decision")
+                .len(),
+            1
+        );
     }
 
     #[test]

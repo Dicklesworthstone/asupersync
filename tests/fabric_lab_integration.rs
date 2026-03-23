@@ -8,6 +8,7 @@ use asupersync::messaging::capability::{
     FabricCapability as RuntimeFabricCapability, FabricCapabilityScope,
 };
 use asupersync::messaging::compiler::FabricCompiler;
+use asupersync::messaging::explain::ExplainPlan;
 use asupersync::messaging::fabric::{
     CellEpoch, CellTemperature, DataCapsule, Fabric, NodeRole, NormalizationPolicy,
     ObservedCellLoad, PlacementPolicy, RebalanceBudget, RebalancePlan, RepairPolicy,
@@ -23,9 +24,10 @@ use asupersync::messaging::service::{
     ServiceAdmission, ValidatedServiceRequest,
 };
 use asupersync::messaging::{
-    AckKind, DeliveryClass, FabricCapability as MorphismCapability, Morphism, MorphismClass,
-    ResponsePolicy, ReversibilityRequirement, ShardedSublist, SharingPolicy, Subject,
-    SubjectTransform,
+    AckKind, DeliveryClass, FabricCapability as MorphismCapability, FabricCapabilityDecision,
+    FabricDeliveryClassEscalation, FabricRetryDecision, FabricRoutingDecision, Morphism,
+    MorphismClass, ResponsePolicy, ReversibilityRequirement, ShardedSublist, SharingPolicy,
+    Subject, SubjectTransform,
 };
 use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::remote::NodeId;
@@ -115,6 +117,15 @@ struct ShardedRoutingSummary {
     exact_shard: Option<usize>,
     wildcard_shard: Option<usize>,
     remaining_after_all_drops: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoutingDecisionAuditSummary {
+    received_messages: usize,
+    routed_cell_count: usize,
+    routing_action: String,
+    decision_count: usize,
+    recorded_cell_id: String,
 }
 
 fn candidate(
@@ -1140,6 +1151,113 @@ fn run_sharded_routing_scenario(seed: u64) -> (ShardedRoutingSummary, Vec<Fabric
     (summary, log_entries, runtime.steps())
 }
 
+fn run_routing_decision_audit_scenario(
+    seed: u64,
+) -> (RoutingDecisionAuditSummary, Vec<FabricLogEntry>, u64) {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<RoutingDecisionAuditSummary>));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::for_testing();
+                let endpoint = format!("node1:4222/route-audit-{seed:016x}");
+                let fabric = Fabric::connect(&cx, &endpoint).await.expect("connect");
+                let mut subscription = fabric
+                    .subscribe(&cx, "orders.created")
+                    .await
+                    .expect("subscribe");
+
+                yield_now().await;
+                fabric
+                    .publish(&cx, "orders.created", b"payload".to_vec())
+                    .await
+                    .expect("publish");
+                push_log(&log, &seq, "routing-decision", "publish", endpoint);
+
+                let first = subscription.next(&cx).await.expect("first routed message");
+                let second = subscription.next(&cx).await;
+                assert_eq!(first.subject.as_str(), "orders.created");
+                assert_eq!(
+                    second, None,
+                    "single-cell route should not duplicate payloads"
+                );
+
+                let plan = fabric.render_explain_plan();
+                let routing_records = plan.decisions_for_contract("fabric_routing_decision");
+                assert_eq!(
+                    routing_records.len(),
+                    1,
+                    "expected one routing decision record"
+                );
+                let record = routing_records[0];
+                let routed_cell_count = record
+                    .annotations
+                    .get("routed_cell_count")
+                    .expect("routed_cell_count annotation")
+                    .parse::<usize>()
+                    .expect("numeric routed_cell_count");
+                let recorded_cell_id = record
+                    .annotations
+                    .get("cell_id")
+                    .cloned()
+                    .expect("cell_id annotation");
+                push_log(
+                    &log,
+                    &seq,
+                    "routing-decision",
+                    "recorded",
+                    format!(
+                        "action={} routed_cell_count={} cell_id={recorded_cell_id}",
+                        record.audit_entry.action_chosen, routed_cell_count
+                    ),
+                );
+
+                *summary.lock().expect("summary lock") = Some(RoutingDecisionAuditSummary {
+                    received_messages: 1,
+                    routed_cell_count,
+                    routing_action: record.audit_entry.action_chosen.clone(),
+                    decision_count: routing_records.len(),
+                    recorded_cell_id,
+                });
+            })
+            .expect("create routing decision audit task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let violations = runtime.check_invariants();
+    let pending_obligations = runtime.state.pending_obligation_count();
+    assert!(
+        runtime.is_quiescent(),
+        "runtime should quiesce after routing-decision scenario"
+    );
+    assert_eq!(
+        pending_obligations, 0,
+        "routing-decision scenario should not leave pending obligations"
+    );
+    assert!(
+        violations.is_empty(),
+        "routing-decision scenario should not violate lab invariants: {violations:?}"
+    );
+
+    let summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("routing decision summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    (summary, log_entries, runtime.steps())
+}
+
 #[test]
 fn subject_cell_replay_is_deterministic_across_seeded_lab_runs() {
     let inputs = [
@@ -1703,4 +1821,146 @@ fn sharded_routing_drains_cancelled_interest_without_ghosts() {
         summary.remaining_after_all_drops, 0,
         "sharded sublist count should drain to zero after all guards drop"
     );
+}
+
+#[test]
+fn routing_decision_audits_are_deterministic_across_seeded_lab_runs() {
+    let (first_summary, first_log, first_steps) = run_routing_decision_audit_scenario(0x5A4D_0011);
+    let (second_summary, second_log, second_steps) =
+        run_routing_decision_audit_scenario(0x5A4D_0011);
+
+    assert_eq!(
+        first_summary, second_summary,
+        "same seed should yield identical routing-decision summaries"
+    );
+    assert_eq!(
+        first_log, second_log,
+        "same seed should yield identical routing-decision logs"
+    );
+    assert_eq!(
+        first_steps, second_steps,
+        "same seed should yield identical routing-decision scheduler steps"
+    );
+}
+
+#[test]
+fn routing_decision_audit_matches_single_cell_route_behavior() {
+    let (summary, log, _) = run_routing_decision_audit_scenario(0x5A4D_0012);
+
+    assert_eq!(
+        summary.received_messages, 1,
+        "exact routing scenario should deliver exactly one message"
+    );
+    assert_eq!(
+        summary.routed_cell_count, 1,
+        "routing audit should report a single routed canonical cell"
+    );
+    assert_eq!(
+        summary.routing_action, "single_cell",
+        "routing decision should match the observable single-cell delivery path"
+    );
+    assert_eq!(
+        summary.decision_count, 1,
+        "one publish should emit exactly one routing decision record"
+    );
+    assert!(
+        summary.recorded_cell_id.starts_with("cell-"),
+        "routing decisions should annotate the canonical cell id"
+    );
+    assert_eq!(
+        log.len(),
+        2,
+        "expected one publish log entry and one recorded-decision log entry"
+    );
+}
+
+#[test]
+fn fabric_decision_contracts_emit_well_formed_audit_entries() {
+    let candidates = role_mixed_candidates();
+    let policy = alias_policy();
+    let cell = SubjectCell::new(
+        &SubjectPattern::parse("orders.created").expect("pattern"),
+        CellEpoch::new(41, 7),
+        &candidates,
+        &policy,
+        RepairPolicy::default(),
+        DataCapsule {
+            temperature: CellTemperature::Warm,
+            retained_message_blocks: 4,
+        },
+    )
+    .expect("cell should build");
+    let route = FabricRoutingDecision::new(
+        cell.cell_id,
+        "orders.created",
+        DeliveryClass::EphemeralInteractive,
+        vec![cell.subject_partition.canonical_key()],
+    )
+    .evaluate();
+    let retry = FabricRetryDecision::new(
+        cell.cell_id,
+        "orders.created",
+        DeliveryClass::DurableOrdered,
+        2,
+        2,
+    )
+    .evaluate();
+    let capability = FabricCapabilityDecision::new(
+        cell.cell_id,
+        "tenant.alpha.orders.>",
+        DeliveryClass::MobilitySafe,
+        "subscribe(tenant.alpha.orders.>)",
+        1,
+        true,
+    )
+    .evaluate();
+    let delivery = FabricDeliveryClassEscalation::new(
+        cell.cell_id,
+        "service.lookup",
+        DeliveryClass::EphemeralInteractive,
+        DeliveryClass::ObligationBacked,
+    )
+    .evaluate();
+
+    for record in [&route, &retry, &capability, &delivery] {
+        assert_eq!(record.cell_id, cell.cell_id);
+        assert!(
+            !record.audit.contract_name.trim().is_empty(),
+            "every decision contract should stamp a non-empty contract name"
+        );
+        assert!(
+            !record.audit.action_chosen.trim().is_empty(),
+            "every decision contract should stamp a non-empty chosen action"
+        );
+        assert!(
+            record.evidence_count() > 0,
+            "every decision contract should carry posterior evidence"
+        );
+    }
+
+    let mut plan = ExplainPlan::default();
+    for record in [&route, &retry, &capability, &delivery] {
+        record.record_into_plan(&mut plan);
+    }
+
+    assert_eq!(plan.important_decisions.len(), 4);
+    assert_eq!(
+        plan.decisions_for_contract("fabric_routing_decision").len(),
+        1
+    );
+    assert_eq!(
+        plan.decisions_for_contract("fabric_retry_decision").len(),
+        1
+    );
+    assert_eq!(
+        plan.decisions_for_contract("fabric_capability_decision")
+            .len(),
+        1
+    );
+    assert_eq!(
+        plan.decisions_for_contract("fabric_delivery_class_escalation")
+            .len(),
+        1
+    );
+    assert_eq!(plan.decisions_for_cell(cell.cell_id).len(), 4);
 }

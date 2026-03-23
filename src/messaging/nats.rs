@@ -1053,18 +1053,33 @@ impl NatsClient {
             );
         }
 
-        // Send SUB command. If the write fails, clean up the subscription
-        // entry to prevent a leaked sender that would accumulate dead channel
-        // sends on every matching incoming message.
+        struct SubscribeGuard<'a> {
+            subs: &'a Mutex<std::collections::HashMap<u64, SubscriptionState>>,
+            sid: u64,
+            defused: bool,
+        }
+
+        impl Drop for SubscribeGuard<'_> {
+            fn drop(&mut self) {
+                if !self.defused {
+                    self.subs.lock().remove(&self.sid);
+                }
+            }
+        }
+
+        let mut guard = SubscribeGuard {
+            subs: &self.state.subscriptions,
+            sid,
+            defused: false,
+        };
+
+        // Send SUB command. The guard prevents a leaked sender on write failure
+        // or cancellation.
         let cmd = format!("SUB {subject} {sid}\r\n");
-        if let Err(err) = self.stream.write_all(cmd.as_bytes()).await {
-            self.state.subscriptions.lock().remove(&sid);
-            return Err(err.into());
-        }
-        if let Err(err) = self.stream.flush().await {
-            self.state.subscriptions.lock().remove(&sid);
-            return Err(err.into());
-        }
+        self.stream.write_all(cmd.as_bytes()).await?;
+        self.stream.flush().await?;
+
+        guard.defused = true;
 
         cx.trace(&format!("nats: subscribed to {subject} (sid={sid})"));
 
@@ -1105,17 +1120,33 @@ impl NatsClient {
             );
         }
 
+        struct SubscribeGuard<'a> {
+            subs: &'a Mutex<std::collections::HashMap<u64, SubscriptionState>>,
+            sid: u64,
+            defused: bool,
+        }
+
+        impl Drop for SubscribeGuard<'_> {
+            fn drop(&mut self) {
+                if !self.defused {
+                    self.subs.lock().remove(&self.sid);
+                }
+            }
+        }
+
+        let mut guard = SubscribeGuard {
+            subs: &self.state.subscriptions,
+            sid,
+            defused: false,
+        };
+
         // Send SUB command. Clean up the subscription entry on write failure
-        // to prevent a leaked sender (same as subscribe()).
+        // or cancellation (same as subscribe()).
         let cmd = format!("SUB {subject} {queue_group} {sid}\r\n");
-        if let Err(err) = self.stream.write_all(cmd.as_bytes()).await {
-            self.state.subscriptions.lock().remove(&sid);
-            return Err(err.into());
-        }
-        if let Err(err) = self.stream.flush().await {
-            self.state.subscriptions.lock().remove(&sid);
-            return Err(err.into());
-        }
+        self.stream.write_all(cmd.as_bytes()).await?;
+        self.stream.flush().await?;
+
+        guard.defused = true;
 
         Ok(Subscription {
             sid,
@@ -1982,7 +2013,7 @@ mod tests {
         let json = r#"{"key":"val\"ue"}"#;
         assert_eq!(
             extract_json_string(json, "key"),
-            Some("val\\\"ue".to_string())
+            Some("val\"ue".to_string())
         );
     }
 

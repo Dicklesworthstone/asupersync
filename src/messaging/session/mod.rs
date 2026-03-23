@@ -6,7 +6,11 @@ pub mod obligation;
 pub mod projection;
 pub mod synthesis;
 
-pub use conformance::ConformanceMonitorPlaceholder;
+pub use conformance::{
+    ConformanceCheckRecord, ConformanceExpectation, ConformanceMonitor,
+    ConformanceMonitorInitError, ConformanceObserved, ConformanceOracle, ConformanceRecoveryBranch,
+    ConformanceRecoveryStage, ConformanceViolation, ConformanceViolationEvidence,
+};
 pub use contract::{
     CompensationPath, CutoffPath, EvidenceCheckpoint, GlobalSessionType, Label, MessageType,
     ProtocolContract, ProtocolContractValidationError, RoleName, SessionBranch, SessionPath,
