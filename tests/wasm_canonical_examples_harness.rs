@@ -6,12 +6,12 @@ use asupersync::net::worker_channel::{
 };
 use asupersync::types::wasm_abi::ErrorBoundaryAction;
 use asupersync::types::{
-    outcome_to_error_boundary_action, outcome_to_suspense_state, outcome_to_transition_state,
     NextjsBootstrapPhase, NextjsNavigationType, ReactProviderConfig, ReactProviderPhase,
     ReactProviderState, SuspenseBoundaryState, TransitionTaskState, WasmAbiCancellation,
     WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiRecoverability, WasmAbiSymbol,
     WasmAbiValue, WasmBoundaryState, WasmExportDispatcher, WasmTaskCancelRequest,
-    WasmTaskSpawnBuilder,
+    WasmTaskSpawnBuilder, outcome_to_error_boundary_action, outcome_to_suspense_state,
+    outcome_to_transition_state,
 };
 use asupersync::web::{
     BootstrapCommand, BootstrapRecoveryAction, NextjsBootstrapError, NextjsBootstrapState,
@@ -523,6 +523,9 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
         "worker_artifact_download_guard_marker",
         "worker_artifact_quota_guard_marker",
         "worker_artifact_cleanup_marker",
+        "browser_final_phase_is_shutdown_complete",
+        "browser_shutdown_reason",
+        "browser_shutdown_reason_is_fixture_handoff_complete",
         "RUST-BROWSER-CONSUMER",
         "repository_maintained_rust_browser_fixture",
         "L6-RUST-BROWSER-CONSUMER",
@@ -634,6 +637,8 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         "resetBrowserLaneHealth()",
         "worker_loss_fail_closed_demotion",
         "prerequisite_drift_reason_precedence",
+        "graceful_shutdown_handoff",
+        "fixture-handoff-complete",
         "check-browser-run.mjs",
         "browser-run.json",
         "downloadArchive()",
@@ -691,6 +696,8 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         "worker_loss_retry_window",
         "worker_loss_fail_closed_demotion",
         "prerequisite_drift_reason_precedence",
+        "graceful_shutdown_handoff",
+        "fixture-handoff-complete",
         "runtimeSelectionDemoted",
         "runtimeSelectionRecovered",
     ] {
@@ -708,13 +715,18 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         "scenario_inventory",
         "artifacts",
         "replay_commands",
+        "normalize_artifact_keys",
+        "normalize_scenario_inventory",
         "browser_demotion_last_trigger",
         "browser_demotion_demoted_to_lane_id",
         "browser_demoted_health_last_trigger",
         "browser_demoted_health_demoted_to_lane_id",
         "browser_prerequisite_loss_health_demoted_to_lane_id",
+        "browser_shutdown_reason",
+        "browser_shutdown_reason_is_fixture_handoff_complete",
         "worker_loss_fail_closed_demotion",
         "prerequisite_drift_reason_precedence",
+        "graceful_shutdown_handoff",
     ] {
         assert!(
             validator.contains(marker),

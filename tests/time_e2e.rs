@@ -16,9 +16,14 @@
 #[macro_use]
 mod common;
 
+use asupersync::lab::{
+    CancellationRecord, DualRunHarness, DualRunScenarioIdentity, LoserDrainRecord,
+    NormalizedSemantics, ObligationBalanceRecord, Phase, ResourceSurfaceRecord, SeedPlan,
+    TerminalOutcome, assert_dual_run_passes, capture_region_close, run_live_adapter,
+};
 use asupersync::time::{
-    Elapsed, Interval, MissedTickBehavior, Sleep, TimerWheel, interval, interval_at, timeout,
-    timeout_at,
+    Elapsed, Interval, MissedTickBehavior, Sleep, TimeoutFuture, TimerWheel, interval, interval_at,
+    timeout, timeout_at,
 };
 use asupersync::types::{Budget, Time};
 use common::*;
@@ -82,6 +87,227 @@ impl Wake for NotifyWaker {
 fn init_test(test_name: &str) {
     init_test_logging();
     test_phase!(test_name);
+}
+
+const VIRTUAL_TIMEOUT_CONTRACT_VERSION: &str = "time.timeout.virtual_clock_reset.v1";
+const VIRTUAL_TIMEOUT_SCENARIO_CLOCK_ID: &str = "clock.virtual.timeout_ticks.v1";
+const VIRTUAL_TIMEOUT_DEADLINE_ID: &str = "deadline.timeout.pending.reset.v1";
+const VIRTUAL_TIMEOUT_NORMALIZATION_WINDOW: &str = "exact_logical_tick";
+const FIRST_TIMEOUT_DEADLINE_TICKS: u64 = 5;
+const RESET_TIMEOUT_DEADLINE_TICKS: u64 = 9;
+
+fn usize_counter_i64(value: usize) -> i64 {
+    i64::try_from(value).expect("time_e2e usize counters should fit in i64")
+}
+
+fn u64_counter_i64(value: u64) -> i64 {
+    i64::try_from(value).expect("time_e2e u64 counters should fit in i64")
+}
+
+fn bool_counter_i64(value: bool) -> i64 {
+    i64::from(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VirtualTimeoutObservation {
+    pending_before_first_deadline: usize,
+    first_deadline_ticks: u64,
+    elapsed_at_first_deadline: bool,
+    elapsed_after_first_deadline: bool,
+    pending_before_reset_deadline: usize,
+    reset_deadline_ticks: u64,
+    elapsed_at_reset_deadline: bool,
+    final_logical_elapsed_ticks: u64,
+}
+
+impl VirtualTimeoutObservation {
+    fn to_semantics(self) -> NormalizedSemantics {
+        let mut outcome = TerminalOutcome::err("timeout_elapsed");
+        outcome.surface_result = Some("expected_virtual_timeout".to_string());
+
+        NormalizedSemantics {
+            terminal_outcome: outcome,
+            cancellation: CancellationRecord::none(),
+            loser_drain: LoserDrainRecord::not_applicable(),
+            region_close: capture_region_close(true, true),
+            obligation_balance: ObligationBalanceRecord::zero(),
+            resource_surface: ResourceSurfaceRecord::empty("timer.timeout.virtual_clock_reset")
+                .with_counter(
+                    "timeout_pending_before_first_deadline",
+                    usize_counter_i64(self.pending_before_first_deadline),
+                )
+                .with_counter(
+                    "logical_deadline_ticks",
+                    u64_counter_i64(self.first_deadline_ticks),
+                )
+                .with_counter(
+                    "timeout_elapsed_at_first_deadline",
+                    bool_counter_i64(self.elapsed_at_first_deadline),
+                )
+                .with_counter(
+                    "timeout_elapsed_after_first_deadline",
+                    bool_counter_i64(self.elapsed_after_first_deadline),
+                )
+                .with_counter(
+                    "timeout_pending_before_reset_deadline",
+                    usize_counter_i64(self.pending_before_reset_deadline),
+                )
+                .with_counter(
+                    "logical_reset_deadline_ticks",
+                    u64_counter_i64(self.reset_deadline_ticks),
+                )
+                .with_counter(
+                    "timeout_elapsed_at_reset_deadline",
+                    bool_counter_i64(self.elapsed_at_reset_deadline),
+                )
+                .with_counter(
+                    "logical_elapsed_ticks",
+                    u64_counter_i64(self.final_logical_elapsed_ticks),
+                ),
+        }
+    }
+}
+
+fn virtual_timeout_identity() -> DualRunScenarioIdentity {
+    let scenario_id = "phase2.timer.timeout.virtual_clock_reset";
+    let seed_plan = SeedPlan::inherit(0x51A0_C031, format!("seed.{scenario_id}.v1"));
+    let mut identity = DualRunScenarioIdentity::phase1(
+        scenario_id,
+        "timer.timeout.virtual_clock_reset",
+        VIRTUAL_TIMEOUT_CONTRACT_VERSION,
+        "Timeout differential pilot preserves logical deadline and reset semantics under a virtual scenario clock",
+        seed_plan.canonical_seed,
+    )
+    .with_seed_plan(seed_plan)
+    .with_metadata("eligibility_verdict", "eligible_for_pilot")
+    .with_metadata("surface_family", "timer_surface")
+    .with_metadata("scenario_clock_id", VIRTUAL_TIMEOUT_SCENARIO_CLOCK_ID)
+    .with_metadata("clock_source", "scripted_poll_with_time")
+    .with_metadata("logical_deadline_id", VIRTUAL_TIMEOUT_DEADLINE_ID)
+    .with_metadata("normalization_window", VIRTUAL_TIMEOUT_NORMALIZATION_WINDOW);
+    identity.phase = Phase::Phase2;
+    identity
+}
+
+fn scripted_virtual_timeout_observation() -> VirtualTimeoutObservation {
+    let mut timeout = TimeoutFuture::new(
+        std::future::pending::<()>(),
+        Time::from_secs(FIRST_TIMEOUT_DEADLINE_TICKS),
+    );
+    let waker = noop_waker();
+    let mut task_cx = Context::from_waker(&waker);
+
+    let first_poll = timeout.poll_with_time(&mut task_cx, Time::ZERO);
+    let first_poll_pending = first_poll.is_pending();
+    assert!(first_poll_pending, "timeout should start pending");
+
+    let before_deadline = timeout.poll_with_time(
+        &mut task_cx,
+        Time::from_secs(FIRST_TIMEOUT_DEADLINE_TICKS - 1),
+    );
+    let before_deadline_pending = before_deadline.is_pending();
+    assert!(
+        before_deadline_pending,
+        "timeout should remain pending before logical deadline"
+    );
+
+    let at_first_deadline =
+        timeout.poll_with_time(&mut task_cx, Time::from_secs(FIRST_TIMEOUT_DEADLINE_TICKS));
+    let elapsed_at_first_deadline = match at_first_deadline {
+        Poll::Ready(Err(elapsed)) => {
+            elapsed.deadline() == Time::from_secs(FIRST_TIMEOUT_DEADLINE_TICKS)
+        }
+        other => panic!("expected timeout elapsed at first deadline, got {other:?}"),
+    };
+
+    let after_first_deadline = timeout.poll_with_time(
+        &mut task_cx,
+        Time::from_secs(FIRST_TIMEOUT_DEADLINE_TICKS + 1),
+    );
+    let elapsed_after_first_deadline = match after_first_deadline {
+        Poll::Ready(Err(elapsed)) => {
+            elapsed.deadline() == Time::from_secs(FIRST_TIMEOUT_DEADLINE_TICKS)
+        }
+        other => panic!("expected timeout elapsed after first deadline, got {other:?}"),
+    };
+
+    timeout.reset(Time::from_secs(RESET_TIMEOUT_DEADLINE_TICKS));
+
+    let before_reset_deadline = timeout.poll_with_time(
+        &mut task_cx,
+        Time::from_secs(RESET_TIMEOUT_DEADLINE_TICKS - 1),
+    );
+    let before_reset_deadline_pending = before_reset_deadline.is_pending();
+    assert!(
+        before_reset_deadline_pending,
+        "timeout reset should re-arm before the new deadline"
+    );
+
+    let at_reset_deadline =
+        timeout.poll_with_time(&mut task_cx, Time::from_secs(RESET_TIMEOUT_DEADLINE_TICKS));
+    let elapsed_at_reset_deadline = match at_reset_deadline {
+        Poll::Ready(Err(elapsed)) => {
+            elapsed.deadline() == Time::from_secs(RESET_TIMEOUT_DEADLINE_TICKS)
+        }
+        other => panic!("expected timeout elapsed at reset deadline, got {other:?}"),
+    };
+
+    VirtualTimeoutObservation {
+        pending_before_first_deadline: usize::from(first_poll_pending)
+            + usize::from(before_deadline_pending),
+        first_deadline_ticks: FIRST_TIMEOUT_DEADLINE_TICKS,
+        elapsed_at_first_deadline,
+        elapsed_after_first_deadline,
+        pending_before_reset_deadline: usize::from(before_reset_deadline_pending),
+        reset_deadline_ticks: RESET_TIMEOUT_DEADLINE_TICKS,
+        elapsed_at_reset_deadline,
+        final_logical_elapsed_ticks: RESET_TIMEOUT_DEADLINE_TICKS,
+    }
+}
+
+fn make_virtual_timeout_live_result(
+    identity: &DualRunScenarioIdentity,
+) -> asupersync::lab::LiveRunResult {
+    run_live_adapter(identity, |_config, witness| {
+        let observation = scripted_virtual_timeout_observation();
+        let mut outcome = TerminalOutcome::err("timeout_elapsed");
+        outcome.surface_result = Some("expected_virtual_timeout".to_string());
+        witness.set_outcome(outcome);
+        witness.set_region_close(capture_region_close(true, true));
+        witness.set_obligation_balance(ObligationBalanceRecord::zero());
+        witness.record_counter(
+            "timeout_pending_before_first_deadline",
+            usize_counter_i64(observation.pending_before_first_deadline),
+        );
+        witness.record_counter(
+            "logical_deadline_ticks",
+            u64_counter_i64(observation.first_deadline_ticks),
+        );
+        witness.record_counter(
+            "timeout_elapsed_at_first_deadline",
+            bool_counter_i64(observation.elapsed_at_first_deadline),
+        );
+        witness.record_counter(
+            "timeout_elapsed_after_first_deadline",
+            bool_counter_i64(observation.elapsed_after_first_deadline),
+        );
+        witness.record_counter(
+            "timeout_pending_before_reset_deadline",
+            usize_counter_i64(observation.pending_before_reset_deadline),
+        );
+        witness.record_counter(
+            "logical_reset_deadline_ticks",
+            u64_counter_i64(observation.reset_deadline_ticks),
+        );
+        witness.record_counter(
+            "timeout_elapsed_at_reset_deadline",
+            bool_counter_i64(observation.elapsed_at_reset_deadline),
+        );
+        witness.record_counter(
+            "logical_elapsed_ticks",
+            u64_counter_i64(observation.final_logical_elapsed_ticks),
+        );
+    })
 }
 
 // ============================================================================
@@ -493,6 +719,108 @@ fn test_interval_with_virtual_time() {
     test_complete!("test_interval_with_virtual_time");
 }
 
+#[test]
+fn test_virtual_timeout_observation_encodes_normalized_time_contract() {
+    init_test("test_virtual_timeout_observation_encodes_normalized_time_contract");
+    tracing::info!("Testing virtual timeout observation encodes the normalized time contract");
+
+    let semantics = scripted_virtual_timeout_observation().to_semantics();
+
+    assert_eq!(
+        semantics.resource_surface.contract_scope,
+        "timer.timeout.virtual_clock_reset"
+    );
+    assert_eq!(
+        semantics.terminal_outcome.error_class.as_deref(),
+        Some("timeout_elapsed")
+    );
+    assert_eq!(
+        semantics.terminal_outcome.surface_result.as_deref(),
+        Some("expected_virtual_timeout")
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["logical_deadline_ticks"],
+        u64_counter_i64(FIRST_TIMEOUT_DEADLINE_TICKS)
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["logical_reset_deadline_ticks"],
+        u64_counter_i64(RESET_TIMEOUT_DEADLINE_TICKS)
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["logical_elapsed_ticks"],
+        u64_counter_i64(RESET_TIMEOUT_DEADLINE_TICKS)
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["timeout_pending_before_first_deadline"],
+        2
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["timeout_elapsed_at_first_deadline"],
+        1
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["timeout_elapsed_after_first_deadline"],
+        1
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["timeout_elapsed_at_reset_deadline"],
+        1
+    );
+    assert_eq!(
+        semantics.resource_surface.counters["timeout_pending_before_reset_deadline"],
+        1
+    );
+
+    test_complete!("test_virtual_timeout_observation_encodes_normalized_time_contract");
+}
+
+#[test]
+fn timeout_dual_run_pilot_preserves_virtual_deadline_and_reset_semantics() {
+    init_test("timeout_dual_run_pilot_preserves_virtual_deadline_and_reset_semantics");
+    tracing::info!("Testing dual-run parity for virtual timeout deadline/reset semantics");
+
+    let identity = virtual_timeout_identity();
+    let live_result = make_virtual_timeout_live_result(&identity);
+
+    let result = DualRunHarness::from_identity(identity)
+        .lab(move |_config| scripted_virtual_timeout_observation().to_semantics())
+        .live_result(move |_seed, _entropy| live_result)
+        .run();
+
+    assert_dual_run_passes(&result);
+    assert_eq!(
+        result
+            .live
+            .semantics
+            .terminal_outcome
+            .error_class
+            .as_deref(),
+        Some("timeout_elapsed")
+    );
+    assert_eq!(
+        result.live.semantics.resource_surface.counters["logical_deadline_ticks"],
+        u64_counter_i64(FIRST_TIMEOUT_DEADLINE_TICKS)
+    );
+    assert_eq!(
+        result.live.semantics.resource_surface.counters["logical_reset_deadline_ticks"],
+        u64_counter_i64(RESET_TIMEOUT_DEADLINE_TICKS)
+    );
+    assert_eq!(
+        result.live.semantics.resource_surface.counters["timeout_elapsed_at_first_deadline"],
+        1
+    );
+    assert_eq!(
+        result.live.semantics.resource_surface.counters["timeout_elapsed_at_reset_deadline"],
+        1
+    );
+    assert_eq!(
+        result.live.semantics.resource_surface.counters["logical_elapsed_ticks"],
+        u64_counter_i64(RESET_TIMEOUT_DEADLINE_TICKS)
+    );
+
+    test_complete!("timeout_dual_run_pilot_preserves_virtual_deadline_and_reset_semantics");
+}
+
 // ============================================================================
 // 5. Determinism Tests
 // ============================================================================
@@ -830,6 +1158,7 @@ fn test_time_verification_summary() {
     init_test("test_time_verification_summary");
     tracing::info!("=== Time/Timers Verification Suite Summary ===");
     tracing::info!("Verified: sleep operations, intervals, timeouts, virtual time");
+    tracing::info!("Verified: phase-2 differential virtual-time timeout parity");
     tracing::info!("Verified: determinism, budget integration, cancel-safety");
     tracing::info!("Verified: edge cases, timer wheel operations");
     test_complete!("test_time_verification_summary");

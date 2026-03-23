@@ -1131,15 +1131,39 @@ fn browser_src_index_exports_lane_health_control_plane_markers() {
         "reportLaneUnhealthy(",
         "resetLaneHealth(",
         "lane_health_status=",
-        "failure_count=",
-        "retry_budget_remaining=",
-        "cooldown_until_ms=",
+        "lane_health_failure_count=",
+        "lane_health_retry_budget_remaining=",
+        "lane_health_cooldown_until_ms=",
+        "lane_health_last_trigger=",
+        "demoted_lane_id=",
     ] {
         assert!(
             content.contains(marker),
             "browser src/index.ts must preserve lane-health marker: {marker}"
         );
     }
+}
+
+#[test]
+fn browser_src_index_pins_lane_health_message_fragment_to_contract_field_names() {
+    let content = read_source("packages/browser/src/index.ts");
+    let function = slice_between(
+        &content,
+        "function browserLaneHealthMessageFragment(",
+        "\n\nfunction browserExecutionLaneUnhealthyMessage(",
+    );
+
+    assert_markers_in_order(
+        function,
+        &[
+            "\"lane_health_cooldown_until_ms=null\"",
+            "`lane_health_cooldown_until_ms=${health.cooldownUntilMs}`",
+            "const trigger = health.lastTrigger ?? \"runtime_init_failure\";",
+            "const demotedLaneId = health.demotedToLaneId ?? \"null\";",
+            "return `lane_health_status=${health.status}; lane_health_failure_count=${health.failureCount}; lane_health_retry_budget_remaining=${health.retryBudgetRemaining}; ${cooldown}; lane_health_last_trigger=${trigger}; demoted_lane_id=${demotedLaneId}`;",
+        ],
+        "browserLaneHealthMessageFragment must emit the contract-required lane-health field names in a stable order",
+    );
 }
 
 #[test]

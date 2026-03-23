@@ -436,6 +436,8 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
         "BROWSER_RUN_FILE",
         "npm run check:browser",
         "real_browser_run_ok",
+        "normalize_artifact_keys",
+        "normalize_scenario_inventory",
         "browser_baseline_selected_lane",
         "browser_retrying_status",
         "browser_retrying_selected_lane",
@@ -452,6 +454,10 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
         "browser_prerequisite_loss_health_demoted_to_lane_id",
         "browser_prerequisite_loss_worker_candidate_reason",
         "browser_recovered_selected_lane",
+        "browser_final_phase_is_shutdown_complete",
+        "browser_shutdown_reason",
+        "browser_shutdown_reason_is_fixture_handoff_complete",
+        "graceful_shutdown_handoff",
         "worker_lane_health_retrying_marker",
         "worker_execution_ladder_retrying_marker",
         "worker_runtime_selection_prerequisite_loss_marker",
@@ -485,6 +491,8 @@ fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
         "demoted_health_last_trigger",
         "demoted_health_demoted_to_lane_id",
         "prerequisite_loss_health_demoted_to_lane_id",
+        "fixture-handoff-complete",
+        "graceful_shutdown_handoff",
         "shutdown_complete",
     ] {
         assert!(

@@ -5,6 +5,7 @@
 
 #![allow(missing_docs)]
 
+use serde_json::{Value, json};
 use std::path::Path;
 
 fn load_doc() -> std::io::Result<String> {
@@ -15,6 +16,22 @@ fn load_doc() -> std::io::Result<String> {
 fn load_divergence_doc() -> std::io::Result<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/lab_live_divergence_taxonomy.md");
     std::fs::read_to_string(path)
+}
+
+fn load_ci_workflow() -> std::io::Result<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml");
+    std::fs::read_to_string(path)
+}
+
+fn load_ci_matrix_policy() -> std::io::Result<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/ci_matrix_policy.json");
+    std::fs::read_to_string(path)
+}
+
+fn load_ci_matrix_policy_json() -> std::io::Result<Value> {
+    let raw = load_ci_matrix_policy()?;
+    serde_json::from_str(&raw)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
 
 #[test]
@@ -343,14 +360,115 @@ fn differential_runner_script_exists_and_uses_rch_cli_surface() -> std::io::Resu
     let script = std::fs::read_to_string(path)?;
     for token in [
         "target/debug/asupersync",
+        "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
         "lab differential \"$@\"",
-        "rch exec -- cargo run --features cli --bin asupersync -- lab differential",
+        "\"${RCH_BIN}\" exec -- cargo run --features cli --bin asupersync -- lab differential",
+        "exec cargo run --features cli --bin asupersync -- lab differential \"$@\"",
     ] {
         assert!(
             script.contains(token),
             "differential runner script missing token: {token}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn doc_records_fast_ci_differential_lane() -> std::io::Result<()> {
+    let doc = load_doc()?;
+    for token in [
+        "Current fast CI differential lane",
+        "scripts/run_lab_live_differential.sh --profile smoke --seed 91",
+        "scripts/run_lab_live_differential.sh --profile calibration --scenario calibration.channel.commit_visibility_mismatch --seed 20260323",
+        "artifacts/lab-differential-fast/",
+        "smoke/operator_summary.txt",
+        "smoke/artifact_index.json",
+        "calibration/operator_summary.txt",
+        "calibration/artifact_index.json",
+    ] {
+        assert!(
+            doc.contains(token),
+            "taxonomy doc missing fast-CI differential token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ci_workflow_defines_fast_differential_gate() -> std::io::Result<()> {
+    let workflow = load_ci_workflow()?;
+    for token in [
+        "differential-fast:",
+        "name: Differential Fast Gate",
+        "Differential fast CI gate",
+        "scripts/run_lab_live_differential.sh \\",
+        "--profile smoke",
+        "--profile calibration",
+        "calibration.channel.commit_visibility_mismatch",
+        "Summarize differential fast gate",
+        "lab-live-differential-fast-artifacts",
+        "artifact_index.json",
+        "operator_summary.txt",
+        "[(.scenarios // [])[] | .scenario_id] | join(\", \")",
+        "<unavailable>",
+        "GITHUB_STEP_SUMMARY",
+    ] {
+        assert!(
+            workflow.contains(token),
+            "CI workflow missing fast differential token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ci_matrix_policy_tracks_fast_differential_lane() -> std::io::Result<()> {
+    let policy = load_ci_matrix_policy_json()?;
+    let lanes = policy["lanes"]
+        .as_array()
+        .expect("policy lanes must be array");
+    let lane = lanes
+        .iter()
+        .find(|lane| lane["lane_id"] == "lab-live-differential-fast")
+        .expect("fast differential lane missing from policy");
+
+    assert_eq!(lane["required_job_ids"], json!(["differential-fast"]));
+    assert_eq!(
+        lane["required_step_names"],
+        json!(["Differential fast CI gate"])
+    );
+    assert_eq!(
+        lane["required_artifact_names"],
+        json!(["lab-live-differential-fast-artifacts"])
+    );
+    assert_eq!(lane["require_rch"], false);
+    assert_eq!(lane["thresholds"]["max_failures"], 0);
+    assert_eq!(lane["thresholds"]["required_artifacts_min"], 1);
+
+    let replay_command = lane["replay_command"]
+        .as_str()
+        .expect("replay_command must be string");
+    assert!(
+        replay_command.contains(
+            "bash scripts/run_lab_live_differential.sh --profile smoke --seed 91 --out-dir artifacts/lab-differential-fast"
+        ),
+        "replay command must include smoke fast-lane invocation"
+    );
+    assert!(
+        replay_command.contains(
+            "bash scripts/run_lab_live_differential.sh --profile calibration --scenario calibration.channel.commit_visibility_mismatch --seed 20260323 --out-dir artifacts/lab-differential-fast"
+        ),
+        "replay command must include calibration fast-lane invocation"
+    );
+
+    assert_eq!(
+        lane["failure_taxonomy"],
+        json!([
+            "profile_contract_regression",
+            "artifact_bundle_contract_regression",
+            "calibration_path_regression"
+        ])
+    );
     Ok(())
 }
 

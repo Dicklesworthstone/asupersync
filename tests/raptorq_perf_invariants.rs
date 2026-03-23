@@ -4308,6 +4308,24 @@ fn h2_closure_packet_schema_and_lever_coverage() {
         ["draft_blocked", "ready_for_signoff", "signed_off"].contains(&packet_status),
         "packet_state.status must remain in allowed lifecycle states"
     );
+    let blocking_dependencies = artifact["packet_state"]["blocking_dependencies"]
+        .as_array()
+        .expect("packet_state.blocking_dependencies must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("blocking dependency entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    if packet_status == "draft_blocked" {
+        let expected_blockers = BTreeSet::from([String::from("asupersync-2cyx5")]);
+        assert_eq!(
+            blocking_dependencies, expected_blockers,
+            "draft_blocked H2 packet must list Track-G as the sole blocker"
+        );
+    }
 
     let required_beads = artifact["signoff_dependency_matrix"]["required_beads"]
         .as_array()
@@ -4401,6 +4419,15 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 .is_empty(),
             "track {track_code} must include status_reason"
         );
+        if track_code == "H" {
+            assert!(
+                track["status_reason"]
+                    .as_str()
+                    .expect("track H must include status_reason")
+                    .contains("sole remaining blocker"),
+                "track H status_reason must say Track-G is the sole remaining blocker"
+            );
+        }
         assert!(
             !track["closure_dependency_path"]
                 .as_str()
@@ -4508,11 +4535,9 @@ fn h2_closure_packet_schema_and_lever_coverage() {
         "H2 closure packet must include signoff checklist entries"
     );
     for item in checklist {
+        let check_id = item["check_id"].as_str().expect("check_id must be present");
         assert!(
-            !item["check_id"]
-                .as_str()
-                .expect("check_id must be present")
-                .is_empty(),
+            !check_id.is_empty(),
             "checklist entries must include check_id"
         );
         assert!(
@@ -4536,6 +4561,28 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 .is_empty(),
             "checklist entries must include replay commands"
         );
+        if check_id == "h2-residual-risk-and-follow-up-ownership" {
+            let required_artifacts = item["required_artifacts"]
+                .as_array()
+                .expect("required_artifacts must be an array")
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("required artifact entries must be strings")
+                        .to_string()
+                })
+                .collect::<BTreeSet<_>>();
+            for expected in [
+                "artifacts/raptorq_program_closure_signoff_packet_v1.json#residual_risk_register",
+                "artifacts/raptorq_program_closure_signoff_packet_v1.json#follow_up_ownership",
+            ] {
+                assert!(
+                    required_artifacts.contains(expected),
+                    "{check_id} must require {expected}"
+                );
+            }
+        }
     }
 
     let replay_index = artifact["artifact_replay_index"]
@@ -4670,6 +4717,27 @@ fn h2_closure_packet_dependency_status_alignment() {
             "each residual risk must include status"
         );
     }
+    let follow_up_ownership = artifact["follow_up_ownership"]
+        .as_array()
+        .expect("follow_up_ownership must be an array");
+    assert!(
+        !follow_up_ownership.is_empty(),
+        "follow_up_ownership must include at least one explicit owner"
+    );
+    for owner in follow_up_ownership {
+        assert!(
+            owner["bead_id"].as_str().is_some(),
+            "each follow_up_ownership entry must include bead_id"
+        );
+        assert!(
+            owner["role"].as_str().is_some(),
+            "each follow_up_ownership entry must include role"
+        );
+        assert!(
+            owner["handoff_expectation"].as_str().is_some(),
+            "each follow_up_ownership entry must include handoff_expectation"
+        );
+    }
 }
 
 /// Validate H2 closure packet docs cross-link to canonical artifacts.
@@ -4688,6 +4756,8 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "artifacts/raptorq_controlled_rollout_policy_v1.json",
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
         "artifacts/raptorq_replay_catalog_v1.json",
+        "follow_up_ownership",
+        "residual_risk_register",
         "E4",
         "F8",
         "rch exec --",
