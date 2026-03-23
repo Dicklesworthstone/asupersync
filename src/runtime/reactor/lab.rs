@@ -953,13 +953,22 @@ impl Reactor for LabReactor {
                     }
                 }
 
-                for (&token, socket) in sockets.iter() {
-                    let Some(fault) = socket.fault.as_ref() else {
-                        continue;
-                    };
-                    if fault.config.partitioned || !fault.config.closed {
-                        continue;
-                    }
+                // Collect closed-fault HUP tokens into a sorted vec to
+                // ensure deterministic delivery order. HashMap iteration
+                // is non-deterministic, which would violate the lab
+                // reactor's "same seed → same behavior" contract.
+                let mut closed_hup_tokens: Vec<Token> = sockets
+                    .iter()
+                    .filter_map(|(&token, socket)| {
+                        let fault = socket.fault.as_ref()?;
+                        if fault.config.partitioned || !fault.config.closed {
+                            return None;
+                        }
+                        Some(token)
+                    })
+                    .collect();
+                closed_hup_tokens.sort();
+                for token in closed_hup_tokens {
                     if closed_tokens_emitted.insert(token) {
                         delivered_events.push(Event::hangup(token));
                     }
