@@ -914,3 +914,7 @@
 {"file":"src/observability/analyzer_plugin.rs","status":"audited"}
 {"file":"src/bytes/buf/limit.rs","status":"audited"}
 {"file":"src/messaging/nats.rs","lines":1953,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: subscribe/queue_subscribe leak subscription entry on write failure. Fixed by removing entry in error path."}
+{"file":"src/web/request_region.rs","lines":400,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Post-handler cancel check correct (499 semantics). Panic isolation correct."}
+{"file":"src/grpc/health.rs","lines":600,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic status+version capture fix correct."}
+{"file":"src/messaging/redis.rs","lines":2445,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PubSub subscribe tracks after ACK. No pre-registration leak."}
+{"file":"src/net/happy_eyeballs.rs","lines":300,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lazy filter optimization preserves interleaving logic. No aliasing issue."}
