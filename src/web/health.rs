@@ -27,10 +27,10 @@
 //!     .route("/readyz", get(health.readiness_handler()));
 //! ```
 
-use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 use super::handler::FnHandler;
@@ -224,7 +224,10 @@ impl HealthCheck {
         name: impl Into<String>,
         f: impl Fn() -> HealthStatus + Send + Sync + 'static,
     ) -> Self {
-        self.inner.checks.lock().push((name.into(), Box::new(f)));
+        self.inner
+            .checks
+            .lock()
+            .push((name.into(), Box::new(f)));
         self
     }
 

@@ -58,7 +58,7 @@ impl std::error::Error for LockError {}
 /// Error returned when trying to lock without waiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryLockError {
-    /// The mutex is currently locked or reserved for an older queued waiter.
+    /// The mutex is currently locked.
     Locked,
     /// The mutex was poisoned.
     Poisoned,
@@ -67,7 +67,7 @@ pub enum TryLockError {
 impl std::fmt::Display for TryLockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Locked => write!(f, "mutex is locked or has queued waiters"),
+            Self::Locked => write!(f, "mutex is locked"),
             Self::Poisoned => write!(f, "mutex poisoned"),
         }
     }
@@ -98,24 +98,6 @@ struct MutexState {
     waiters: VecDeque<Waiter>,
     /// Monotonic counter for waiter identity.
     next_waiter_id: u64,
-}
-
-impl MutexState {
-    fn is_head_waiter(&self, waiter_id: u64) -> bool {
-        self.waiters
-            .front()
-            .is_some_and(|waiter| waiter.id == waiter_id)
-    }
-
-    fn can_acquire(&self, waiter_id: Option<u64>) -> bool {
-        if self.locked {
-            return false;
-        }
-
-        waiter_id.map_or(self.waiters.is_empty(), |waiter_id| {
-            self.is_head_waiter(waiter_id)
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -169,15 +151,12 @@ impl<T> Mutex<T> {
     }
 
     /// Tries to acquire the mutex without waiting.
-    ///
-    /// This respects FIFO fairness: if older waiters are queued, `try_lock`
-    /// returns [`TryLockError::Locked`] instead of barging ahead of them.
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryLockError::Poisoned);
         }
-        if !state.can_acquire(None) {
+        if state.locked {
             return Err(TryLockError::Locked);
         }
 
@@ -211,7 +190,7 @@ impl<T> Mutex<T> {
         let waker_to_wake = {
             let mut state = self.state.lock();
             state.locked = false;
-            state.waiters.front().map(|w| w.waker.clone())
+            state.waiters.pop_front().map(|w| w.waker)
         };
         // Wake outside the lock
         if let Some(waker) = waker_to_wake {
@@ -249,7 +228,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Err(LockError::Poisoned));
         }
 
-        if state.can_acquire(self.waiter_id) {
+        if !state.locked {
             // Acquire lock
             state.locked = true;
 
@@ -435,7 +414,7 @@ impl<T> OwnedMutexGuard<T> {
                 if this.mutex.is_poisoned() {
                     return Poll::Ready(Err(LockError::Poisoned));
                 }
-                if state.can_acquire(this.waiter_id) {
+                if !state.locked {
                     state.locked = true;
 
                     // Remove ourselves from the queue if we were still in it,
@@ -502,7 +481,7 @@ impl<T> OwnedMutexGuard<T> {
             if mutex.is_poisoned() {
                 return Err(TryLockError::Poisoned);
             }
-            if !state.can_acquire(None) {
+            if state.locked {
                 return Err(TryLockError::Locked);
             }
             state.locked = true;
@@ -576,15 +555,6 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
-        }
-    }
-
-    fn poll_pinned_once<T, F: Future<Output = T>>(mut future: Pin<&mut F>) -> Option<T> {
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(v) => Some(v),
-            Poll::Pending => None,
         }
     }
 
@@ -916,8 +886,8 @@ mod tests {
     }
 
     #[test]
-    fn try_lock_does_not_barge_ahead_of_waiter() {
-        init_test("try_lock_does_not_barge_ahead_of_waiter");
+    fn try_lock_steal_does_not_lose_waiter() {
+        init_test("try_lock_steal_does_not_lose_waiter");
         let cx = test_cx();
         let mutex = Mutex::new(0u32);
 
@@ -932,71 +902,23 @@ mod tests {
         // Release — unlock wakes the waiter (noop waker, no actual schedule).
         drop(guard);
 
-        // try_lock must not barge ahead of the queued waiter.
-        let locked = matches!(mutex.try_lock(), Err(TryLockError::Locked));
-        crate::assert_with_log!(locked, "try_lock respects queued waiter", true, locked);
+        // Steal the lock before the waiter can poll.
+        let steal_guard = mutex.try_lock().expect("steal should succeed");
 
-        // Queued waiter should acquire directly.
+        // Waiter polls: lock is busy (stolen). It re-registers at the front.
+        let pending = poll_once(&mut fut_w).is_none();
+        crate::assert_with_log!(pending, "waiter blocked by steal", true, pending);
+
+        // Release stolen lock.
+        drop(steal_guard);
+
+        // Waiter should now acquire.
         let guard_w = poll_once(&mut fut_w)
             .expect("should complete")
             .expect("no error");
-        crate::assert_with_log!(*guard_w == 0, "queued waiter acquires", 0u32, *guard_w);
+        crate::assert_with_log!(*guard_w == 0, "waiter acquired after steal", 0u32, *guard_w);
 
-        crate::test_complete!("try_lock_does_not_barge_ahead_of_waiter");
-    }
-
-    #[test]
-    fn fresh_lock_future_does_not_barge_ahead_of_waiter() {
-        init_test("fresh_lock_future_does_not_barge_ahead_of_waiter");
-        let cx = test_cx();
-        let mutex = Mutex::new(7u32);
-
-        // Hold the lock and queue waiter A.
-        let mut fut_hold = mutex.lock(&cx);
-        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
-
-        let mut fut_a = mutex.lock(&cx);
-        let _ = poll_once(&mut fut_a);
-
-        // Release the lock, but do not poll waiter A yet.
-        drop(guard);
-
-        // A fresh waiter must queue behind A instead of barging in.
-        let mut fut_b = mutex.lock(&cx);
-        let b_pending = poll_once(&mut fut_b).is_none();
-        crate::assert_with_log!(
-            b_pending,
-            "fresh waiter queued behind head",
-            true,
-            b_pending
-        );
-
-        let guard_a = poll_once(&mut fut_a)
-            .expect("head waiter should acquire")
-            .expect("no error");
-        crate::assert_with_log!(*guard_a == 7, "head waiter acquired first", 7u32, *guard_a);
-
-        let b_still_pending = poll_once(&mut fut_b).is_none();
-        crate::assert_with_log!(
-            b_still_pending,
-            "second waiter remains queued until head releases",
-            true,
-            b_still_pending
-        );
-
-        drop(guard_a);
-
-        let guard_b = poll_once(&mut fut_b)
-            .expect("second waiter should acquire after head release")
-            .expect("no error");
-        crate::assert_with_log!(
-            *guard_b == 7,
-            "second waiter acquires after head",
-            7u32,
-            *guard_b
-        );
-
-        crate::test_complete!("fresh_lock_future_does_not_barge_ahead_of_waiter");
+        crate::test_complete!("try_lock_steal_does_not_lose_waiter");
     }
 
     #[test]
@@ -1039,99 +961,6 @@ mod tests {
         let guard2 = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after async");
         crate::assert_with_log!(*guard2 == 99, "async mutation persisted", 99u32, *guard2);
         crate::test_complete!("test_owned_mutex_guard_async_lock");
-    }
-
-    #[test]
-    fn owned_async_lock_does_not_barge_ahead_of_waiter() {
-        init_test("owned_async_lock_does_not_barge_ahead_of_waiter");
-        let cx = test_cx();
-        let mutex = Arc::new(Mutex::new(11_u32));
-
-        // Hold the lock and queue owned waiter A.
-        let mut hold = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
-        let guard = poll_pinned_until_ready(hold.as_mut()).expect("hold should succeed");
-
-        let mut fut_a = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
-        let a_pending = poll_pinned_once(fut_a.as_mut()).is_none();
-        crate::assert_with_log!(a_pending, "owned waiter A queued", true, a_pending);
-
-        drop(guard);
-
-        // A fresh owned waiter must queue behind A instead of barging in.
-        let mut fut_b = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
-        let b_pending = poll_pinned_once(fut_b.as_mut()).is_none();
-        crate::assert_with_log!(
-            b_pending,
-            "owned waiter B queued behind head",
-            true,
-            b_pending
-        );
-
-        let guard_a = poll_pinned_until_ready(fut_a.as_mut()).expect("owned waiter A acquires");
-        crate::assert_with_log!(
-            *guard_a == 11,
-            "owned waiter A acquires first",
-            11u32,
-            *guard_a
-        );
-
-        let b_still_pending = poll_pinned_once(fut_b.as_mut()).is_none();
-        crate::assert_with_log!(
-            b_still_pending,
-            "owned waiter B remains queued until A releases",
-            true,
-            b_still_pending
-        );
-
-        drop(guard_a);
-
-        let guard_b = poll_pinned_until_ready(fut_b.as_mut()).expect("owned waiter B acquires");
-        crate::assert_with_log!(
-            *guard_b == 11,
-            "owned waiter B acquires second",
-            11u32,
-            *guard_b
-        );
-
-        crate::test_complete!("owned_async_lock_does_not_barge_ahead_of_waiter");
-    }
-
-    #[test]
-    fn owned_try_lock_does_not_barge_ahead_of_waiter() {
-        init_test("owned_try_lock_does_not_barge_ahead_of_waiter");
-        let cx = test_cx();
-        let mutex = Arc::new(Mutex::new(5_u32));
-
-        let mut hold = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
-        let guard = poll_pinned_until_ready(hold.as_mut()).expect("hold should succeed");
-
-        let mut fut_waiter = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
-        let pending = poll_pinned_once(fut_waiter.as_mut()).is_none();
-        crate::assert_with_log!(pending, "owned waiter queued", true, pending);
-
-        drop(guard);
-
-        let locked = matches!(
-            OwnedMutexGuard::try_lock(Arc::clone(&mutex)),
-            Err(TryLockError::Locked)
-        );
-        crate::assert_with_log!(
-            locked,
-            "owned try_lock respects queued waiter",
-            true,
-            locked
-        );
-
-        let guard_waiter =
-            poll_pinned_until_ready(fut_waiter.as_mut()).expect("queued owned waiter acquires");
-        crate::assert_with_log!(
-            *guard_waiter == 5,
-            "queued owned waiter acquires after try_lock refusal",
-            5u32,
-            *guard_waiter
-        );
-
-        crate::test_complete!("owned_try_lock_does_not_barge_ahead_of_waiter");
     }
 
     #[test]

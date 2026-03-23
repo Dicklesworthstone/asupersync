@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-m7o6i",
   "parent_track_bead_id": "asupersync-2cyx5",
   "external_ref": "bd-2bd8e",
-  "generated_at_utc": "2026-03-21T16:50:12Z",
+  "generated_at_utc": "2026-03-05T06:30:00Z",
   "contract": {
     "states": [
       "healthy",
@@ -248,8 +248,7 @@
   },
   "validation": {
     "unit_commands": [
-      "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
-      "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture"
+      "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture"
     ],
     "deterministic_e2e_commands": [
       "rch exec -- ./scripts/run_raptorq_e2e.sh --profile fast"
@@ -407,13 +406,11 @@
       },
       {
         "bead_id": "asupersync-36m6p",
-        "name": "E5 high-confidence p95/p99 and broader multiscenario comparator evidence",
+        "name": "E5 high-confidence p95/p99 comparator corpus",
         "required_status": "closed",
         "current_status": "in_progress",
         "evidence_refs": [
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
-          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
-          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
           "thread:coord-2026-02-19"
         ]
       },
@@ -439,8 +436,7 @@
       }
     ],
     "remaining_requirements": [
-      "Close asupersync-36m6p (E5) so closure_readiness dependencies all reach required_status=closed.",
-      "Publish the raw-sample or materially better broader E5 closure-grade evidence packet so Track-G is not relying only on the narrowed highconf_v1 guardrail and the current longer-window negative multiscenario guardrail."
+      "Close asupersync-36m6p (E5) so closure_readiness dependencies all reach required_status=closed."
     ],
     "track_g_handoff": {
       "bead_id": "asupersync-2cyx5",

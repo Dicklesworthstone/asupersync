@@ -106,10 +106,9 @@ Cargo-heavy validation and replay commands must use `rch`:
 
 - `rch exec -- cargo ...`
 
-Primary replay anchors:
+Primary replay anchor:
 
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture`
-- `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture`
 
 ## Closure Readiness Contract
 
@@ -123,7 +122,7 @@ Current dependency set in the artifact:
 3. `asupersync-n5fk6` (F7 final closure evidence in G3 cards) must be `closed`
 4. `asupersync-2zu9p` (F8 implementation + closure evidence) must be `closed`
 
-Current closure-readiness status (2026-03-21 refresh):
+Current closure-readiness status (2026-03-05 refresh):
 
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`
@@ -132,29 +131,6 @@ Current closure-readiness status (2026-03-21 refresh):
 
 `ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
 `closed`.
-
-The E5 dependency is intentionally modeled as a three-part evidence contract:
-
-- `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` remains the narrowed
-  negative guardrail for the current not-ready state.
-- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the
-  historical broader short-window directional refresh and is still not closure-grade.
-- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` is now the
-  current broader longer-window negative guardrail. It expands the corpus to
-  `RQ-E-GF256-DUAL-001..008` and still keeps `ready_for_e5_closure = false`.
-
-In invariant-test terms, the historical directional packet keeps
-`confidence_contract = short_window_directional_not_closure_grade`: that
-short-window refresh is informative for rollout posture, but it is not
-sufficient to close the dependency on its own. The current broader successor
-packet now carries `confidence_contract = longer_window_interval_proxy_negative_guardrail`,
-which means the longer-window broader read exists but still lands as negative
-evidence rather than closure-grade proof.
-
-That means Track-G still needs a broader positive E5 packet before G7 can
-truthfully flip `ready_to_close` to `true`. The longer-window packet now exists,
-but it remains a negative guardrail; the next closure attempt should prefer
-raw-sample capture or materially better broader interval-proxy results.
 
 Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `residual_risk_register`, `go_no_go_decision`) are now attached in

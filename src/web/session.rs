@@ -16,10 +16,10 @@
 //!     .wrap(my_handler);
 //! ```
 
-use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 use super::extract::Request;
@@ -166,7 +166,9 @@ impl SessionStore for MemoryStore {
     }
 
     fn save(&self, id: &str, data: &SessionData) {
-        self.sessions.lock().insert(id.to_string(), data.clone());
+        self.sessions
+            .lock()
+            .insert(id.to_string(), data.clone());
     }
 
     fn delete(&self, id: &str) {
