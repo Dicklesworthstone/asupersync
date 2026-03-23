@@ -10,14 +10,18 @@ use super::capability::FabricCapability;
 use super::class::{AckKind, DeliveryClass};
 use super::control::MembershipRecord;
 use super::policy::SemanticServiceClass;
+use super::service::{ReplyCertificate, RequestCertificate, ServiceAdmission, ServiceObligation};
 pub use super::subject::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
+use super::subject::{Sublist, SubscriptionGuard, SubscriptionId};
 use crate::cx::Cx;
 use crate::distributed::HashRing;
 use crate::error::{Error as AsupersyncError, ErrorKind};
+use crate::obligation::ledger::ObligationLedger;
 use crate::remote::NodeId;
+use crate::types::ObligationId;
 use crate::util::DetHasher;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock, Weak};
@@ -49,7 +53,7 @@ fn shared_fabric_state(endpoint: &str) -> Arc<Mutex<FabricState>> {
         return existing;
     }
 
-    let state = Arc::new(Mutex::new(FabricState::default()));
+    let state = Arc::new(Mutex::new(FabricState::new(endpoint)));
     registry.insert(endpoint.to_owned(), Arc::downgrade(&state));
     state
 }
@@ -70,9 +74,384 @@ pub struct Fabric {
     state: Arc<Mutex<FabricState>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct FabricState {
-    published: Vec<FabricMessage>,
+    cells: BTreeMap<String, FabricCellRuntime>,
+    cell_routes: BTreeMap<SubscriptionId, String>,
+    subscribers: BTreeMap<u64, FabricSubscriberState>,
+    routing: Arc<Sublist>,
+    next_sequence: u64,
+    next_subscriber_id: u64,
+    cell_buffer_capacity: usize,
+    placement_policy: PlacementPolicy,
+    repair_policy: RepairPolicy,
+    default_data_capsule: DataCapsule,
+    default_epoch: CellEpoch,
+    local_candidates: Vec<StewardCandidate>,
+}
+
+#[derive(Debug, Clone)]
+struct FabricSubscriberState {
+    pattern: SubjectPattern,
+    next_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct FabricBufferedMessage {
+    sequence: u64,
+    message: FabricMessage,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedFabricPublish {
+    routed_cells: Vec<String>,
+    message: FabricMessage,
+    capacity: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FabricCellBufferState {
+    Empty,
+    Buffered,
+    Backpressured,
+}
+
+impl FabricCellBufferState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Buffered => "buffered",
+            Self::Backpressured => "backpressured",
+        }
+    }
+
+    const fn from_buffer_len(buffer_len: usize, capacity: usize) -> Self {
+        if buffer_len == 0 {
+            Self::Empty
+        } else if buffer_len >= capacity {
+            Self::Backpressured
+        } else {
+            Self::Buffered
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FabricCellRuntime {
+    cell: SubjectCell,
+    _route_guard: SubscriptionGuard,
+    buffer: VecDeque<FabricBufferedMessage>,
+    state: FabricCellBufferState,
+}
+
+impl FabricCellRuntime {
+    fn new(cell: SubjectCell, route_guard: SubscriptionGuard) -> Self {
+        Self {
+            cell,
+            _route_guard: route_guard,
+            buffer: VecDeque::new(),
+            state: FabricCellBufferState::Empty,
+        }
+    }
+}
+
+impl FabricState {
+    const DEFAULT_CELL_BUFFER_CAPACITY: usize = 64;
+
+    fn new(endpoint: &str) -> Self {
+        Self {
+            cells: BTreeMap::new(),
+            cell_routes: BTreeMap::new(),
+            subscribers: BTreeMap::new(),
+            routing: Arc::new(Sublist::new()),
+            next_sequence: 0,
+            next_subscriber_id: 1,
+            cell_buffer_capacity: Self::DEFAULT_CELL_BUFFER_CAPACITY,
+            placement_policy: PlacementPolicy::default(),
+            repair_policy: RepairPolicy::default(),
+            default_data_capsule: DataCapsule::default(),
+            default_epoch: CellEpoch::new(0, 1),
+            local_candidates: vec![
+                StewardCandidate::new(
+                    NodeId::new(format!(
+                        "fabric-local-{:016x}",
+                        stable_hash(("fabric-endpoint", endpoint))
+                    )),
+                    "local",
+                )
+                .with_role(NodeRole::Steward)
+                .with_role(NodeRole::RepairWitness),
+            ],
+        }
+    }
+
+    fn effective_cell_buffer_capacity(&self) -> usize {
+        self.cell_buffer_capacity.max(1)
+    }
+
+    fn register_subscription(&mut self, pattern: SubjectPattern, next_sequence: u64) -> u64 {
+        let id = self.next_subscriber_id;
+        self.next_subscriber_id += 1;
+        self.subscribers.insert(
+            id,
+            FabricSubscriberState {
+                pattern,
+                next_sequence,
+            },
+        );
+        id
+    }
+
+    fn remove_subscription(&mut self, id: u64) {
+        self.subscribers.remove(&id);
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn ensure_cell_for_subject(
+        &mut self,
+        cx: &Cx,
+        subject: &Subject,
+    ) -> Result<String, AsupersyncError> {
+        let literal_partition = parse_subject_pattern(subject.as_str())?;
+        let canonical_partition = self
+            .placement_policy
+            .normalization
+            .normalize(&literal_partition)
+            .map_err(|error| fabric_input_error(error.to_string()))?;
+        let cell_key = canonical_partition.canonical_key();
+
+        if self.cells.contains_key(&cell_key) {
+            return Ok(cell_key);
+        }
+
+        let cell = SubjectCell::new(
+            &literal_partition,
+            self.default_epoch,
+            &self.local_candidates,
+            &self.placement_policy,
+            self.repair_policy.clone(),
+            self.default_data_capsule.clone(),
+        )
+        .map_err(|error| fabric_input_error(error.to_string()))?;
+        let route_guard = self.routing.subscribe(&cell.subject_partition, None);
+        let route_id = route_guard.id();
+        let cell_id = cell.cell_id;
+
+        self.cell_routes.insert(route_id, cell_key.clone());
+        self.cells
+            .insert(cell_key.clone(), FabricCellRuntime::new(cell, route_guard));
+        trace_fabric_cell_state_transition(
+            cx,
+            cell_id,
+            None,
+            FabricCellBufferState::Empty,
+            "cell created",
+        );
+
+        Ok(cell_key)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn route_keys_for_subject(
+        &mut self,
+        cx: &Cx,
+        subject: &Subject,
+    ) -> Result<Vec<String>, AsupersyncError> {
+        let expected_cell = self.ensure_cell_for_subject(cx, subject)?;
+        let matches = self.routing.lookup(subject);
+        let mut routed = Vec::with_capacity(matches.subscribers.len());
+
+        for route_id in matches.subscribers {
+            if let Some(cell_key) = self.cell_routes.get(&route_id) {
+                routed.push(cell_key.clone());
+            }
+        }
+
+        if routed.is_empty() {
+            routed.push(expected_cell);
+        }
+
+        routed.sort();
+        routed.dedup();
+        Ok(routed)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn publish_message(
+        &mut self,
+        cx: &Cx,
+        subject: Subject,
+        payload: Vec<u8>,
+        delivery_class: DeliveryClass,
+    ) -> Result<(), AsupersyncError> {
+        let prepared = self.prepare_publish_message(cx, &subject, payload, delivery_class)?;
+        self.apply_prepared_publish(cx, prepared);
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn prepare_publish_message(
+        &mut self,
+        cx: &Cx,
+        subject: &Subject,
+        payload: Vec<u8>,
+        delivery_class: DeliveryClass,
+    ) -> Result<PreparedFabricPublish, AsupersyncError> {
+        self.prune_cells(cx);
+
+        let routed_cells = self.route_keys_for_subject(cx, &subject)?;
+        let capacity = self.effective_cell_buffer_capacity();
+        let message = FabricMessage {
+            subject: subject.clone(),
+            payload,
+            delivery_class,
+        };
+
+        for cell_key in &routed_cells {
+            let Some(cell) = self.cells.get_mut(cell_key) else {
+                return Err(AsupersyncError::new(ErrorKind::RoutingFailed)
+                    .with_message(format!("missing fabric cell runtime for {cell_key}")));
+            };
+
+            if cell.buffer.len() >= capacity {
+                let cell_id = cell.cell.cell_id;
+                let from_state = cell.state;
+                if from_state != FabricCellBufferState::Backpressured {
+                    cell.state = FabricCellBufferState::Backpressured;
+                    trace_fabric_cell_state_transition(
+                        cx,
+                        cell_id,
+                        Some(from_state),
+                        FabricCellBufferState::Backpressured,
+                        "buffer capacity exhausted",
+                    );
+                }
+                return Err(AsupersyncError::new(ErrorKind::ChannelFull).with_message(
+                    format!(
+                        "fabric cell {cell_id} is backpressured at capacity {capacity} for subject {}",
+                        subject.as_str()
+                    ),
+                ));
+            }
+        }
+
+        Ok(PreparedFabricPublish {
+            routed_cells,
+            message,
+            capacity,
+        })
+    }
+
+    fn apply_prepared_publish(&mut self, cx: &Cx, prepared: PreparedFabricPublish) {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+
+        for cell_key in prepared.routed_cells {
+            let mut transition = None;
+
+            {
+                let cell = self
+                    .cells
+                    .get_mut(&cell_key)
+                    .expect("prepared routed cell must exist for publish");
+                cell.buffer.push_back(FabricBufferedMessage {
+                    sequence,
+                    message: prepared.message.clone(),
+                });
+
+                let next_state =
+                    FabricCellBufferState::from_buffer_len(cell.buffer.len(), prepared.capacity);
+                if cell.state != next_state {
+                    transition = Some((cell.cell.cell_id, cell.state, next_state));
+                    cell.state = next_state;
+                }
+            }
+
+            if let Some((cell_id, from_state, to_state)) = transition {
+                trace_fabric_cell_state_transition(
+                    cx,
+                    cell_id,
+                    Some(from_state),
+                    to_state,
+                    "publish accepted",
+                );
+            }
+        }
+    }
+
+    fn next_matching_message(&mut self, cx: &Cx, subscription_id: u64) -> Option<FabricMessage> {
+        let subscriber = self.subscribers.get(&subscription_id)?.clone();
+
+        let next = self
+            .cells
+            .values()
+            .flat_map(|cell| cell.buffer.iter())
+            .filter(|entry| {
+                entry.sequence >= subscriber.next_sequence
+                    && subscriber.pattern.matches(&entry.message.subject)
+            })
+            .min_by_key(|entry| entry.sequence)
+            .cloned();
+
+        let next = next?;
+        let subscriber_state = self.subscribers.get_mut(&subscription_id)?;
+        subscriber_state.next_sequence = next.sequence + 1;
+        self.prune_cells(cx);
+        Some(next.message)
+    }
+
+    fn prune_cells(&mut self, cx: &Cx) {
+        let subscribers = &self.subscribers;
+        let capacity = self.effective_cell_buffer_capacity();
+
+        for cell in self.cells.values_mut() {
+            while let Some(front) = cell.buffer.front() {
+                let retained = subscribers.values().any(|subscriber| {
+                    subscriber.next_sequence <= front.sequence
+                        && subscriber.pattern.matches(&front.message.subject)
+                });
+                if retained {
+                    break;
+                }
+                cell.buffer.pop_front();
+            }
+
+            let next_state = FabricCellBufferState::from_buffer_len(cell.buffer.len(), capacity);
+            if cell.state != next_state {
+                let from_state = cell.state;
+                cell.state = next_state;
+                trace_fabric_cell_state_transition(
+                    cx,
+                    cell.cell.cell_id,
+                    Some(from_state),
+                    next_state,
+                    "buffer retention pruned",
+                );
+            }
+        }
+    }
+}
+
+fn trace_fabric_cell_state_transition(
+    cx: &Cx,
+    cell_id: CellId,
+    from_state: Option<FabricCellBufferState>,
+    to_state: FabricCellBufferState,
+    reason: &str,
+) {
+    let cell_id = cell_id.to_string();
+    let from_state = from_state.map_or("absent", |state| state.as_str());
+    let to_state = to_state.as_str();
+    cx.trace_with_fields(
+        "fabric.cell_state_transition",
+        &[
+            ("event", "fabric.cell_state_transition"),
+            ("cell_id", cell_id.as_str()),
+            ("from_state", from_state),
+            ("to_state", to_state),
+            ("reason", reason),
+        ],
+    );
 }
 
 /// Published or received packet-plane message.
@@ -110,6 +489,31 @@ pub struct FabricReply {
     pub ack_kind: AckKind,
     /// Delivery class used for the request.
     pub delivery_class: DeliveryClass,
+}
+
+/// Follow-on delivery receipt produced when a certified reply crosses a
+/// tracked delivery or receipt boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricReplyDelivery {
+    /// Follow-on reply-delivery obligation id.
+    pub obligation_id: ObligationId,
+    /// Boundary satisfied by the immediate loopback seam.
+    pub delivery_boundary: AckKind,
+    /// Whether the caller explicitly required a receipt boundary.
+    pub receipt_required: bool,
+}
+
+/// Obligation-backed request/reply result with explicit certificates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricCertifiedReply {
+    /// The public reply envelope observed by the caller.
+    pub reply: FabricReply,
+    /// Admission certificate carried into the request.
+    pub request_certificate: RequestCertificate,
+    /// Reply certificate proving the callee resolved the service obligation.
+    pub reply_certificate: ReplyCertificate,
+    /// Delivery receipt when the reply crossed a tracked boundary.
+    pub delivery_receipt: Option<FabricReplyDelivery>,
 }
 
 /// Capture policy for stream declarations.
@@ -187,16 +591,27 @@ impl FabricStreamHandle {
 /// Subscription handle returned by `Fabric::subscribe`.
 #[derive(Debug, Clone)]
 pub struct FabricSubscription {
+    inner: Arc<FabricSubscriptionInner>,
+}
+
+#[derive(Debug)]
+struct FabricSubscriptionInner {
+    id: u64,
     pattern: SubjectPattern,
-    next_index: usize,
     state: Arc<Mutex<FabricState>>,
+}
+
+impl Drop for FabricSubscriptionInner {
+    fn drop(&mut self) {
+        self.state.lock().remove_subscription(self.id);
+    }
 }
 
 impl FabricSubscription {
     /// Return the subscribed pattern.
     #[must_use]
     pub fn pattern(&self) -> &SubjectPattern {
-        &self.pattern
+        &self.inner.pattern
     }
 
     /// Return the next matching message, if one is currently available.
@@ -209,20 +624,10 @@ impl FabricSubscription {
             return None;
         }
 
-        let state = self.state.lock();
-        let published = &state.published;
-
-        while self.next_index < published.len() {
-            let message = published[self.next_index].clone();
-            self.next_index += 1;
-            if self.pattern.matches(&message.subject) {
-                drop(state);
-                return Some(message);
-            }
-        }
-        drop(state);
-
-        None
+        self.inner
+            .state
+            .lock()
+            .next_matching_message(cx, self.inner.id)
     }
 }
 
@@ -262,12 +667,12 @@ impl Fabric {
 
         let subject = parse_subject(subject)?;
         let payload = payload.into();
-        let message = FabricMessage {
-            subject: subject.clone(),
-            payload: payload.clone(),
-            delivery_class: DeliveryClass::EphemeralInteractive,
-        };
-        self.state.lock().published.push(message);
+        self.state.lock().publish_message(
+            cx,
+            subject.clone(),
+            payload.clone(),
+            DeliveryClass::EphemeralInteractive,
+        )?;
 
         Ok(PublishReceipt {
             subject,
@@ -285,15 +690,16 @@ impl Fabric {
         subject_pattern: impl AsRef<str>,
     ) -> Result<FabricSubscription, AsupersyncError> {
         cx.checkpoint()?;
-        let next_index = self.state.lock().published.len();
+        let pattern = parse_subject_pattern(subject_pattern)?;
+        let state = Arc::clone(&self.state);
+        let id = {
+            let mut state = state.lock();
+            let next_sequence = state.next_sequence;
+            state.register_subscription(pattern.clone(), next_sequence)
+        };
 
         Ok(FabricSubscription {
-            pattern: parse_subject_pattern(subject_pattern)?,
-            // Layer-0 FABRIC models packet-plane pub/sub rather than durable
-            // replay, so subscriptions observe publishes from the subscription
-            // point forward even when endpoint state is shared across handles.
-            next_index,
-            state: Arc::clone(&self.state),
+            inner: Arc::new(FabricSubscriptionInner { id, pattern, state }),
         })
     }
 
@@ -315,6 +721,112 @@ impl Fabric {
             payload,
             ack_kind: receipt.ack_kind,
             delivery_class: receipt.delivery_class,
+        })
+    }
+
+    /// Execute an obligation-backed request/reply using a prior service
+    /// admission certificate.
+    ///
+    /// This keeps the default [`Fabric::request`] path NATS-cheap while making
+    /// stronger request/reply contracts an explicit opt-in. The caller must
+    /// provide a [`ServiceAdmission`] produced by the FABRIC service boundary;
+    /// this method then allocates and resolves the corresponding service
+    /// obligation, emits a reply certificate, and commits any required
+    /// reply-delivery obligation before returning.
+    #[allow(clippy::unused_async)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn request_certified(
+        &self,
+        cx: &Cx,
+        ledger: &mut ObligationLedger,
+        admission: &ServiceAdmission,
+        callee: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+        delivery_boundary: AckKind,
+        receipt_required: bool,
+    ) -> Result<FabricCertifiedReply, AsupersyncError> {
+        cx.checkpoint()?;
+        admission
+            .certificate
+            .validate()
+            .map_err(|error| fabric_input_error(error.to_string()))?;
+
+        let delivery_class = admission.validated.delivery_class;
+        if delivery_class < DeliveryClass::ObligationBacked {
+            return Err(fabric_input_error(format!(
+                "certified fabric request requires obligation-backed or stronger delivery class, got {delivery_class}"
+            )));
+        }
+        if admission.certificate.delivery_class != delivery_class {
+            return Err(fabric_input_error(format!(
+                "service admission delivery class {delivery_class} does not match certificate {}",
+                admission.certificate.delivery_class
+            )));
+        }
+        if admission.certificate.timeout != admission.validated.timeout {
+            return Err(fabric_input_error(
+                "service admission timeout does not match certificate timeout",
+            ));
+        }
+
+        let callee = callee.into();
+        let subject = parse_subject(&admission.certificate.subject)?;
+        let payload = payload.into();
+        let now = cx.now();
+        let service_latency =
+            Duration::from_nanos(now.duration_since(admission.certificate.issued_at));
+        let mut state = self.state.lock();
+        let prepared_publish =
+            state.prepare_publish_message(cx, &subject, payload.clone(), delivery_class)?;
+        let mut obligation = ServiceObligation::allocate(
+            ledger,
+            admission.certificate.request_id.clone(),
+            admission.certificate.caller.clone(),
+            callee.clone(),
+            admission.certificate.subject.clone(),
+            delivery_class,
+            cx.task_id(),
+            cx.region_id(),
+            now,
+            admission.validated.timeout,
+        )
+        .map_err(|error| fabric_input_error(error.to_string()))?;
+
+        let commit = obligation
+            .commit_with_reply(
+                ledger,
+                now,
+                payload.clone(),
+                delivery_boundary,
+                receipt_required,
+            )
+            .map_err(|error| fabric_input_error(error.to_string()))?;
+        let reply_certificate =
+            ReplyCertificate::from_commit(&commit, callee, now, service_latency);
+        debug_assert!(reply_certificate.validate().is_ok());
+
+        let delivery_receipt = commit.reply_obligation.map(|reply_obligation| {
+            let receipt = reply_obligation.commit_delivery(ledger, now);
+            FabricReplyDelivery {
+                obligation_id: receipt.obligation_id,
+                delivery_boundary: receipt.delivery_boundary,
+                receipt_required: receipt.receipt_required,
+            }
+        });
+
+        state.apply_prepared_publish(cx, prepared_publish);
+        drop(state);
+
+        Ok(FabricCertifiedReply {
+            reply: FabricReply {
+                subject,
+                payload,
+                ack_kind: delivery_boundary,
+                delivery_class,
+            },
+            request_certificate: admission.certificate.clone(),
+            reply_certificate,
+            delivery_receipt,
         })
     }
 
@@ -588,6 +1100,27 @@ impl NormalizationPolicy {
         }
 
         Ok(canonical.aggregate_reply_space(self.reply_space_policy))
+    }
+
+    /// Produce a deterministic, deduplicated, non-overlapping canonical
+    /// partition set for placement.
+    #[allow(clippy::result_large_err)]
+    pub fn canonicalize_partitions(
+        &self,
+        patterns: &[SubjectPattern],
+    ) -> Result<Vec<SubjectPattern>, FabricError> {
+        let mut canonical_by_key = BTreeMap::new();
+
+        for pattern in patterns {
+            let canonical = self.normalize(pattern)?;
+            canonical_by_key
+                .entry(canonical.canonical_key())
+                .or_insert(canonical);
+        }
+
+        let canonical_partitions = canonical_by_key.into_values().collect::<Vec<_>>();
+        SubjectPattern::validate_non_overlapping(&canonical_partitions)?;
+        Ok(canonical_partitions)
     }
 }
 
@@ -2850,7 +3383,7 @@ impl SpeculativePublishAttempt {
 
         let conflict_key = conflict_key.into();
         AbortedSpeculativePublish {
-            tentative_obligation: self.tentative_obligation,
+            tentative_obligation: self.tentative_obligation.clone(),
             replay_artifact: self.replay_artifact.resolved(
                 SpeculativeReplayDecision::AbortedConflict,
                 None,
@@ -4072,8 +4605,15 @@ fn validate_repair_bindings(
 
 #[cfg(test)]
 mod tests {
+    use super::super::ir::ReplySpaceRule;
+    use super::super::service::{
+        CompensationSemantics, EvidenceLevel, MobilityConstraint, OverloadPolicy, ServiceAdmission,
+        ValidatedServiceRequest,
+    };
     use super::*;
+    use crate::runtime::RuntimeBuilder;
     use crate::test_utils::run_test_with_cx;
+    use proptest::prelude::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
 
@@ -4088,6 +4628,48 @@ mod tests {
             .with_role(NodeRole::RepairWitness)
             .with_storage_class(storage_class)
             .with_latency_millis(latency_millis)
+    }
+
+    fn service_admission(
+        request_id: &str,
+        subject: &str,
+        delivery_class: DeliveryClass,
+        timeout: Option<Duration>,
+        issued_at: crate::types::Time,
+    ) -> ServiceAdmission {
+        let validated = ValidatedServiceRequest {
+            delivery_class,
+            timeout,
+            priority_hint: None,
+            guaranteed_durability: delivery_class,
+            evidence_level: EvidenceLevel::Standard,
+            mobility_constraint: MobilityConstraint::Unrestricted,
+            compensation_policy: CompensationSemantics::None,
+            overload_policy: OverloadPolicy::RejectNew,
+        };
+        let certificate = RequestCertificate::from_validated(
+            request_id.to_owned(),
+            "caller-a".to_owned(),
+            subject.to_owned(),
+            &validated,
+            ReplySpaceRule::CallerInbox,
+            "OrderService".to_owned(),
+            0xC0DE,
+            issued_at,
+        );
+
+        ServiceAdmission {
+            validated,
+            certificate,
+        }
+    }
+
+    fn canonical_cell_key(subject: &str) -> String {
+        PlacementPolicy::default()
+            .normalization
+            .normalize(&SubjectPattern::parse(subject).expect("subject pattern"))
+            .expect("canonical subject partition")
+            .canonical_key()
     }
 
     #[test]
@@ -4169,6 +4751,109 @@ mod tests {
             assert_eq!(reply.delivery_class, DeliveryClass::EphemeralInteractive);
             assert_eq!(reply.subject.as_str(), "service.lookup");
             assert_eq!(reply.payload, b"lookup".to_vec());
+        });
+    }
+
+    #[test]
+    fn certified_request_emits_certificates_and_resolves_obligations() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/certified")
+                .await
+                .expect("connect");
+            let mut subscription = fabric.subscribe(&cx, "service.>").await.expect("subscribe");
+            let mut ledger = ObligationLedger::new();
+            let admission = service_admission(
+                "req-certified",
+                "service.lookup",
+                DeliveryClass::ObligationBacked,
+                Some(Duration::from_secs(5)),
+                cx.now(),
+            );
+
+            let certified = fabric
+                .request_certified(
+                    &cx,
+                    &mut ledger,
+                    &admission,
+                    "callee-a",
+                    b"lookup".to_vec(),
+                    AckKind::Received,
+                    true,
+                )
+                .await
+                .expect("certified request");
+            let published = subscription.next(&cx).await.expect("published message");
+
+            assert_eq!(published.delivery_class, DeliveryClass::ObligationBacked);
+            assert_eq!(certified.reply.ack_kind, AckKind::Received);
+            assert_eq!(
+                certified.reply.delivery_class,
+                DeliveryClass::ObligationBacked
+            );
+            assert_eq!(certified.reply.subject.as_str(), "service.lookup");
+            assert_eq!(certified.reply.payload, b"lookup".to_vec());
+            assert!(certified.request_certificate.validate().is_ok());
+            assert!(certified.reply_certificate.validate().is_ok());
+            assert_eq!(
+                certified.reply_certificate.delivery_class,
+                DeliveryClass::ObligationBacked
+            );
+            assert!(certified.reply_certificate.service_obligation_id.is_some());
+            assert_eq!(
+                certified.reply_certificate.service_latency,
+                Duration::from_nanos(
+                    certified
+                        .reply_certificate
+                        .issued_at
+                        .duration_since(admission.certificate.issued_at)
+                )
+            );
+            assert_eq!(
+                certified
+                    .delivery_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.delivery_boundary),
+                Some(AckKind::Received)
+            );
+            assert_eq!(ledger.pending_count(), 0);
+            assert!(ledger.check_leaks().is_clean());
+        });
+    }
+
+    #[test]
+    fn certified_request_rejects_non_obligation_delivery_classes() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/certified-reject")
+                .await
+                .expect("connect");
+            let mut ledger = ObligationLedger::new();
+            let admission = service_admission(
+                "req-ephemeral",
+                "service.lookup",
+                DeliveryClass::EphemeralInteractive,
+                None,
+                cx.now(),
+            );
+
+            let err = fabric
+                .request_certified(
+                    &cx,
+                    &mut ledger,
+                    &admission,
+                    "callee-a",
+                    b"lookup".to_vec(),
+                    AckKind::Accepted,
+                    false,
+                )
+                .await
+                .expect_err("ephemeral class must use plain request");
+
+            assert_eq!(err.kind(), ErrorKind::User);
+            assert!(
+                err.to_string().contains("obligation-backed or stronger"),
+                "unexpected error: {err}"
+            );
+            assert!(ledger.is_empty());
         });
     }
 
@@ -4281,6 +4966,183 @@ mod tests {
     }
 
     #[test]
+    fn publish_creates_subject_cells_and_prunes_after_delivery() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/cell-create")
+                .await
+                .expect("connect");
+            let mut subscription = fabric
+                .subscribe(&cx, "orders.created")
+                .await
+                .expect("subscribe");
+
+            fabric
+                .publish(&cx, "orders.created", b"payload".to_vec())
+                .await
+                .expect("publish");
+
+            {
+                let state = fabric.state.lock();
+                let cell_key = canonical_cell_key("orders.created");
+                let cell = state.cells.get(&cell_key).expect("cell runtime");
+                assert_eq!(state.cells.len(), 1);
+                assert_eq!(state.cell_routes.len(), 1);
+                assert_eq!(cell.cell.subject_partition.canonical_key(), cell_key);
+                assert_eq!(cell.buffer.len(), 1);
+                assert_eq!(cell.state, FabricCellBufferState::Buffered);
+            }
+
+            let message = subscription.next(&cx).await.expect("message");
+            assert_eq!(message.subject.as_str(), "orders.created");
+            assert_eq!(message.payload, b"payload".to_vec());
+
+            let state = fabric.state.lock();
+            let cell = state
+                .cells
+                .get(&canonical_cell_key("orders.created"))
+                .expect("cell runtime");
+            assert!(cell.buffer.is_empty(), "consumed messages should be pruned");
+            assert_eq!(cell.state, FabricCellBufferState::Empty);
+        });
+    }
+
+    #[test]
+    fn wildcard_subscription_reads_messages_across_multiple_cells_in_publish_order() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/fanout")
+                .await
+                .expect("connect");
+            let mut subscription = fabric.subscribe(&cx, "orders.>").await.expect("subscribe");
+
+            fabric
+                .publish(&cx, "orders.created", b"created".to_vec())
+                .await
+                .expect("first publish");
+            fabric
+                .publish(&cx, "orders.updated", b"updated".to_vec())
+                .await
+                .expect("second publish");
+
+            let first = subscription.next(&cx).await.expect("first message");
+            let second = subscription.next(&cx).await.expect("second message");
+
+            assert_eq!(first.subject.as_str(), "orders.created");
+            assert_eq!(first.payload, b"created".to_vec());
+            assert_eq!(second.subject.as_str(), "orders.updated");
+            assert_eq!(second.payload, b"updated".to_vec());
+            assert_eq!(subscription.next(&cx).await, None);
+
+            let state = fabric.state.lock();
+            assert_eq!(state.cells.len(), 2);
+            assert!(
+                state
+                    .cells
+                    .contains_key(&canonical_cell_key("orders.created"))
+            );
+            assert!(
+                state
+                    .cells
+                    .contains_key(&canonical_cell_key("orders.updated"))
+            );
+        });
+    }
+
+    #[test]
+    fn publish_backpressures_full_cells_until_subscribers_drain_them() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/backpressure")
+                .await
+                .expect("connect");
+            fabric.state.lock().cell_buffer_capacity = 1;
+            let mut subscription = fabric
+                .subscribe(&cx, "orders.created")
+                .await
+                .expect("subscribe");
+
+            fabric
+                .publish(&cx, "orders.created", b"first".to_vec())
+                .await
+                .expect("first publish");
+
+            let err = fabric
+                .publish(&cx, "orders.created", b"second".to_vec())
+                .await
+                .expect_err("full cell should reject a second publish");
+            assert_eq!(err.kind(), ErrorKind::ChannelFull);
+
+            let cell_key = canonical_cell_key("orders.created");
+            {
+                let state = fabric.state.lock();
+                let cell = state.cells.get(&cell_key).expect("cell runtime");
+                assert_eq!(cell.state, FabricCellBufferState::Backpressured);
+                assert_eq!(cell.buffer.len(), 1);
+            }
+
+            let drained = subscription.next(&cx).await.expect("drained message");
+            assert_eq!(drained.payload, b"first".to_vec());
+
+            fabric
+                .publish(&cx, "orders.created", b"third".to_vec())
+                .await
+                .expect("drain should restore capacity");
+
+            let delivered = subscription.next(&cx).await.expect("delivered message");
+            assert_eq!(delivered.payload, b"third".to_vec());
+        });
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn full_wildcard_subscription_preserves_publish_order_and_reuses_canonical_cells(
+            subject_indexes in proptest::collection::vec(0usize..4, 1..8)
+        ) {
+            let endpoint = format!(
+                "node1:4222/property-{:016x}",
+                stable_hash(("fabric-property-order", &subject_indexes))
+            );
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("failed to build runtime");
+            let cx = Cx::for_testing();
+
+            runtime.block_on(async move {
+                let fabric = Fabric::connect(&cx, endpoint).await.expect("connect");
+                let mut subscription = fabric.subscribe(&cx, ">").await.expect("subscribe");
+                let subjects = [
+                    "orders.created",
+                    "orders.updated",
+                    "_INBOX.orders.region.req-1",
+                    "_INBOX.orders.region.req-2",
+                ];
+
+                for (ordinal, index) in subject_indexes.iter().copied().enumerate() {
+                    fabric
+                        .publish(&cx, subjects[index], vec![ordinal as u8])
+                        .await
+                        .expect("publish");
+                }
+
+                for (ordinal, index) in subject_indexes.iter().copied().enumerate() {
+                    let message = subscription.next(&cx).await.expect("message");
+                    assert_eq!(message.subject.as_str(), subjects[index]);
+                    assert_eq!(message.payload, vec![ordinal as u8]);
+                }
+                assert_eq!(subscription.next(&cx).await, None);
+
+                let expected_cells = subject_indexes
+                    .iter()
+                    .map(|index| canonical_cell_key(subjects[*index]))
+                    .collect::<BTreeSet<_>>();
+                let state = fabric.state.lock();
+                let actual_cells = state.cells.keys().cloned().collect::<BTreeSet<_>>();
+                assert_eq!(actual_cells, expected_cells);
+            });
+        }
+    }
+
+    #[test]
     fn parse_subject_pattern_trims_outer_whitespace() {
         let pattern = SubjectPattern::parse("  orders.created.>  ").expect("pattern");
         assert_eq!(pattern.canonical_key(), "orders.created.>");
@@ -4377,6 +5239,26 @@ mod tests {
     }
 
     #[test]
+    fn normalization_policy_rejects_conflicting_morphisms() {
+        let policy = NormalizationPolicy {
+            morphisms: vec![
+                SubjectPrefixMorphism::new("svc.orders", "orders").expect("left morphism"),
+                SubjectPrefixMorphism::new("svc.orders", "legacy.orders").expect("right morphism"),
+            ],
+            reply_space_policy: ReplySpaceCompactionPolicy::default(),
+        };
+
+        let err = policy
+            .normalize(&SubjectPattern::parse("svc.orders.created").expect("pattern"))
+            .expect_err("conflicting rewrites must fail closed");
+
+        assert!(matches!(
+            err,
+            FabricError::ConflictingSubjectMorphisms { .. }
+        ));
+    }
+
+    #[test]
     fn normalization_policy_can_compact_reply_space_after_morphism() {
         let policy = NormalizationPolicy {
             morphisms: vec![SubjectPrefixMorphism::new("svc", "_INBOX").expect("morphism")],
@@ -4391,6 +5273,108 @@ mod tests {
             .expect("normalized");
 
         assert_eq!(canonical.canonical_key(), "_INBOX.orders.region.>");
+    }
+
+    #[test]
+    fn normalization_policy_canonicalize_partitions_deduplicates_aliases() {
+        let policy = NormalizationPolicy {
+            morphisms: vec![SubjectPrefixMorphism::new("svc.orders", "orders").expect("morphism")],
+            reply_space_policy: ReplySpaceCompactionPolicy::default(),
+        };
+        let partitions = vec![
+            SubjectPattern::parse("orders.created").expect("canonical"),
+            SubjectPattern::parse("svc.orders.created").expect("alias"),
+            SubjectPattern::parse("orders.created").expect("duplicate"),
+        ];
+
+        let canonical = policy
+            .canonicalize_partitions(&partitions)
+            .expect("canonical partitions");
+
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(canonical[0].canonical_key(), "orders.created");
+    }
+
+    #[test]
+    fn normalization_policy_canonicalize_partitions_preserves_nested_wildcards() {
+        let policy = NormalizationPolicy {
+            morphisms: vec![SubjectPrefixMorphism::new("svc", "canonical").expect("morphism")],
+            reply_space_policy: ReplySpaceCompactionPolicy::default(),
+        };
+        let partitions = vec![
+            SubjectPattern::parse("svc.region.*.>").expect("nested wildcard"),
+            SubjectPattern::parse("svc.metrics.*").expect("disjoint wildcard"),
+        ];
+
+        let canonical = policy
+            .canonicalize_partitions(&partitions)
+            .expect("canonical partitions");
+        let keys = canonical
+            .into_iter()
+            .map(|pattern| pattern.canonical_key())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                "canonical.metrics.*".to_string(),
+                "canonical.region.*.>".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalization_policy_canonicalize_partitions_rejects_overlap_after_normalization() {
+        let policy = NormalizationPolicy {
+            morphisms: vec![SubjectPrefixMorphism::new("svc.orders", "orders").expect("morphism")],
+            reply_space_policy: ReplySpaceCompactionPolicy::default(),
+        };
+        let partitions = vec![
+            SubjectPattern::parse("svc.orders.created").expect("alias"),
+            SubjectPattern::parse("orders.*").expect("wildcard"),
+        ];
+
+        let err = policy
+            .canonicalize_partitions(&partitions)
+            .expect_err("overlap after normalization must fail closed");
+
+        assert!(matches!(
+            err,
+            FabricError::OverlappingSubjectPartitions { .. }
+        ));
+    }
+
+    #[test]
+    fn normalization_policy_canonicalize_partitions_is_order_stable() {
+        let policy = NormalizationPolicy {
+            morphisms: vec![SubjectPrefixMorphism::new("svc", "canonical").expect("morphism")],
+            reply_space_policy: ReplySpaceCompactionPolicy {
+                enabled: true,
+                preserve_segments: 3,
+            },
+        };
+        let partitions = vec![
+            SubjectPattern::parse("svc.region.two.*").expect("two"),
+            SubjectPattern::parse("_INBOX.orders.region.instance.9").expect("reply"),
+            SubjectPattern::parse("svc.region.one.>").expect("one"),
+        ];
+
+        let canonical = policy
+            .canonicalize_partitions(&partitions)
+            .expect("canonical partitions");
+        let keys = canonical
+            .into_iter()
+            .map(|pattern| pattern.canonical_key())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                "_INBOX.orders.region.>".to_string(),
+                "canonical.region.one.>".to_string(),
+                "canonical.region.two.*".to_string(),
+            ]
+        );
     }
 
     #[test]

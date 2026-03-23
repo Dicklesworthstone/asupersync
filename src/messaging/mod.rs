@@ -131,8 +131,8 @@ pub use cut::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use fabric::{
-    CapturePolicy, Fabric, FabricMessage, FabricReply, FabricStreamConfig, FabricStreamHandle,
-    FabricSubscription, PublishReceipt,
+    CapturePolicy, Fabric, FabricCertifiedReply, FabricMessage, FabricReply, FabricReplyDelivery,
+    FabricStreamConfig, FabricStreamHandle, FabricSubscription, PublishReceipt,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use federation::{

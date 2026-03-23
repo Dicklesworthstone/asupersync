@@ -299,16 +299,36 @@ impl ServerInfo {
 fn extract_json_string(json: &str, key: &str) -> Option<String> {
     let pattern = format!("\"{key}\":\"");
     let start = json.find(&pattern)? + pattern.len();
-    // Walk forward, respecting backslash escapes
     let slice = &json[start..];
-    let mut chars = slice.char_indices();
+    let mut out = String::with_capacity(slice.len());
+    let mut chars = slice.chars();
     loop {
         match chars.next()? {
-            (i, '"') => return Some(json[start..start + i].to_string()),
-            (_, '\\') => {
-                chars.next()?;
+            '"' => return Some(out),
+            '\\' => {
+                let next = chars.next()?;
+                match next {
+                    '"' | '\\' | '/' => out.push(next),
+                    'b' => out.push('\x08'),
+                    'f' => out.push('\x0C'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let mut hex = String::with_capacity(4);
+                        for _ in 0..4 {
+                            hex.push(chars.next()?);
+                        }
+                        if let Ok(val) = u32::from_str_radix(&hex, 16) {
+                            if let Some(c) = char::from_u32(val) {
+                                out.push(c);
+                            }
+                        }
+                    }
+                    _ => out.push(next),
+                }
             }
-            _ => {}
+            c => out.push(c),
         }
     }
 }
@@ -944,12 +964,7 @@ impl NatsClient {
         loop {
             cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-            if let Err(err) = self.read_more_until(cx, deadline).await {
-                self.cleanup_request_subscription(cx, sub.sid(), REQUEST_TIMEOUT_MESSAGE)
-                    .await;
-                return Err(err);
-            }
-
+            let mut processed_any = false;
             // Process messages looking for our reply
             loop {
                 let message = match self.try_parse_message() {
@@ -965,6 +980,7 @@ impl NatsClient {
                     Some(NatsMessage::Ping) => {
                         self.stream.write_all(b"PONG\r\n").await?;
                         self.stream.flush().await?;
+                        processed_any = true;
                     }
                     Some(NatsMessage::Msg(m)) => {
                         if m.sid == sub.sid() {
@@ -974,14 +990,32 @@ impl NatsClient {
                         }
                         // Dispatch to other subscriptions
                         self.dispatch_message(m);
+                        processed_any = true;
                     }
                     Some(NatsMessage::Err(e)) => {
                         self.cleanup_request_subscription(cx, sub.sid(), "server_error")
                             .await;
                         return Err(NatsError::Server(e));
                     }
-                    Some(_) => {}
-                    None => break,
+                    Some(_) => {
+                        processed_any = true;
+                    }
+                    None => {
+                        if processed_any {
+                            break;
+                        }
+
+                        if let Err(err) = self.read_more_until(cx, deadline).await {
+                            self.cleanup_request_subscription(
+                                cx,
+                                sub.sid(),
+                                REQUEST_TIMEOUT_MESSAGE,
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                        processed_any = true;
+                    }
                 }
             }
 
@@ -1165,24 +1199,34 @@ impl NatsClient {
     pub async fn process(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        // Read available data
-        self.read_more().await?;
-
-        // Process all complete messages
+        let mut processed_any = false;
         loop {
             match self.try_parse_message()? {
                 Some(NatsMessage::Ping) => {
                     self.stream.write_all(b"PONG\r\n").await?;
                     self.stream.flush().await?;
+                    processed_any = true;
                 }
                 Some(NatsMessage::Msg(m)) => {
                     self.dispatch_message(m);
+                    processed_any = true;
                 }
                 Some(NatsMessage::Err(e)) => {
                     return Err(NatsError::Server(e));
                 }
-                Some(_) => {}
-                None => break,
+                Some(_) => {
+                    processed_any = true;
+                }
+                None => {
+                    if processed_any {
+                        break;
+                    }
+
+                    self.read_more().await?;
+                    // We read more data, but we only want to read once per `process` call
+                    // if we are waiting for a partial message to complete.
+                    processed_any = true;
+                }
             }
         }
 

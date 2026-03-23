@@ -3531,6 +3531,11 @@ pub enum ServiceContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::messaging::ir::ReplySpaceRule;
+    use crate::messaging::morphism::{
+        FabricCapability, MorphismClass, MorphismPlanDirection, ResponsePolicy,
+        ReversibilityRequirement, SharingPolicy, SubjectTransform,
+    };
     use crate::messaging::subject::SubjectPattern;
     use crate::record::{ObligationAbortReason, ObligationState};
     use crate::util::ArenaIndex;
@@ -3599,18 +3604,18 @@ mod tests {
         Morphism {
             source_language: SubjectPattern::new("tenant.acme.service.orders.lookup"),
             dest_language: SubjectPattern::new("tenant.acme.service.edge-orders.lookup"),
-            class: super::morphism::MorphismClass::Authoritative,
-            transform: super::morphism::SubjectTransform::RenamePrefix {
+            class: MorphismClass::Authoritative,
+            transform: SubjectTransform::RenamePrefix {
                 from: SubjectPattern::new("tenant.acme.service.orders.lookup"),
                 to: SubjectPattern::new("tenant.acme.service.edge-orders.lookup"),
             },
-            reversibility: super::morphism::ReversibilityRequirement::Bijective,
+            reversibility: ReversibilityRequirement::Bijective,
             capability_requirements: vec![
-                super::morphism::FabricCapability::CarryAuthority,
-                super::morphism::FabricCapability::ReplyAuthority,
+                FabricCapability::CarryAuthority,
+                FabricCapability::ReplyAuthority,
             ],
-            sharing_policy: super::morphism::SharingPolicy::TenantScoped,
-            response_policy: super::morphism::ResponsePolicy::ReplyAuthoritative,
+            sharing_policy: SharingPolicy::TenantScoped,
+            response_policy: ResponsePolicy::ReplyAuthoritative,
             ..Morphism::default()
         }
     }
@@ -3710,7 +3715,7 @@ mod tests {
                 "req-service-boundary",
                 "caller-a",
                 &caller,
-                super::ir::ReplySpaceRule::CallerInbox,
+                ReplySpaceRule::CallerInbox,
                 0xfeed_u64,
                 Time::from_nanos(10),
             )
@@ -3727,7 +3732,7 @@ mod tests {
         assert_eq!(admission.certificate.service_class, "fabric.echo");
         assert_eq!(
             admission.certificate.reply_space_rule,
-            super::ir::ReplySpaceRule::CallerInbox
+            ReplySpaceRule::CallerInbox
         );
     }
 
@@ -3744,7 +3749,7 @@ mod tests {
                 "req-transfer",
                 "caller-a",
                 &caller,
-                super::ir::ReplySpaceRule::CallerInbox,
+                ReplySpaceRule::CallerInbox,
                 99,
                 Time::from_nanos(1),
             )
@@ -3771,7 +3776,7 @@ mod tests {
                 Subject::new("tenant.acme.service.edge-orders.lookup"),
                 "import/orders->edge",
                 &authoritative_import_morphism(),
-                Some(super::ir::ReplySpaceRule::DedicatedPrefix {
+                Some(ReplySpaceRule::DedicatedPrefix {
                     prefix: "tenant.acme.service.edge-orders.lookup".to_owned(),
                 }),
                 Time::from_nanos(3),
@@ -3782,13 +3787,10 @@ mod tests {
         assert_eq!(obligation.callee, "orders-edge");
         assert_eq!(obligation.lineage.len(), 1);
         assert_eq!(obligation.lineage[0].morphism, "import/orders->edge");
-        assert_eq!(
-            plan.direction,
-            super::morphism::MorphismPlanDirection::Import
-        );
+        assert_eq!(plan.direction, MorphismPlanDirection::Import);
         assert_eq!(
             plan.selected_reply_space,
-            Some(super::ir::ReplySpaceRule::DedicatedPrefix {
+            Some(ReplySpaceRule::DedicatedPrefix {
                 prefix: "tenant.acme.service.edge-orders.lookup".to_owned(),
             })
         );
@@ -3828,7 +3830,7 @@ mod tests {
                 "req-transfer-pinned",
                 "caller-a",
                 &caller,
-                super::ir::ReplySpaceRule::CallerInbox,
+                ReplySpaceRule::CallerInbox,
                 11,
                 Time::from_nanos(1),
             )
@@ -3884,7 +3886,7 @@ mod tests {
                 "req-transfer-miss",
                 "caller-a",
                 &caller,
-                super::ir::ReplySpaceRule::CallerInbox,
+                ReplySpaceRule::CallerInbox,
                 12,
                 Time::from_nanos(1),
             )
@@ -3940,7 +3942,7 @@ mod tests {
                 "req-transfer-a",
                 "caller-a",
                 &caller,
-                super::ir::ReplySpaceRule::CallerInbox,
+                ReplySpaceRule::CallerInbox,
                 13,
                 Time::from_nanos(1),
             )
@@ -3996,7 +3998,7 @@ mod tests {
                 "req-transfer-shifted",
                 "caller-a",
                 &caller,
-                super::ir::ReplySpaceRule::CallerInbox,
+                ReplySpaceRule::CallerInbox,
                 14,
                 Time::from_nanos(1),
             )
@@ -4052,7 +4054,7 @@ mod tests {
                 "req-cancel",
                 "caller-a",
                 &caller,
-                super::ir::ReplySpaceRule::CallerInbox,
+                ReplySpaceRule::CallerInbox,
                 42,
                 Time::from_nanos(1),
             )

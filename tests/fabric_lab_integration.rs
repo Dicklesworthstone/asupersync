@@ -2,6 +2,7 @@
 #![cfg(feature = "messaging-fabric")]
 
 use asupersync::cx::{Cx, cap};
+use asupersync::error::ErrorKind;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::messaging::capability::{
     FabricCapability as RuntimeFabricCapability, FabricCapabilityScope,
@@ -17,10 +18,16 @@ use asupersync::messaging::ir::{
     CostVector, EvidencePolicy, FabricIr, MobilityPermission, PrivacyPolicy, ReplySpaceRule,
     SubjectFamily, SubjectSchema,
 };
-use asupersync::messaging::{
-    DeliveryClass, FabricCapability as MorphismCapability, Morphism, MorphismClass, ResponsePolicy,
-    ReversibilityRequirement, ShardedSublist, SharingPolicy, Subject, SubjectTransform,
+use asupersync::messaging::service::{
+    CompensationSemantics, EvidenceLevel, MobilityConstraint, OverloadPolicy, RequestCertificate,
+    ServiceAdmission, ValidatedServiceRequest,
 };
+use asupersync::messaging::{
+    AckKind, DeliveryClass, FabricCapability as MorphismCapability, Morphism, MorphismClass,
+    ResponsePolicy, ReversibilityRequirement, ShardedSublist, SharingPolicy, Subject,
+    SubjectTransform,
+};
+use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::remote::NodeId;
 use asupersync::runtime::yield_now;
 use asupersync::types::{Budget, RegionId, TaskId};
@@ -81,6 +88,20 @@ struct PacketPlaneScenarioSummary {
     cancelled_next_is_none: bool,
     reply_subject: String,
     reply_payload_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CertifiedRequestScenarioSummary {
+    reply_subject: String,
+    reply_payload_len: usize,
+    reply_ack_kind: AckKind,
+    reply_delivery_class: DeliveryClass,
+    published_delivery_class: DeliveryClass,
+    request_certificate_valid: bool,
+    reply_certificate_valid: bool,
+    service_obligation_present: bool,
+    delivery_receipt_present: bool,
+    ledger_clean: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +222,40 @@ fn test_fabric_cx(slot: u32) -> Cx {
         TaskId::new_for_test(slot, 0),
         Budget::INFINITE,
     )
+}
+
+fn service_admission(
+    request_id: &str,
+    subject: &str,
+    delivery_class: DeliveryClass,
+    timeout: Option<Duration>,
+    issued_at: asupersync::types::Time,
+) -> ServiceAdmission {
+    let validated = ValidatedServiceRequest {
+        delivery_class,
+        timeout,
+        priority_hint: None,
+        guaranteed_durability: delivery_class,
+        evidence_level: EvidenceLevel::Standard,
+        mobility_constraint: MobilityConstraint::Unrestricted,
+        compensation_policy: CompensationSemantics::None,
+        overload_policy: OverloadPolicy::RejectNew,
+    };
+    let certificate = RequestCertificate::from_validated(
+        request_id.to_owned(),
+        "caller-a".to_owned(),
+        subject.to_owned(),
+        &validated,
+        ReplySpaceRule::CallerInbox,
+        "OrderService".to_owned(),
+        0xC0DE,
+        issued_at,
+    );
+
+    ServiceAdmission {
+        validated,
+        certificate,
+    }
 }
 
 fn push_log(
@@ -834,6 +889,114 @@ fn run_packet_plane_scenario(seed: u64) -> (PacketPlaneScenarioSummary, Vec<Fabr
     )
 }
 
+fn run_certified_request_scenario(
+    seed: u64,
+) -> (CertifiedRequestScenarioSummary, Vec<FabricLogEntry>, u64) {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<CertifiedRequestScenarioSummary>));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = test_fabric_cx(740);
+
+                yield_now().await;
+                let fabric = Fabric::connect(&cx, "lab://fabric-certified")
+                    .await
+                    .expect("connect");
+                let mut subscription = fabric.subscribe(&cx, "service.>").await.expect("subscribe");
+                push_log(
+                    &log,
+                    &seq,
+                    "certified",
+                    "connect",
+                    fabric.endpoint().to_string(),
+                );
+
+                let mut ledger = ObligationLedger::new();
+                let admission = service_admission(
+                    "req-certified",
+                    "service.lookup",
+                    DeliveryClass::ObligationBacked,
+                    Some(Duration::from_secs(5)),
+                    cx.now(),
+                );
+
+                yield_now().await;
+                let certified = fabric
+                    .request_certified(
+                        &cx,
+                        &mut ledger,
+                        &admission,
+                        "callee-a",
+                        b"lookup".to_vec(),
+                        AckKind::Received,
+                        true,
+                    )
+                    .await
+                    .expect("certified request");
+                let published = subscription.next(&cx).await.expect("published request");
+                push_log(
+                    &log,
+                    &seq,
+                    "certified",
+                    "request",
+                    format!("reply_subject={}", certified.reply.subject.as_str()),
+                );
+
+                *summary.lock().expect("summary lock") = Some(CertifiedRequestScenarioSummary {
+                    reply_subject: certified.reply.subject.as_str().to_string(),
+                    reply_payload_len: certified.reply.payload.len(),
+                    reply_ack_kind: certified.reply.ack_kind,
+                    reply_delivery_class: certified.reply.delivery_class,
+                    published_delivery_class: published.delivery_class,
+                    request_certificate_valid: certified.request_certificate.validate().is_ok(),
+                    reply_certificate_valid: certified.reply_certificate.validate().is_ok(),
+                    service_obligation_present: certified
+                        .reply_certificate
+                        .service_obligation_id
+                        .is_some(),
+                    delivery_receipt_present: certified.delivery_receipt.is_some(),
+                    ledger_clean: ledger.pending_count() == 0 && ledger.check_leaks().is_clean(),
+                });
+            })
+            .expect("create certified-request task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let violations = runtime.check_invariants();
+    let pending_obligations = runtime.state.pending_obligation_count();
+    assert!(
+        runtime.is_quiescent(),
+        "runtime should quiesce after certified request scenario"
+    );
+    assert_eq!(
+        pending_obligations, 0,
+        "certified request scenario should not leave runtime pending obligations"
+    );
+    assert!(
+        violations.is_empty(),
+        "certified request scenario should not violate lab invariants: {violations:?}"
+    );
+
+    let summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("certified request summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    (summary, log_entries, runtime.steps())
+}
+
 fn run_sharded_routing_scenario(seed: u64) -> (ShardedRoutingSummary, Vec<FabricLogEntry>, u64) {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -1075,6 +1238,47 @@ fn concurrent_placement_filters_non_steward_roles() {
 }
 
 #[test]
+fn canonical_partition_pipeline_deduplicates_aliases_and_fails_closed_on_overlap() {
+    let policy = alias_policy().normalization;
+    let canonical = policy
+        .canonicalize_partitions(&[
+            SubjectPattern::parse("svc.orders.created").expect("alias"),
+            SubjectPattern::parse("orders.created").expect("canonical"),
+            SubjectPattern::parse("_INBOX.orders.region.instance.123").expect("reply-a"),
+            SubjectPattern::parse("_INBOX.orders.region.instance.456").expect("reply-b"),
+        ])
+        .expect("canonical partitions");
+    let canonical_keys = canonical
+        .into_iter()
+        .map(|pattern| pattern.canonical_key())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        canonical_keys,
+        vec![
+            "_INBOX.orders.region.>".to_string(),
+            "orders.created".to_string()
+        ],
+        "canonical partitioning should deduplicate aliases and compact reply space deterministically"
+    );
+
+    let err = policy
+        .canonicalize_partitions(&[
+            SubjectPattern::parse("svc.orders.created").expect("alias"),
+            SubjectPattern::parse("orders.*").expect("wildcard"),
+        ])
+        .expect_err("overlap after normalization must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            asupersync::messaging::fabric::FabricError::OverlappingSubjectPartitions { .. }
+        ),
+        "canonical partition set must fail closed on overlapping ownership"
+    );
+}
+
+#[test]
 fn rebalance_planning_stays_deterministic_for_alias_inputs() {
     let inputs = [
         "orders.created",
@@ -1282,6 +1486,141 @@ fn fabric_public_subscription_respects_routing_and_cancellation() {
         6,
         "expected one structured log entry per packet-plane phase"
     );
+}
+
+#[test]
+fn fabric_certified_request_is_deterministic_across_seeded_lab_runs() {
+    let (first_summary, first_log, first_steps) = run_certified_request_scenario(0xFA61_1C11);
+    let (second_summary, second_log, second_steps) = run_certified_request_scenario(0xFA61_1C11);
+
+    assert_eq!(
+        first_summary, second_summary,
+        "same seed should yield identical certified request summaries"
+    );
+    assert_eq!(
+        first_log, second_log,
+        "same seed should yield identical certified request logs"
+    );
+    assert_eq!(
+        first_steps, second_steps,
+        "same seed should yield identical certified request scheduler steps"
+    );
+}
+
+#[test]
+fn fabric_certified_request_emits_certificates_and_drains_obligations() {
+    let (summary, log, _) = run_certified_request_scenario(0xFA61_1C12);
+
+    assert_eq!(summary.reply_subject, "service.lookup");
+    assert_eq!(summary.reply_payload_len, 6);
+    assert_eq!(summary.reply_ack_kind, AckKind::Received);
+    assert_eq!(
+        summary.reply_delivery_class,
+        DeliveryClass::ObligationBacked
+    );
+    assert_eq!(
+        summary.published_delivery_class,
+        DeliveryClass::ObligationBacked
+    );
+    assert!(
+        summary.request_certificate_valid,
+        "request certificate should validate cleanly"
+    );
+    assert!(
+        summary.reply_certificate_valid,
+        "reply certificate should validate cleanly"
+    );
+    assert!(
+        summary.service_obligation_present,
+        "certified replies should carry a tracked service obligation id"
+    );
+    assert!(
+        summary.delivery_receipt_present,
+        "received-boundary certified replies should surface a delivery receipt"
+    );
+    assert!(
+        summary.ledger_clean,
+        "certified request scenario should drain its private obligation ledger"
+    );
+    assert_eq!(
+        log.len(),
+        2,
+        "expected one structured log entry per certified-request phase"
+    );
+}
+
+#[test]
+fn fabric_certified_request_fails_closed_when_subject_cell_is_backpressured() {
+    let cx = test_fabric_cx(741);
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("failed to build runtime");
+
+    runtime.block_on(async move {
+        let fabric = Fabric::connect(&cx, "node1:4222/certified-backpressure")
+            .await
+            .expect("connect");
+        let mut subscription = fabric
+            .subscribe(&cx, "service.lookup")
+            .await
+            .expect("subscribe");
+        let mut published_count = 0usize;
+
+        loop {
+            match fabric
+                .publish(&cx, "service.lookup", vec![published_count as u8])
+                .await
+            {
+                Ok(_) => published_count += 1,
+                Err(err) => {
+                    assert_eq!(err.kind(), ErrorKind::ChannelFull);
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            published_count > 0,
+            "cell should accept at least one packet"
+        );
+
+        let mut ledger = ObligationLedger::new();
+        let admission = service_admission(
+            "req-certified-backpressured",
+            "service.lookup",
+            DeliveryClass::ObligationBacked,
+            Some(Duration::from_secs(5)),
+            cx.now(),
+        );
+
+        let err = fabric
+            .request_certified(
+                &cx,
+                &mut ledger,
+                &admission,
+                "callee-a",
+                b"lookup".to_vec(),
+                AckKind::Received,
+                true,
+            )
+            .await
+            .expect_err("backpressured cell must reject certified publish");
+
+        assert_eq!(err.kind(), ErrorKind::ChannelFull);
+        assert_eq!(ledger.pending_count(), 0);
+        assert!(ledger.check_leaks().is_clean());
+
+        for index in 0..published_count {
+            let message = subscription.next(&cx).await.expect("buffered message");
+            assert_eq!(message.subject.as_str(), "service.lookup");
+            assert_eq!(message.payload, vec![index as u8]);
+        }
+        assert_eq!(
+            subscription.next(&cx).await,
+            None,
+            "failed certified publish must not emit an additional packet-plane message"
+        );
+    });
 }
 
 #[test]
