@@ -15,13 +15,26 @@ use super::policy::SemanticServiceClass;
 use super::service::{ReplyCertificate, RequestCertificate, ServiceAdmission, ServiceObligation};
 pub use super::subject::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
 use super::subject::{Sublist, SubscriptionGuard, SubscriptionId};
+use crate::config::EncodingConfig as RaptorQEncodingConfig;
 use crate::cx::Cx;
+#[cfg(test)]
+use crate::decoding::{
+    DecodingConfig as RaptorQDecodingConfig, DecodingPipeline as RaptorQDecodingPipeline,
+    RejectReason,
+};
 use crate::distributed::HashRing;
+use crate::encoding::EncodingPipeline as RaptorQEncodingPipeline;
 use crate::error::{Error as AsupersyncError, ErrorKind};
 use crate::obligation::ledger::{ObligationLedger, ObligationToken};
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::remote::NodeId;
-use crate::types::{ObligationId, Time};
+#[cfg(test)]
+use crate::security::AuthenticatedSymbol;
+use crate::security::{AuthKey, AuthenticationTag};
+use crate::types::resource::{PoolConfig, SymbolPool};
+use crate::types::{
+    DEFAULT_SYMBOL_SIZE, ObjectId, ObjectParams, ObligationId, Symbol, SymbolId, Time,
+};
 use crate::util::DetHasher;
 use franken_decision::{
     DecisionAuditEntry, DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior,
@@ -74,6 +87,43 @@ fn parse_subject(raw: impl AsRef<str>) -> Result<Subject, AsupersyncError> {
 #[allow(clippy::result_large_err)]
 fn parse_subject_pattern(raw: impl AsRef<str>) -> Result<SubjectPattern, AsupersyncError> {
     SubjectPattern::parse(raw.as_ref()).map_err(|error| fabric_input_error(error.to_string()))
+}
+
+fn render_fabric_capability(capability: &FabricCapability) -> String {
+    match capability {
+        FabricCapability::Publish { subject } => format!("publish:{}", subject.canonical_key()),
+        FabricCapability::Subscribe { subject } => {
+            format!("subscribe:{}", subject.canonical_key())
+        }
+        FabricCapability::CreateStream { subject } => {
+            format!("create_stream:{}", subject.canonical_key())
+        }
+        FabricCapability::ConsumeStream { stream } => format!("consume_stream:{stream}"),
+        FabricCapability::TransformSpace { subject } => {
+            format!("transform_space:{}", subject.canonical_key())
+        }
+        FabricCapability::AdminControl => "admin_control".to_owned(),
+    }
+}
+
+fn fabric_capability_denied_error(
+    subject: SubjectPattern,
+    delivery_class: DeliveryClass,
+    requested_capability: String,
+    decision_id: DecisionId,
+) -> AsupersyncError {
+    let message = format!(
+        "fabric capability `{requested_capability}` is required for `{}` at delivery class `{delivery_class}`",
+        subject.canonical_key()
+    );
+    AsupersyncError::new(ErrorKind::AdmissionDenied)
+        .with_message(message)
+        .with_source(FabricError::CapabilityDenied {
+            subject,
+            delivery_class,
+            requested_capability,
+            decision_id,
+        })
 }
 
 fn shared_fabric_state(endpoint: &str) -> Arc<Mutex<FabricState>> {
@@ -174,6 +224,7 @@ impl FabricCellBufferState {
 #[derive(Debug)]
 struct FabricCellRuntime {
     cell: SubjectCell,
+    durable_capsule: RecoverableDataCapsule,
     _route_guard: SubscriptionGuard,
     buffer: VecDeque<FabricBufferedMessage>,
     state: FabricCellBufferState,
@@ -182,6 +233,7 @@ struct FabricCellRuntime {
 impl FabricCellRuntime {
     fn new(cell: SubjectCell, route_guard: SubscriptionGuard) -> Self {
         Self {
+            durable_capsule: RecoverableDataCapsule::new(&cell),
             cell,
             _route_guard: route_guard,
             buffer: VecDeque::new(),
@@ -228,6 +280,80 @@ impl FabricState {
     fn push_decision(&mut self, cx: &Cx, record: FabricDecisionRecord) {
         trace_fabric_decision_recorded(cx, &record);
         self.decision_records.push(record);
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn capability_cell_id_for_subject(
+        &self,
+        subject: &SubjectPattern,
+    ) -> Result<CellId, AsupersyncError> {
+        let canonical_partition = self
+            .placement_policy
+            .normalization
+            .normalize(subject)
+            .map_err(|error| fabric_input_error(error.to_string()))?;
+        Ok(CellId::for_partition(
+            self.default_epoch,
+            &canonical_partition,
+        ))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn enforce_capability(
+        &mut self,
+        cx: &Cx,
+        subject: &SubjectPattern,
+        delivery_class: DeliveryClass,
+        requested: &FabricCapability,
+    ) -> Result<(), AsupersyncError> {
+        let requested_capability = render_fabric_capability(requested);
+        let granted_capability_count = cx.fabric_capabilities().len();
+        let allowed = cx.check_fabric_capability(requested);
+        let cell_id = self.capability_cell_id_for_subject(subject)?;
+        let record = FabricCapabilityDecision::new(
+            cell_id,
+            subject.canonical_key(),
+            delivery_class,
+            requested_capability.clone(),
+            granted_capability_count,
+            allowed,
+        )
+        .evaluate();
+        let decision_id = record.decision_id();
+        let cell_id_str = cell_id.to_string();
+        let subject_str = subject.canonical_key();
+        let delivery_class_str = delivery_class.to_string();
+        let granted_capability_count_str = granted_capability_count.to_string();
+        let allowed_str = if allowed { "true" } else { "false" };
+        let decision_id_str = decision_id.to_string();
+        cx.trace_with_fields(
+            "fabric.capability_check",
+            &[
+                ("event", "fabric.capability_check"),
+                ("cell_id", cell_id_str.as_str()),
+                ("subject", subject_str.as_str()),
+                ("delivery_class", delivery_class_str.as_str()),
+                ("requested_capability", requested_capability.as_str()),
+                (
+                    "granted_capability_count",
+                    granted_capability_count_str.as_str(),
+                ),
+                ("allowed", allowed_str),
+                ("decision_id", decision_id_str.as_str()),
+            ],
+        );
+        self.push_decision(cx, record);
+
+        if allowed {
+            Ok(())
+        } else {
+            Err(fabric_capability_denied_error(
+                subject.clone(),
+                delivery_class,
+                requested_capability,
+                decision_id,
+            ))
+        }
     }
 
     fn primary_cell_id_for_routed_keys(&self, routed_cells: &[String]) -> Option<CellId> {
@@ -423,6 +549,7 @@ impl FabricState {
     fn apply_prepared_publish(&mut self, cx: &Cx, prepared: PreparedFabricPublish) {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
+        let local_candidates = self.local_candidates.clone();
 
         for cell_key in prepared.routed_cells {
             let mut transition = None;
@@ -436,6 +563,16 @@ impl FabricState {
                     sequence,
                     message: prepared.message.clone(),
                 });
+                if prepared.message.delivery_class == DeliveryClass::DurableOrdered {
+                    if let Err(error) = cell.durable_capsule.record_publish(
+                        &cell.cell,
+                        &local_candidates,
+                        sequence,
+                        &prepared.message,
+                    ) {
+                        trace_data_capsule_publish_error(cx, cell.cell.cell_id, sequence, &error);
+                    }
+                }
 
                 let next_state =
                     FabricCellBufferState::from_buffer_len(cell.buffer.len(), prepared.capacity);
@@ -597,6 +734,26 @@ fn trace_publish_abort(
     );
 }
 
+fn trace_data_capsule_publish_error(
+    cx: &Cx,
+    cell_id: CellId,
+    sequence: u64,
+    error: &DataCapsuleError,
+) {
+    let cell_id = cell_id.to_string();
+    let sequence = sequence.to_string();
+    let reason = error.to_string();
+    cx.trace_with_fields(
+        "fabric.data_capsule_publish_error",
+        &[
+            ("event", "fabric_data_capsule_publish_error"),
+            ("cell_id", cell_id.as_str()),
+            ("sequence", sequence.as_str()),
+            ("reason", reason.as_str()),
+        ],
+    );
+}
+
 /// Emit a structured trace when a fabric operation is cancelled at its
 /// checkpoint.  This gives operators visibility into cancel pressure on
 /// the packet plane without extra error-handling boilerplate.
@@ -607,10 +764,7 @@ fn fabric_checkpoint(cx: &Cx, operation: &str) -> Result<(), AsupersyncError> {
         Err(err) => {
             cx.trace_with_fields(
                 "fabric.cancelled",
-                &[
-                    ("event", "fabric_cancelled"),
-                    ("operation", operation),
-                ],
+                &[("event", "fabric_cancelled"), ("operation", operation)],
             );
             Err(err)
         }
@@ -653,10 +807,10 @@ impl FabricDecisionKind {
     fn retention(self) -> RetentionPolicy {
         match self {
             Self::Routing | Self::Retry => RetentionPolicy::RetainFor {
-                duration: Duration::from_secs(300),
+                duration: Duration::from_mins(5),
             },
             Self::Capability | Self::DeliveryClassEscalation => RetentionPolicy::RetainFor {
-                duration: Duration::from_secs(900),
+                duration: Duration::from_mins(15),
             },
         }
     }
@@ -1839,12 +1993,24 @@ impl Fabric {
         validate_publish_delivery_class(delivery_class, false)?;
 
         let subject = parse_subject(subject)?;
+        let requested_capability = FabricCapability::Publish {
+            subject: parse_subject_pattern(subject.as_str())?,
+        };
         // Prepare with an empty payload — the real payload is supplied at
         // send time.  The prepare phase validates routing and capacity.
-        let prepared =
-            self.state
-                .lock()
-                .prepare_publish_message(cx, &subject, Vec::new(), delivery_class)?;
+        let prepared = {
+            let mut state = self.state.lock();
+            state.enforce_capability(
+                cx,
+                match &requested_capability {
+                    FabricCapability::Publish { subject } => subject,
+                    _ => unreachable!("publish path constructs publish capability"),
+                },
+                delivery_class,
+                &requested_capability,
+            )?;
+            state.prepare_publish_message(cx, &subject, Vec::new(), delivery_class)?
+        };
 
         trace_publish_reserve(cx, &subject, delivery_class, None);
 
@@ -1881,10 +2047,22 @@ impl Fabric {
         validate_publish_delivery_class(delivery_class, true)?;
 
         let subject = parse_subject(subject)?;
-        let prepared =
-            self.state
-                .lock()
-                .prepare_publish_message(cx, &subject, Vec::new(), delivery_class)?;
+        let requested_capability = FabricCapability::Publish {
+            subject: parse_subject_pattern(subject.as_str())?,
+        };
+        let prepared = {
+            let mut state = self.state.lock();
+            state.enforce_capability(
+                cx,
+                match &requested_capability {
+                    FabricCapability::Publish { subject } => subject,
+                    _ => unreachable!("durable publish path constructs publish capability"),
+                },
+                delivery_class,
+                &requested_capability,
+            )?;
+            state.prepare_publish_message(cx, &subject, Vec::new(), delivery_class)?
+        };
 
         let obligation = if delivery_class > DeliveryClass::EphemeralInteractive {
             let reserved_at = cx.now();
@@ -1946,6 +2124,15 @@ impl Fabric {
         let state = Arc::clone(&self.state);
         let id = {
             let mut state = state.lock();
+            let requested_capability = FabricCapability::Subscribe {
+                subject: pattern.clone(),
+            };
+            state.enforce_capability(
+                cx,
+                &pattern,
+                DeliveryClass::EphemeralInteractive,
+                &requested_capability,
+            )?;
             let next_sequence = state.next_sequence;
             state.register_subscription(pattern.clone(), next_sequence)
         };
@@ -1966,8 +2153,21 @@ impl Fabric {
         payload: impl Into<Vec<u8>>,
     ) -> Result<FabricReply, AsupersyncError> {
         fabric_checkpoint(cx, "request")?;
+        let subject = parse_subject(subject)?;
+        let requested_capability = FabricCapability::Subscribe {
+            subject: parse_subject_pattern(subject.as_str())?,
+        };
+        self.state.lock().enforce_capability(
+            cx,
+            match &requested_capability {
+                FabricCapability::Subscribe { subject } => subject,
+                _ => unreachable!("request path constructs subscribe capability"),
+            },
+            DeliveryClass::EphemeralInteractive,
+            &requested_capability,
+        )?;
         let payload = payload.into();
-        let receipt = self.publish(cx, subject, payload.clone()).await?;
+        let receipt = self.publish(cx, subject.as_str(), payload.clone()).await?;
 
         Ok(FabricReply {
             subject: receipt.subject,
@@ -2024,11 +2224,38 @@ impl Fabric {
 
         let callee = callee.into();
         let subject = parse_subject(&admission.certificate.subject)?;
+        let publish_capability = FabricCapability::Publish {
+            subject: parse_subject_pattern(subject.as_str())?,
+        };
+        let subscribe_capability = FabricCapability::Subscribe {
+            subject: match &publish_capability {
+                FabricCapability::Publish { subject } => subject.clone(),
+                _ => unreachable!("certified request constructs publish capability"),
+            },
+        };
         let payload = payload.into();
         let now = cx.now();
         let service_latency =
             Duration::from_nanos(now.duration_since(admission.certificate.issued_at));
         let mut state = self.state.lock();
+        state.enforce_capability(
+            cx,
+            match &publish_capability {
+                FabricCapability::Publish { subject } => subject,
+                _ => unreachable!("certified request constructs publish capability"),
+            },
+            delivery_class,
+            &publish_capability,
+        )?;
+        state.enforce_capability(
+            cx,
+            match &subscribe_capability {
+                FabricCapability::Subscribe { subject } => subject,
+                _ => unreachable!("certified request constructs subscribe capability"),
+            },
+            delivery_class,
+            &subscribe_capability,
+        )?;
         let prepared_publish =
             state.prepare_publish_message(cx, &subject, payload.clone(), delivery_class)?;
         if let Some(cell_id) = state.primary_cell_id_for_routed_keys(&prepared_publish.routed_cells)
@@ -2103,6 +2330,20 @@ impl Fabric {
     ) -> Result<FabricStreamHandle, AsupersyncError> {
         fabric_checkpoint(cx, "stream")?;
         config.validate()?;
+        {
+            let mut state = self.state.lock();
+            for subject in &config.subjects {
+                let requested_capability = FabricCapability::CreateStream {
+                    subject: subject.clone(),
+                };
+                state.enforce_capability(
+                    cx,
+                    subject,
+                    config.delivery_class,
+                    &requested_capability,
+                )?;
+            }
+        }
 
         Ok(FabricStreamHandle {
             endpoint: self.endpoint.clone(),
@@ -3670,6 +3911,473 @@ impl Default for DataCapsule {
     }
 }
 
+impl DataCapsule {
+    fn wants_inline_payload(payload_len: usize) -> bool {
+        payload_len <= DEFAULT_SYMBOL_SIZE
+    }
+
+    fn repair_symbols_per_block(&self, holder_count: usize, steward_count: usize) -> usize {
+        let holder_bonus = holder_count.saturating_sub(steward_count).max(1);
+        let temperature_bonus = match self.temperature {
+            CellTemperature::Cold => 0,
+            CellTemperature::Warm => 1,
+            CellTemperature::Hot => 2,
+        };
+        holder_bonus + temperature_bonus
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct SegmentWindow {
+    start_sequence: u64,
+    end_sequence: u64,
+}
+
+impl SegmentWindow {
+    const fn single(sequence: u64) -> Self {
+        Self {
+            start_sequence: sequence,
+            end_sequence: sequence,
+        }
+    }
+
+    const fn contains(self, sequence: u64) -> bool {
+        self.start_sequence <= sequence && sequence <= self.end_sequence
+    }
+}
+
+impl fmt::Display for SegmentWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}..={}", self.start_sequence, self.end_sequence)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredCapsuleSymbol {
+    holder: NodeId,
+    symbol: Symbol,
+    authentication_tag: AuthenticationTag,
+    wrapped_for_external_holder: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DurableSegmentEncoding {
+    Inline {
+        payload: Vec<u8>,
+    },
+    Coded {
+        params: ObjectParams,
+        source_symbols: usize,
+        repair_symbols: usize,
+        symbols: Vec<StoredCapsuleSymbol>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DurableSegment {
+    window: SegmentWindow,
+    payload_digest: u64,
+    auth_key: AuthKey,
+    holders: Vec<NodeId>,
+    sealed: bool,
+    durability_target_met: bool,
+    encoding: DurableSegmentEncoding,
+}
+
+impl DurableSegment {
+    fn build(
+        cell: &SubjectCell,
+        candidates: &[StewardCandidate],
+        sequence: u64,
+        message: &FabricMessage,
+    ) -> Result<Self, DataCapsuleError> {
+        let window = SegmentWindow::single(sequence);
+        let payload_digest = stable_hash((
+            "fabric-data-capsule-payload",
+            cell.cell_id.raw(),
+            cell.epoch,
+            window,
+            &message.payload,
+        ));
+        let auth_key =
+            derive_data_capsule_auth_key(cell.cell_id, cell.epoch, window, payload_digest);
+        let (holders, required_holders) =
+            select_data_capsule_holders(cell, candidates, &cell.repair_policy);
+        let durability_target_met = holders.len() >= required_holders;
+
+        if DataCapsule::wants_inline_payload(message.payload.len()) {
+            return Ok(Self {
+                window,
+                payload_digest,
+                auth_key,
+                holders: cell.steward_set.clone(),
+                sealed: true,
+                durability_target_met,
+                encoding: DurableSegmentEncoding::Inline {
+                    payload: message.payload.clone(),
+                },
+            });
+        }
+
+        let encoding_config = data_capsule_encoding_config(message.payload.len());
+        let object_id = data_capsule_object_id(cell.cell_id, cell.epoch, window, payload_digest);
+        let source_symbols = message
+            .payload
+            .len()
+            .div_ceil(usize::from(encoding_config.symbol_size));
+        let source_symbols_u16 =
+            u16::try_from(source_symbols).map_err(|_| DataCapsuleError::TooManySourceSymbols {
+                count: source_symbols,
+            })?;
+        let repair_symbols_per_block = cell
+            .data_capsule
+            .repair_symbols_per_block(holders.len(), cell.steward_set.len());
+        let params = ObjectParams::new(
+            object_id,
+            u64::try_from(message.payload.len()).map_err(|_| {
+                DataCapsuleError::PayloadTooLarge {
+                    bytes: message.payload.len(),
+                }
+            })?,
+            encoding_config.symbol_size,
+            1,
+            source_symbols_u16,
+        );
+
+        let mut encoder = RaptorQEncodingPipeline::new(
+            encoding_config.clone(),
+            SymbolPool::new(PoolConfig {
+                symbol_size: encoding_config.symbol_size,
+                ..PoolConfig::default()
+            }),
+        );
+        let encoded_symbols = encoder
+            .encode_with_repair(object_id, &message.payload, repair_symbols_per_block)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DataCapsuleError::Encoding(error.to_string()))?;
+        let source_symbol_count = encoded_symbols
+            .iter()
+            .filter(|symbol| symbol.kind().is_source())
+            .count();
+        let repair_symbol_count = encoded_symbols.len().saturating_sub(source_symbol_count);
+        let stored_symbols = encoded_symbols
+            .into_iter()
+            .enumerate()
+            .map(|(index, symbol)| {
+                let holder = holders[index % holders.len()].clone();
+                let symbol = symbol.into_symbol();
+                let authentication_tag = AuthenticationTag::compute(&auth_key, &symbol);
+                StoredCapsuleSymbol {
+                    wrapped_for_external_holder: !contains_node(&cell.steward_set, &holder),
+                    holder,
+                    symbol,
+                    authentication_tag,
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            window,
+            payload_digest,
+            auth_key,
+            holders,
+            sealed: true,
+            durability_target_met,
+            encoding: DurableSegmentEncoding::Coded {
+                params,
+                source_symbols: source_symbol_count,
+                repair_symbols: repair_symbol_count,
+                symbols: stored_symbols,
+            },
+        })
+    }
+
+    #[cfg(test)]
+    fn repair_symbol_count(&self) -> usize {
+        match &self.encoding {
+            DurableSegmentEncoding::Inline { .. } => 0,
+            DurableSegmentEncoding::Coded { repair_symbols, .. } => *repair_symbols,
+        }
+    }
+
+    #[cfg(test)]
+    fn source_symbol_count(&self) -> usize {
+        match &self.encoding {
+            DurableSegmentEncoding::Inline { payload } => {
+                if payload.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            DurableSegmentEncoding::Coded { source_symbols, .. } => *source_symbols,
+        }
+    }
+
+    #[cfg(test)]
+    fn reconstruct_payload(
+        &self,
+        available_holders: &BTreeSet<NodeId>,
+    ) -> Result<Vec<u8>, DataCapsuleError> {
+        debug_assert!(
+            self.sealed,
+            "only sealed durable segments may be reconstructed"
+        );
+        debug_assert_ne!(self.payload_digest, 0);
+        let _durability_target_met = self.durability_target_met;
+        match &self.encoding {
+            DurableSegmentEncoding::Inline { payload } => {
+                if self
+                    .holders
+                    .iter()
+                    .any(|holder| available_holders.contains(holder))
+                {
+                    Ok(payload.clone())
+                } else {
+                    Err(DataCapsuleError::NoAvailableHolders {
+                        window: self.window,
+                    })
+                }
+            }
+            DurableSegmentEncoding::Coded {
+                params, symbols, ..
+            } => {
+                let mut decoder = RaptorQDecodingPipeline::new(RaptorQDecodingConfig {
+                    symbol_size: params.symbol_size,
+                    max_block_size: usize::from(params.symbols_per_block)
+                        * usize::from(params.symbol_size),
+                    repair_overhead: 1.0,
+                    min_overhead: 0,
+                    max_buffered_symbols: 0,
+                    block_timeout: Duration::from_secs(30),
+                    verify_auth: false,
+                });
+                decoder
+                    .set_object_params(*params)
+                    .map_err(|error| DataCapsuleError::Decoding(error.to_string()))?;
+
+                let mut fed_any = false;
+                for stored in symbols {
+                    if !available_holders.contains(&stored.holder) {
+                        continue;
+                    }
+                    let _wrapped_for_external_holder = stored.wrapped_for_external_holder;
+                    if !stored
+                        .authentication_tag
+                        .verify(&self.auth_key, &stored.symbol)
+                    {
+                        return Err(DataCapsuleError::AuthenticationFailed {
+                            holder: stored.holder.clone(),
+                            symbol_id: stored.symbol.id(),
+                        });
+                    }
+                    fed_any = true;
+                    match decoder
+                        .feed(AuthenticatedSymbol::new_verified(
+                            stored.symbol.clone(),
+                            stored.authentication_tag,
+                        ))
+                        .map_err(|error| DataCapsuleError::Decoding(error.to_string()))?
+                    {
+                        crate::decoding::SymbolAcceptResult::Rejected(
+                            RejectReason::BlockAlreadyDecoded,
+                        )
+                        | crate::decoding::SymbolAcceptResult::Duplicate
+                        | crate::decoding::SymbolAcceptResult::Accepted { .. }
+                        | crate::decoding::SymbolAcceptResult::DecodingStarted { .. }
+                        | crate::decoding::SymbolAcceptResult::BlockComplete { .. } => {}
+                        crate::decoding::SymbolAcceptResult::Rejected(reason) => {
+                            return Err(DataCapsuleError::DecodingRejected {
+                                reason: format!("{reason:?}"),
+                            });
+                        }
+                    }
+                }
+
+                if !fed_any {
+                    return Err(DataCapsuleError::NoAvailableHolders {
+                        window: self.window,
+                    });
+                }
+
+                decoder
+                    .into_data()
+                    .map_err(|error| DataCapsuleError::Decoding(error.to_string()))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecoverableDataCapsule {
+    cell_id: CellId,
+    repair_policy: RepairPolicy,
+    segments: VecDeque<DurableSegment>,
+    symbol_spread: BTreeMap<NodeId, Vec<SegmentWindow>>,
+}
+
+impl RecoverableDataCapsule {
+    fn new(cell: &SubjectCell) -> Self {
+        Self {
+            cell_id: cell.cell_id,
+            repair_policy: cell.repair_policy.clone(),
+            segments: VecDeque::new(),
+            symbol_spread: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn latest_segment(&self) -> Option<&DurableSegment> {
+        self.segments.back()
+    }
+
+    fn record_publish(
+        &mut self,
+        cell: &SubjectCell,
+        candidates: &[StewardCandidate],
+        sequence: u64,
+        message: &FabricMessage,
+    ) -> Result<(), DataCapsuleError> {
+        debug_assert_eq!(self.cell_id, cell.cell_id);
+        if message.delivery_class != DeliveryClass::DurableOrdered {
+            return Ok(());
+        }
+
+        let segment = DurableSegment::build(cell, candidates, sequence, message)?;
+        self.segments.push_back(segment);
+        let keep = cell.data_capsule.retained_message_blocks.max(1);
+        while self.segments.len() > keep {
+            self.segments.pop_front();
+        }
+        self.repair_policy = cell.repair_policy.clone();
+        self.rebuild_symbol_spread();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn reconstruct_payload(
+        &self,
+        sequence: u64,
+        available_holders: &BTreeSet<NodeId>,
+    ) -> Result<Vec<u8>, DataCapsuleError> {
+        let segment = self
+            .segments
+            .iter()
+            .find(|segment| segment.window.contains(sequence))
+            .ok_or(DataCapsuleError::MissingSegment { sequence })?;
+        segment.reconstruct_payload(available_holders)
+    }
+
+    fn rebuild_symbol_spread(&mut self) {
+        self.symbol_spread.clear();
+        for segment in &self.segments {
+            for holder in &segment.holders {
+                self.symbol_spread
+                    .entry(holder.clone())
+                    .or_default()
+                    .push(segment.window);
+            }
+        }
+        for windows in self.symbol_spread.values_mut() {
+            windows.sort();
+            windows.dedup();
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+enum DataCapsuleError {
+    #[error("payload of {bytes} bytes exceeds the bounded data-capsule envelope")]
+    PayloadTooLarge { bytes: usize },
+    #[error("durable segment requires {required} holders but only {available} were available")]
+    InsufficientRepairHolders { required: usize, available: usize },
+    #[error("payload requires unsupported source-symbol count {count}")]
+    TooManySourceSymbols { count: usize },
+    #[error("raptorq encoding failed: {0}")]
+    Encoding(String),
+    #[error("raptorq decoding failed: {0}")]
+    Decoding(String),
+    #[error("decoder rejected a retained symbol: {reason}")]
+    DecodingRejected { reason: String },
+    #[error("no retained holder can serve segment window {window}")]
+    NoAvailableHolders { window: SegmentWindow },
+    #[error("no durable segment retained sequence {sequence}")]
+    MissingSegment { sequence: u64 },
+    #[error("symbol authentication failed for holder `{holder}` symbol `{symbol_id}`")]
+    AuthenticationFailed { holder: NodeId, symbol_id: SymbolId },
+}
+
+fn data_capsule_object_id(
+    cell_id: CellId,
+    epoch: CellEpoch,
+    window: SegmentWindow,
+    payload_digest: u64,
+) -> ObjectId {
+    ObjectId::new(
+        stable_hash((
+            "fabric-data-capsule-object-high",
+            cell_id.raw(),
+            epoch,
+            window,
+            payload_digest,
+        )),
+        stable_hash((
+            "fabric-data-capsule-object-low",
+            cell_id.raw(),
+            epoch,
+            window,
+            payload_digest,
+        )),
+    )
+}
+
+fn derive_data_capsule_auth_key(
+    cell_id: CellId,
+    epoch: CellEpoch,
+    window: SegmentWindow,
+    payload_digest: u64,
+) -> AuthKey {
+    AuthKey::from_seed(stable_hash((
+        "fabric-data-capsule-auth",
+        cell_id.raw(),
+        epoch,
+        window,
+        payload_digest,
+    )))
+}
+
+fn select_data_capsule_holders(
+    cell: &SubjectCell,
+    candidates: &[StewardCandidate],
+    repair_policy: &RepairPolicy,
+) -> (Vec<NodeId>, usize) {
+    let required_holders =
+        repair_policy.minimum_repair_holders(cell.data_capsule.temperature, cell.steward_set.len());
+    let mut holders = cell.steward_set.clone();
+
+    for candidate in candidates {
+        if holders.len() >= required_holders {
+            break;
+        }
+        if contains_node(&holders, &candidate.node_id) || !candidate.can_repair() {
+            continue;
+        }
+        holders.push(candidate.node_id.clone());
+    }
+
+    (holders, required_holders)
+}
+
+fn data_capsule_encoding_config(payload_len: usize) -> RaptorQEncodingConfig {
+    RaptorQEncodingConfig {
+        repair_overhead: 1.0,
+        max_block_size: payload_len.max(DEFAULT_SYMBOL_SIZE),
+        symbol_size: DEFAULT_SYMBOL_SIZE as u16,
+        encoding_parallelism: 1,
+        decoding_parallelism: 1,
+    }
+}
+
 /// Repair and recoverability policy for a cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepairPolicy {
@@ -4960,6 +5668,20 @@ pub enum FabricError {
         /// Canonical subject that repeated while chasing morphisms.
         cycle_point: SubjectPattern,
     },
+    /// Runtime FABRIC authority did not cover the requested subject space.
+    #[error(
+        "fabric capability `{requested_capability}` denied for `{subject}` at delivery class `{delivery_class}` (decision `{decision_id}`)"
+    )]
+    CapabilityDenied {
+        /// Subject or subject pattern that was denied.
+        subject: SubjectPattern,
+        /// Delivery class in force at the denied surface.
+        delivery_class: DeliveryClass,
+        /// Deterministic operator rendering of the missing capability.
+        requested_capability: String,
+        /// Decision-contract identifier recorded for the denial.
+        decision_id: DecisionId,
+    },
 }
 
 /// Bootstrap mode used to start a typed discovery session.
@@ -5907,6 +6629,7 @@ mod tests {
     use crate::runtime::RuntimeBuilder;
     use crate::test_utils::run_test_with_cx;
     use proptest::prelude::*;
+    use std::collections::BTreeSet;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
 
@@ -5955,6 +6678,38 @@ mod tests {
             validated,
             certificate,
         }
+    }
+
+    fn grant_capability(cx: &Cx, capability: FabricCapability) {
+        cx.grant_fabric_capability(capability)
+            .expect("fabric capability grant");
+    }
+
+    fn grant_publish(cx: &Cx, subject: &str) {
+        grant_capability(
+            cx,
+            FabricCapability::Publish {
+                subject: SubjectPattern::parse(subject).expect("publish subject"),
+            },
+        );
+    }
+
+    fn grant_subscribe(cx: &Cx, subject: &str) {
+        grant_capability(
+            cx,
+            FabricCapability::Subscribe {
+                subject: SubjectPattern::parse(subject).expect("subscribe subject"),
+            },
+        );
+    }
+
+    fn grant_create_stream(cx: &Cx, subject: &str) {
+        grant_capability(
+            cx,
+            FabricCapability::CreateStream {
+                subject: SubjectPattern::parse(subject).expect("stream subject"),
+            },
+        );
     }
 
     fn canonical_cell_key(subject: &str) -> String {
@@ -6010,6 +6765,8 @@ mod tests {
     #[test]
     fn publish_and_subscribe_round_trip_with_ephemeral_defaults() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            grant_subscribe(&cx, "orders.>");
             let fabric = Fabric::connect(&cx, "node1:4222/publish")
                 .await
                 .expect("connect");
@@ -6032,6 +6789,8 @@ mod tests {
     #[test]
     fn request_uses_same_surface_and_returns_reply() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "service.lookup");
+            grant_subscribe(&cx, "service.lookup");
             let fabric = Fabric::connect(&cx, "node1:4222/request")
                 .await
                 .expect("connect");
@@ -6050,6 +6809,8 @@ mod tests {
     #[test]
     fn certified_request_emits_certificates_and_resolves_obligations() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "service.lookup");
+            grant_subscribe(&cx, "service.>");
             let fabric = Fabric::connect(&cx, "node1:4222/certified")
                 .await
                 .expect("connect");
@@ -6153,6 +6914,7 @@ mod tests {
     #[test]
     fn stream_accepts_explicit_subjects_and_preserves_endpoint() {
         run_test_with_cx(|cx| async move {
+            grant_create_stream(&cx, "orders.>");
             let fabric = Fabric::connect(&cx, "node1:4222/stream")
                 .await
                 .expect("connect");
@@ -6179,8 +6941,77 @@ mod tests {
     }
 
     #[test]
+    fn stream_requires_create_stream_capability() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/stream-denied")
+                .await
+                .expect("connect");
+
+            let err = fabric
+                .stream(
+                    &cx,
+                    FabricStreamConfig {
+                        subjects: vec![SubjectPattern::parse("orders.>").expect("pattern")],
+                        delivery_class: DeliveryClass::DurableOrdered,
+                        capture_policy: CapturePolicy::ExplicitOptIn,
+                        request_timeout: Some(Duration::from_secs(5)),
+                    },
+                )
+                .await
+                .expect_err("stream declaration without create-stream capability must fail");
+
+            assert_eq!(err.kind(), ErrorKind::AdmissionDenied);
+            let decisions = fabric
+                .decision_records()
+                .into_iter()
+                .filter(|record| record.contract_name() == "fabric_capability_decision")
+                .collect::<Vec<_>>();
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(decisions[0].audit.action_chosen, "reject");
+        });
+    }
+
+    #[test]
+    fn stream_requires_capability_for_each_declared_subject() {
+        run_test_with_cx(|cx| async move {
+            grant_create_stream(&cx, "orders.created");
+            let fabric = Fabric::connect(&cx, "node1:4222/stream-partial")
+                .await
+                .expect("connect");
+
+            let err = fabric
+                .stream(
+                    &cx,
+                    FabricStreamConfig {
+                        subjects: vec![
+                            SubjectPattern::parse("orders.created").expect("created"),
+                            SubjectPattern::parse("orders.snapshot").expect("snapshot"),
+                        ],
+                        delivery_class: DeliveryClass::DurableOrdered,
+                        capture_policy: CapturePolicy::ExplicitOptIn,
+                        request_timeout: Some(Duration::from_secs(5)),
+                    },
+                )
+                .await
+                .expect_err("partially authorized stream declarations must fail closed");
+
+            assert_eq!(err.kind(), ErrorKind::AdmissionDenied);
+            let decisions = fabric
+                .decision_records()
+                .into_iter()
+                .filter(|record| record.contract_name() == "fabric_capability_decision")
+                .collect::<Vec<_>>();
+            assert_eq!(decisions.len(), 2);
+            assert_eq!(decisions[0].audit.action_chosen, "allow");
+            assert_eq!(decisions[1].audit.action_chosen, "reject");
+        });
+    }
+
+    #[test]
     fn same_endpoint_connections_share_published_messages() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            grant_subscribe(&cx, "orders.>");
             let publisher = Fabric::connect(&cx, "node1:4222/shared")
                 .await
                 .expect("connect");
@@ -6206,6 +7037,8 @@ mod tests {
     #[test]
     fn different_endpoints_do_not_share_messages() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            grant_subscribe(&cx, "orders.>");
             let left = Fabric::connect(&cx, "node1:4222/left")
                 .await
                 .expect("connect");
@@ -6225,6 +7058,8 @@ mod tests {
     #[test]
     fn late_subscriber_does_not_replay_prior_messages_on_shared_endpoint() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            grant_subscribe(&cx, "orders.>");
             let publisher = Fabric::connect(&cx, "node1:4222/live-only")
                 .await
                 .expect("connect");
@@ -6261,6 +7096,8 @@ mod tests {
     #[test]
     fn publish_creates_subject_cells_and_prunes_after_delivery() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            grant_subscribe(&cx, "orders.created");
             let fabric = Fabric::connect(&cx, "node1:4222/cell-create")
                 .await
                 .expect("connect");
@@ -6302,6 +7139,8 @@ mod tests {
     #[test]
     fn wildcard_subscription_reads_messages_across_multiple_cells_in_publish_order() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.>");
+            grant_subscribe(&cx, "orders.>");
             let fabric = Fabric::connect(&cx, "node1:4222/fanout")
                 .await
                 .expect("connect");
@@ -6343,6 +7182,8 @@ mod tests {
     #[test]
     fn publish_backpressures_full_cells_until_subscribers_drain_them() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            grant_subscribe(&cx, "orders.created");
             let fabric = Fabric::connect(&cx, "node1:4222/backpressure")
                 .await
                 .expect("connect");
@@ -6399,6 +7240,8 @@ mod tests {
                 .build()
                 .expect("failed to build runtime");
             let cx = Cx::for_testing();
+            grant_publish(&cx, ">");
+            grant_subscribe(&cx, ">");
 
             runtime.block_on(async move {
                 let fabric = Fabric::connect(&cx, endpoint).await.expect("connect");
@@ -9011,11 +9854,221 @@ mod tests {
         );
     }
 
+    #[test]
+    fn recoverable_data_capsule_uses_inline_fast_path_for_tiny_payloads() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        let mut capsule = RecoverableDataCapsule::new(&cell);
+        let message = FabricMessage {
+            subject: Subject::parse("orders.created").expect("subject"),
+            payload: b"tiny".to_vec(),
+            delivery_class: DeliveryClass::DurableOrdered,
+        };
+
+        capsule
+            .record_publish(&cell, &candidates, 7, &message)
+            .expect("record inline segment");
+
+        let segment = capsule.latest_segment().expect("latest segment");
+        assert!(matches!(
+            segment.encoding,
+            DurableSegmentEncoding::Inline { .. }
+        ));
+        assert_eq!(segment.source_symbol_count(), 1);
+        assert_eq!(segment.repair_symbol_count(), 0);
+        assert_eq!(segment.holders, cell.steward_set);
+
+        let available = cell.steward_set.iter().cloned().collect::<BTreeSet<_>>();
+        let recovered = capsule
+            .reconstruct_payload(7, &available)
+            .expect("inline payload should be readable from a steward");
+        assert_eq!(recovered, message.payload);
+    }
+
+    #[test]
+    fn recoverable_data_capsule_reconstructs_coded_payload_from_partial_holders() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = hot_subject_cell(&candidates, &policy);
+        let mut capsule = RecoverableDataCapsule::new(&cell);
+        let payload = vec![0x5a; DEFAULT_SYMBOL_SIZE * 3];
+        let message = FabricMessage {
+            subject: Subject::parse("orders.created").expect("subject"),
+            payload: payload.clone(),
+            delivery_class: DeliveryClass::DurableOrdered,
+        };
+
+        capsule
+            .record_publish(&cell, &candidates, 11, &message)
+            .expect("record coded segment");
+
+        let segment = capsule.latest_segment().expect("latest segment");
+        assert!(matches!(
+            segment.encoding,
+            DurableSegmentEncoding::Coded { .. }
+        ));
+        assert!(
+            segment.repair_symbol_count() >= 3,
+            "hot cells should allocate extra repair symbols"
+        );
+        let available = segment
+            .holders
+            .iter()
+            .take(segment.holders.len().saturating_sub(1))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !available.is_empty(),
+            "test requires at least one retained holder"
+        );
+
+        let recovered = capsule
+            .reconstruct_payload(11, &available)
+            .expect("partial quorum should reconstruct the coded segment");
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn recoverable_data_capsule_detects_symbol_tampering() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = hot_subject_cell(&candidates, &policy);
+        let payload = vec![0x33; DEFAULT_SYMBOL_SIZE * 2];
+        let message = FabricMessage {
+            subject: Subject::parse("orders.created").expect("subject"),
+            payload,
+            delivery_class: DeliveryClass::DurableOrdered,
+        };
+
+        let mut segment =
+            DurableSegment::build(&cell, &candidates, 19, &message).expect("coded segment");
+        let available = segment.holders.iter().cloned().collect::<BTreeSet<_>>();
+        match &mut segment.encoding {
+            DurableSegmentEncoding::Inline { .. } => panic!("expected coded segment"),
+            DurableSegmentEncoding::Coded { symbols, .. } => {
+                let first = symbols.first_mut().expect("stored symbol");
+                first.symbol.data_mut()[0] ^= 0x01;
+            }
+        }
+
+        let err = segment
+            .reconstruct_payload(&available)
+            .expect_err("tampered symbol must fail authentication");
+        assert!(matches!(err, DataCapsuleError::AuthenticationFailed { .. }));
+    }
+
+    #[test]
+    fn recoverable_data_capsule_hot_cells_plan_more_repair_than_cold_cells() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cold = cold_subject_cell(&candidates, &policy);
+        let hot = hot_subject_cell(&candidates, &policy);
+        let payload = vec![0xab; DEFAULT_SYMBOL_SIZE * 2];
+        let message = FabricMessage {
+            subject: Subject::parse("orders.created").expect("subject"),
+            payload,
+            delivery_class: DeliveryClass::DurableOrdered,
+        };
+
+        let cold_segment =
+            DurableSegment::build(&cold, &candidates, 29, &message).expect("cold segment");
+        let hot_segment =
+            DurableSegment::build(&hot, &candidates, 29, &message).expect("hot segment");
+
+        assert!(
+            hot_segment.repair_symbol_count() > cold_segment.repair_symbol_count(),
+            "hot cells should deepen repair spread"
+        );
+        assert!(
+            hot_segment.holders.len() >= cold_segment.holders.len(),
+            "hot cells should not reduce holder coverage"
+        );
+    }
+
+    #[test]
+    fn reserve_publish_durable_records_recoverable_capsule_state() {
+        run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-durable-capsule")
+                .await
+                .expect("connect");
+
+            {
+                let mut state = fabric.state.lock();
+                state.default_data_capsule = DataCapsule {
+                    temperature: CellTemperature::Hot,
+                    retained_message_blocks: 3,
+                };
+                state.repair_policy = RepairPolicy {
+                    recoverability_target: 3,
+                    cold_witnesses: 1,
+                    hot_witnesses: 2,
+                };
+                state.placement_policy.cold_stewards = 2;
+                state.placement_policy.warm_stewards = 2;
+                state.placement_policy.hot_stewards = 2;
+                state.placement_policy.candidate_pool_size = 4;
+                state.local_candidates = vec![
+                    candidate("node-a", "rack-a", StorageClass::Durable, 5),
+                    candidate("node-b", "rack-b", StorageClass::Durable, 6),
+                    candidate("node-c", "rack-c", StorageClass::Standard, 7),
+                    candidate("node-d", "rack-d", StorageClass::Standard, 8),
+                ];
+            }
+
+            let mut ledger = ObligationLedger::new();
+            let permit = fabric
+                .reserve_publish_durable(
+                    &cx,
+                    &mut ledger,
+                    "orders.created",
+                    DeliveryClass::DurableOrdered,
+                )
+                .await
+                .expect("durable permit");
+            let payload = vec![0x44; DEFAULT_SYMBOL_SIZE * 3];
+            permit.send(&cx, payload.clone());
+
+            let state = fabric.state.lock();
+            let cell = state
+                .cells
+                .get(&canonical_cell_key("orders.created"))
+                .expect("cell runtime");
+            let segment = cell
+                .durable_capsule
+                .latest_segment()
+                .expect("durable segment recorded");
+            assert!(matches!(
+                segment.encoding,
+                DurableSegmentEncoding::Coded { .. }
+            ));
+            assert!(
+                cell.durable_capsule.symbol_spread.len() >= 3,
+                "coded durable publish should spread symbols across stewards and witnesses"
+            );
+
+            let available = segment
+                .holders
+                .iter()
+                .take(segment.holders.len().saturating_sub(1))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let recovered = cell
+                .durable_capsule
+                .reconstruct_payload(segment.window.start_sequence, &available)
+                .expect("runtime durable capsule should reconstruct from partial holders");
+            assert_eq!(recovered, payload);
+        });
+    }
+
     // ── Two-phase publish tests ───────────────────────────────────
 
     #[test]
     fn reserve_publish_then_send_delivers_message() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            grant_subscribe(&cx, "orders.>");
             let fabric = Fabric::connect(&cx, "node1:4222/two-phase-send")
                 .await
                 .expect("connect");
@@ -9044,6 +10097,8 @@ mod tests {
     #[test]
     fn reserve_publish_then_abort_delivers_nothing() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.>");
+            grant_subscribe(&cx, "orders.>");
             let fabric = Fabric::connect(&cx, "node1:4222/two-phase-abort")
                 .await
                 .expect("connect");
@@ -9073,6 +10128,8 @@ mod tests {
     #[test]
     fn reserve_publish_drop_delivers_nothing() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.>");
+            grant_subscribe(&cx, "orders.>");
             let fabric = Fabric::connect(&cx, "node1:4222/two-phase-drop")
                 .await
                 .expect("connect");
@@ -9103,6 +10160,7 @@ mod tests {
     #[test]
     fn reserve_publish_durable_allocates_obligation() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
             let fabric = Fabric::connect(&cx, "node1:4222/two-phase-durable")
                 .await
                 .expect("connect");
@@ -9141,6 +10199,7 @@ mod tests {
     #[test]
     fn reserve_publish_durable_abort_resolves_obligation() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
             let fabric = Fabric::connect(&cx, "node1:4222/two-phase-durable-abort")
                 .await
                 .expect("connect");
@@ -9176,6 +10235,7 @@ mod tests {
     #[test]
     fn reserve_publish_durable_drop_resolves_obligation() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
             let fabric = Fabric::connect(&cx, "node1:4222/two-phase-durable-drop")
                 .await
                 .expect("connect");
@@ -9282,8 +10342,122 @@ mod tests {
     }
 
     #[test]
+    fn reserve_publish_requires_matching_publish_capability() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/deny-reserve")
+                .await
+                .expect("connect");
+
+            let err = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                .await
+                .expect_err("reserve without publish capability must fail");
+
+            assert_eq!(err.kind(), ErrorKind::AdmissionDenied);
+            let decisions = fabric
+                .decision_records()
+                .into_iter()
+                .filter(|record| record.contract_name() == "fabric_capability_decision")
+                .collect::<Vec<_>>();
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(decisions[0].audit.action_chosen, "reject");
+        });
+    }
+
+    #[test]
+    fn subscribe_requires_matching_subscribe_capability() {
+        run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            let fabric = Fabric::connect(&cx, "node1:4222/deny-subscribe")
+                .await
+                .expect("connect");
+
+            let err = fabric
+                .subscribe(&cx, "orders.>")
+                .await
+                .expect_err("subscribe without subscribe capability must fail");
+
+            assert_eq!(err.kind(), ErrorKind::AdmissionDenied);
+            let decisions = fabric
+                .decision_records()
+                .into_iter()
+                .filter(|record| record.contract_name() == "fabric_capability_decision")
+                .collect::<Vec<_>>();
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(decisions[0].audit.action_chosen, "reject");
+        });
+    }
+
+    #[test]
+    fn request_requires_subscribe_capability_even_with_publish_granted() {
+        run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "service.lookup");
+            let fabric = Fabric::connect(&cx, "node1:4222/deny-request")
+                .await
+                .expect("connect");
+
+            let err = fabric
+                .request(&cx, "service.lookup", b"lookup".to_vec())
+                .await
+                .expect_err("request without subscribe capability must fail");
+
+            assert_eq!(err.kind(), ErrorKind::AdmissionDenied);
+            let decisions = fabric
+                .decision_records()
+                .into_iter()
+                .filter(|record| record.contract_name() == "fabric_capability_decision")
+                .collect::<Vec<_>>();
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(decisions[0].audit.action_chosen, "reject");
+        });
+    }
+
+    #[test]
+    fn certified_request_requires_publish_and_subscribe_capabilities() {
+        run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "service.lookup");
+            let fabric = Fabric::connect(&cx, "node1:4222/deny-certified")
+                .await
+                .expect("connect");
+            let mut ledger = ObligationLedger::new();
+            let admission = service_admission(
+                "req-certified-denied",
+                "service.lookup",
+                DeliveryClass::ObligationBacked,
+                Some(Duration::from_secs(5)),
+                cx.now(),
+            );
+
+            let err = fabric
+                .request_certified(
+                    &cx,
+                    &mut ledger,
+                    &admission,
+                    "callee-a",
+                    b"lookup".to_vec(),
+                    AckKind::Received,
+                    true,
+                )
+                .await
+                .expect_err("certified request without subscribe capability must fail");
+
+            assert_eq!(err.kind(), ErrorKind::AdmissionDenied);
+            let decisions = fabric
+                .decision_records()
+                .into_iter()
+                .filter(|record| record.contract_name() == "fabric_capability_decision")
+                .collect::<Vec<_>>();
+            assert_eq!(decisions.len(), 2);
+            assert_eq!(decisions[0].audit.action_chosen, "allow");
+            assert_eq!(decisions[1].audit.action_chosen, "reject");
+        });
+    }
+
+    #[test]
     fn publish_convenience_wrapper_works() {
         run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "events.fired");
+            grant_subscribe(&cx, "events.>");
             let fabric = Fabric::connect(&cx, "node1:4222/publish-wrapper")
                 .await
                 .expect("connect");

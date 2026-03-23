@@ -235,6 +235,29 @@ fn test_fabric_cx(slot: u32) -> Cx {
     )
 }
 
+fn grant_fabric_capability(cx: &Cx, capability: RuntimeFabricCapability) {
+    cx.grant_fabric_capability(capability)
+        .expect("fabric capability grant");
+}
+
+fn grant_publish(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::Publish {
+            subject: SubjectPattern::parse(subject).expect("publish subject"),
+        },
+    );
+}
+
+fn grant_subscribe(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::Subscribe {
+            subject: SubjectPattern::parse(subject).expect("subscribe subject"),
+        },
+    );
+}
+
 fn service_admission(
     request_id: &str,
     subject: &str,
@@ -789,6 +812,10 @@ fn run_packet_plane_scenario(seed: u64) -> (PacketPlaneScenarioSummary, Vec<Fabr
             .create_task(region, Budget::INFINITE, async move {
                 let cx = test_fabric_cx(700);
                 let cancelled = test_fabric_cx(701);
+                grant_publish(&cx, "orders.>");
+                grant_publish(&cx, "service.lookup");
+                grant_subscribe(&cx, "orders.>");
+                grant_subscribe(&cx, "service.lookup");
 
                 yield_now().await;
                 let fabric = Fabric::connect(&cx, "lab://fabric").await.expect("connect");
@@ -917,6 +944,8 @@ fn run_certified_request_scenario(
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx = test_fabric_cx(740);
+                grant_publish(&cx, "service.lookup");
+                grant_subscribe(&cx, "service.>");
 
                 yield_now().await;
                 let fabric = Fabric::connect(&cx, "lab://fabric-certified")
@@ -1168,6 +1197,8 @@ fn run_routing_decision_audit_scenario(
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx = Cx::for_testing();
+                grant_publish(&cx, "orders.created");
+                grant_subscribe(&cx, "orders.created");
                 let endpoint = format!("node1:4222/route-audit-{seed:016x}");
                 let fabric = Fabric::connect(&cx, &endpoint).await.expect("connect");
                 let mut subscription = fabric
@@ -1670,6 +1701,8 @@ fn fabric_certified_request_emits_certificates_and_drains_obligations() {
 #[test]
 fn fabric_certified_request_fails_closed_when_subject_cell_is_backpressured() {
     let cx = test_fabric_cx(741);
+    grant_publish(&cx, "service.lookup");
+    grant_subscribe(&cx, "service.lookup");
     let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
         .build()
         .expect("failed to build runtime");

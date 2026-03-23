@@ -1,0 +1,999 @@
+//! Aggregated FABRIC E2E coverage with structured per-scenario summaries.
+#![cfg(feature = "messaging-fabric")]
+
+mod common;
+
+use common::{init_test_logging, test_context_with_seed};
+
+use asupersync::cx::Cx;
+use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::messaging::capability::FabricCapability as RuntimeFabricCapability;
+use asupersync::messaging::consumer::{
+    AckResolution, ConsumerDemandClass, ConsumerDispatchMode, FabricConsumer, FabricConsumerConfig,
+    FabricConsumerOwner, PullDispatchOutcome, PullRequest, RecoverableCapsule, SequenceWindow,
+};
+use asupersync::messaging::fabric::{
+    CellEpoch, CellTemperature, DataCapsule, NodeRole, PlacementPolicy, RepairPolicy,
+    StewardCandidate, StorageClass, SubjectCell, SubjectPattern,
+};
+use asupersync::messaging::ir::ReplySpaceRule;
+use asupersync::messaging::service::{
+    CompensationSemantics, EvidenceLevel, MobilityConstraint, OverloadPolicy, RequestCertificate,
+    ServiceAdmission, ValidatedServiceRequest,
+};
+use asupersync::messaging::{AckKind, CapturePolicy, DeliveryClass, Fabric, FabricStreamConfig};
+use asupersync::obligation::ledger::ObligationLedger;
+use asupersync::remote::NodeId;
+use asupersync::runtime::yield_now;
+use asupersync::test_logging::{TestHarness, TestReportAggregator, TestSummary};
+use asupersync::types::{Budget, RegionId, TaskId, Time};
+use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FabricLogEntry {
+    seq: u64,
+    lane: &'static str,
+    action: &'static str,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PacketPlaneOutcome {
+    wildcard_subjects: Vec<String>,
+    exact_subjects: Vec<String>,
+    cancelled_next_is_none: bool,
+    reply_subject: String,
+    reply_payload_len: usize,
+    log: Vec<FabricLogEntry>,
+    steps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CertifiedRequestOutcome {
+    reply_subject: String,
+    reply_payload_len: usize,
+    reply_ack_kind: AckKind,
+    reply_delivery_class: DeliveryClass,
+    published_delivery_class: DeliveryClass,
+    request_certificate_valid: bool,
+    reply_certificate_valid: bool,
+    service_obligation_present: bool,
+    delivery_receipt_present: bool,
+    ledger_clean: bool,
+    log: Vec<FabricLogEntry>,
+    steps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StreamHandleOutcome {
+    endpoint_matches_prefix: bool,
+    subjects: Vec<String>,
+    delivery_class: DeliveryClass,
+    capture_policy: String,
+    request_timeout_millis: Option<u64>,
+    reply_subject: String,
+    reply_payload_len: usize,
+    log: Vec<FabricLogEntry>,
+    steps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ConsumerFlowOutcome {
+    push_window: (u64, u64),
+    pending_after_push_dispatch: u64,
+    pending_after_push_ack: u64,
+    ack_floor_after_push_ack: u64,
+    catch_up_window: (u64, u64),
+    tail_window: (u64, u64),
+    pending_after_tail_dispatch: u64,
+    no_data_waiting_after_error: usize,
+    total_acquired: u64,
+    total_committed: u64,
+    log: Vec<FabricLogEntry>,
+    steps: u64,
+}
+
+static ENDPOINT_NONCE: AtomicU64 = AtomicU64::new(0);
+
+fn test_fabric_cx(slot: u32) -> Cx {
+    Cx::new(
+        RegionId::new_for_test(slot, 0),
+        TaskId::new_for_test(slot, 0),
+        Budget::INFINITE,
+    )
+}
+
+fn push_log(
+    log: &Arc<Mutex<Vec<FabricLogEntry>>>,
+    seq: &Arc<AtomicU64>,
+    lane: &'static str,
+    action: &'static str,
+    detail: impl Into<String>,
+) {
+    log.lock().expect("log lock").push(FabricLogEntry {
+        seq: seq.fetch_add(1, Ordering::SeqCst),
+        lane,
+        action,
+        detail: detail.into(),
+    });
+}
+
+fn unique_endpoint(prefix: &str, seed: u64) -> String {
+    let nonce = ENDPOINT_NONCE.fetch_add(1, Ordering::SeqCst);
+    format!("lab://{prefix}-{seed:016x}-{nonce:08x}")
+}
+
+fn grant_fabric_capability(cx: &Cx, capability: RuntimeFabricCapability) {
+    cx.grant_fabric_capability(capability)
+        .expect("fabric capability grant");
+}
+
+fn grant_publish(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::Publish {
+            subject: SubjectPattern::parse(subject).expect("publish subject"),
+        },
+    );
+}
+
+fn grant_subscribe(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::Subscribe {
+            subject: SubjectPattern::parse(subject).expect("subscribe subject"),
+        },
+    );
+}
+
+fn grant_create_stream(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::CreateStream {
+            subject: SubjectPattern::parse(subject).expect("stream subject"),
+        },
+    );
+}
+
+fn candidate(name: &str, domain: &str) -> StewardCandidate {
+    StewardCandidate::new(NodeId::new(name), domain)
+        .with_role(NodeRole::Steward)
+        .with_role(NodeRole::RepairWitness)
+        .with_storage_class(StorageClass::Durable)
+}
+
+fn test_cell() -> SubjectCell {
+    SubjectCell::new(
+        &SubjectPattern::parse("orders.created").expect("pattern"),
+        CellEpoch::new(7, 11),
+        &[
+            candidate("node-a", "rack-a"),
+            candidate("node-b", "rack-b"),
+            candidate("node-c", "rack-c"),
+        ],
+        &PlacementPolicy {
+            cold_stewards: 3,
+            warm_stewards: 3,
+            hot_stewards: 3,
+            ..PlacementPolicy::default()
+        },
+        RepairPolicy::default(),
+        DataCapsule {
+            temperature: CellTemperature::Warm,
+            retained_message_blocks: 4,
+        },
+    )
+    .expect("cell")
+}
+
+fn service_admission(
+    request_id: &str,
+    subject: &str,
+    delivery_class: DeliveryClass,
+    timeout: Option<Duration>,
+    issued_at: Time,
+) -> ServiceAdmission {
+    let validated = ValidatedServiceRequest {
+        delivery_class,
+        timeout,
+        priority_hint: None,
+        guaranteed_durability: delivery_class,
+        evidence_level: EvidenceLevel::Standard,
+        mobility_constraint: MobilityConstraint::Unrestricted,
+        compensation_policy: CompensationSemantics::None,
+        overload_policy: OverloadPolicy::RejectNew,
+    };
+    let certificate = RequestCertificate::from_validated(
+        request_id.to_owned(),
+        "caller-a".to_owned(),
+        subject.to_owned(),
+        &validated,
+        ReplySpaceRule::CallerInbox,
+        "OrderService".to_owned(),
+        0xC0DE,
+        issued_at,
+    );
+
+    ServiceAdmission {
+        validated,
+        certificate,
+    }
+}
+
+fn assert_runtime_clean(runtime: &mut LabRuntime, label: &str) {
+    runtime.run_until_quiescent();
+    let pending_obligations = runtime.state.pending_obligation_count();
+    let violations = runtime.check_invariants();
+    assert!(runtime.is_quiescent(), "{label} should quiesce");
+    assert_eq!(
+        pending_obligations, 0,
+        "{label} should not leave runtime obligations pending"
+    );
+    assert!(
+        violations.is_empty(),
+        "{label} should not violate lab invariants: {violations:?}"
+    );
+}
+
+fn run_packet_plane(seed: u64) -> PacketPlaneOutcome {
+    #[derive(Debug, Clone, Default)]
+    struct PacketPlaneState {
+        wildcard_subjects: Vec<String>,
+        exact_subjects: Vec<String>,
+        cancelled_next_is_none: bool,
+        reply_subject: Option<String>,
+        reply_payload_len: Option<usize>,
+    }
+
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let state = Arc::new(Mutex::new(PacketPlaneState::default()));
+    let endpoint = unique_endpoint("fabric-e2e-packet", seed);
+
+    {
+        let endpoint = endpoint.clone();
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let state = Arc::clone(&state);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = test_fabric_cx(900);
+                let cancelled = test_fabric_cx(901);
+                grant_publish(&cx, "orders.>");
+                grant_subscribe(&cx, "orders.>");
+                grant_subscribe(&cx, "orders.created");
+                grant_publish(&cx, "service.lookup");
+                grant_subscribe(&cx, "service.lookup");
+
+                yield_now().await;
+                let fabric = Fabric::connect(&cx, &endpoint).await.expect("connect");
+                let _ = fabric.endpoint();
+                push_log(&log, &seq, "packet", "connect", "connected");
+
+                let mut wildcard = fabric.subscribe(&cx, "orders.>").await.expect("wildcard");
+                let mut exact = fabric
+                    .subscribe(&cx, "orders.created")
+                    .await
+                    .expect("exact");
+                push_log(
+                    &log,
+                    &seq,
+                    "packet",
+                    "subscribe",
+                    "orders.> + orders.created",
+                );
+
+                yield_now().await;
+                let _created = fabric
+                    .publish(&cx, "orders.created", b"created".to_vec())
+                    .await
+                    .expect("publish created");
+                push_log(&log, &seq, "packet", "publish", "orders.created");
+
+                yield_now().await;
+                let _updated = fabric
+                    .publish(&cx, "orders.updated", b"updated".to_vec())
+                    .await
+                    .expect("publish updated");
+                push_log(&log, &seq, "packet", "publish", "orders.updated");
+
+                let wildcard_created = wildcard.next(&cx).await.expect("wildcard created");
+                let exact_created = exact.next(&cx).await.expect("exact created");
+                let wildcard_updated = wildcard.next(&cx).await.expect("wildcard updated");
+
+                cancelled.set_cancel_requested(true);
+                let cancelled_next_is_none = wildcard.next(&cancelled).await.is_none();
+                push_log(
+                    &log,
+                    &seq,
+                    "packet",
+                    "cancelled_next",
+                    format!("none={cancelled_next_is_none}"),
+                );
+
+                let reply = fabric
+                    .request(&cx, "service.lookup", b"lookup".to_vec())
+                    .await
+                    .expect("request");
+                push_log(
+                    &log,
+                    &seq,
+                    "packet",
+                    "request",
+                    format!("reply_subject={}", reply.subject.as_str()),
+                );
+
+                let mut guard = state.lock().expect("state lock");
+                guard.wildcard_subjects = vec![
+                    wildcard_created.subject.as_str().to_string(),
+                    wildcard_updated.subject.as_str().to_string(),
+                ];
+                guard.exact_subjects = vec![exact_created.subject.as_str().to_string()];
+                guard.cancelled_next_is_none = cancelled_next_is_none;
+                guard.reply_subject = Some(reply.subject.as_str().to_string());
+                guard.reply_payload_len = Some(reply.payload.len());
+            })
+            .expect("create packet-plane task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    assert_runtime_clean(&mut runtime, "packet plane e2e");
+
+    let state = state.lock().expect("state lock").clone();
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+
+    PacketPlaneOutcome {
+        wildcard_subjects: state.wildcard_subjects,
+        exact_subjects: state.exact_subjects,
+        cancelled_next_is_none: state.cancelled_next_is_none,
+        reply_subject: state.reply_subject.expect("reply subject"),
+        reply_payload_len: state.reply_payload_len.expect("reply payload len"),
+        log: log_entries,
+        steps: runtime.steps(),
+    }
+}
+
+fn run_certified_request(seed: u64) -> CertifiedRequestOutcome {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<CertifiedRequestOutcome>));
+    let endpoint = unique_endpoint("fabric-e2e-certified", seed);
+
+    {
+        let endpoint = endpoint.clone();
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = test_fabric_cx(920);
+                grant_publish(&cx, "service.lookup");
+                grant_subscribe(&cx, "service.>");
+
+                yield_now().await;
+                let fabric = Fabric::connect(&cx, &endpoint).await.expect("connect");
+                let mut subscription = fabric.subscribe(&cx, "service.>").await.expect("subscribe");
+                let _ = fabric.endpoint();
+                push_log(&log, &seq, "certified", "connect", "connected");
+
+                let mut ledger = ObligationLedger::new();
+                let admission = service_admission(
+                    "req-certified",
+                    "service.lookup",
+                    DeliveryClass::ObligationBacked,
+                    Some(Duration::from_secs(5)),
+                    cx.now(),
+                );
+
+                yield_now().await;
+                let certified = fabric
+                    .request_certified(
+                        &cx,
+                        &mut ledger,
+                        &admission,
+                        "callee-a",
+                        b"lookup".to_vec(),
+                        AckKind::Received,
+                        true,
+                    )
+                    .await
+                    .expect("certified request");
+                let published = subscription.next(&cx).await.expect("published request");
+                push_log(
+                    &log,
+                    &seq,
+                    "certified",
+                    "request",
+                    format!("reply_subject={}", certified.reply.subject.as_str()),
+                );
+
+                *summary.lock().expect("summary lock") = Some(CertifiedRequestOutcome {
+                    reply_subject: certified.reply.subject.as_str().to_string(),
+                    reply_payload_len: certified.reply.payload.len(),
+                    reply_ack_kind: certified.reply.ack_kind,
+                    reply_delivery_class: certified.reply.delivery_class,
+                    published_delivery_class: published.delivery_class,
+                    request_certificate_valid: certified.request_certificate.validate().is_ok(),
+                    reply_certificate_valid: certified.reply_certificate.validate().is_ok(),
+                    service_obligation_present: certified
+                        .reply_certificate
+                        .service_obligation_id
+                        .is_some(),
+                    delivery_receipt_present: certified.delivery_receipt.is_some(),
+                    ledger_clean: ledger.pending_count() == 0 && ledger.check_leaks().is_clean(),
+                    log: Vec::new(),
+                    steps: 0,
+                });
+            })
+            .expect("create certified task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    assert_runtime_clean(&mut runtime, "certified request e2e");
+
+    let mut summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("certified summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    summary.log = log_entries;
+    summary.steps = runtime.steps();
+    summary
+}
+
+fn run_stream_handle(seed: u64) -> StreamHandleOutcome {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<StreamHandleOutcome>));
+    let endpoint = unique_endpoint("fabric-e2e-stream", seed);
+
+    {
+        let endpoint = endpoint.clone();
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = test_fabric_cx(940);
+                grant_publish(&cx, "service.lookup");
+                grant_subscribe(&cx, "service.lookup");
+                grant_create_stream(&cx, "orders.>");
+
+                yield_now().await;
+                let fabric = Fabric::connect(&cx, &endpoint).await.expect("connect");
+                push_log(&log, &seq, "stream", "connect", "connected");
+
+                let handle = fabric
+                    .stream(
+                        &cx,
+                        FabricStreamConfig {
+                            subjects: vec![
+                                SubjectPattern::parse("orders.created").expect("created"),
+                                SubjectPattern::parse("orders.snapshot").expect("snapshot"),
+                            ],
+                            delivery_class: DeliveryClass::DurableOrdered,
+                            capture_policy: CapturePolicy::ExplicitOptIn,
+                            request_timeout: Some(Duration::from_secs(5)),
+                        },
+                    )
+                    .await
+                    .expect("stream");
+                push_log(
+                    &log,
+                    &seq,
+                    "stream",
+                    "declare",
+                    format!("subjects={}", handle.config().subjects.len()),
+                );
+
+                yield_now().await;
+                let reply = fabric
+                    .request(&cx, "service.lookup", b"lookup".to_vec())
+                    .await
+                    .expect("request");
+                push_log(
+                    &log,
+                    &seq,
+                    "stream",
+                    "request",
+                    format!("reply_subject={}", reply.subject.as_str()),
+                );
+
+                *summary.lock().expect("summary lock") = Some(StreamHandleOutcome {
+                    endpoint_matches_prefix: handle
+                        .endpoint()
+                        .starts_with("lab://fabric-e2e-stream-"),
+                    subjects: handle
+                        .config()
+                        .subjects
+                        .iter()
+                        .map(SubjectPattern::canonical_key)
+                        .collect(),
+                    delivery_class: handle.config().delivery_class,
+                    capture_policy: format!("{:?}", handle.config().capture_policy),
+                    request_timeout_millis: handle.config().request_timeout.map(|duration| {
+                        u64::try_from(duration.as_millis()).expect("timeout fits in u64")
+                    }),
+                    reply_subject: reply.subject.as_str().to_string(),
+                    reply_payload_len: reply.payload.len(),
+                    log: Vec::new(),
+                    steps: 0,
+                });
+            })
+            .expect("create stream task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    assert_runtime_clean(&mut runtime, "stream handle e2e");
+
+    let mut summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("stream summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    summary.log = log_entries;
+    summary.steps = runtime.steps();
+    summary
+}
+
+fn run_consumer_flow(seed: u64) -> ConsumerFlowOutcome {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<ConsumerFlowOutcome>));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let owner = FabricConsumerOwner {
+                    holder: TaskId::new_for_test(41, 0),
+                    region: RegionId::new_for_test(7, 0),
+                };
+                let mut consumer =
+                    FabricConsumer::new_owned(&test_cell(), FabricConsumerConfig::default(), owner)
+                        .expect("consumer");
+                let push_window = SequenceWindow::new(5, 6).expect("push window");
+                let push_capsule =
+                    RecoverableCapsule::default().with_window(NodeId::new("node-a"), push_window);
+                let full_capsule = RecoverableCapsule::default().with_window(
+                    NodeId::new("node-a"),
+                    SequenceWindow::new(1, 12).expect("capsule window"),
+                );
+
+                yield_now().await;
+                let push_delivery = consumer
+                    .dispatch_push(push_window, &push_capsule, None)
+                    .expect("dispatch push");
+                let pending_after_push_dispatch = consumer.state().pending_count;
+                let total_acquired = consumer.obligation_stats().total_acquired;
+                push_log(
+                    &log,
+                    &seq,
+                    "consumer",
+                    "dispatch_push",
+                    format!(
+                        "window={}..={}",
+                        push_delivery.window.start(),
+                        push_delivery.window.end()
+                    ),
+                );
+
+                yield_now().await;
+                let push_ack = consumer
+                    .acknowledge_delivery(&push_delivery.attempt)
+                    .expect("ack push");
+                assert!(
+                    matches!(push_ack, AckResolution::Committed { .. }),
+                    "push delivery should commit"
+                );
+                let pending_after_push_ack = consumer.state().pending_count;
+                let ack_floor_after_push_ack = consumer.state().ack_floor;
+                push_log(
+                    &log,
+                    &seq,
+                    "consumer",
+                    "ack_push",
+                    format!("ack_floor={ack_floor_after_push_ack}"),
+                );
+
+                consumer.switch_mode(ConsumerDispatchMode::Pull);
+                consumer
+                    .queue_pull_request(
+                        PullRequest::new(3, ConsumerDemandClass::CatchUp).expect("catchup"),
+                    )
+                    .expect("queue catchup");
+                push_log(&log, &seq, "consumer", "queue_pull", "catchup");
+
+                yield_now().await;
+                let catch_up_delivery = match consumer
+                    .dispatch_next_pull(12, &full_capsule, None)
+                    .expect("dispatch catchup")
+                {
+                    PullDispatchOutcome::Scheduled(delivery) => *delivery,
+                    PullDispatchOutcome::Waiting(_) => {
+                        panic!("catchup request should schedule")
+                    }
+                };
+                let catch_up_window = (
+                    catch_up_delivery.window.start(),
+                    catch_up_delivery.window.end(),
+                );
+                push_log(
+                    &log,
+                    &seq,
+                    "consumer",
+                    "dispatch_catchup",
+                    format!(
+                        "window={}..={}",
+                        catch_up_delivery.window.start(),
+                        catch_up_delivery.window.end()
+                    ),
+                );
+                let catch_up_ack = consumer
+                    .acknowledge_delivery(&catch_up_delivery.attempt)
+                    .expect("ack catchup");
+                assert!(
+                    matches!(catch_up_ack, AckResolution::Committed { .. }),
+                    "catchup delivery should commit"
+                );
+
+                consumer
+                    .queue_pull_request(
+                        PullRequest::new(2, ConsumerDemandClass::Tail).expect("tail"),
+                    )
+                    .expect("queue tail");
+                yield_now().await;
+                let tail_delivery = match consumer
+                    .dispatch_next_pull(12, &full_capsule, None)
+                    .expect("dispatch tail")
+                {
+                    PullDispatchOutcome::Scheduled(delivery) => *delivery,
+                    PullDispatchOutcome::Waiting(_) => panic!("tail request should schedule"),
+                };
+                let tail_window = (tail_delivery.window.start(), tail_delivery.window.end());
+                let pending_after_tail_dispatch = consumer.state().pending_count;
+                push_log(
+                    &log,
+                    &seq,
+                    "consumer",
+                    "dispatch_tail",
+                    format!(
+                        "window={}..={}",
+                        tail_delivery.window.start(),
+                        tail_delivery.window.end()
+                    ),
+                );
+                let tail_ack = consumer
+                    .acknowledge_delivery(&tail_delivery.attempt)
+                    .expect("ack tail");
+                assert!(
+                    matches!(tail_ack, AckResolution::Committed { .. }),
+                    "tail delivery should commit"
+                );
+
+                consumer
+                    .queue_pull_request(
+                        PullRequest::new(1, ConsumerDemandClass::Tail)
+                            .expect("tail no data")
+                            .with_no_wait(),
+                    )
+                    .expect("queue no data");
+                let no_data_waiting_after_error = match consumer
+                    .dispatch_next_pull(0, &full_capsule, None)
+                    .expect_err("tail no-data request should fail")
+                {
+                    asupersync::messaging::consumer::FabricConsumerError::NoDataAvailable {
+                        ..
+                    } => consumer.waiting_pull_request_count(),
+                    other => panic!("unexpected no-data error: {other:?}"),
+                };
+                push_log(&log, &seq, "consumer", "tail_no_data", "observed");
+
+                *summary.lock().expect("summary lock") = Some(ConsumerFlowOutcome {
+                    push_window: (push_window.start(), push_window.end()),
+                    pending_after_push_dispatch,
+                    pending_after_push_ack,
+                    ack_floor_after_push_ack,
+                    catch_up_window,
+                    tail_window,
+                    pending_after_tail_dispatch,
+                    no_data_waiting_after_error,
+                    total_acquired,
+                    total_committed: consumer.obligation_stats().total_committed,
+                    log: Vec::new(),
+                    steps: 0,
+                });
+            })
+            .expect("create consumer task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    assert_runtime_clean(&mut runtime, "consumer flow e2e");
+
+    let mut summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("consumer summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    summary.log = log_entries;
+    summary.steps = runtime.steps();
+    summary
+}
+
+fn log_scenario_summary<T: Serialize>(scenario: &str, summary: &T) {
+    tracing::info!(
+        scenario = scenario,
+        summary = %serde_json::to_string(summary).expect("serialize scenario summary"),
+        "fabric e2e scenario summary"
+    );
+}
+
+fn packet_plane_subtest(seed: u64) -> TestSummary {
+    let mut harness = TestHarness::with_context(
+        "fabric_e2e_packet_plane",
+        test_context_with_seed("fabric-e2e-packet-plane", seed),
+    );
+    harness.enter_phase("run");
+    let summary = run_packet_plane(seed);
+    log_scenario_summary("packet_plane", &summary);
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    harness.assert_eq(
+        "wildcard subjects",
+        &vec!["orders.created".to_string(), "orders.updated".to_string()],
+        &summary.wildcard_subjects,
+    );
+    harness.assert_eq(
+        "exact subjects",
+        &vec!["orders.created".to_string()],
+        &summary.exact_subjects,
+    );
+    harness.assert_true(
+        "cancelled next returns none",
+        summary.cancelled_next_is_none,
+    );
+    harness.assert_eq(
+        "reply subject",
+        &"service.lookup".to_string(),
+        &summary.reply_subject,
+    );
+    harness.assert_eq("reply payload len", &6usize, &summary.reply_payload_len);
+    harness.assert_true("timeline captured", summary.log.len() >= 5);
+    harness.collect_artifact(
+        "packet_plane_summary.json",
+        &serde_json::to_string_pretty(&summary).expect("serialize packet summary"),
+    );
+    harness.exit_phase();
+
+    harness.finish()
+}
+
+fn certified_request_subtest(seed: u64) -> TestSummary {
+    let mut harness = TestHarness::with_context(
+        "fabric_e2e_certified_request",
+        test_context_with_seed("fabric-e2e-certified-request", seed),
+    );
+    harness.enter_phase("run");
+    let summary = run_certified_request(seed);
+    log_scenario_summary("certified_request", &summary);
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    harness.assert_eq(
+        "reply subject",
+        &"service.lookup".to_string(),
+        &summary.reply_subject,
+    );
+    harness.assert_eq("reply payload len", &6usize, &summary.reply_payload_len);
+    harness.assert_eq(
+        "reply ack kind",
+        &AckKind::Received,
+        &summary.reply_ack_kind,
+    );
+    harness.assert_eq(
+        "reply delivery class",
+        &DeliveryClass::ObligationBacked,
+        &summary.reply_delivery_class,
+    );
+    harness.assert_eq(
+        "published delivery class",
+        &DeliveryClass::ObligationBacked,
+        &summary.published_delivery_class,
+    );
+    harness.assert_true(
+        "request certificate validates",
+        summary.request_certificate_valid,
+    );
+    harness.assert_true(
+        "reply certificate validates",
+        summary.reply_certificate_valid,
+    );
+    harness.assert_true(
+        "service obligation id captured",
+        summary.service_obligation_present,
+    );
+    harness.assert_true("delivery receipt present", summary.delivery_receipt_present);
+    harness.assert_true("ledger resolves cleanly", summary.ledger_clean);
+    harness.collect_artifact(
+        "certified_request_summary.json",
+        &serde_json::to_string_pretty(&summary).expect("serialize certified summary"),
+    );
+    harness.exit_phase();
+
+    harness.finish()
+}
+
+fn stream_handle_subtest(seed: u64) -> TestSummary {
+    let mut harness = TestHarness::with_context(
+        "fabric_e2e_stream_handle",
+        test_context_with_seed("fabric-e2e-stream-handle", seed),
+    );
+    harness.enter_phase("run");
+    let summary = run_stream_handle(seed);
+    log_scenario_summary("stream_handle", &summary);
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    harness.assert_true(
+        "endpoint matches expected prefix",
+        summary.endpoint_matches_prefix,
+    );
+    harness.assert_eq(
+        "subjects",
+        &vec!["orders.created".to_string(), "orders.snapshot".to_string()],
+        &summary.subjects,
+    );
+    harness.assert_eq(
+        "delivery class",
+        &DeliveryClass::DurableOrdered,
+        &summary.delivery_class,
+    );
+    harness.assert_eq(
+        "capture policy",
+        &"ExplicitOptIn".to_string(),
+        &summary.capture_policy,
+    );
+    harness.assert_eq(
+        "request timeout millis",
+        &Some(5_000_u64),
+        &summary.request_timeout_millis,
+    );
+    harness.assert_eq(
+        "reply subject",
+        &"service.lookup".to_string(),
+        &summary.reply_subject,
+    );
+    harness.assert_eq("reply payload len", &6usize, &summary.reply_payload_len);
+    harness.collect_artifact(
+        "stream_handle_summary.json",
+        &serde_json::to_string_pretty(&summary).expect("serialize stream summary"),
+    );
+    harness.exit_phase();
+
+    harness.finish()
+}
+
+fn consumer_flow_subtest(seed: u64) -> TestSummary {
+    let mut harness = TestHarness::with_context(
+        "fabric_e2e_consumer_flow",
+        test_context_with_seed("fabric-e2e-consumer-flow", seed),
+    );
+    harness.enter_phase("run");
+    let summary = run_consumer_flow(seed);
+    log_scenario_summary("consumer_flow", &summary);
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    harness.assert_eq("push window", &(5_u64, 6_u64), &summary.push_window);
+    harness.assert_eq(
+        "pending after push dispatch",
+        &2_u64,
+        &summary.pending_after_push_dispatch,
+    );
+    harness.assert_eq(
+        "pending after push ack",
+        &0_u64,
+        &summary.pending_after_push_ack,
+    );
+    harness.assert_eq(
+        "ack floor after push ack",
+        &6_u64,
+        &summary.ack_floor_after_push_ack,
+    );
+    harness.assert_eq("catch up window", &(7_u64, 9_u64), &summary.catch_up_window);
+    harness.assert_eq("tail window", &(11_u64, 12_u64), &summary.tail_window);
+    harness.assert_eq(
+        "pending after tail dispatch",
+        &2_u64,
+        &summary.pending_after_tail_dispatch,
+    );
+    harness.assert_eq(
+        "no data leaves queue empty",
+        &0_usize,
+        &summary.no_data_waiting_after_error,
+    );
+    harness.assert_eq("total acquired", &1_u64, &summary.total_acquired);
+    harness.assert_eq("total committed", &3_u64, &summary.total_committed);
+    harness.collect_artifact(
+        "consumer_flow_summary.json",
+        &serde_json::to_string_pretty(&summary).expect("serialize consumer summary"),
+    );
+    harness.exit_phase();
+
+    harness.finish()
+}
+
+#[test]
+fn fabric_e2e_aggregated_report_covers_public_surface_scenarios() {
+    init_test_logging();
+
+    let mut aggregator = TestReportAggregator::new();
+    aggregator.add(packet_plane_subtest(0xFABC_0001));
+    aggregator.add(certified_request_subtest(0xFABC_0002));
+    aggregator.add(stream_handle_subtest(0xFABC_0003));
+    aggregator.add(consumer_flow_subtest(0xFABC_0004));
+
+    let report = aggregator.report();
+    assert_eq!(report.total_tests, 4);
+    assert_eq!(report.passed_tests, 4);
+    assert_eq!(report.failed_tests, 0);
+    assert_eq!(report.coverage_matrix.len(), 4);
+    assert!(report.total_assertions >= 20);
+    assert!(
+        report
+            .coverage_matrix
+            .iter()
+            .all(|row| !row.phases_exercised.is_empty())
+    );
+
+    tracing::info!(
+        json = %aggregator.report_json(),
+        "fabric e2e aggregated coverage report"
+    );
+}
+
+#[test]
+fn fabric_e2e_fixed_seed_scenarios_are_deterministic() {
+    init_test_logging();
+
+    let first_packet = run_packet_plane(0xFADE_1001);
+    let second_packet = run_packet_plane(0xFADE_1001);
+    assert_eq!(first_packet, second_packet);
+
+    let first_certified = run_certified_request(0xFADE_1002);
+    let second_certified = run_certified_request(0xFADE_1002);
+    assert_eq!(first_certified, second_certified);
+
+    let first_stream = run_stream_handle(0xFADE_1003);
+    let second_stream = run_stream_handle(0xFADE_1003);
+    assert_eq!(first_stream, second_stream);
+
+    let first_consumer = run_consumer_flow(0xFADE_1004);
+    let second_consumer = run_consumer_flow(0xFADE_1004);
+    assert_eq!(first_consumer, second_consumer);
+}

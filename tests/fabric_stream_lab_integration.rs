@@ -3,6 +3,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::messaging::capability::FabricCapability as RuntimeFabricCapability;
 use asupersync::messaging::consumer::{
     AckResolution, ConsumerDemandClass, ConsumerDispatchMode, CursorLeaseHolder, FabricConsumer,
     FabricConsumerConfig, FabricConsumerError, PullDispatchOutcome, PullRequest,
@@ -75,6 +76,38 @@ fn test_fabric_cx(slot: u32) -> Cx {
     )
 }
 
+fn grant_fabric_capability(cx: &Cx, capability: RuntimeFabricCapability) {
+    cx.grant_fabric_capability(capability)
+        .expect("fabric capability grant");
+}
+
+fn grant_publish(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::Publish {
+            subject: SubjectPattern::parse(subject).expect("publish subject"),
+        },
+    );
+}
+
+fn grant_subscribe(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::Subscribe {
+            subject: SubjectPattern::parse(subject).expect("subscribe subject"),
+        },
+    );
+}
+
+fn grant_create_stream(cx: &Cx, subject: &str) {
+    grant_fabric_capability(
+        cx,
+        RuntimeFabricCapability::CreateStream {
+            subject: SubjectPattern::parse(subject).expect("stream subject"),
+        },
+    );
+}
+
 fn push_log(
     log: &Arc<Mutex<Vec<StreamConsumerLogEntry>>>,
     seq: &Arc<AtomicU64>,
@@ -138,6 +171,9 @@ fn run_stream_handle_scenario(
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx = test_fabric_cx(820);
+                grant_publish(&cx, "service.lookup");
+                grant_subscribe(&cx, "service.lookup");
+                grant_create_stream(&cx, "orders.>");
                 yield_now().await;
 
                 let fabric = Fabric::connect(&cx, "lab://fabric-stream")
