@@ -640,7 +640,11 @@ where
             let mut this = self.as_mut().project();
 
             match this.inner.as_mut().project() {
-                RetryInnerProj::Completed => panic!("retry future polled after completion"),
+                RetryInnerProj::Completed => {
+                    return Poll::Ready(RetryResult::Cancelled(CancelReason::user(
+                        "polled after completion",
+                    )));
+                }
                 RetryInnerProj::Idle => {
                     if let Some(r) = cancel_reason {
                         this.inner.set(RetryInner::Completed);

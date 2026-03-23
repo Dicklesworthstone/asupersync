@@ -619,7 +619,11 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
-        assert!(!this.completed, "hedge future polled after completion");
+        if this.completed {
+            return Poll::Ready(HedgeResult::PrimaryFast(Outcome::Cancelled(
+                CancelReason::user("polled after completion"),
+            )));
+        }
 
         // Poll primary if present
         if let Some(primary) = &mut this.primary {
