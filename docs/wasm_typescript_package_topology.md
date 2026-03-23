@@ -74,7 +74,11 @@ Maintained dedicated-worker validation path:
 - fixture: `tests/fixtures/dedicated-worker-consumer`
 - validator: `scripts/validate_dedicated_worker_consumer.sh`
 - onboarding lane: `python3 scripts/run_browser_onboarding_checks.py --scenario worker`
-- artifact pointer: `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`
+- artifact pointers: `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`,
+  `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`
+- summary expectation: the dedicated-worker `summary.json` bundle preserves
+  `scenario_inventory` plus artifact pointers under `artifacts` for lane-selection,
+  storage/export, and downgrade review
 
 ## Rust Crate Layout and Artifact Provenance
 

@@ -155,6 +155,7 @@ fn checklist_doc_requires_vnext_surface_review_rows() {
         "target/e2e-results/rust_browser_consumer/<timestamp>/summary.json",
         "target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json",
         "scenario_inventory",
+        "artifact pointers under `artifacts`",
         "service_worker_not_yet_shipped",
         "service_worker_direct_runtime_not_shipped",
         "shared_worker_direct_runtime_not_shipped",

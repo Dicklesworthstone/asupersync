@@ -91,6 +91,25 @@ fn topology_documents_rust_crate_layout_and_pkg_staging() {
 }
 
 #[test]
+fn topology_pins_dedicated_worker_validation_artifacts() {
+    let topology = load_topology();
+    for marker in [
+        "tests/fixtures/dedicated-worker-consumer",
+        "scripts/validate_dedicated_worker_consumer.sh",
+        "python3 scripts/run_browser_onboarding_checks.py --scenario worker",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json",
+        "scenario_inventory",
+        "artifact pointers under `artifacts`",
+    ] {
+        assert!(
+            topology.contains(marker),
+            "Topology doc missing dedicated-worker validation marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn matrix_documents_browser_core_producer_crate_and_staging_path() {
     let doc = load_matrix();
     for marker in [

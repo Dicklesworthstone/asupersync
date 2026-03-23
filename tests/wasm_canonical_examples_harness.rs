@@ -6,12 +6,12 @@ use asupersync::net::worker_channel::{
 };
 use asupersync::types::wasm_abi::ErrorBoundaryAction;
 use asupersync::types::{
+    outcome_to_error_boundary_action, outcome_to_suspense_state, outcome_to_transition_state,
     NextjsBootstrapPhase, NextjsNavigationType, ReactProviderConfig, ReactProviderPhase,
     ReactProviderState, SuspenseBoundaryState, TransitionTaskState, WasmAbiCancellation,
     WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiRecoverability, WasmAbiSymbol,
     WasmAbiValue, WasmBoundaryState, WasmExportDispatcher, WasmTaskCancelRequest,
-    WasmTaskSpawnBuilder, outcome_to_error_boundary_action, outcome_to_suspense_state,
-    outcome_to_transition_state,
+    WasmTaskSpawnBuilder,
 };
 use asupersync::web::{
     BootstrapCommand, BootstrapRecoveryAction, NextjsBootstrapError, NextjsBootstrapState,
@@ -542,7 +542,10 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
         "scripts/validate_next_turbopack_consumer.sh",
         "target/e2e-results/vite_vanilla_consumer/",
         "target/e2e-results/dedicated_worker_consumer/",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json",
         "target/e2e-results/rust_browser_consumer/",
+        "scenario_inventory",
+        "artifact pointers under `artifacts`",
         "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
         "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
         "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh",

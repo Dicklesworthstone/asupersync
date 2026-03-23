@@ -26,6 +26,7 @@ fn troubleshooting_doc_references_bead_and_contract() {
     let doc = load_doc();
     for token in [
         "asupersync-umelq.16.4",
+        "asupersync-3qv04.9.4",
         "asupersync-3qv04.8.6.3",
         "wasm-browser-troubleshooting-cookbook-v1",
     ] {
@@ -103,8 +104,11 @@ fn troubleshooting_doc_includes_expected_artifacts_and_cross_refs() {
         "artifacts/wasm_flake_governance_events.ndjson",
         "target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json",
         "target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json",
         "target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json",
         "target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json",
+        "scenario_inventory",
+        "artifact pointers under `artifacts`",
     ];
     for artifact in required_artifacts {
         assert!(
@@ -160,6 +164,8 @@ fn troubleshooting_doc_covers_browser_storage_and_artifact_failure_paths() {
         "blocked_upgrade",
         "quota_exceeded",
         "download_unavailable",
+        "browser-run.json",
+        "scenario_inventory",
         "worker_storage_roundtrip_marker",
         "worker_artifact_export_marker",
         "worker_artifact_download_guard_marker",

@@ -33,7 +33,7 @@ Every example in this catalog must preserve:
 | Surface | Canonical Scenario IDs | Deterministic Harness | Replay Artifact Pointers |
 | --- | --- | --- | --- |
 | Vanilla JS | `vanilla.storage_artifact_bundle`, `vanilla.behavior_loser_drain_replay`, `vanilla.negative_skipped_loser_detection`, `vanilla.timing_mid_computation_drain`, `L6-BUNDLER-VITE` | `tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs`, `scripts/validate_vite_vanilla_consumer.sh` | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `artifacts/onboarding/vanilla.behavior_loser_drain_replay.log`, `artifacts/onboarding/vanilla.negative_skipped_loser_detection.log` |
-| Dedicated Worker | `worker.runtime_support_matrix`, `worker.storage_artifact_diagnostics`, `worker.storage_artifact_export_handoff`, `worker.coordinator_protocol`, `L6-BUNDLER-DEDICATED-WORKER` | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `src/net/worker_channel.rs`, `scripts/validate_dedicated_worker_consumer.sh` | `artifacts/onboarding/worker.runtime_support_matrix.log`, `artifacts/onboarding/worker.storage_artifact_diagnostics.log`, `artifacts/onboarding/worker.coordinator_protocol.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json` |
+| Dedicated Worker | `worker.runtime_support_matrix`, `worker.storage_artifact_diagnostics`, `worker.storage_artifact_export_handoff`, `worker.coordinator_protocol`, `L6-BUNDLER-DEDICATED-WORKER` | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `src/net/worker_channel.rs`, `scripts/validate_dedicated_worker_consumer.sh` | `artifacts/onboarding/worker.runtime_support_matrix.log`, `artifacts/onboarding/worker.storage_artifact_diagnostics.log`, `artifacts/onboarding/worker.coordinator_protocol.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`; the reviewed summary bundle must preserve `scenario_inventory` plus artifact pointers under `artifacts` |
 | Rust Browser | `RUST-BROWSER-CONSUMER`, `repository_maintained_rust_browser_fixture`, `L6-RUST-BROWSER-CONSUMER` | `tests/wasm_rust_browser_example_contract.rs`, `scripts/validate_rust_browser_consumer.sh` | `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json` |
 | TypeScript | `TS-TYPE-VANILLA`, `TS-TYPE-REACT`, `TS-TYPE-NEXT` | `scripts/check_wasm_typescript_type_model_policy.py` | `artifacts/wasm_typescript_type_model_summary.json`, `artifacts/wasm_typescript_type_model_log.ndjson` |
 | React | `react_ref.task_group_cancel`, `react_ref.retry_after_transient_failure`, `react_ref.bulkhead_isolation`, `react_ref.tracing_hook_transition` | `tests/react_wasm_strictmode_harness.rs` | `artifacts/onboarding/react.behavior_strict_mode_double_invocation.log`, `artifacts/onboarding/react.timing_restart_churn.log` |
@@ -101,6 +101,11 @@ The dedicated-worker summary is expected to retain these bundle markers:
 - `worker_artifact_quota_guard_marker`
 - `worker_artifact_cleanup_marker`
 
+The dedicated-worker summary bundle must also preserve top-level
+`scenario_inventory` plus artifact pointers under `artifacts` so
+release-governance reviews can trace `summary.json`, `browser-run.json`, and
+supporting logs without rerunning the fixture.
+
 Primary deterministic validation commands:
 
 ```bash
@@ -119,8 +124,13 @@ This fixture is the canonical Rust-authored browser example for:
 
 - the truthful repository-maintained browser-facing Rust workflow
 - a real wasm package layout that stages generated `pkg/` output next to a frontend consumer
+- a dedicated-worker companion bundle at
+  `tests/fixtures/rust-browser-consumer/src/worker.ts` for preferred-lane
+  selection and downgrade coverage
 - provider/helper-driven structured-concurrency lifecycle evidence instead of a fabricated public browser `RuntimeBuilder` story
 - explicit browser capability reporting, one successful completion path, and one unmount-driven cancellation path
+- execution-ladder downgrade evidence for `missing_webassembly` and
+  `candidate_host_role_mismatch` when the preferred host lane is unavailable
 - deterministic artifact output under `target/e2e-results/rust_browser_consumer/`
 
 The Rust-browser summary is expected to retain these contract markers:
