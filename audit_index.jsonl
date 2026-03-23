@@ -999,3 +999,31 @@
 {"file":"src/net/websocket/close.rs","lines":786,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Close state machine correct, RFC 6455 code validation correct."}
 {"file":"src/net/tcp/virtual_tcp.rs","lines":876,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Buffer handling correct, proper wakeups. Test infrastructure."}
 {"file":"src/net/dns/lookup.rs","lines":621,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Result types, Happy Eyeballs interleave correct."}
+{"file":"src/runtime/state.rs","lines":7251,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core state machine audited in batch 426"}
+{"file":"src/cx/registry.rs","lines":3510,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"NameRegistry audited in batch 426"}
+{"file":"src/cx/cx.rs","lines":3409,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability context audited in batch 426"}
+{"file":"src/cx/scope.rs","lines":2375,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Structured concurrency scope audited in batch 426"}
+{"file":"src/remote.rs","lines":4055,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Remote Saga audited in batch 426"}
+{"file":"src/types/cancel.rs","lines":2523,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cancel reason types audited in batch 426"}
+{"file":"src/time/wheel.rs","lines":2191,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer wheel audited in batch 426"}
+{"file":"src/combinator/race.rs","lines":1275,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Race combinator audited in batch 426"}
+{"file":"src/combinator/quorum.rs","lines":805,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Quorum combinator audited in batch 426"}
+{"file":"src/obligation/lyapunov.rs","lines":2302,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lyapunov governor audited in batch 426"}
+{"file":"src/obligation/no_aliasing_proof.rs","lines":2140,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"No-aliasing proof audited in batch 426"}
+{"file":"src/runtime/reactor/lab.rs","lines":2615,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":0,"notes":"Lab reactor HashMap determinism fixed in batch 426"}
+{"file":"src/io/browser_stream.rs","lines":2970,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Browser stream audited in batch 426"}
+{"file":"src/runtime/scheduler/priority.rs","lines":3063,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Priority scheduler audited in batch 426"}
+{"file":"src/trace/event.rs","lines":3546,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace event types audited in batch 426"}
+{"file":"src/trace/crashpack.rs","lines":3472,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Crash diagnostics audited in batch 426"}
+{"file":"src/record/region.rs","lines":2368,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Region records audited in batch 426"}
+{"file":"src/runtime/io_driver.rs","lines":2135,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"IO driver: RAII cleanup, PollingGuard restore, retry on deregister. Clean."}
+{"file":"src/runtime/deadline_monitor.rs","lines":1642,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deadline monitor: saturating duration, fraction_nanos clamped. Clean."}
+{"file":"src/record/task.rs","lines":1768,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Task records: phase transitions validated in debug. Clean."}
+{"file":"src/http/h1/types.rs","lines":1791,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP/1.1 types: header storage, status codes. Clean."}
+{"file":"src/service/service.rs","lines":1646,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core service trait, AsupersyncAdapter. Clean."}
+{"file":"src/obligation/choreography/pipeline.rs","lines":1898,"batch":429,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Obligation pipeline: BTreeMap for determinism. Clean."}
+{"file":"src/database/pool.rs","lines":0,"batch":429,"date":"2026-03-23","agent":"Gemini","verdict":"FIXED","bugs":1,"notes":"Fixed compiler error: replaced non-existent saturating_duration_since on Instant with standard duration_since wrapped in Duration::from_nanos."}
+{"file":"src/database/sqlite.rs","lines":0,"batch":429,"date":"2026-03-23","agent":"Gemini","verdict":"FIXED","bugs":1,"notes":"Fixed borrow checker conflict: extracted column info (column_names, column_count) before querying to prevent overlapping immutable and mutable borrows on the SQLite statement."}
+{"file":"src/net/tcp/stream.rs","lines":0,"batch":429,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Verified epoll integration for connect(2) and nonblocking I/O readiness bounds. Confirmed shutdown behavior correctly differentiates shared halves."}
+{"file":"src/net/tcp/listener.rs","lines":0,"batch":429,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Verified accept storm backoff math limits strictly to 32ms cap and clears appropriately."}
+{"file":"src/io/copy.rs","lines":0,"batch":429,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Confirmed absence of starvation loops. Yield budgets (32-64 ops) effectively manage CPU sharing without stalling executors."}
