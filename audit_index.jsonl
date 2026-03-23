@@ -978,3 +978,6 @@
 {"file":"src/runtime/env_config.rs","status":"audited"}
 {"file":"src/security/authenticated.rs","status":"audited"}
 {"file":"src/lab/oracle/actor.rs","lines":845,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 MEDIUM: ActorLeakOracle and MailboxOracle iterate HashMap in non-deterministic order for violation selection. Fixed by sorting keys before iteration."}
+{"file":"src/types/wasm_abi.rs","lines":6674,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"WASM ABI schema types. No casts, no arithmetic. Clean."}
+{"file":"src/lab/oracle/spork.rs","lines":600,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"All check() methods sort HashMap keys before iteration. Deterministic."}
+{"file":"src/lab/oracle/quiescence.rs","lines":400,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Violations stored in Vec, check returns first(). Deterministic."}
