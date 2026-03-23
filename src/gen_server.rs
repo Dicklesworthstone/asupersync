@@ -1103,39 +1103,127 @@ impl<S: GenServer> GenServerHandle<S> {
     pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
-            let mut guard = inner.write();
-            guard.cancel_requested = true;
-            guard
-                .fast_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
+            let cancel_waker = {
+                let mut guard = inner.write();
+                guard.cancel_requested = true;
+                guard
+                    .fast_cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if guard.cancel_reason.is_none() {
+                    guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
+                }
+                guard.cancel_waker.clone()
+            };
+            if let Some(waker) = cancel_waker {
+                waker.wake_by_ref();
+            }
         }
         self.sender.wake_receiver();
     }
 
     /// Wait for the server to finish and return its final state.
-    pub async fn join(&mut self, cx: &Cx) -> Result<S, JoinError> {
-        if self.completed {
-            return Err(JoinError::PolledAfterCompletion);
+    pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> GenServerJoinFuture<'a, S> {
+        let cx_inner = self.inner.clone();
+        let receiver = &mut self.receiver;
+        let terminal_state = &mut self.completed;
+        GenServerJoinFuture {
+            inner: receiver.recv_uninterruptible(),
+            cx_inner,
+            sender: self.sender.clone(),
+            state: Arc::clone(&self.state),
+            terminal_state,
+            drop_abort_defused: false,
+        }
+    }
+}
+
+/// Future returned by [`GenServerHandle::join`].
+///
+/// This future aborts the server if dropped before completion, ensuring correct
+/// cleanup in races and timeouts.
+pub struct GenServerJoinFuture<'a, S: GenServer> {
+    inner: oneshot::RecvUninterruptibleFuture<'a, Result<S, JoinError>>,
+    cx_inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+    sender: mpsc::Sender<Envelope<S>>,
+    state: Arc<GenServerStateCell>,
+    terminal_state: &'a mut bool,
+    drop_abort_defused: bool,
+}
+
+impl<S: GenServer> GenServerJoinFuture<'_, S> {
+    fn closed_reason(&self) -> crate::types::CancelReason {
+        self.cx_inner
+            .upgrade()
+            .and_then(|inner| inner.read().cancel_reason.clone())
+            .unwrap_or_else(|| crate::types::CancelReason::user("join channel closed"))
+    }
+
+    fn abort(&self) {
+        self.state.store(ActorState::Stopping);
+        if let Some(inner) = self.cx_inner.upgrade() {
+            let cancel_waker = {
+                let mut guard = inner.write();
+                guard.cancel_requested = true;
+                guard
+                    .fast_cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if guard.cancel_reason.is_none() {
+                    guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
+                }
+                guard.cancel_waker.clone()
+            };
+            if let Some(waker) = cancel_waker {
+                waker.wake_by_ref();
+            }
+        }
+        self.sender.wake_receiver();
+    }
+}
+
+impl<S: GenServer> std::future::Future for GenServerJoinFuture<'_, S> {
+    type Output = Result<S, JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = &mut *self;
+        if *this.terminal_state {
+            return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
         }
 
-        match self.receiver.recv(cx).await {
-            Ok(result) => {
-                self.completed = true;
-                result
+        match std::pin::Pin::new(&mut this.inner).poll(cx) {
+            std::task::Poll::Ready(Ok(res)) => {
+                *this.terminal_state = true;
+                this.drop_abort_defused = true;
+                std::task::Poll::Ready(res)
             }
-            Err(oneshot::RecvError::Closed) => {
-                self.completed = true;
-                Err(JoinError::Cancelled(self.closed_reason()))
+            std::task::Poll::Ready(Err(oneshot::RecvError::Closed)) => {
+                *this.terminal_state = true;
+                this.drop_abort_defused = true;
+                let reason = this.closed_reason();
+                std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
             }
-            Err(oneshot::RecvError::Cancelled) => {
-                let reason = cx
-                    .cancel_reason()
-                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
-                Err(JoinError::Cancelled(reason))
+            std::task::Poll::Ready(Err(oneshot::RecvError::Cancelled)) => {
+                unreachable!("RecvUninterruptibleFuture cannot return Cancelled");
             }
-            Err(oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("GenServerHandle::join awaits a fresh oneshot recv future")
+            std::task::Poll::Ready(Err(oneshot::RecvError::PolledAfterCompletion)) => {
+                unreachable!(
+                    "JoinFuture guards repolls before polling the inner oneshot recv future"
+                )
             }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl<S: GenServer> Drop for GenServerJoinFuture<'_, S> {
+    fn drop(&mut self) {
+        if !*self.terminal_state && !self.drop_abort_defused {
+            if self.inner.receiver_finished() {
+                return;
+            }
+            self.abort();
         }
     }
 }
@@ -2782,6 +2870,57 @@ mod tests {
         assert!(handle.is_finished(), "server should finish after stop");
 
         crate::test_complete!("gen_server_stop_wakes_blocked_mailbox_recv");
+    }
+
+    #[test]
+    fn dropped_join_future_marks_server_stopping_like_abort() {
+        init_test("dropped_join_future_marks_server_stopping_like_abort");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let final_count = Arc::new(AtomicU64::new(u64::MAX));
+        let server = ObservableCounter {
+            count: 0,
+            final_count: Arc::clone(&final_count),
+        };
+
+        let (mut handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        runtime.scheduler.lock().schedule(server_task_id, 0);
+        runtime.run_until_idle();
+        assert_eq!(
+            handle.state.load(),
+            ActorState::Running,
+            "server should be running before join drop requests abort"
+        );
+
+        drop(handle.join(&cx));
+
+        assert_eq!(
+            handle.state.load(),
+            ActorState::Stopping,
+            "dropping join future should mirror GenServerHandle::abort state transition"
+        );
+
+        runtime.run_until_quiescent();
+        assert!(
+            handle.is_finished(),
+            "server should stop after join future drop"
+        );
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            0,
+            "idle server should stop without processing phantom work"
+        );
+
+        crate::test_complete!("dropped_join_future_marks_server_stopping_like_abort");
     }
 
     // ---- Observable GenServer for E2E ----

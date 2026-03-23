@@ -278,29 +278,17 @@ impl<A: Actor> ActorHandle<A> {
     ///
     /// Blocks until the actor loop completes (mailbox closed or cancelled),
     /// then returns the actor's final state or a join error.
-    pub async fn join(&mut self, cx: &Cx) -> Result<A, JoinError> {
-        if self.completed {
-            return Err(JoinError::PolledAfterCompletion);
-        }
-
-        match self.receiver.recv(cx).await {
-            Ok(result) => {
-                self.completed = true;
-                result
-            }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                self.completed = true;
-                Err(JoinError::Cancelled(self.closed_reason()))
-            }
-            Err(crate::channel::oneshot::RecvError::Cancelled) => {
-                let reason = cx
-                    .cancel_reason()
-                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
-                Err(JoinError::Cancelled(reason))
-            }
-            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("ActorHandle::join awaits a fresh oneshot recv future")
-            }
+    pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> ActorJoinFuture<'a, A> {
+        let cx_inner = self.inner.clone();
+        let receiver = &mut self.receiver;
+        let terminal_state = &mut self.completed;
+        ActorJoinFuture {
+            inner: receiver.recv_uninterruptible(),
+            cx_inner,
+            sender: self.sender.clone(),
+            state: Arc::clone(&self.state),
+            terminal_state,
+            drop_abort_defused: false,
         }
     }
 
@@ -312,13 +300,115 @@ impl<A: Actor> ActorHandle<A> {
     pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
-            let mut guard = inner.write();
-            guard.cancel_requested = true;
-            guard
-                .fast_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
+            let cancel_waker = {
+                let mut guard = inner.write();
+                guard.cancel_requested = true;
+                guard
+                    .fast_cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if guard.cancel_reason.is_none() {
+                    guard.cancel_reason = Some(crate::types::CancelReason::user("actor aborted"));
+                }
+                guard.cancel_waker.clone()
+            };
+            if let Some(waker) = cancel_waker {
+                waker.wake_by_ref();
+            }
         }
         self.sender.wake_receiver();
+    }
+}
+
+/// Future returned by [`ActorHandle::join`].
+///
+/// This future aborts the actor if dropped before completion, ensuring correct
+/// cleanup in races and timeouts.
+pub struct ActorJoinFuture<'a, A: Actor> {
+    inner: crate::channel::oneshot::RecvUninterruptibleFuture<'a, Result<A, JoinError>>,
+    cx_inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+    sender: mpsc::Sender<A::Message>,
+    state: Arc<ActorStateCell>,
+    terminal_state: &'a mut bool,
+    drop_abort_defused: bool,
+}
+
+impl<A: Actor> ActorJoinFuture<'_, A> {
+    fn closed_reason(&self) -> crate::types::CancelReason {
+        self.cx_inner
+            .upgrade()
+            .and_then(|inner| inner.read().cancel_reason.clone())
+            .unwrap_or_else(|| crate::types::CancelReason::user("join channel closed"))
+    }
+
+    fn abort(&self) {
+        self.state.store(ActorState::Stopping);
+        if let Some(inner) = self.cx_inner.upgrade() {
+            let cancel_waker = {
+                let mut guard = inner.write();
+                guard.cancel_requested = true;
+                guard
+                    .fast_cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if guard.cancel_reason.is_none() {
+                    guard.cancel_reason = Some(crate::types::CancelReason::user("actor aborted"));
+                }
+                guard.cancel_waker.clone()
+            };
+            if let Some(waker) = cancel_waker {
+                waker.wake_by_ref();
+            }
+        }
+        self.sender.wake_receiver();
+    }
+}
+
+impl<A: Actor> std::future::Future for ActorJoinFuture<'_, A> {
+    type Output = Result<A, JoinError>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = &mut *self;
+        if *this.terminal_state {
+            return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
+        }
+
+        match Pin::new(&mut this.inner).poll(cx) {
+            std::task::Poll::Ready(Ok(res)) => {
+                *this.terminal_state = true;
+                this.drop_abort_defused = true;
+                std::task::Poll::Ready(res)
+            }
+            std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
+                *this.terminal_state = true;
+                this.drop_abort_defused = true;
+                let reason = this.closed_reason();
+                std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
+            }
+            std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Cancelled)) => {
+                unreachable!("RecvUninterruptibleFuture cannot return Cancelled");
+            }
+            std::task::Poll::Ready(Err(
+                crate::channel::oneshot::RecvError::PolledAfterCompletion,
+            )) => {
+                unreachable!(
+                    "JoinFuture guards repolls before polling the inner oneshot recv future"
+                )
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl<A: Actor> Drop for ActorJoinFuture<'_, A> {
+    fn drop(&mut self) {
+        if !*self.terminal_state && !self.drop_abort_defused {
+            if self.inner.receiver_finished() {
+                return;
+            }
+            self.abort();
+        }
     }
 }
 
@@ -1444,6 +1534,56 @@ mod tests {
         );
 
         crate::test_complete!("actor_ref_is_alive_transitions");
+    }
+
+    #[test]
+    fn dropped_join_future_marks_actor_stopping_like_abort() {
+        init_test("dropped_join_future_marks_actor_stopping_like_abort");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (on_stop_count, started, stopped) = observable_state();
+        let actor = ObservableCounter::new(on_stop_count.clone(), started.clone(), stopped.clone());
+
+        let (mut handle, stored) = scope
+            .spawn_actor(&mut runtime.state, &cx, actor, 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_idle();
+        assert_eq!(
+            handle.state.load(),
+            ActorState::Running,
+            "actor should be running before join drop requests abort"
+        );
+
+        drop(handle.join(&cx));
+
+        assert_eq!(
+            handle.state.load(),
+            ActorState::Stopping,
+            "dropping join future should mirror ActorHandle::abort state transition"
+        );
+
+        runtime.run_until_quiescent();
+        assert!(
+            handle.is_finished(),
+            "actor should stop after join future drop"
+        );
+        assert!(started.load(Ordering::SeqCst), "on_start should have run");
+        assert!(stopped.load(Ordering::SeqCst), "on_stop should have run");
+        assert_eq!(
+            on_stop_count.load(Ordering::SeqCst),
+            0,
+            "idle actor should stop without processing phantom messages"
+        );
+
+        crate::test_complete!("dropped_join_future_marks_actor_stopping_like_abort");
     }
 
     /// E2E: Supervised actor restarts on panic within budget.
