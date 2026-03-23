@@ -209,6 +209,7 @@ struct SplitIoState {
     registration: Option<IoRegistration>,
     read_waker: Option<Waker>,
     write_waker: Option<Waker>,
+    combined_waker: Option<Waker>,
 }
 
 /// Shared state for owned split halves.
@@ -238,6 +239,7 @@ impl UnixStreamInner {
         // Store this direction's waker for combined dispatch.
         // Use independent checks (not else-if) so that callers passing
         // combined interest (READABLE | WRITABLE) update both wakers.
+        let mut wakers_changed = false;
         if interest.is_readable() {
             if !guard
                 .read_waker
@@ -245,6 +247,7 @@ impl UnixStreamInner {
                 .is_some_and(|w| w.will_wake(cx.waker()))
             {
                 guard.read_waker = Some(cx.waker().clone());
+                wakers_changed = true;
             }
         }
         if interest.is_writable() {
@@ -254,7 +257,15 @@ impl UnixStreamInner {
                 .is_some_and(|w| w.will_wake(cx.waker()))
             {
                 guard.write_waker = Some(cx.waker().clone());
+                wakers_changed = true;
             }
+        }
+
+        if wakers_changed || guard.combined_waker.is_none() {
+            guard.combined_waker = Some(combined_waker(
+                guard.read_waker.as_ref(),
+                guard.write_waker.as_ref(),
+            ));
         }
 
         let mut dropped_reg = None;
@@ -267,13 +278,14 @@ impl UnixStreamInner {
                 registration,
                 read_waker,
                 write_waker,
+                combined_waker: cached_combined_waker,
             } = &mut *guard;
             if let Some(reg) = registration.as_mut() {
                 let combined_interest =
                     registration_interest(read_waker.is_some(), write_waker.is_some(), interest);
-                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
+                let waker = cached_combined_waker.as_ref().unwrap();
                 // Single lock in io_driver: re-arm interest + refresh waker.
-                match reg.rearm(combined_interest, &waker) {
+                match reg.rearm(combined_interest, waker) {
                     Ok(true) => early_return = Some(Ok(())),
                     Ok(false) => {
                         dropped_reg = registration.take();
@@ -306,7 +318,7 @@ impl UnixStreamInner {
         // held across `driver.register()` to prevent a race where both halves
         // concurrently attempt to create a fresh registration for the same fd,
         // causing one to fail with EEXIST from epoll_ctl(ADD).
-        let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+        let waker = guard.combined_waker.as_ref().unwrap().clone();
         let register_interest = registration_interest(
             guard.read_waker.is_some(),
             guard.write_waker.is_some(),
@@ -344,11 +356,21 @@ impl UnixStreamInner {
     fn clear_waiter_on_drop(&self, interest: Interest) {
         let mut guard = self.state.lock();
 
+        let mut wakers_changed = false;
         if interest.is_readable() {
             guard.read_waker = None;
+            wakers_changed = true;
         }
         if interest.is_writable() {
             guard.write_waker = None;
+            wakers_changed = true;
+        }
+
+        if wakers_changed || guard.combined_waker.is_none() {
+            guard.combined_waker = Some(combined_waker(
+                guard.read_waker.as_ref(),
+                guard.write_waker.as_ref(),
+            ));
         }
 
         let desired_interest = registration_interest(
@@ -361,7 +383,7 @@ impl UnixStreamInner {
         let mut wakers_to_wake = None;
 
         if !clear_registration {
-            let combined = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+            let combined = guard.combined_waker.as_ref().unwrap().clone();
             let is_some = guard.registration.is_some();
             let rearm_ok = guard
                 .registration
@@ -426,6 +448,7 @@ impl OwnedReadHalf {
                 registration,
                 read_waker: None,
                 write_waker: None,
+                combined_waker: None,
             }),
         });
         (

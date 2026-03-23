@@ -248,6 +248,8 @@ pub struct ServerWebSocket<IO> {
     extensions: Vec<String>,
     /// Pending pong payloads to send.
     pending_pongs: std::collections::VecDeque<crate::bytes::Bytes>,
+    /// Whether there are encoded pongs in the write buffer that need flushing.
+    pending_pong_flush: bool,
 }
 
 impl<IO> ServerWebSocket<IO>
@@ -278,6 +280,7 @@ where
             protocol: accept.protocol,
             extensions: accept.extensions,
             pending_pongs: std::collections::VecDeque::new(),
+            pending_pong_flush: false,
         }
     }
 
@@ -377,10 +380,19 @@ where
                 )));
             }
 
-            // Send any pending pongs in FIFO order
+            // Send any pending pongs in FIFO order (cancel-safe: pop_front() takes
+            // one at a time from the front without reversing the whole queue).
+            let mut flush_pending_pongs = self.pending_pong_flush;
             while let Some(payload) = self.pending_pongs.pop_front() {
+                flush_pending_pongs = true;
+                self.pending_pong_flush = true;
                 let pong = Frame::pong(payload);
-                self.send_frame(pong).await?;
+                self.encode_frame(pong)?;
+            }
+
+            if flush_pending_pongs {
+                self.flush_write_buf().await?;
+                self.pending_pong_flush = false;
             }
 
             if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
@@ -509,11 +521,15 @@ where
         Ok(())
     }
 
-    /// Internal: send a single frame.
-    async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        use std::future::poll_fn;
-
+    /// Internal: encode a frame into the write buffer.
+    fn encode_frame(&mut self, frame: Frame) -> Result<(), WsError> {
         self.codec.encode(frame, &mut self.write_buf)?;
+        Ok(())
+    }
+
+    /// Internal: flush the write buffer to the underlying I/O stream.
+    async fn flush_write_buf(&mut self) -> Result<(), WsError> {
+        use std::future::poll_fn;
 
         while !self.write_buf.is_empty() {
             let n =
@@ -527,7 +543,16 @@ where
             let _ = self.write_buf.split_to(n);
         }
 
+        // Ensure the underlying I/O stream is flushed
+        poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
+
         Ok(())
+    }
+
+    /// Internal: send a single frame.
+    async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
+        self.encode_frame(frame)?;
+        self.flush_write_buf().await
     }
 
     /// Internal: read more data into buffer.

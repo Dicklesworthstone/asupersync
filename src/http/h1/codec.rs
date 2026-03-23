@@ -354,8 +354,15 @@ fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpEr
     let name_bytes = &line_bytes[..colon];
     let value_bytes = &line_bytes[value_start..value_end];
     let name = std::str::from_utf8(name_bytes).map_err(|_| HttpError::BadHeader)?;
-    let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::BadHeader)?;
-    Ok((name.to_owned(), value.to_owned()))
+
+    // Header values might contain obs-text (bytes >= 0x80) which are not always valid UTF-8.
+    // Fall back to Latin-1 decoding if UTF-8 validation fails.
+    let value = match std::str::from_utf8(value_bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => value_bytes.iter().map(|&b| b as char).collect(),
+    };
+
+    Ok((name.to_owned(), value))
 }
 
 /// Parse a single `Name: Value` header line.

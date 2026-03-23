@@ -183,6 +183,8 @@ pub enum BufferError<E> {
     Full,
     /// The buffer has been closed.
     Closed,
+    /// The future was polled after it had already completed.
+    PolledAfterCompletion,
     /// The inner service returned an error.
     Inner(E),
 }
@@ -192,6 +194,7 @@ impl<E: fmt::Display> fmt::Display for BufferError<E> {
         match self {
             Self::Full => write!(f, "buffer full"),
             Self::Closed => write!(f, "buffer closed"),
+            Self::PolledAfterCompletion => write!(f, "buffer future polled after completion"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
     }
@@ -200,7 +203,7 @@ impl<E: fmt::Display> fmt::Display for BufferError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for BufferError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Full | Self::Closed => None,
+            Self::Full | Self::Closed | Self::PolledAfterCompletion => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -262,14 +265,12 @@ where
         loop {
             let this = self.as_mut().get_mut();
 
-            let state = std::mem::replace(&mut this.state, BufferFutureState::Done);
-
-            match state {
-                BufferFutureState::WaitingForReady { mut request, shared } => {
+            match &mut this.state {
+                BufferFutureState::WaitingForReady { request, shared } => {
                     let mut inner = shared.inner.lock();
                     match inner.poll_ready(cx) {
                         Poll::Ready(Ok(())) => {
-                            let req = request.take().unwrap();
+                            let req = request.take().expect("request missing");
                             let future = inner.call(req);
                             drop(inner);
 
@@ -278,7 +279,11 @@ where
                                 w.wake();
                             }
 
-                            this.state = BufferFutureState::Active { future, shared };
+                            let shared_clone = Arc::clone(shared);
+                            this.state = BufferFutureState::Active {
+                                future,
+                                shared: shared_clone,
+                            };
                             // Loop around to poll Active
                         }
                         Poll::Ready(Err(e)) => {
@@ -291,8 +296,7 @@ where
                             {
                                 let mut pending = shared.pending.lock();
                                 *pending = pending.saturating_sub(1);
-                                let wakers =
-                                    std::mem::take(&mut *shared.ready_wakers.lock());
+                                let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
                                 drop(pending);
                                 for w in wakers {
                                     w.wake();
@@ -309,12 +313,11 @@ where
                                     wakers.push(cx.waker().clone());
                                 }
                             }
-                            this.state = BufferFutureState::WaitingForReady { request, shared };
                             return Poll::Pending;
                         }
                     }
                 }
-                BufferFutureState::Active { mut future, shared } => match Pin::new(&mut future).poll(cx) {
+                BufferFutureState::Active { future, shared } => match Pin::new(future).poll(cx) {
                     Poll::Ready(result) => {
                         let mut pending = shared.pending.lock();
                         *pending = pending.saturating_sub(1);
@@ -324,22 +327,24 @@ where
                             w.wake();
                         }
 
+                        this.state = BufferFutureState::Done;
+
                         match result {
                             Ok(v) => return Poll::Ready(Ok(v)),
                             Err(e) => return Poll::Ready(Err(BufferError::Inner(e))),
                         }
                     }
                     Poll::Pending => {
-                        this.state = BufferFutureState::Active { future, shared };
                         return Poll::Pending;
                     }
                 },
-                BufferFutureState::Error(mut err) => {
+                BufferFutureState::Error(err) => {
                     let err = err.take().expect("polled after completion");
+                    this.state = BufferFutureState::Done;
                     return Poll::Ready(Err(err));
                 }
                 BufferFutureState::Done => {
-                    panic!("BufferFuture polled after completion")
+                    return Poll::Ready(Err(BufferError::PolledAfterCompletion));
                 }
             }
         }
@@ -813,9 +818,12 @@ mod tests {
 
     #[test]
     fn buffer_future_debug() {
-        let err = BufferFuture::<std::future::Ready<Result<i32, std::convert::Infallible>>, std::convert::Infallible, EchoService, i32>::error(
-            BufferError::Full,
-        );
+        let err = BufferFuture::<
+            std::future::Ready<Result<i32, std::convert::Infallible>>,
+            std::convert::Infallible,
+            EchoService,
+            i32,
+        >::error(BufferError::Full);
         let dbg = format!("{err:?}");
         assert!(dbg.contains("BufferFuture"));
         assert!(dbg.contains("Error"));
@@ -823,24 +831,33 @@ mod tests {
 
     #[test]
     fn buffer_future_error_debug() {
-        let future = BufferFuture::<std::future::Ready<Result<i32, std::convert::Infallible>>, std::convert::Infallible, EchoService, i32>::error(
-            BufferError::Full,
-        );
+        let future = BufferFuture::<
+            std::future::Ready<Result<i32, std::convert::Infallible>>,
+            std::convert::Infallible,
+            EchoService,
+            i32,
+        >::error(BufferError::Full);
         let dbg = format!("{future:?}");
         assert!(dbg.contains("Error"));
     }
 
     #[test]
-    #[should_panic(expected = "polled after completion")]
-    fn buffer_future_panics_when_polled_after_completion() {
-        let future = BufferFuture::<std::future::Ready<Result<i32, std::convert::Infallible>>, std::convert::Infallible, EchoService, i32>::error(
-            BufferError::Full,
-        );
+    fn buffer_future_returns_error_when_polled_after_completion() {
+        let future = BufferFuture::<
+            std::future::Ready<Result<i32, std::convert::Infallible>>,
+            std::convert::Infallible,
+            EchoService,
+            i32,
+        >::error(BufferError::Full);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut future = future;
         let _ = Pin::new(&mut future).poll(&mut cx);
-        let _ = Pin::new(&mut future).poll(&mut cx); // should panic
+        let poll2 = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            poll2,
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
     }
 
     // ================================================================

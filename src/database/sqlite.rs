@@ -342,46 +342,42 @@ impl SqliteRow {
 
     /// Gets an integer value by column name.
     pub fn get_i64(&self, column: &str) -> Result<i64, SqliteError> {
-        self.get(column)?
-            .as_integer()
-            .ok_or_else(|| SqliteError::TypeMismatch {
-                column: column.to_string(),
-                expected: "integer",
-                actual: format!("{:?}", self.get(column).unwrap()),
-            })
+        let val = self.get(column)?;
+        val.as_integer().ok_or_else(|| SqliteError::TypeMismatch {
+            column: column.to_string(),
+            expected: "integer",
+            actual: format!("{val:?}"),
+        })
     }
 
     /// Gets a real value by column name.
     pub fn get_f64(&self, column: &str) -> Result<f64, SqliteError> {
-        self.get(column)?
-            .as_real()
-            .ok_or_else(|| SqliteError::TypeMismatch {
-                column: column.to_string(),
-                expected: "real",
-                actual: format!("{:?}", self.get(column).unwrap()),
-            })
+        let val = self.get(column)?;
+        val.as_real().ok_or_else(|| SqliteError::TypeMismatch {
+            column: column.to_string(),
+            expected: "real",
+            actual: format!("{val:?}"),
+        })
     }
 
     /// Gets a text value by column name.
     pub fn get_str(&self, column: &str) -> Result<&str, SqliteError> {
-        self.get(column)?
-            .as_text()
-            .ok_or_else(|| SqliteError::TypeMismatch {
-                column: column.to_string(),
-                expected: "text",
-                actual: format!("{:?}", self.get(column).unwrap()),
-            })
+        let val = self.get(column)?;
+        val.as_text().ok_or_else(|| SqliteError::TypeMismatch {
+            column: column.to_string(),
+            expected: "text",
+            actual: format!("{val:?}"),
+        })
     }
 
     /// Gets a blob value by column name.
     pub fn get_blob(&self, column: &str) -> Result<&[u8], SqliteError> {
-        self.get(column)?
-            .as_blob()
-            .ok_or_else(|| SqliteError::TypeMismatch {
-                column: column.to_string(),
-                expected: "blob",
-                actual: format!("{:?}", self.get(column).unwrap()),
-            })
+        let val = self.get(column)?;
+        val.as_blob().ok_or_else(|| SqliteError::TypeMismatch {
+            column: column.to_string(),
+            expected: "blob",
+            actual: format!("{val:?}"),
+        })
     }
 
     /// Returns the number of columns in this row.
@@ -842,7 +838,9 @@ impl SqliteConnection {
                     .query(params_refs.as_slice())
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-                let row_opt = rows.next().map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                let row_opt = rows
+                    .next()
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
                 let result = if let Some(row) = row_opt {
                     let column_count = stmt.column_count();

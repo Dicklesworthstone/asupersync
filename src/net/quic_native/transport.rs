@@ -376,7 +376,7 @@ impl LossRecovery {
         let srtt = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
         let rttvar = self.rtt.rttvar_micros().unwrap_or(srtt / 2);
         let granularity = 1_000;
-        let mut timeout = srtt + (4 * rttvar).max(granularity);
+        let mut timeout = srtt.saturating_add(4u64.saturating_mul(rttvar).max(granularity));
         timeout = timeout.saturating_add(self.max_ack_delay_micros);
         let backoff = 1u64 << self.pto_count.min(10);
         Some(now_micros.saturating_add(timeout.saturating_mul(backoff)))

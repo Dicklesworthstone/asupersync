@@ -230,29 +230,30 @@ impl<T: Clone> FaultSender<T> {
             should_duplicate = rng.should_inject(self.config.duplication_probability);
         }
 
-        if should_reorder {
-            self.record_reorder();
-            let value = {
-                let mut buffer = self.reorder_buffer.lock();
-                if buffer.len() + 1 < self.config.reorder_buffer_size {
-                    buffer.push(value);
-                    drop(buffer);
-                    return Ok(());
-                }
-                value
-            };
-            return self.auto_flush_including_current(cx, value).await;
-        }
-
-        // Clone before send only if duplication is needed.
         let duplicate = if should_duplicate {
             Some(value.clone())
         } else {
             None
         };
 
-        self.inner.send(cx, value).await?;
-        self.record_sent();
+        if should_reorder {
+            self.record_reorder();
+            let mut value_to_flush = None;
+            {
+                let mut buffer = self.reorder_buffer.lock();
+                if buffer.len() + 1 < self.config.reorder_buffer_size {
+                    buffer.push(value);
+                } else {
+                    value_to_flush = Some(value);
+                }
+            }
+            if let Some(v) = value_to_flush {
+                self.auto_flush_including_current(cx, v).await?;
+            }
+        } else {
+            self.inner.send(cx, value).await?;
+            self.record_sent();
+        }
 
         // Send duplicate if triggered — only record evidence after successful delivery.
         if let Some(dup) = duplicate {

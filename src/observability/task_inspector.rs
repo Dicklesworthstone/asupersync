@@ -1249,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_only_reports_pending_obligations() {
+    fn inspector_only_reports_only_pending_obligations() {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
         let (task_id, _handle) = state
@@ -1264,6 +1264,12 @@ mod tests {
         state
             .commit_obligation(committed)
             .expect("commit obligation");
+        let aborted = state
+            .create_obligation(crate::record::ObligationKind::Lease, task_id, root, None)
+            .expect("create aborted obligation");
+        state
+            .abort_obligation(aborted, crate::record::ObligationAbortReason::Cancel)
+            .expect("abort obligation");
 
         let inspector = TaskInspector::new(Arc::new(state), None);
         let details = inspector.inspect_task(task_id).expect("task exists");
