@@ -51,6 +51,15 @@ const RECOVERABILITY_LEVELS = Object.freeze([
   "unknown",
 ]);
 
+export const abiMetadata = Object.freeze({
+  abi_version: Object.freeze({
+    major: 1,
+    minor: 0,
+  }),
+  abi_signature_fingerprint_v1: 4558451663113424898,
+  profile: "prod",
+});
+
 const BUDGET_BOUNDS = Object.freeze({
   pollQuota: Object.freeze({ min: 1, max: 1_000_000 }),
   deadlineMs: Object.freeze({ min: 0, max: 86_400_000 }),

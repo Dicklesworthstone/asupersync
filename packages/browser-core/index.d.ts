@@ -11,6 +11,12 @@ export interface AbiVersion {
   minor: number;
 }
 
+export interface AbiMetadata {
+  readonly abi_version: Readonly<AbiVersion>;
+  readonly abi_signature_fingerprint_v1: number;
+  readonly profile: string;
+}
+
 export interface Budget {
   pollQuota: number;
   deadlineMs: number;
@@ -334,6 +340,7 @@ export declare const webtransportClose: typeof webtransport_close;
 export declare const webtransportCancel: typeof webtransport_cancel;
 export declare const abiVersion: typeof abi_version;
 export declare const abiFingerprint: typeof abi_fingerprint;
+export declare const abiMetadata: AbiMetadata;
 
 export declare const rawBindings: Readonly<{
   init: typeof init;

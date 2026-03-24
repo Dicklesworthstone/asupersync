@@ -1,7 +1,10 @@
 //! Contract checks for the service-worker bounded broker policy
 //! (`asupersync-n6kwt.7.1`).
 
+use serde_json::Value;
 use std::path::PathBuf;
+use std::process::Command;
+use tempfile::TempDir;
 
 const DOC_PATH: &str = "docs/wasm_service_worker_broker_contract.md";
 
@@ -19,6 +22,112 @@ fn read_file(path: &str) -> String {
         path.display()
     );
     content
+}
+
+fn run_node_json(script: &str, extra_env: &[(&str, &std::path::Path)]) -> Value {
+    let repo_root = repo_root();
+    let mut command = Command::new("node");
+    command
+        .arg("--input-type=module")
+        .arg("--eval")
+        .arg(script)
+        .current_dir(&repo_root)
+        .env("ASUPERSYNC_REPO_ROOT", &repo_root);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .expect("failed to execute node ESM contract harness");
+
+    let stdout = String::from_utf8(output.stdout).expect("node stdout must be valid UTF-8");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "node broker harness failed:\nstdout:\n{stdout}\n\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("ExperimentalWarning"),
+        "node import path must not require experimental JSON modules:\n{stderr}"
+    );
+
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("failed to parse node JSON stdout: {error}\n{stdout}"))
+}
+
+fn write_stage_file(path: &std::path::Path, contents: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", parent.display()));
+    }
+    std::fs::write(path, contents)
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
+}
+
+fn stage_browser_node_fixture() -> Option<TempDir> {
+    let repo_root = repo_root();
+    let browser_dist = repo_root.join("packages/browser/dist/index.js");
+    let browser_core_package = repo_root.join("packages/browser-core/package.json");
+    let browser_core_index = repo_root.join("packages/browser-core/index.js");
+    let browser_core_wasm_bindings = repo_root.join("packages/browser-core/asupersync.js");
+    let browser_core_abi_metadata = repo_root.join("packages/browser-core/abi-metadata.json");
+
+    for path in [
+        &browser_dist,
+        &browser_core_package,
+        &browser_core_index,
+        &browser_core_wasm_bindings,
+        &browser_core_abi_metadata,
+    ] {
+        if !path.exists() {
+            eprintln!(
+                "skipping staged Node broker proof because required package asset is unavailable: {}",
+                path.display()
+            );
+            return None;
+        }
+    }
+
+    let stage = tempfile::tempdir().expect("create staged node fixture directory");
+    let root = stage.path();
+
+    write_stage_file(
+        &root.join("browser/dist/index.js"),
+        &std::fs::read(&browser_dist)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", browser_dist.display())),
+    );
+    write_stage_file(
+        &root.join("node_modules/@asupersync/browser-core/package.json"),
+        &std::fs::read(&browser_core_package).unwrap_or_else(|error| {
+            panic!("failed to read {}: {error}", browser_core_package.display())
+        }),
+    );
+    write_stage_file(
+        &root.join("node_modules/@asupersync/browser-core/index.js"),
+        &std::fs::read(&browser_core_index).unwrap_or_else(|error| {
+            panic!("failed to read {}: {error}", browser_core_index.display())
+        }),
+    );
+    write_stage_file(
+        &root.join("node_modules/@asupersync/browser-core/asupersync.js"),
+        &std::fs::read(&browser_core_wasm_bindings).unwrap_or_else(|error| {
+            panic!(
+                "failed to read {}: {error}",
+                browser_core_wasm_bindings.display()
+            )
+        }),
+    );
+    write_stage_file(
+        &root.join("node_modules/@asupersync/browser-core/abi-metadata.json"),
+        &std::fs::read(&browser_core_abi_metadata).unwrap_or_else(|error| {
+            panic!(
+                "failed to read {}: {error}",
+                browser_core_abi_metadata.display()
+            )
+        }),
+    );
+
+    Some(stage)
 }
 
 #[test]
@@ -393,4 +502,414 @@ fn maintained_service_worker_broker_validation_path_is_pinned() {
             "fixture browser-run checker missing expected marker: {marker}"
         );
     }
+}
+
+#[test]
+fn node_executes_service_worker_broker_restart_flow_against_dist_bundle() {
+    let Some(stage) = stage_browser_node_fixture() else {
+        return;
+    };
+    let report = run_node_json(
+        r#"
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function createLocalStorageHarness() {
+  const backing = new Map();
+  return {
+    backing,
+    localStorage: {
+      get length() {
+        return backing.size;
+      },
+      clear() {
+        backing.clear();
+      },
+      getItem(key) {
+        return backing.has(key) ? backing.get(key) : null;
+      },
+      key(index) {
+        return Array.from(backing.keys())[index] ?? null;
+      },
+      removeItem(key) {
+        backing.delete(key);
+      },
+      setItem(key, value) {
+        backing.set(String(key), String(value));
+      },
+    },
+  };
+}
+
+const repoRoot = process.env.ASUPERSYNC_REPO_ROOT;
+assert(typeof repoRoot === "string" && repoRoot.length > 0, "ASUPERSYNC_REPO_ROOT must be set");
+const stageRoot = process.env.ASUPERSYNC_BROWSER_STAGE_ROOT;
+assert(
+  typeof stageRoot === "string" && stageRoot.length > 0,
+  "ASUPERSYNC_BROWSER_STAGE_ROOT must be set",
+);
+
+const browserEntryUrl = pathToFileURL(
+  resolve(stageRoot, "browser/dist/index.js"),
+).href;
+const abiMetadataSidecar = JSON.parse(
+  readFileSync(
+    resolve(stageRoot, "node_modules/@asupersync/browser-core/abi-metadata.json"),
+    "utf8",
+  ),
+);
+const browser = await import(browserEntryUrl);
+const {
+  abiMetadata,
+  BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
+  BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+  BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE,
+  BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
+  BROWSER_SERVICE_WORKER_BROKER_LANE,
+  createBrowserServiceWorkerBrokerStore,
+  detectBrowserServiceWorkerBrokerSupport,
+} = browser;
+
+const { backing, localStorage } = createLocalStorageHarness();
+const serviceWorkerGlobal = {
+  TextEncoder,
+  TextDecoder,
+  atob: (value) => Buffer.from(value, "base64").toString("binary"),
+  btoa: (value) => Buffer.from(value, "binary").toString("base64"),
+  clients: {
+    claim: async () => undefined,
+    matchAll: async () => [],
+    openWindow: async () => null,
+  },
+  localStorage,
+  location: { origin: "https://example.test" },
+  navigator: { serviceWorker: { controller: { id: "controller-1" } } },
+  registration: { scope: "https://example.test/app/" },
+  skipWaiting: async () => undefined,
+};
+
+let nowMs = 1_000;
+const now = () => {
+  nowMs += 100;
+  return nowMs;
+};
+
+const support = detectBrowserServiceWorkerBrokerSupport({
+  appNamespace: "browser.tests",
+  appVersionMajor: 7,
+  backend: "localstorage",
+  brokerProtocolVersion: 3,
+  expectedAppNamespace: "browser.tests",
+  expectedAppVersionMajor: 7,
+  expectedBrokerProtocolVersion: 3,
+  expectedRegistrationScope: "https://example.test/app/",
+  globalObject: serviceWorkerGlobal,
+  requireController: true,
+});
+assert(support.supported, `expected broker support, got ${support.reason}`);
+
+const store = createBrowserServiceWorkerBrokerStore({
+  backend: "localstorage",
+  globalObject: serviceWorkerGlobal,
+  now,
+});
+const registration = await store.registerBroker({
+  admission: {
+    origin: "https://example.test",
+    registrationScope: "https://example.test/app/",
+    appNamespace: "browser.tests",
+    appVersionMajor: 7,
+    brokerProtocolVersion: 3,
+    runProfile: "restartable",
+  },
+  capabilityManifestVersion: "caps-v1",
+  controllerPresent: true,
+  lifecycleState: "validating_scope",
+});
+const brokeringRegistration = await store.setLifecycleState("brokering");
+const firstWork = await store.persistBrokerWork({
+  artifactNamespace: "evidence.browser.tests",
+  brokerWorkId: "work-1",
+  capabilityManifestVersion: "caps-v1",
+  idempotencyKey: "idem-1",
+  leaseEpoch: 1,
+  metadata: { route: "/broker/one" },
+  sourceEventKind: "fetch",
+});
+const firstHandoff = await store.persistDurableHandoff({
+  artifactNamespace: "evidence.browser.tests",
+  brokerWorkId: "work-1",
+  capabilityManifestVersion: "caps-v1",
+  fallbackTarget: BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE,
+  idempotencyKey: "idem-1",
+  leaseEpoch: 1,
+  metadata: { destination: "window" },
+  reason: support.directExecutionReasonCode,
+  sourceEventKind: "fetch",
+  targetLane: BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE,
+});
+
+const preRestartPending = await store.listPendingWork();
+const preRestartHandoffs = await store.listDurableHandoffs();
+
+const restartedStore = createBrowserServiceWorkerBrokerStore({
+  backend: "localstorage",
+  globalObject: serviceWorkerGlobal,
+  now,
+});
+const recoveredRegistration = await restartedStore.readRegistration();
+const reconcilingRegistration =
+  await restartedStore.setLifecycleState("reconciling_durable_state");
+const recoveredPendingBeforeNewWrite = await restartedStore.listPendingWork();
+const recoveredHandoffsBeforeNewWrite = await restartedStore.listDurableHandoffs();
+const mismatch = restartedStore.diagnostics({
+  expectedBrokerProtocolVersion: 99,
+  expectedRegistrationScope: "https://example.test/app/",
+});
+
+const secondWork = await restartedStore.persistBrokerWork({
+  artifactNamespace: "evidence.browser.tests",
+  brokerWorkId: "work-2",
+  capabilityManifestVersion: "caps-v1",
+  fallbackTarget: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+  idempotencyKey: "idem-2",
+  leaseEpoch: 2,
+  metadata: { route: "/broker/two" },
+  sourceEventKind: "push",
+});
+const secondHandoff = await restartedStore.persistDurableHandoff({
+  artifactNamespace: "evidence.browser.tests",
+  brokerWorkId: "work-2",
+  capabilityManifestVersion: "caps-v1",
+  fallbackTarget: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+  idempotencyKey: "idem-2",
+  leaseEpoch: 2,
+  metadata: { destination: "dedicated_worker" },
+  reason: "worker_reclaimed_by_browser",
+  sourceEventKind: "push",
+  targetLane: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+});
+
+const postRestartPending = await restartedStore.listPendingWork();
+const postRestartHandoffs = await restartedStore.listDurableHandoffs();
+const cleared = await restartedStore.clearBrokerState();
+const postClearRegistration = await restartedStore.readRegistration();
+const postClearPending = await restartedStore.listPendingWork();
+const postClearHandoffs = await restartedStore.listDurableHandoffs();
+
+console.log(
+  JSON.stringify({
+    abi_metadata_matches_sidecar:
+      JSON.stringify(abiMetadata) === JSON.stringify(abiMetadataSidecar),
+    abi_metadata_profile: abiMetadata.profile,
+    abi_metadata_version_major: abiMetadata.abi_version.major,
+    broker_contract_id: BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
+    requested_lane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+    fallback_constants: [
+      BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+      BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE,
+      BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
+    ],
+    support: {
+      controllerPresent: support.controllerPresent,
+      directExecutionReasonCode: support.directExecutionReasonCode,
+      downgradeOrder: support.downgradeOrder,
+      fallbackLaneId: support.fallbackLaneId,
+      fallbackTarget: support.fallbackTarget,
+      hostRole: support.hostRole,
+      reason: support.reason,
+      registrationScope: support.registrationScope,
+      runtimeContext: support.runtimeContext,
+      supported: support.supported,
+    },
+    registration,
+    brokering_lifecycle_state: brokeringRegistration?.lifecycleState ?? null,
+    first_work: firstWork,
+    first_handoff: firstHandoff,
+    pre_restart_pending_ids: preRestartPending.map((item) => item.brokerWorkId),
+    pre_restart_handoff_ids: preRestartHandoffs.map((item) => item.brokerWorkId),
+    recovered_registration: recoveredRegistration,
+    reconciling_lifecycle_state:
+      reconcilingRegistration?.lifecycleState ?? null,
+    recovered_pending_before_new_write:
+      recoveredPendingBeforeNewWrite.map((item) => item.brokerWorkId),
+    recovered_handoffs_before_new_write:
+      recoveredHandoffsBeforeNewWrite.map((item) => item.brokerWorkId),
+    mismatch: {
+      directExecutionReasonCode: mismatch.directExecutionReasonCode,
+      reason: mismatch.reason,
+      supported: mismatch.supported,
+    },
+    second_work: secondWork,
+    second_handoff: secondHandoff,
+    post_restart_pending_ids: postRestartPending.map((item) => item.brokerWorkId),
+    post_restart_handoff_ids:
+      postRestartHandoffs.map((item) => item.brokerWorkId),
+    cleared,
+    post_clear_registration: postClearRegistration,
+    post_clear_pending_count: postClearPending.length,
+    post_clear_handoff_count: postClearHandoffs.length,
+    post_clear_storage_keys: Array.from(backing.keys()).sort(),
+  }),
+);
+"#,
+        &[("ASUPERSYNC_BROWSER_STAGE_ROOT", stage.path())],
+    );
+
+    assert_eq!(report["abi_metadata_matches_sidecar"], Value::Bool(true));
+    assert_eq!(report["abi_metadata_profile"], Value::String("prod".into()));
+    assert_eq!(report["abi_metadata_version_major"], Value::from(1));
+    assert_eq!(
+        report["broker_contract_id"],
+        Value::String("wasm-service-worker-broker-contract-v1".into())
+    );
+    assert_eq!(
+        report["requested_lane"],
+        Value::String("lane.browser.service_worker.broker".into())
+    );
+    assert_eq!(
+        report["fallback_constants"],
+        serde_json::json!([
+            "lane.browser.dedicated_worker.direct_runtime",
+            "lane.browser.main_thread.direct_runtime",
+            "bridge_fallback",
+        ])
+    );
+
+    assert_eq!(report["support"]["supported"], Value::Bool(true));
+    assert_eq!(
+        report["support"]["reason"],
+        Value::String("supported".into())
+    );
+    assert_eq!(
+        report["support"]["hostRole"],
+        Value::String("service_worker".into())
+    );
+    assert_eq!(
+        report["support"]["directExecutionReasonCode"],
+        Value::String("service_worker_direct_runtime_not_shipped".into())
+    );
+    assert_eq!(
+        report["support"]["fallbackTarget"],
+        Value::String("lane.browser.dedicated_worker.direct_runtime".into())
+    );
+    assert_eq!(
+        report["support"]["fallbackLaneId"],
+        Value::String("lane.browser.dedicated_worker.direct_runtime".into())
+    );
+    assert_eq!(
+        report["support"]["downgradeOrder"],
+        serde_json::json!([
+            "lane.browser.dedicated_worker.direct_runtime",
+            "lane.browser.main_thread.direct_runtime",
+            "bridge_fallback",
+        ])
+    );
+    assert_eq!(report["support"]["controllerPresent"], Value::Bool(true));
+    assert_eq!(
+        report["support"]["registrationScope"],
+        Value::String("https://example.test/app/".into())
+    );
+
+    assert_eq!(
+        report["registration"]["contractId"],
+        Value::String("wasm-service-worker-broker-contract-v1".into())
+    );
+    assert_eq!(
+        report["registration"]["requestedLane"],
+        Value::String("lane.browser.service_worker.broker".into())
+    );
+    assert_eq!(
+        report["registration"]["fallbackTarget"],
+        Value::String("lane.browser.dedicated_worker.direct_runtime".into())
+    );
+    assert_eq!(
+        report["registration"]["directExecutionReasonCode"],
+        Value::String("service_worker_direct_runtime_not_shipped".into())
+    );
+    assert_eq!(
+        report["brokering_lifecycle_state"],
+        Value::String("brokering".into())
+    );
+
+    assert_eq!(
+        report["first_work"]["brokerWorkId"],
+        Value::String("work-1".into())
+    );
+    assert_eq!(
+        report["first_work"]["fallbackTarget"],
+        Value::String("lane.browser.dedicated_worker.direct_runtime".into())
+    );
+    assert_eq!(
+        report["first_handoff"]["targetLane"],
+        Value::String("lane.browser.main_thread.direct_runtime".into())
+    );
+    assert_eq!(
+        report["first_handoff"]["reason"],
+        Value::String("service_worker_direct_runtime_not_shipped".into())
+    );
+    assert_eq!(
+        report["pre_restart_pending_ids"],
+        serde_json::json!(["work-1"])
+    );
+    assert_eq!(
+        report["pre_restart_handoff_ids"],
+        serde_json::json!(["work-1"])
+    );
+
+    assert_eq!(
+        report["recovered_registration"]["lifecycleState"],
+        Value::String("brokering".into())
+    );
+    assert_eq!(
+        report["reconciling_lifecycle_state"],
+        Value::String("reconciling_durable_state".into())
+    );
+    assert_eq!(
+        report["recovered_pending_before_new_write"],
+        serde_json::json!(["work-1"])
+    );
+    assert_eq!(
+        report["recovered_handoffs_before_new_write"],
+        serde_json::json!(["work-1"])
+    );
+    assert_eq!(report["mismatch"]["supported"], Value::Bool(false));
+    assert_eq!(
+        report["mismatch"]["reason"],
+        Value::String("broker_protocol_version_mismatch".into())
+    );
+    assert_eq!(
+        report["mismatch"]["directExecutionReasonCode"],
+        Value::String("service_worker_direct_runtime_not_shipped".into())
+    );
+
+    assert_eq!(
+        report["second_work"]["brokerWorkId"],
+        Value::String("work-2".into())
+    );
+    assert_eq!(
+        report["second_handoff"]["targetLane"],
+        Value::String("lane.browser.dedicated_worker.direct_runtime".into())
+    );
+    assert_eq!(
+        report["post_restart_pending_ids"],
+        serde_json::json!(["work-2", "work-1"])
+    );
+    assert_eq!(
+        report["post_restart_handoff_ids"],
+        serde_json::json!(["work-2", "work-1"])
+    );
+
+    assert_eq!(report["cleared"], Value::from(5));
+    assert_eq!(report["post_clear_registration"], Value::Null);
+    assert_eq!(report["post_clear_pending_count"], Value::from(0));
+    assert_eq!(report["post_clear_handoff_count"], Value::from(0));
+    assert_eq!(report["post_clear_storage_keys"], serde_json::json!([]));
 }
