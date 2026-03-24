@@ -1100,28 +1100,28 @@ impl MessageBuffer {
     }
 
     /// Build a typed message with length prefix.
-    fn build_message(&mut self, msg_type: u8) -> Vec<u8> {
+    fn build_message(&mut self, msg_type: u8) -> Result<Vec<u8>, PgError> {
         // PostgreSQL protocol uses i32 for message length. Guard against
         // overflow for pathologically large messages (> 2 GiB payload).
         let payload_len = self.buf.len().saturating_add(4); // +4 for length field
-        let len: i32 =
-            i32::try_from(payload_len).expect("message payload exceeds PostgreSQL 2 GiB limit");
+        let len: i32 = i32::try_from(payload_len)
+            .map_err(|_| PgError::Protocol("message payload exceeds PostgreSQL 2 GiB limit".into()))?;
         let mut result = Vec::with_capacity(1 + 4 + self.buf.len());
         result.push(msg_type);
         result.extend_from_slice(&len.to_be_bytes());
         result.extend_from_slice(&self.buf);
-        result
+        Ok(result)
     }
 
     /// Build a startup message (no type byte, includes protocol version).
-    fn build_startup_message(&mut self) -> Vec<u8> {
+    fn build_startup_message(&mut self) -> Result<Vec<u8>, PgError> {
         let payload_len = self.buf.len().saturating_add(4);
-        let len: i32 =
-            i32::try_from(payload_len).expect("message payload exceeds PostgreSQL 2 GiB limit");
+        let len: i32 = i32::try_from(payload_len)
+            .map_err(|_| PgError::Protocol("message payload exceeds PostgreSQL 2 GiB limit".into()))?;
         let mut result = Vec::with_capacity(4 + self.buf.len());
         result.extend_from_slice(&len.to_be_bytes());
         result.extend_from_slice(&self.buf);
-        result
+        Ok(result)
     }
 
     fn into_inner(self) -> Vec<u8> {
@@ -2164,7 +2164,7 @@ impl PgConnection {
         })?;
         buf.write_i32(client_first_len);
         buf.write_bytes(&client_first);
-        let msg = buf.build_message(b'p');
+        let msg = buf.build_message(b'p')?;
         self.write_all(&msg).await?;
 
         if cx.is_cancel_requested() {
@@ -2197,7 +2197,7 @@ impl PgConnection {
         let client_final = scram.process_server_first(server_first)?;
         let mut buf = MessageBuffer::new();
         buf.write_bytes(&client_final);
-        let msg = buf.build_message(b'p');
+        let msg = buf.build_message(b'p')?;
         self.write_all(&msg).await?;
 
         if cx.is_cancel_requested() {
@@ -2260,7 +2260,7 @@ impl PgConnection {
     async fn send_password(&mut self, password: &str) -> Result<(), PgError> {
         let mut buf = MessageBuffer::new();
         buf.write_cstring(password);
-        let msg = buf.build_message(b'p');
+        let msg = buf.build_message(b'p')?;
         self.write_all(&msg).await?;
         Ok(())
     }
@@ -2348,7 +2348,7 @@ impl PgConnection {
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
-        let msg = buf.build_message(b'Q');
+        let msg = buf.build_message(b'Q')?;
 
         if let Err(e) = self.write_all(&msg).await {
             return Outcome::Err(e);
@@ -2465,7 +2465,7 @@ impl PgConnection {
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
-        let msg = buf.build_message(b'Q');
+        let msg = buf.build_message(b'Q')?;
 
         if let Err(e) = self.write_all(&msg).await {
             return Outcome::Err(e);
@@ -2611,9 +2611,18 @@ impl PgConnection {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };
-        let describe = build_describe_msg(b'P', "");
-        let execute = build_execute_msg("", 0);
-        let sync = build_sync_msg();
+        let describe = match build_describe_msg(b'P', "") {
+            Ok(d) => d,
+            Err(e) => return Outcome::Err(e),
+        };
+        let execute = match build_execute_msg("", 0) {
+            Ok(e) => e,
+            Err(err) => return Outcome::Err(err),
+        };
+        let sync = match build_sync_msg() {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(e),
+        };
 
         // Combine into single write for reduced syscalls.
         let total = parse.len() + bind.len() + describe.len() + execute.len() + sync.len();
@@ -2748,8 +2757,14 @@ impl PgConnection {
             Ok(p) => p,
             Err(e) => return Outcome::Err(e),
         };
-        let describe = build_describe_msg(b'S', &stmt_name);
-        let sync = build_sync_msg();
+        let describe = match build_describe_msg(b'S', &stmt_name) {
+            Ok(d) => d,
+            Err(e) => return Outcome::Err(e),
+        };
+        let sync = match build_sync_msg() {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(e),
+        };
 
         let total = parse.len() + describe.len() + sync.len();
         let mut combined = Vec::with_capacity(total);
@@ -2834,9 +2849,18 @@ impl PgConnection {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };
-        let describe = build_describe_msg(b'P', "");
-        let execute = build_execute_msg("", 0);
-        let sync = build_sync_msg();
+        let describe = match build_describe_msg(b'P', "") {
+            Ok(d) => d,
+            Err(e) => return Outcome::Err(e),
+        };
+        let execute = match build_execute_msg("", 0) {
+            Ok(e) => e,
+            Err(err) => return Outcome::Err(err),
+        };
+        let sync = match build_sync_msg() {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(e),
+        };
 
         let total = bind.len() + describe.len() + execute.len() + sync.len();
         let mut combined = Vec::with_capacity(total);
@@ -2913,8 +2937,14 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
-        let close = build_close_msg(b'S', &stmt.name);
-        let sync = build_sync_msg();
+        let close = match build_close_msg(b'S', &stmt.name) {
+            Ok(c) => c,
+            Err(e) => return Outcome::Err(e),
+        };
+        let sync = match build_sync_msg() {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(e),
+        };
 
         let mut combined = Vec::with_capacity(close.len() + sync.len());
         combined.extend_from_slice(&close);
@@ -2973,7 +3003,7 @@ impl PgConnection {
 
         let mut buf = MessageBuffer::new();
         buf.write_cstring("ROLLBACK");
-        let msg = buf.build_message(b'Q');
+        let msg = buf.build_message(b'Q')?;
 
         if let Err(e) = self.write_all(&msg).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -3492,7 +3522,7 @@ fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Result<Vec
     for &o in param_oids {
         buf.write_i32(o as i32);
     }
-    Ok(buf.build_message(FrontendMessage::Parse as u8))
+    Ok(buf.build_message(FrontendMessage::Parse as u8)?)
 }
 
 /// Build a Bind message (Extended Query Protocol).
@@ -3545,11 +3575,11 @@ fn build_bind_msg(
     buf.write_i16(1);
     buf.write_i16(result_format as i16);
 
-    Ok(buf.build_message(FrontendMessage::Bind as u8))
+    Ok(buf.build_message(FrontendMessage::Bind as u8)?)
 }
 
 /// Build a Describe message.
-fn build_describe_msg(target: u8, name: &str) -> Vec<u8> {
+fn build_describe_msg(target: u8, name: &str) -> Result<Vec<u8>, PgError> {
     let mut buf = MessageBuffer::new();
     buf.write_byte(target); // 'S' for statement, 'P' for portal
     buf.write_cstring(name);
@@ -3557,7 +3587,7 @@ fn build_describe_msg(target: u8, name: &str) -> Vec<u8> {
 }
 
 /// Build an Execute message.
-fn build_execute_msg(portal: &str, max_rows: i32) -> Vec<u8> {
+fn build_execute_msg(portal: &str, max_rows: i32) -> Result<Vec<u8>, PgError> {
     let mut buf = MessageBuffer::new();
     buf.write_cstring(portal);
     buf.write_i32(max_rows); // 0 = all rows
@@ -3565,13 +3595,13 @@ fn build_execute_msg(portal: &str, max_rows: i32) -> Vec<u8> {
 }
 
 /// Build a Sync message.
-fn build_sync_msg() -> Vec<u8> {
+fn build_sync_msg() -> Result<Vec<u8>, PgError> {
     let mut buf = MessageBuffer::new();
     buf.build_message(FrontendMessage::Sync as u8)
 }
 
 /// Build a Close message.
-fn build_close_msg(target: u8, name: &str) -> Vec<u8> {
+fn build_close_msg(target: u8, name: &str) -> Result<Vec<u8>, PgError> {
     let mut buf = MessageBuffer::new();
     buf.write_byte(target); // 'S' for statement, 'P' for portal
     buf.write_cstring(name);
@@ -4163,7 +4193,7 @@ mod tests {
         let mut buf = MessageBuffer::new();
         buf.write_byte(b'Q');
         buf.write_cstring("SELECT 1");
-        let msg = buf.build_message(b'Q');
+        let msg = buf.build_message(b'Q').unwrap();
         // byte 0: msg type 'Q'
         assert_eq!(msg[0], b'Q');
         // bytes 1-4: length = body_len + 4
@@ -5101,7 +5131,7 @@ mod tests {
 
     #[test]
     fn build_close_msg_statement() {
-        let msg = build_close_msg(b'S', "stmt1");
+        let msg = build_close_msg(b'S', "stmt1").unwrap();
         assert_eq!(msg[0], b'C');
         assert_eq!(msg[5], b'S');
     }

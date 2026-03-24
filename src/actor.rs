@@ -2185,7 +2185,7 @@ mod tests {
             SupervisedOutcome::Escalated,
         ];
         for v in &variants {
-            let dbg = format!("{:?}", v);
+            let dbg = format!("{v:?}");
             assert!(!dbg.is_empty());
         }
         assert!(format!("{:?}", variants[0]).contains("Stopped"));

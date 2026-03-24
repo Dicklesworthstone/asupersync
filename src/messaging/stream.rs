@@ -2611,4 +2611,41 @@ mod tests {
             "expected PermitAlreadyCommitted, got {err:?}"
         );
     }
+
+    #[test]
+    fn permit_cannot_commit_into_different_stream() {
+        let mut left = make_default_stream();
+        let mut right = Stream::new(
+            "other-stream",
+            test_region(2),
+            Time::from_secs(0),
+            stream_config("orders.>"),
+            InMemoryStorageBackend::default(),
+        )
+        .expect("create second stream");
+
+        let mut permit = left
+            .reserve_append(Subject::new("orders.created"), Time::from_secs(1))
+            .expect("reserve on left");
+        let err = right
+            .commit_append(&mut permit, b"payload".to_vec())
+            .expect_err("permit must stay bound to the reserving stream");
+
+        assert!(
+            matches!(
+                err,
+                StreamError::PermitStreamMismatch {
+                    ref permit_name,
+                    permit_region,
+                    ref stream_name,
+                    stream_region,
+                } if permit_name == "test-stream"
+                    && permit_region == test_region(1)
+                    && stream_name == "other-stream"
+                    && stream_region == test_region(2)
+            ),
+            "expected PermitStreamMismatch, got {err:?}"
+        );
+    }
+
 }

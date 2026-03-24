@@ -675,8 +675,10 @@ impl Default for CompressionConfig {
 /// client's Accept-Encoding header against the server's supported set.
 /// Only compresses when the response body exceeds `min_body_size`.
 ///
-/// Compression is currently identity-only for correctness. Non-identity
-/// encodings are negotiated only when real compressors are available.
+/// Negotiation is already wired so the middleware can emit truthful `406`
+/// responses and `Vary: accept-encoding` even before real compressors land.
+/// Until non-identity encoders are implemented here, negotiated non-identity
+/// responses still carry the identity payload.
 pub struct CompressionMiddleware<H> {
     inner: H,
     config: CompressionConfig,
@@ -695,13 +697,13 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         let accept_encoding = header_value(&req, "accept-encoding");
         let mut resp = self.inner.call(req);
 
-        // Skip compression for small bodies or when no Accept-Encoding.
+        // Skip compression for small bodies.
         if resp.body.len() < self.config.min_body_size {
             return resp;
         }
 
-        let accept = accept_encoding.as_deref().unwrap_or("");
-        let Some(encoding) = negotiate_encoding(accept, &self.config.supported) else {
+        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &self.config.supported)
+        else {
             if accept_encoding.is_some() {
                 return Response::new(
                     StatusCode::from_u16(406),
@@ -2422,6 +2424,42 @@ mod tests {
             resp.headers.get("vary"),
             Some(&"accept-encoding".to_string())
         );
+    }
+
+    #[test]
+    fn compression_absent_accept_encoding_remains_permissive() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'x'; 512])
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 256,
+            supported: vec![ContentEncoding::Gzip],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-encoding".to_string())
+        );
+    }
+
+    #[test]
+    fn compression_empty_accept_encoding_is_not_treated_as_absent() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'x'; 512])
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 256,
+            supported: vec![ContentEncoding::Gzip],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "");
+        let resp = mw.call(req);
+        assert_eq!(resp.status.as_u16(), 406);
+        assert_eq!(resp.body.as_ref(), b"No acceptable response encoding");
     }
 
     #[test]

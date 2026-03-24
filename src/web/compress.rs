@@ -135,10 +135,9 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             .filter(|encoding| content_encoding_available(*encoding))
             .collect();
 
-        let accept = accept_encoding.as_deref().unwrap_or_default();
-
         // Negotiate encoding.
-        let Some(encoding) = negotiate_encoding(accept, &available_encodings) else {
+        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &available_encodings)
+        else {
             if accept_encoding.is_some() {
                 return Response::new(
                     StatusCode::from_u16(406),
@@ -296,8 +295,22 @@ mod tests {
         let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
         let req = Request::new("GET", "/test");
         let resp = mw.call(req);
-        // With empty accept-encoding, identity is negotiated, no content-encoding set.
+        // With no Accept-Encoding header, the middleware preserves the
+        // existing preference for identity when it is available.
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn empty_accept_encoding_header_is_not_treated_as_absent() {
+        let policy = CompressionPolicy {
+            supported_encodings: vec![ContentEncoding::Gzip],
+            min_body_size: 0,
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("");
+        let resp = mw.call(req);
+        assert_eq!(resp.status.as_u16(), 406);
+        assert_eq!(resp.body.as_ref(), b"No acceptable response encoding");
     }
 
     #[test]

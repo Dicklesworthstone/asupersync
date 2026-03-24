@@ -235,6 +235,11 @@ impl DnsCache {
 
     /// Inserts a negative no-record result into the cache.
     pub fn put_negative_ip_no_records(&self, host: &str) {
+        if self.config.negative_ttl.is_zero() {
+            self.remove(host);
+            return;
+        }
+
         self.put_ip_entry(
             host,
             CachedIpEntry::NegativeNoRecords,
@@ -753,6 +758,68 @@ mod tests {
         let stats = cache.stats();
         crate::assert_with_log!(stats.size == 0, "cache size returns to zero", 0, stats.size);
         crate::test_complete!("cache_zero_ttl_positive_answers_clear_existing_entry");
+    }
+
+    #[test]
+    fn cache_zero_ttl_negative_answers_are_not_retained() {
+        init_test("cache_zero_ttl_negative_answers_are_not_retained");
+        set_test_time(0);
+        let config = CacheConfig {
+            negative_ttl: Duration::ZERO,
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        cache.put_negative_ip_no_records("missing.example");
+
+        let result = cache.get_ip_result("missing.example");
+        crate::assert_with_log!(
+            result.is_none(),
+            "zero-ttl negative answer is not cached",
+            true,
+            result.is_none()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 0, "cache size stays zero", 0, stats.size);
+        crate::test_complete!("cache_zero_ttl_negative_answers_are_not_retained");
+    }
+
+    #[test]
+    fn cache_zero_ttl_negative_answers_clear_existing_entry() {
+        init_test("cache_zero_ttl_negative_answers_clear_existing_entry");
+        set_test_time(0);
+        let config = CacheConfig {
+            negative_ttl: Duration::ZERO,
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        let cached = LookupIp::new(
+            vec!["192.0.2.88".parse::<IpAddr>().expect("ip parse")],
+            Duration::from_mins(5),
+        );
+        cache.put_ip("replace.example", &cached);
+        crate::assert_with_log!(
+            cache.get_ip("replace.example").is_some(),
+            "seeded entry exists",
+            true,
+            cache.get_ip("replace.example").is_some()
+        );
+
+        cache.put_negative_ip_no_records("replace.example");
+
+        let result = cache.get_ip_result("replace.example");
+        crate::assert_with_log!(
+            result.is_none(),
+            "zero-ttl negative refresh clears stale cached entry",
+            true,
+            result.is_none()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 0, "cache size returns to zero", 0, stats.size);
+        crate::test_complete!("cache_zero_ttl_negative_answers_clear_existing_entry");
     }
 
     #[test]

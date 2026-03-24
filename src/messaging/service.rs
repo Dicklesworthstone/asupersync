@@ -115,7 +115,7 @@ pub struct BudgetSemantics {
     pub cleanup_urgency: CleanupUrgency,
     /// Default timeout applied when the caller does not override it.
     pub default_timeout: Option<Duration>,
-    /// Whether the caller may request a narrower timeout.
+    /// Whether the caller may request an equal-or-narrower timeout.
     pub allow_timeout_override: bool,
     /// Whether caller-provided priority hints are honored.
     pub honor_priority_hints: bool,
@@ -468,7 +468,7 @@ impl ProviderTerms {
 pub struct CallerOptions {
     /// Explicit delivery class request, or `None` for the provider default.
     pub requested_class: Option<DeliveryClass>,
-    /// Narrower timeout requested by the caller.
+    /// Timeout override requested by the caller, bounded by the provider default when present.
     pub timeout_override: Option<Duration>,
     /// Optional scheduling hint in the range `0..=255`.
     pub priority_hint: Option<u8>,
@@ -2221,6 +2221,16 @@ impl ServiceRegistration {
         {
             return Err(ServiceContractError::TimeoutOverrideNotAllowed);
         }
+        if let (Some(requested_timeout), Some(default_timeout)) = (
+            caller.timeout_override,
+            self.contract.budget_semantics.default_timeout,
+        ) && requested_timeout > default_timeout
+        {
+            return Err(ServiceContractError::TimeoutOverrideExceedsDefault {
+                requested_timeout,
+                default_timeout,
+            });
+        }
         if caller.priority_hint.is_some() && !self.contract.budget_semantics.honor_priority_hints {
             return Err(ServiceContractError::PriorityHintsNotAllowed);
         }
@@ -3520,6 +3530,16 @@ pub enum ServiceContractError {
     /// Caller tried to override timeout when the contract forbids it.
     #[error("caller timeout overrides are not allowed by the contract budget semantics")]
     TimeoutOverrideNotAllowed,
+    /// Caller tried to widen the provider's default timeout budget.
+    #[error(
+        "caller timeout override {requested_timeout:?} exceeds contract default timeout {default_timeout:?}"
+    )]
+    TimeoutOverrideExceedsDefault {
+        /// Timeout requested by the caller.
+        requested_timeout: Duration,
+        /// Default timeout declared by the provider contract.
+        default_timeout: Duration,
+    },
     /// Caller tried to pass a priority hint when the contract ignores hints.
     #[error("caller priority hints are not allowed by the contract budget semantics")]
     PriorityHintsNotAllowed,
@@ -4165,6 +4185,48 @@ mod tests {
             .expect_err("timeout override should be rejected");
 
         assert_eq!(err, ServiceContractError::TimeoutOverrideNotAllowed);
+    }
+
+    #[test]
+    fn validate_caller_rejects_timeout_override_above_contract_default() {
+        let mut contract = contract();
+        contract.budget_semantics.default_timeout = Some(Duration::from_secs(5));
+        let registration =
+            ServiceRegistration::new("fabric.echo", contract, provider_terms()).expect("valid");
+        let caller = CallerOptions {
+            timeout_override: Some(Duration::from_secs(6)),
+            ..CallerOptions::default()
+        };
+
+        let err = registration
+            .validate_caller(&caller)
+            .expect_err("timeout override should stay within the provider default");
+
+        assert_eq!(
+            err,
+            ServiceContractError::TimeoutOverrideExceedsDefault {
+                requested_timeout: Duration::from_secs(6),
+                default_timeout: Duration::from_secs(5),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_caller_accepts_timeout_override_equal_to_contract_default() {
+        let mut contract = contract();
+        contract.budget_semantics.default_timeout = Some(Duration::from_secs(5));
+        let registration =
+            ServiceRegistration::new("fabric.echo", contract, provider_terms()).expect("valid");
+        let caller = CallerOptions {
+            timeout_override: Some(Duration::from_secs(5)),
+            ..CallerOptions::default()
+        };
+
+        let validated = registration
+            .validate_caller(&caller)
+            .expect("equal timeout override should remain admissible");
+
+        assert_eq!(validated.timeout, Some(Duration::from_secs(5)));
     }
 
     #[test]

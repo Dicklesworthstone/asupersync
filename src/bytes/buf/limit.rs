@@ -67,15 +67,21 @@ impl<T: BufMut> BufMut for Limit<T> {
     }
 
     fn chunk_mut(&mut self) -> &mut [u8] {
+        let remaining = self.remaining_mut();
         let chunk = self.inner.chunk_mut();
-        let len = std::cmp::min(chunk.len(), self.limit);
+        let len = std::cmp::min(chunk.len(), remaining);
+        assert!(
+            remaining == 0 || len > 0,
+            "chunk_mut returned empty with remaining_mut() > 0; inner buffer does not expose direct writable space"
+        );
         &mut chunk[..len]
     }
 
     fn advance_mut(&mut self, cnt: usize) {
+        let remaining = self.remaining_mut();
         assert!(
-            cnt <= self.limit,
-            "advance_mut out of bounds: cnt={cnt}, limit={}",
+            cnt <= remaining,
+            "advance_mut out of bounds: cnt={cnt}, remaining={remaining}, limit={}",
             self.limit
         );
         self.inner.advance_mut(cnt);
@@ -83,9 +89,10 @@ impl<T: BufMut> BufMut for Limit<T> {
     }
 
     fn put_slice(&mut self, src: &[u8]) {
+        let remaining = self.remaining_mut();
         assert!(
-            src.len() <= self.limit,
-            "put_slice out of bounds: len={}, limit={}",
+            src.len() <= remaining,
+            "put_slice out of bounds: len={}, remaining={remaining}, limit={}",
             src.len(),
             self.limit
         );
@@ -139,6 +146,61 @@ mod tests {
         let ok = data[..5] == [1, 2, 3, 0, 0];
         crate::assert_with_log!(ok, "data", &[1, 2, 3, 0, 0], &data[..5]);
         crate::test_complete!("test_limit_put_slice");
+    }
+
+    #[test]
+    fn test_limit_advance_mut_when_limit_exceeds_inner_remaining() {
+        init_test("test_limit_advance_mut_when_limit_exceeds_inner_remaining");
+        let mut data = [0u8; 3];
+        let buf: &mut [u8] = &mut data;
+        let mut limit = Limit::new(buf, 10);
+
+        limit.advance_mut(3);
+
+        let remaining = limit.remaining_mut();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        crate::test_complete!("test_limit_advance_mut_when_limit_exceeds_inner_remaining");
+    }
+
+    #[test]
+    #[should_panic(expected = "advance_mut out of bounds")]
+    fn test_limit_advance_mut_panics_when_count_exceeds_effective_remaining() {
+        let mut data = [0u8; 3];
+        let buf: &mut [u8] = &mut data;
+        let mut limit = Limit::new(buf, 10);
+        limit.advance_mut(4);
+    }
+
+    #[test]
+    fn test_limit_put_slice_when_limit_exceeds_inner_remaining() {
+        init_test("test_limit_put_slice_when_limit_exceeds_inner_remaining");
+        let mut data = [0u8; 3];
+        {
+            let buf: &mut [u8] = &mut data;
+            let mut limit = Limit::new(buf, 10);
+            limit.put_slice(&[1, 2, 3]);
+            let remaining = limit.remaining_mut();
+            crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        }
+        let ok = data == [1, 2, 3];
+        crate::assert_with_log!(ok, "data", [1, 2, 3], data);
+        crate::test_complete!("test_limit_put_slice_when_limit_exceeds_inner_remaining");
+    }
+
+    #[test]
+    #[should_panic(expected = "chunk_mut returned empty with remaining_mut() > 0")]
+    fn test_limit_chunk_mut_panics_when_inner_cannot_expose_direct_space() {
+        let mut limit = Limit::new(Vec::new(), 3);
+        let _ = limit.chunk_mut();
+    }
+
+    #[test]
+    #[should_panic(expected = "put_slice out of bounds")]
+    fn test_limit_put_slice_panics_when_len_exceeds_effective_remaining() {
+        let mut data = [0u8; 3];
+        let buf: &mut [u8] = &mut data;
+        let mut limit = Limit::new(buf, 10);
+        limit.put_slice(&[1, 2, 3, 4]);
     }
 
     #[test]

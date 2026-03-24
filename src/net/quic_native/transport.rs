@@ -253,12 +253,9 @@ impl LossRecovery {
             .map(|range| range.largest)
             .max()
             .unwrap_or(0);
-        self.largest_acked[space.idx()] = Some(
-            self.largest_acked[space.idx()]
-                .map_or(local_largest_acked, |v| v.max(local_largest_acked)),
-        );
-
-        let global_largest_acked = self.largest_acked[space.idx()].unwrap();
+        let global_largest_acked = self.largest_acked[space.idx()]
+            .map_or(local_largest_acked, |v| v.max(local_largest_acked));
+        self.largest_acked[space.idx()] = Some(global_largest_acked);
 
         let loss_delay = self.loss_delay_micros();
         let time_threshold = now_micros.saturating_sub(loss_delay);

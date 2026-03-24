@@ -103,22 +103,28 @@ fn parse_accept_encoding(header: &str) -> Vec<QualityValue> {
         .collect()
 }
 
-/// Negotiate the best content encoding from an Accept-Encoding header
+/// Negotiate the best content encoding from an optional Accept-Encoding header
 /// against the server's supported encodings.
 ///
-/// Returns `None` if no acceptable encoding is found (the client explicitly
-/// rejected all available encodings with q=0).
+/// `None` means the request omitted the header entirely. `Some("")` (or
+/// whitespace only) means the header was present but empty, which is treated
+/// as an explicit no-content-coding request.
+///
+/// Returns `None` if no acceptable encoding is found.
 ///
 /// # Algorithm
 ///
-/// 1. Parse Accept-Encoding into (token, quality) pairs.
-/// 2. For each server-supported encoding, find its quality:
+/// 1. If the header is absent, prefer `identity` when available, otherwise
+///    fall back to server preference order.
+/// 2. If the header is present but empty, only `identity` is acceptable.
+/// 3. Parse a non-empty Accept-Encoding value into (token, quality) pairs.
+/// 4. For each server-supported encoding, find its quality:
 ///    - Exact match on encoding token.
 ///    - Wildcard `*` match if no exact match.
 ///    - `identity` defaults to q=1.0 unless explicitly excluded by
 ///      `identity;q=0` or `*;q=0` without a more specific `identity` entry.
-/// 3. Filter out q=0 (explicitly rejected).
-/// 4. Return the encoding with highest quality (ties broken by server
+/// 5. Filter out q=0 (explicitly rejected).
+/// 6. Return the encoding with highest quality (ties broken by server
 ///    preference order).
 ///
 /// # Examples
@@ -126,21 +132,28 @@ fn parse_accept_encoding(header: &str) -> Vec<QualityValue> {
 /// ```
 /// # use asupersync::http::compress::{ContentEncoding, negotiate_encoding};
 /// let supported = &[ContentEncoding::Gzip, ContentEncoding::Deflate, ContentEncoding::Identity];
-/// let best = negotiate_encoding("gzip;q=1.0, deflate;q=0.5", supported);
+/// let best = negotiate_encoding(Some("gzip;q=1.0, deflate;q=0.5"), supported);
 /// assert_eq!(best, Some(ContentEncoding::Gzip));
 /// ```
 #[must_use]
 pub fn negotiate_encoding(
-    accept_encoding: &str,
+    accept_encoding: Option<&str>,
     supported: &[ContentEncoding],
 ) -> Option<ContentEncoding> {
-    if accept_encoding.trim().is_empty() {
-        // No Accept-Encoding header: identity is acceptable
+    let Some(accept_encoding) = accept_encoding else {
+        // No Accept-Encoding header: keep the existing server-preference
+        // behavior and prefer identity when available.
         return if supported.contains(&ContentEncoding::Identity) {
             Some(ContentEncoding::Identity)
         } else {
             supported.first().copied()
         };
+    };
+
+    if accept_encoding.trim().is_empty() {
+        return supported
+            .contains(&ContentEncoding::Identity)
+            .then_some(ContentEncoding::Identity);
     }
 
     let preferences = parse_accept_encoding(accept_encoding);
@@ -711,14 +724,14 @@ mod tests {
             ContentEncoding::Deflate,
             ContentEncoding::Identity,
         ];
-        let best = negotiate_encoding("gzip;q=0.5, deflate;q=1.0", supported);
+        let best = negotiate_encoding(Some("gzip;q=0.5, deflate;q=1.0"), supported);
         assert_eq!(best, Some(ContentEncoding::Deflate));
     }
 
     #[test]
     fn negotiate_server_order_breaks_ties() {
         let supported = &[ContentEncoding::Gzip, ContentEncoding::Deflate];
-        let best = negotiate_encoding("gzip, deflate", supported);
+        let best = negotiate_encoding(Some("gzip, deflate"), supported);
         // Both have q=1.0, server prefers gzip (listed first)
         assert_eq!(best, Some(ContentEncoding::Gzip));
     }
@@ -726,7 +739,7 @@ mod tests {
     #[test]
     fn negotiate_wildcard() {
         let supported = &[ContentEncoding::Brotli, ContentEncoding::Identity];
-        let best = negotiate_encoding("*", supported);
+        let best = negotiate_encoding(Some("*"), supported);
         assert_eq!(best, Some(ContentEncoding::Brotli));
     }
 
@@ -737,7 +750,7 @@ mod tests {
             ContentEncoding::Deflate,
             ContentEncoding::Identity,
         ];
-        let best = negotiate_encoding("gzip;q=0, *;q=0.5", supported);
+        let best = negotiate_encoding(Some("gzip;q=0, *;q=0.5"), supported);
         // gzip is explicitly rejected (q=0). deflate inherits wildcard q=0.5.
         // identity keeps its RFC 9110 §12.5.3 default q=1.0 (wildcard only
         // excludes identity when *;q=0).
@@ -747,44 +760,53 @@ mod tests {
     #[test]
     fn negotiate_all_rejected() {
         let supported = &[ContentEncoding::Gzip];
-        let best = negotiate_encoding("gzip;q=0, *;q=0", supported);
+        let best = negotiate_encoding(Some("gzip;q=0, *;q=0"), supported);
         assert_eq!(best, None);
     }
 
     #[test]
-    fn negotiate_empty_accept_encoding() {
+    fn negotiate_absent_accept_encoding_prefers_identity() {
         let supported = &[ContentEncoding::Gzip, ContentEncoding::Identity];
-        let best = negotiate_encoding("", supported);
+        let best = negotiate_encoding(None, supported);
         assert_eq!(best, Some(ContentEncoding::Identity));
     }
 
     #[test]
-    fn negotiate_empty_accept_no_identity() {
+    fn negotiate_absent_accept_encoding_uses_first_supported_when_identity_missing() {
         let supported = &[ContentEncoding::Gzip];
-        let best = negotiate_encoding("", supported);
+        let best = negotiate_encoding(None, supported);
         assert_eq!(best, Some(ContentEncoding::Gzip));
     }
 
     #[test]
-    fn negotiate_whitespace_only_accept_encoding_matches_empty_header() {
-        let gzip_only = &[ContentEncoding::Gzip];
-        assert_eq!(
-            negotiate_encoding("   ", gzip_only),
-            Some(ContentEncoding::Gzip)
-        );
-
+    fn negotiate_empty_accept_encoding_only_accepts_identity() {
         let with_identity = &[ContentEncoding::Gzip, ContentEncoding::Identity];
         assert_eq!(
-            negotiate_encoding("   ", with_identity),
+            negotiate_encoding(Some(""), with_identity),
             Some(ContentEncoding::Identity)
         );
+
+        let gzip_only = &[ContentEncoding::Gzip];
+        assert_eq!(negotiate_encoding(Some(""), gzip_only), None);
+    }
+
+    #[test]
+    fn negotiate_whitespace_only_accept_encoding_matches_explicit_empty_header() {
+        let with_identity = &[ContentEncoding::Gzip, ContentEncoding::Identity];
+        assert_eq!(
+            negotiate_encoding(Some("   "), with_identity),
+            Some(ContentEncoding::Identity)
+        );
+
+        let gzip_only = &[ContentEncoding::Gzip];
+        assert_eq!(negotiate_encoding(Some("   "), gzip_only), None);
     }
 
     #[test]
     fn negotiate_identity_implicit_acceptable() {
         let supported = &[ContentEncoding::Identity, ContentEncoding::Gzip];
         // Only gzip mentioned; identity is implicitly acceptable
-        let best = negotiate_encoding("gzip;q=0.5", supported);
+        let best = negotiate_encoding(Some("gzip;q=0.5"), supported);
         // Identity gets implicit q=1.0, gzip gets q=0.5
         assert_eq!(best, Some(ContentEncoding::Identity));
     }
@@ -792,14 +814,14 @@ mod tests {
     #[test]
     fn negotiate_identity_explicitly_rejected() {
         let supported = &[ContentEncoding::Identity, ContentEncoding::Gzip];
-        let best = negotiate_encoding("identity;q=0, gzip;q=1.0", supported);
+        let best = negotiate_encoding(Some("identity;q=0, gzip;q=1.0"), supported);
         assert_eq!(best, Some(ContentEncoding::Gzip));
     }
 
     #[test]
     fn negotiate_identity_default_preferred_over_wildcard_quality() {
         let supported = &[ContentEncoding::Brotli, ContentEncoding::Identity];
-        let best = negotiate_encoding("*;q=0.5", supported);
+        let best = negotiate_encoding(Some("*;q=0.5"), supported);
         // Brotli inherits wildcard q=0.5. Identity keeps its RFC 9110 §12.5.3
         // default q=1.0 — the wildcard only excludes identity at *;q=0.
         assert_eq!(best, Some(ContentEncoding::Identity));
@@ -809,7 +831,7 @@ mod tests {
     fn negotiate_wildcard_only_identity_keeps_default() {
         // Regression: *;q=0.5 must NOT lower identity from its RFC default 1.0.
         let supported = &[ContentEncoding::Gzip, ContentEncoding::Identity];
-        let best = negotiate_encoding("*;q=0.5", supported);
+        let best = negotiate_encoding(Some("*;q=0.5"), supported);
         // identity q=1.0 (default) > gzip q=0.5 (from wildcard)
         assert_eq!(best, Some(ContentEncoding::Identity));
     }
@@ -817,7 +839,7 @@ mod tests {
     #[test]
     fn negotiate_zero_wildcard_rejects_implicit_identity() {
         let supported = &[ContentEncoding::Identity];
-        let best = negotiate_encoding("*;q=0", supported);
+        let best = negotiate_encoding(Some("*;q=0"), supported);
         assert_eq!(best, None);
     }
 
@@ -825,7 +847,7 @@ mod tests {
     fn negotiate_identity_default_without_wildcard() {
         // No wildcard at all: identity gets its RFC default q=1.0
         let supported = &[ContentEncoding::Gzip, ContentEncoding::Identity];
-        let best = negotiate_encoding("gzip;q=0.8", supported);
+        let best = negotiate_encoding(Some("gzip;q=0.8"), supported);
         assert_eq!(best, Some(ContentEncoding::Identity));
     }
 
@@ -833,7 +855,7 @@ mod tests {
     fn negotiate_explicit_identity_overrides_wildcard() {
         // Explicit identity;q=1.0 takes priority over *;q=0.5
         let supported = &[ContentEncoding::Gzip, ContentEncoding::Identity];
-        let best = negotiate_encoding("identity;q=1.0, *;q=0.5", supported);
+        let best = negotiate_encoding(Some("identity;q=1.0, *;q=0.5"), supported);
         assert_eq!(best, Some(ContentEncoding::Identity));
     }
 
@@ -842,11 +864,11 @@ mod tests {
         // RFC 9110 §12.5.3: identity is acceptable by default (q=1.0)
         // unless excluded by *;q=0. *;q=0.3 does NOT lower identity.
         let supported = &[ContentEncoding::Identity];
-        let best = negotiate_encoding("*;q=0.3", supported);
+        let best = negotiate_encoding(Some("*;q=0.3"), supported);
         assert_eq!(best, Some(ContentEncoding::Identity));
         // Identity keeps q=1.0 even when wildcard is lower
         let supported2 = &[ContentEncoding::Gzip, ContentEncoding::Identity];
-        let best2 = negotiate_encoding("gzip;q=0.5, *;q=0.3", supported2);
+        let best2 = negotiate_encoding(Some("gzip;q=0.5, *;q=0.3"), supported2);
         // identity q=1.0 (default) > gzip q=0.5
         assert_eq!(best2, Some(ContentEncoding::Identity));
     }

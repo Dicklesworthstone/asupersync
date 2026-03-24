@@ -267,7 +267,10 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<MultipartField>, E
         })?;
 
         // Part body ends before the CRLF preceding the delimiter.
-        let body_end = strip_trailing_crlf(body, next_delim);
+        // If the client sent a malformed request where the boundary immediately follows
+        // the header terminator, strip_trailing_crlf might strip the header's CRLF,
+        // causing body_end < body_start. We clamp it to prevent a panic.
+        let body_end = strip_trailing_crlf(body, next_delim).max(body_start);
         let part_body = Bytes::copy_from_slice(&body[body_start..body_end]);
 
         // Parse Content-Disposition for name and filename.
