@@ -324,7 +324,13 @@ impl IncomingBodyWriter {
         let Some(sender) = self.sender.as_ref() else {
             return Err(HttpError::BodyChannelClosed);
         };
-        match sender.send(cx, Ok::<crate::http::body::Frame<BytesCursor>, HttpError>(frame)).await {
+        match sender
+            .send(
+                cx,
+                Ok::<crate::http::body::Frame<BytesCursor>, HttpError>(frame),
+            )
+            .await
+        {
             Ok(()) => Ok(()),
             Err(SendError::Disconnected(_) | SendError::Full(_)) => {
                 Err(HttpError::BodyChannelClosed)
@@ -813,7 +819,13 @@ impl OutgoingBodySender {
         let Some(sender) = self.sender.as_ref() else {
             return Err(HttpError::BodyChannelClosed);
         };
-        match sender.send(cx, Ok::<crate::http::body::Frame<BytesCursor>, HttpError>(frame)).await {
+        match sender
+            .send(
+                cx,
+                Ok::<crate::http::body::Frame<BytesCursor>, HttpError>(frame),
+            )
+            .await
+        {
             Ok(()) => Ok(()),
             Err(SendError::Disconnected(_) | SendError::Full(_)) => {
                 Err(HttpError::BodyChannelClosed)

@@ -1131,7 +1131,8 @@ impl TraceReader {
 
         // Guard against decompression bombs (OOM mitigation)
         if compressed.len() >= 4 {
-            let uncompressed_len = u32::from_le_bytes(compressed[0..4].try_into().unwrap()) as usize;
+            let uncompressed_len =
+                u32::from_le_bytes(compressed[0..4].try_into().unwrap()) as usize;
             if uncompressed_len > MAX_COMPRESSED_CHUNK_LEN {
                 return Err(TraceFileError::OversizedField {
                     field: "decompressed_chunk_len",
@@ -1331,7 +1332,8 @@ impl TraceEventIterator {
 
         // Guard against decompression bombs (OOM mitigation)
         if compressed.len() >= 4 {
-            let uncompressed_len = u32::from_le_bytes(compressed[0..4].try_into().unwrap()) as usize;
+            let uncompressed_len =
+                u32::from_le_bytes(compressed[0..4].try_into().unwrap()) as usize;
             if uncompressed_len > MAX_COMPRESSED_CHUNK_LEN {
                 return Err(TraceFileError::OversizedField {
                     field: "decompressed_chunk_len",

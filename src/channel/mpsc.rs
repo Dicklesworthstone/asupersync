@@ -1697,7 +1697,10 @@ mod tests {
         wait_cx.set_cancel_requested(true);
         let cancelled_poll = reserve_fut.as_mut().poll(&mut cx_task);
         crate::assert_with_log!(
-            matches!(cancelled_poll, Poll::Ready(Err(SendError::<()>::Cancelled(())))),
+            matches!(
+                cancelled_poll,
+                Poll::Ready(Err(SendError::<()>::Cancelled(())))
+            ),
             "pending waiter observes cancellation",
             "Ready(Err(Cancelled(())))",
             format!("{:?}", cancelled_poll)
@@ -1743,7 +1746,10 @@ mod tests {
         drop(rx);
         let second_poll = reserve_fut.as_mut().poll(&mut cx_task);
         crate::assert_with_log!(
-            matches!(second_poll, Poll::Ready(Err(SendError::<()>::Disconnected(())))),
+            matches!(
+                second_poll,
+                Poll::Ready(Err(SendError::<()>::Disconnected(())))
+            ),
             "pending reserve sees disconnect after receiver drop",
             "Ready(Err(Disconnected(())))",
             format!("{:?}", second_poll)
