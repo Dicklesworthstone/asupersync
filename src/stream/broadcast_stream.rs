@@ -252,7 +252,12 @@ mod tests {
 
         // Error trait
         let e: &dyn std::error::Error = &err;
-        crate::assert_with_log!(e.source().is_none(), "no source", true, e.source().is_none());
+        crate::assert_with_log!(
+            e.source().is_none(),
+            "no source",
+            true,
+            e.source().is_none()
+        );
 
         crate::test_complete!("broadcast_stream_recv_error_lagged_preserves_count");
     }
