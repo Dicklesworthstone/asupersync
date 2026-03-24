@@ -13,7 +13,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Retention semantics for a captured subject set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RetentionPolicy {
     /// Retain messages until configured resource limits evict them.
     #[default]
@@ -31,7 +31,7 @@ pub enum RetentionPolicy {
 }
 
 /// Capture policy for durable stream ingest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CapturePolicy {
     /// Only explicitly configured subject-filter matches are captured.
     #[default]
@@ -41,7 +41,7 @@ pub enum CapturePolicy {
 }
 
 /// Static configuration for a region-owned FABRIC stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamConfig {
     /// Subject set whose traffic is durably captured.
     pub subject_filter: SubjectPattern,
@@ -77,7 +77,7 @@ impl Default for StreamConfig {
 }
 
 /// Mutable stream bookkeeping surfaced for diagnostics and tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamState {
     /// Number of currently retained messages.
     pub msg_count: u64,
@@ -110,7 +110,7 @@ impl StreamState {
 }
 
 /// Lifecycle state for a region-owned stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StreamLifecycle {
     /// The stream is accepting new captures.
     #[default]
@@ -122,7 +122,7 @@ pub enum StreamLifecycle {
 }
 
 /// A single durably retained stream record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StreamRecord {
     /// Monotonic stream-local sequence number.
     pub seq: u64,
@@ -143,14 +143,14 @@ impl StreamRecord {
 }
 
 /// Storage snapshot returned by a stream backend.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct StorageSnapshot {
     /// Retained records in stream order.
     pub records: Vec<StreamRecord>,
 }
 
 /// A snapshot of stream configuration, state, storage, and child-region links.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamSnapshot {
     /// Human-readable stream name.
     pub name: String,
@@ -162,10 +162,22 @@ pub struct StreamSnapshot {
     pub state: StreamState,
     /// Storage contents at snapshot time.
     pub storage: StorageSnapshot,
+    /// Active consumer attachments at snapshot time.
+    pub consumer_ids: Vec<u64>,
     /// Mirror child regions currently attached to the stream.
     pub mirror_regions: Vec<RegionId>,
     /// Source child regions currently attached to the stream.
     pub source_regions: Vec<RegionId>,
+}
+
+impl StreamSnapshot {
+    /// Return whether the captured stream had drained all live attachments.
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        self.consumer_ids.is_empty()
+            && self.mirror_regions.is_empty()
+            && self.source_regions.is_empty()
+    }
 }
 
 /// Storage backend used by a FABRIC stream.
@@ -232,6 +244,16 @@ impl StorageBackend for InMemoryStorageBackend {
     fn snapshot(&self) -> Result<StorageSnapshot, StreamError> {
         Ok(StorageSnapshot {
             records: self.records.iter().cloned().collect(),
+        })
+    }
+}
+
+impl InMemoryStorageBackend {
+    /// Rehydrate the in-memory backend from a retained storage snapshot.
+    pub fn from_snapshot(snapshot: &StorageSnapshot) -> Result<Self, StreamError> {
+        validate_retained_records(snapshot.records.iter())?;
+        Ok(Self {
+            records: snapshot.records.iter().cloned().collect(),
         })
     }
 }
@@ -1210,6 +1232,7 @@ impl<B: StorageBackend> Stream<B> {
             config: self.config.clone(),
             state: self.state.clone(),
             storage: self.storage.snapshot()?,
+            consumer_ids: self.consumer_ids.iter().copied().collect(),
             mirror_regions: self.mirror_regions.iter().copied().collect(),
             source_regions: self.source_regions.iter().copied().collect(),
         })
@@ -1293,6 +1316,79 @@ impl<B: StorageBackend> Stream<B> {
         self.state.last_seq = snapshot.records.last().map_or(0, |record| record.seq);
         self.state.consumer_count = self.consumer_ids.len();
         Ok(())
+    }
+
+    fn rebuild_dedup_index_from_storage_snapshot(&mut self, snapshot: &StorageSnapshot) {
+        self.dedup_index.clear();
+        if self.config.dedupe_window.is_none() {
+            return;
+        }
+
+        for record in &snapshot.records {
+            self.record_dedup(
+                &record.subject,
+                &record.payload,
+                record.published_at,
+                record.seq,
+            );
+        }
+    }
+
+    fn restore_with_storage(
+        snapshot: &StreamSnapshot,
+        region_id: RegionId,
+        storage: B,
+    ) -> Result<Self, StreamError> {
+        let mut restored = Self::new(
+            snapshot.name.clone(),
+            region_id,
+            snapshot.state.created_at,
+            snapshot.config.clone(),
+            storage,
+        )?;
+        restored.rebuild_dedup_index_from_storage_snapshot(&snapshot.storage);
+
+        match snapshot.state.lifecycle {
+            StreamLifecycle::Open => {}
+            StreamLifecycle::Closing => restored.begin_close(),
+            StreamLifecycle::Closed => {
+                restored.begin_close();
+                restored.close()?;
+            }
+        }
+
+        Ok(restored)
+    }
+}
+
+impl Stream<InMemoryStorageBackend> {
+    /// Restore a captured stream into a fresh region using in-memory storage.
+    ///
+    /// Live consumer attachments and child-region leases are intentionally not
+    /// reactivated during restore; callers must re-establish those explicit
+    /// relationships in the new environment.
+    pub fn restore_from_snapshot(
+        snapshot: &StreamSnapshot,
+        region_id: RegionId,
+    ) -> Result<Self, StreamError> {
+        let storage = InMemoryStorageBackend::from_snapshot(&snapshot.storage)?;
+        Self::restore_with_storage(snapshot, region_id, storage)
+    }
+}
+
+impl Stream<WalStorageBackend> {
+    /// Restore a captured stream into a fresh region backed by a new WAL root.
+    ///
+    /// Live consumer attachments and child-region leases are intentionally not
+    /// reactivated during restore; callers must re-establish those explicit
+    /// relationships in the new environment.
+    pub fn restore_from_snapshot_wal(
+        snapshot: &StreamSnapshot,
+        region_id: RegionId,
+        config: WalStorageConfig,
+    ) -> Result<Self, StreamError> {
+        let storage = WalStorageBackend::from_snapshot(config, &snapshot.storage)?;
+        Self::restore_with_storage(snapshot, region_id, storage)
     }
 }
 
@@ -1778,10 +1874,103 @@ mod tests {
         assert_eq!(snapshot.region_id, test_region(20));
         assert_eq!(snapshot.state.msg_count, 1);
         assert_eq!(snapshot.storage.records.len(), 1);
+        assert_eq!(snapshot.consumer_ids, vec![consumer]);
         assert_eq!(snapshot.mirror_regions, vec![test_region(21)]);
         assert_eq!(snapshot.source_regions, vec![test_region(22)]);
 
         assert!(stream.detach_consumer(consumer));
+    }
+
+    #[test]
+    fn restore_from_snapshot_scrubs_live_attachments_but_preserves_records() {
+        let mut stream = Stream::new(
+            "orders",
+            test_region(30),
+            Time::from_secs(10),
+            stream_config("orders.>"),
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+        stream
+            .append(
+                Subject::new("orders.created"),
+                b"payload".to_vec(),
+                Time::from_secs(11),
+            )
+            .expect("append");
+        let consumer = stream.attach_consumer();
+        stream
+            .add_mirror_region(test_region(31))
+            .expect("mirror region");
+        stream
+            .add_source_region(test_region(32))
+            .expect("source region");
+
+        let snapshot = stream.snapshot().expect("snapshot");
+        let restored = Stream::restore_from_snapshot(&snapshot, test_region(40)).expect("restore");
+        let restored_snapshot = restored.snapshot().expect("restored snapshot");
+
+        assert_eq!(snapshot.storage, restored_snapshot.storage);
+        assert_eq!(restored_snapshot.name, "orders");
+        assert_eq!(restored_snapshot.region_id, test_region(40));
+        assert_eq!(restored_snapshot.config, snapshot.config);
+        assert_eq!(
+            restored_snapshot.state.created_at,
+            snapshot.state.created_at
+        );
+        assert_eq!(restored_snapshot.state.msg_count, snapshot.state.msg_count);
+        assert_eq!(
+            restored_snapshot.state.byte_count,
+            snapshot.state.byte_count
+        );
+        assert_eq!(restored_snapshot.state.first_seq, snapshot.state.first_seq);
+        assert_eq!(restored_snapshot.state.last_seq, snapshot.state.last_seq);
+        assert_eq!(restored_snapshot.consumer_ids, Vec::<u64>::new());
+        assert!(restored_snapshot.is_quiescent());
+        assert_eq!(snapshot.consumer_ids, vec![consumer]);
+        assert_eq!(snapshot.mirror_regions, vec![test_region(31)]);
+        assert_eq!(snapshot.source_regions, vec![test_region(32)]);
+    }
+
+    #[test]
+    fn restore_from_snapshot_rebuilds_dedup_index() {
+        let mut config = stream_config("orders.>");
+        config.dedupe_window = Some(Duration::from_secs(60));
+
+        let mut stream = Stream::new(
+            "orders",
+            test_region(50),
+            Time::from_secs(10),
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+        stream
+            .append(
+                Subject::new("orders.created"),
+                b"same-payload".to_vec(),
+                Time::from_secs(11),
+            )
+            .expect("append");
+
+        let snapshot = stream.snapshot().expect("snapshot");
+        let mut restored =
+            Stream::restore_from_snapshot(&snapshot, test_region(51)).expect("restore");
+        let err = restored
+            .append(
+                Subject::new("orders.created"),
+                b"same-payload".to_vec(),
+                Time::from_secs(20),
+            )
+            .expect_err("duplicate within dedupe window must be rejected");
+
+        assert_eq!(
+            err,
+            StreamError::DuplicateDetected {
+                subject: "orders.created".to_owned(),
+                existing_seq: 1,
+            }
+        );
     }
 
     fn temp_wal_dir(test_name: &str) -> PathBuf {

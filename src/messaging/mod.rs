@@ -205,8 +205,10 @@ pub use session::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use snapshot::{
-    CapsuleStateDigest, EvidenceDigest, RecoverableServiceCapsule, RestoredServiceCapsule,
-    ServiceCapsuleError, ServiceCapsuleRestorePlan, ServiceCapsuleState,
+    CapsuleStateDigest, EvidenceDigest, RecoverableServiceCapsule, RecoverableStreamSnapshot,
+    RestoredServiceCapsule, RestoredStreamConsumerState, RestoredStreamSnapshot,
+    ServiceCapsuleError, ServiceCapsuleRestorePlan, ServiceCapsuleState, StreamConsumerSnapshot,
+    StreamRestoreScrubSummary, StreamSnapshotError,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use subject::{

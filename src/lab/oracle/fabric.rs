@@ -510,6 +510,7 @@ struct FabricRedeliveryRecord {
     max_redeliveries: u32,
     observed_redeliveries: u32,
     last_redelivery_at: Time,
+    bound_explicit: bool,
 }
 
 /// Oracle for the invariant "redelivery remains bounded".
@@ -527,15 +528,32 @@ impl FabricRedeliveryOracle {
     }
 
     /// Begin tracking a delivery with an explicit redelivery bound.
+    ///
+    /// Re-tracking an existing message preserves any redeliveries already
+    /// observed so late or duplicate tracking cannot erase evidence. Once a
+    /// message has an explicit bound, later calls may only tighten it.
     pub fn track_message(&mut self, message_id: impl Into<String>, max_redeliveries: u32) {
-        self.messages.insert(
-            message_id.into(),
-            FabricRedeliveryRecord {
-                max_redeliveries,
-                observed_redeliveries: 0,
-                last_redelivery_at: Time::ZERO,
-            },
-        );
+        use std::collections::btree_map::Entry;
+
+        match self.messages.entry(message_id.into()) {
+            Entry::Vacant(entry) => {
+                entry.insert(FabricRedeliveryRecord {
+                    max_redeliveries,
+                    observed_redeliveries: 0,
+                    last_redelivery_at: Time::ZERO,
+                    bound_explicit: true,
+                });
+            }
+            Entry::Occupied(mut entry) => {
+                let record = entry.get_mut();
+                if record.bound_explicit {
+                    record.max_redeliveries = record.max_redeliveries.min(max_redeliveries);
+                } else {
+                    record.max_redeliveries = max_redeliveries;
+                    record.bound_explicit = true;
+                }
+            }
+        }
     }
 
     /// Record one redelivery attempt for the tracked message.
@@ -548,6 +566,7 @@ impl FabricRedeliveryOracle {
                 max_redeliveries: 0,
                 observed_redeliveries: 0,
                 last_redelivery_at: attempt_time,
+                bound_explicit: false,
             });
         record.observed_redeliveries = record.observed_redeliveries.saturating_add(1);
         record.last_redelivery_at = attempt_time;
@@ -828,6 +847,48 @@ mod tests {
         assert_eq!(violation.message_id, "msg-1");
         assert_eq!(violation.max_redeliveries, 1);
         assert_eq!(violation.observed_redeliveries, 2);
+    }
+
+    #[test]
+    fn redelivery_oracle_duplicate_tracking_does_not_erase_redelivery_history() {
+        init_test("redelivery_oracle_duplicate_tracking_does_not_erase_redelivery_history");
+
+        let mut oracle = FabricRedeliveryOracle::new();
+        oracle.track_message("msg-1", 1);
+        oracle.on_redelivery("msg-1", t(10));
+
+        // Re-tracking the same message must not discard the prior redelivery.
+        oracle.track_message("msg-1", 4);
+        oracle.on_redelivery("msg-1", t(20));
+
+        let violation = oracle
+            .check()
+            .expect_err("duplicate tracking must not relax the original bound");
+        assert_eq!(violation.message_id, "msg-1");
+        assert_eq!(violation.max_redeliveries, 1);
+        assert_eq!(violation.observed_redeliveries, 2);
+        assert_eq!(violation.last_redelivery_at, t(20));
+    }
+
+    #[test]
+    fn redelivery_oracle_late_tracking_preserves_prior_redelivery_observations() {
+        init_test("redelivery_oracle_late_tracking_preserves_prior_redelivery_observations");
+
+        let mut oracle = FabricRedeliveryOracle::new();
+
+        // Redelivery can be observed before the bound is later attached.
+        oracle.on_redelivery("msg-1", t(10));
+        oracle.track_message("msg-1", 2);
+        oracle.on_redelivery("msg-1", t(20));
+        oracle.on_redelivery("msg-1", t(30));
+
+        let violation = oracle
+            .check()
+            .expect_err("late tracking must retain already-observed redeliveries");
+        assert_eq!(violation.message_id, "msg-1");
+        assert_eq!(violation.max_redeliveries, 2);
+        assert_eq!(violation.observed_redeliveries, 3);
+        assert_eq!(violation.last_redelivery_at, t(30));
     }
 
     #[test]

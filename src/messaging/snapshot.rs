@@ -16,8 +16,9 @@ use super::cut::{
 };
 use super::fabric::{CellEpoch, SubjectCell};
 use super::privacy::{CellKeyHierarchySpec, KeyHierarchyError, RestoreScrubRequest};
+use super::stream::{InMemoryStorageBackend, Stream, StreamConfig, StreamError, StreamSnapshot};
 use crate::remote::NodeId;
-use crate::types::Time;
+use crate::types::{ObligationId, RegionId, Time};
 use crate::util::DetHasher;
 use std::hash::{Hash, Hasher};
 use thiserror::Error;
@@ -315,6 +316,202 @@ impl RestoredServiceCapsule {
     }
 }
 
+/// Consumer-side state captured with a stream snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamConsumerSnapshot {
+    /// Stable consumer attachment id at capture time.
+    pub consumer_id: u64,
+}
+
+/// Consumer-side state after restore-time lease invalidation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RestoredStreamConsumerState {
+    /// Stable consumer attachment id from the captured stream.
+    pub consumer_id: u64,
+    /// Restore invalidates captured live leases before replay or staging use.
+    pub lease_invalidated: bool,
+}
+
+/// Explicit restore-time scrub summary for a recovered stream branch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamRestoreScrubSummary {
+    /// Replacement reply-space prefix for the restored environment.
+    pub reply_subject_prefix: String,
+    /// Import credentials are never preserved across restore.
+    pub import_credentials_stripped: bool,
+    /// Export credentials are never preserved across restore.
+    pub export_credentials_stripped: bool,
+    /// Captured live consumer leases are invalidated before restore.
+    pub consumer_leases_invalidated: bool,
+}
+
+/// Recoverable stream snapshot captured at a cut-certified frontier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableStreamSnapshot {
+    /// Captured stream state and retained records.
+    pub stream_state: StreamSnapshot,
+    /// Captured consumer attachment state.
+    pub consumer_states: Vec<StreamConsumerSnapshot>,
+    /// Canonicalized obligation frontier preserved for replay.
+    pub obligation_frontier: Vec<ObligationId>,
+    /// Source cell epoch fenced into the cut.
+    pub epoch: CellEpoch,
+    /// Logical time when the stream snapshot was captured.
+    pub timestamp: Time,
+    /// Cell whose stream state was captured.
+    pub source_cell: SubjectCell,
+    /// Cut certificate fencing the captured state.
+    pub cut_certificate: CutCertificate,
+    /// Key-hierarchy binding that must be scrubbed before restore.
+    pub key_hierarchy: CellKeyHierarchySpec,
+    /// Deterministic digest of the recoverable stream snapshot payload.
+    pub snapshot_digest: CapsuleDigest,
+}
+
+impl RecoverableStreamSnapshot {
+    /// Capture a recoverable stream snapshot from a stream-side logical cut.
+    pub fn capture(
+        stream_state: &StreamSnapshot,
+        cell: &SubjectCell,
+        cut_certificate: &CutCertificate,
+        key_hierarchy: CellKeyHierarchySpec,
+        timestamp: Time,
+    ) -> Result<Self, StreamSnapshotError> {
+        cut_certificate.validate_for(cell)?;
+        key_hierarchy.validate()?;
+        validate_stream_key_hierarchy_binding(cell, &key_hierarchy)?;
+        if !stream_state.is_quiescent() && cut_certificate.obligation_frontier.is_empty() {
+            return Err(StreamSnapshotError::NonQuiescentWithoutObligationFrontier {
+                consumers: stream_state.consumer_ids.len(),
+                mirrors: stream_state.mirror_regions.len(),
+                sources: stream_state.source_regions.len(),
+            });
+        }
+        if !stream_state.consumer_ids.is_empty()
+            && cut_certificate.consumer_state_digest == ConsumerStateDigest::ZERO
+        {
+            return Err(StreamSnapshotError::MissingConsumerStateDigest);
+        }
+
+        let consumer_states = stream_state
+            .consumer_ids
+            .iter()
+            .copied()
+            .map(|consumer_id| StreamConsumerSnapshot { consumer_id })
+            .collect::<Vec<_>>();
+        let snapshot_digest = compute_stream_snapshot_digest(
+            stream_state,
+            &consumer_states,
+            &cut_certificate.obligation_frontier,
+            cell,
+            cut_certificate,
+            &key_hierarchy,
+            timestamp,
+        );
+
+        Ok(Self {
+            stream_state: stream_state.clone(),
+            consumer_states,
+            obligation_frontier: cut_certificate.obligation_frontier.clone(),
+            epoch: cut_certificate.epoch,
+            timestamp,
+            source_cell: cell.clone(),
+            cut_certificate: cut_certificate.clone(),
+            key_hierarchy,
+            snapshot_digest,
+        })
+    }
+
+    /// Restore the captured stream into a fresh staging or lab region.
+    pub fn restore_into_staging(
+        &self,
+        target: NodeId,
+        restored_region: RegionId,
+        restored_epoch: CellEpoch,
+        scrub_request: &RestoreScrubRequest,
+        reply_subject_prefix: impl Into<String>,
+        restored_at: Time,
+    ) -> Result<RestoredStreamSnapshot, StreamSnapshotError> {
+        let reply_subject_prefix = reply_subject_prefix.into();
+        if reply_subject_prefix.trim().is_empty() {
+            return Err(StreamSnapshotError::EmptyReplySubjectPrefix);
+        }
+
+        let scrubbed_key_hierarchy = self.key_hierarchy.scrub_for_restore(scrub_request)?;
+        let certified_mobility = self.source_cell.certify_mobility(
+            &self.cut_certificate,
+            &MobilityOperation::WarmRestore {
+                target,
+                restored_epoch,
+                capsule_digest: self.snapshot_digest,
+            },
+        )?;
+        let restored_stream = Stream::<InMemoryStorageBackend>::restore_from_snapshot(
+            &self.stream_state,
+            restored_region,
+        )?;
+        let restored_stream_state = restored_stream.snapshot()?;
+        let restored_consumer_states = self
+            .consumer_states
+            .iter()
+            .map(|consumer| RestoredStreamConsumerState {
+                consumer_id: consumer.consumer_id,
+                lease_invalidated: true,
+            })
+            .collect();
+
+        Ok(RestoredStreamSnapshot {
+            source_snapshot_digest: self.snapshot_digest,
+            certified_mobility,
+            scrubbed_key_hierarchy,
+            restored_stream_state,
+            restored_consumer_states,
+            obligation_frontier: self.obligation_frontier.clone(),
+            scrub_summary: StreamRestoreScrubSummary {
+                reply_subject_prefix,
+                import_credentials_stripped: true,
+                export_credentials_stripped: true,
+                consumer_leases_invalidated: true,
+            },
+            restored_at,
+        })
+    }
+
+    /// Fork the captured stream state under a different replay policy.
+    pub fn fork_with_config(
+        &self,
+        restored_region: RegionId,
+        config: StreamConfig,
+    ) -> Result<StreamSnapshot, StreamSnapshotError> {
+        let mut branch = self.stream_state.clone();
+        branch.config = config;
+        let restored =
+            Stream::<InMemoryStorageBackend>::restore_from_snapshot(&branch, restored_region)?;
+        restored.snapshot().map_err(StreamSnapshotError::from)
+    }
+}
+
+/// Restored stream branch after epoch rebinding and authority scrubbing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredStreamSnapshot {
+    /// Digest of the source stream snapshot.
+    pub source_snapshot_digest: CapsuleDigest,
+    /// Certified mobility artifact rebinding the stream's source cell.
+    pub certified_mobility: CertifiedMobility,
+    /// Scrubbed key hierarchy for the restored environment.
+    pub scrubbed_key_hierarchy: CellKeyHierarchySpec,
+    /// Restored stream state inside the new region.
+    pub restored_stream_state: StreamSnapshot,
+    /// Restored consumer states with live leases invalidated.
+    pub restored_consumer_states: Vec<RestoredStreamConsumerState>,
+    /// Preserved obligation frontier captured at the cut.
+    pub obligation_frontier: Vec<ObligationId>,
+    /// Explicit restore-time scrub summary.
+    pub scrub_summary: StreamRestoreScrubSummary,
+    /// Logical time when the restored branch resumed.
+    pub restored_at: Time,
+}
+
 /// Deterministic failures while capturing or restoring service capsules.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ServiceCapsuleError {
@@ -349,6 +546,58 @@ pub enum ServiceCapsuleError {
     /// The captured key hierarchy must use the current membership epoch of the source cell.
     #[error(
         "service capsule key hierarchy uses authoritative cell epoch {actual}, expected {expected} for the captured subject cell"
+    )]
+    KeyHierarchyCellEpochMismatch {
+        /// Membership epoch of the captured subject cell.
+        expected: u64,
+        /// Advertised key-hierarchy cell epoch.
+        actual: u64,
+    },
+}
+
+/// Deterministic failures while capturing or restoring stream snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum StreamSnapshotError {
+    /// Cut-certificate validation or mobility certification failed.
+    #[error(transparent)]
+    Mobility(#[from] CutMobilityError),
+    /// Restore-time key scrubbing failed.
+    #[error(transparent)]
+    KeyHierarchy(#[from] KeyHierarchyError),
+    /// Stream restore failed while rehydrating storage or rebuildable state.
+    #[error(transparent)]
+    Stream(#[from] StreamError),
+    /// Non-quiescent snapshots must preserve an explicit frontier.
+    #[error(
+        "non-quiescent stream snapshot requires an explicit obligation frontier: consumers={consumers} mirrors={mirrors} sources={sources}"
+    )]
+    NonQuiescentWithoutObligationFrontier {
+        /// Active consumer attachments at capture time.
+        consumers: usize,
+        /// Active mirror child regions at capture time.
+        mirrors: usize,
+        /// Active source child regions at capture time.
+        sources: usize,
+    },
+    /// Active consumer state requires a non-zero cut digest.
+    #[error("stream snapshot with active consumers requires a non-zero consumer-state digest")]
+    MissingConsumerStateDigest,
+    /// Restore must allocate a fresh reply-space prefix.
+    #[error("stream snapshot restore reply subject prefix must not be empty")]
+    EmptyReplySubjectPrefix,
+    /// The captured key hierarchy must identify the same canonical subject cell.
+    #[error(
+        "stream snapshot key hierarchy targets cell binding `{actual}`, expected `{expected}` for the captured subject cell"
+    )]
+    KeyHierarchyCellBindingMismatch {
+        /// Canonical key-hierarchy cell binding derived from the captured subject partition.
+        expected: String,
+        /// Advertised key-hierarchy cell binding.
+        actual: String,
+    },
+    /// The captured key hierarchy must use the current membership epoch of the source cell.
+    #[error(
+        "stream snapshot key hierarchy uses authoritative cell epoch {actual}, expected {expected} for the captured subject cell"
     )]
     KeyHierarchyCellEpochMismatch {
         /// Membership epoch of the captured subject cell.
@@ -447,16 +696,80 @@ fn stable_hash<T: Hash>(value: T) -> u64 {
     hasher.finish()
 }
 
+fn validate_stream_key_hierarchy_binding(
+    cell: &SubjectCell,
+    key_hierarchy: &CellKeyHierarchySpec,
+) -> Result<(), StreamSnapshotError> {
+    let expected_binding = canonical_key_hierarchy_cell_binding(cell);
+    if key_hierarchy.cell.cell_id != expected_binding {
+        return Err(StreamSnapshotError::KeyHierarchyCellBindingMismatch {
+            expected: expected_binding,
+            actual: key_hierarchy.cell.cell_id.clone(),
+        });
+    }
+
+    let expected_epoch = cell.epoch.membership_epoch;
+    if key_hierarchy.cell.cell_epoch != expected_epoch {
+        return Err(StreamSnapshotError::KeyHierarchyCellEpochMismatch {
+            expected: expected_epoch,
+            actual: key_hierarchy.cell.cell_epoch,
+        });
+    }
+
+    Ok(())
+}
+
+fn compute_stream_snapshot_digest(
+    stream_state: &StreamSnapshot,
+    consumer_states: &[StreamConsumerSnapshot],
+    obligation_frontier: &[ObligationId],
+    cell: &SubjectCell,
+    cut_certificate: &CutCertificate,
+    key_hierarchy: &CellKeyHierarchySpec,
+    captured_at: Time,
+) -> CapsuleDigest {
+    let mut hasher = DetHasher::default();
+    "recoverable-stream-snapshot".hash(&mut hasher);
+    stream_state.hash(&mut hasher);
+    consumer_states.hash(&mut hasher);
+    obligation_frontier.hash(&mut hasher);
+    cell.cell_id.raw().hash(&mut hasher);
+    cell.epoch.hash(&mut hasher);
+    cut_certificate.certificate_digest().hash(&mut hasher);
+    key_hierarchy.subgroup.subgroup_epoch.hash(&mut hasher);
+    key_hierarchy
+        .subgroup
+        .subgroup_roster_hash
+        .as_str()
+        .hash(&mut hasher);
+    key_hierarchy.cell.cell_id.as_str().hash(&mut hasher);
+    key_hierarchy.cell.cell_epoch.hash(&mut hasher);
+    key_hierarchy.cell.roster_hash.as_str().hash(&mut hasher);
+    key_hierarchy
+        .cell
+        .config_epoch_hash
+        .as_str()
+        .hash(&mut hasher);
+    key_hierarchy.cell.cell_rekey_generation.hash(&mut hasher);
+    captured_at.as_nanos().hash(&mut hasher);
+    let digest = hasher.finish();
+
+    CapsuleDigest::new(if digest == 0 { 1 } else { digest })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::class::DeliveryClass;
     use super::super::fabric::{
         CellTemperature, DataCapsule, NodeRole, PlacementPolicy, RepairPolicy, StewardCandidate,
         StorageClass, SubjectPattern,
     };
     use super::super::privacy::{CellKeyContext, SubgroupKeyContext};
+    use super::super::stream::{InMemoryStorageBackend, Stream, StreamConfig};
+    use super::super::subject::Subject;
     use super::*;
     use crate::remote::NodeId;
-    use crate::types::ObligationId;
+    use crate::types::{ObligationId, RegionId};
 
     fn candidate(
         name: &str,
@@ -540,6 +853,74 @@ mod tests {
                 .expect("active steward in cut"),
         )
         .expect("cut certificate")
+    }
+
+    fn frontierless_cut_certificate(cell: &SubjectCell) -> CutCertificate {
+        cell.issue_cut_certificate(
+            [],
+            ConsumerStateDigest::new(41),
+            Time::from_secs(3),
+            cell.steward_set
+                .first()
+                .cloned()
+                .expect("active steward in cut"),
+        )
+        .expect("cut certificate")
+    }
+
+    fn test_region(index: u32) -> RegionId {
+        RegionId::new_for_test(index, 1)
+    }
+
+    fn stream_config(filter: &str) -> StreamConfig {
+        StreamConfig {
+            subject_filter: SubjectPattern::new(filter),
+            ..StreamConfig::default()
+        }
+    }
+
+    fn quiescent_stream_snapshot() -> StreamSnapshot {
+        let mut stream = Stream::new(
+            "orders-stream",
+            test_region(70),
+            Time::from_secs(10),
+            stream_config("orders.>"),
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+        stream
+            .append(
+                Subject::new("orders.created"),
+                b"payload".to_vec(),
+                Time::from_secs(11),
+            )
+            .expect("append");
+        stream.snapshot().expect("snapshot")
+    }
+
+    fn non_quiescent_stream_snapshot() -> StreamSnapshot {
+        let mut stream = Stream::new(
+            "orders-stream",
+            test_region(71),
+            Time::from_secs(10),
+            stream_config("orders.>"),
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream");
+        stream
+            .append(
+                Subject::new("orders.created"),
+                b"payload".to_vec(),
+                Time::from_secs(11),
+            )
+            .expect("append");
+        let consumer = stream.attach_consumer();
+        stream
+            .add_mirror_region(test_region(72))
+            .expect("mirror region");
+        let snapshot = stream.snapshot().expect("snapshot");
+        assert_eq!(snapshot.consumer_ids, vec![consumer]);
+        snapshot
     }
 
     #[test]
@@ -838,5 +1219,128 @@ mod tests {
             .expect_err("live snapshot must be hibernated first");
 
         assert_eq!(err, ServiceCapsuleError::CapsuleMustBeHibernated);
+    }
+
+    #[test]
+    fn recoverable_stream_snapshot_requires_frontier_for_non_quiescent_capture() {
+        let cell = subject_cell();
+        let err = RecoverableStreamSnapshot::capture(
+            &non_quiescent_stream_snapshot(),
+            &cell,
+            &frontierless_cut_certificate(&cell),
+            key_hierarchy_spec(),
+            Time::from_secs(12),
+        )
+        .expect_err("non-quiescent capture must carry an explicit frontier");
+
+        assert_eq!(
+            err,
+            StreamSnapshotError::NonQuiescentWithoutObligationFrontier {
+                consumers: 1,
+                mirrors: 1,
+                sources: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn recoverable_stream_snapshot_restore_rebinds_epoch_and_scrubs_live_authority() {
+        let cell = subject_cell();
+        let captured_stream = non_quiescent_stream_snapshot();
+        let cut = cut_certificate(&cell);
+        let recoverable = RecoverableStreamSnapshot::capture(
+            &captured_stream,
+            &cell,
+            &cut,
+            key_hierarchy_spec(),
+            Time::from_secs(12),
+        )
+        .expect("recoverable stream capture");
+
+        let restored = recoverable
+            .restore_into_staging(
+                NodeId::new("restore-node"),
+                test_region(90),
+                CellEpoch::new(12, 4),
+                &RestoreScrubRequest {
+                    subgroup: SubgroupKeyContext {
+                        subgroup_epoch: 9,
+                        subgroup_roster_hash: "subgroup-roster-hash-restored".to_owned(),
+                    },
+                    cell: CellKeyContext {
+                        cell_id: "cell.orders.created.restored".to_owned(),
+                        cell_epoch: 44,
+                        roster_hash: "cell-roster-hash-restored".to_owned(),
+                        config_epoch_hash: "config-epoch-hash-restored".to_owned(),
+                        cell_rekey_generation: 3,
+                    },
+                },
+                "_INBOX.restored",
+                Time::from_secs(20),
+            )
+            .expect("restore stream snapshot");
+
+        assert_eq!(
+            restored.certified_mobility.resulting_cell.epoch,
+            CellEpoch::new(12, 4)
+        );
+        assert_eq!(
+            restored.scrubbed_key_hierarchy.cell.cell_id,
+            "cell.orders.created.restored"
+        );
+        assert_eq!(restored.restored_stream_state.region_id, test_region(90));
+        assert_eq!(
+            restored.restored_stream_state.storage,
+            captured_stream.storage
+        );
+        assert_eq!(restored.restored_stream_state.state.msg_count, 1);
+        assert!(restored.restored_stream_state.is_quiescent());
+        assert_eq!(
+            restored.restored_stream_state.consumer_ids,
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            restored.restored_consumer_states,
+            vec![RestoredStreamConsumerState {
+                consumer_id: captured_stream.consumer_ids[0],
+                lease_invalidated: true,
+            }]
+        );
+        assert_eq!(restored.obligation_frontier, cut.obligation_frontier);
+        assert_eq!(
+            restored.scrub_summary.reply_subject_prefix,
+            "_INBOX.restored"
+        );
+        assert!(restored.scrub_summary.import_credentials_stripped);
+        assert!(restored.scrub_summary.export_credentials_stripped);
+        assert!(restored.scrub_summary.consumer_leases_invalidated);
+    }
+
+    #[test]
+    fn recoverable_stream_snapshot_can_fork_under_counterfactual_policy() {
+        let cell = subject_cell();
+        let captured_stream = quiescent_stream_snapshot();
+        let recoverable = RecoverableStreamSnapshot::capture(
+            &captured_stream,
+            &cell,
+            &cut_certificate(&cell),
+            key_hierarchy_spec(),
+            Time::from_secs(12),
+        )
+        .expect("recoverable stream capture");
+        let mut counterfactual_config = captured_stream.config.clone();
+        counterfactual_config.delivery_class = DeliveryClass::ForensicReplayable;
+
+        let forked = recoverable
+            .fork_with_config(test_region(91), counterfactual_config.clone())
+            .expect("forked stream snapshot");
+
+        assert_eq!(forked.region_id, test_region(91));
+        assert_eq!(forked.config, counterfactual_config);
+        assert_eq!(forked.storage, captured_stream.storage);
+        assert_eq!(forked.state.msg_count, captured_stream.state.msg_count);
+        assert_eq!(forked.state.first_seq, captured_stream.state.first_seq);
+        assert_eq!(forked.state.last_seq, captured_stream.state.last_seq);
+        assert_eq!(forked.consumer_ids, Vec::<u64>::new());
     }
 }
