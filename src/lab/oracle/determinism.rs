@@ -259,12 +259,13 @@ impl TraceEventSummary {
             TraceData::Worker {
                 worker_id,
                 job_id,
+                decision_seq,
+                replay_hash,
                 task,
                 region,
                 obligation,
-                ..
             } => format!(
-                "worker={worker_id} job_id={job_id} task={task} region={region} obligation={obligation}"
+                "worker={worker_id} job_id={job_id} decision_seq={decision_seq} replay_hash={replay_hash} task={task} region={region} obligation={obligation}"
             ),
         }
     }
@@ -459,11 +460,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Budget;
+    use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
+    use crate::util::ArenaIndex;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn task(n: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    fn region(n: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    fn obligation(n: u32) -> ObligationId {
+        ObligationId::from_arena(ArenaIndex::new(n, 0))
     }
 
     #[test]
@@ -857,6 +871,51 @@ mod tests {
         // Empty data should not add extra content
         assert!(!display.contains("  "));
         crate::test_complete!("trace_event_summary_display_empty_data");
+    }
+
+    #[test]
+    fn worker_summary_distinguishes_decision_and_replay_identity() {
+        init_test("worker_summary_distinguishes_decision_and_replay_identity");
+
+        let event_a = TraceEvent::new(
+            7,
+            Time::from_nanos(123),
+            TraceEventKind::WorkerDrainCompleted,
+            TraceData::Worker {
+                worker_id: "worker-a".to_string(),
+                job_id: 11,
+                decision_seq: 17,
+                replay_hash: 23,
+                task: task(1),
+                region: region(2),
+                obligation: obligation(3),
+            },
+        );
+        let event_b = TraceEvent::new(
+            7,
+            Time::from_nanos(123),
+            TraceEventKind::WorkerDrainCompleted,
+            TraceData::Worker {
+                worker_id: "worker-a".to_string(),
+                job_id: 11,
+                decision_seq: 99,
+                replay_hash: 1001,
+                task: task(1),
+                region: region(2),
+                obligation: obligation(3),
+            },
+        );
+
+        let summary_a = TraceEventSummary::from_event(&event_a);
+        let summary_b = TraceEventSummary::from_event(&event_b);
+
+        assert_ne!(summary_a.data_summary, summary_b.data_summary);
+        assert_ne!(summary_a, summary_b);
+        assert!(summary_a.data_summary.contains("decision_seq=17"));
+        assert!(summary_a.data_summary.contains("replay_hash=23"));
+        assert!(summary_b.data_summary.contains("decision_seq=99"));
+        assert!(summary_b.data_summary.contains("replay_hash=1001"));
+        crate::test_complete!("worker_summary_distinguishes_decision_and_replay_identity");
     }
 
     #[test]

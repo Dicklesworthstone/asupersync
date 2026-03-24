@@ -35,24 +35,28 @@ use asupersync::cli::{
     screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
     validate_core_diagnostics_report_contract,
 };
+use asupersync::cx::Cx;
 use asupersync::lab::dual_run::{FinalDivergenceClass, ReplayPolicy, RerunDecision, SeedPlan};
 use asupersync::lab::replay::{
     DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
 };
 use asupersync::lab::{
-    CancellationRecord, DualRunHarness, DualRunScenarioIdentity, LiveWitnessCollector,
-    LoserDrainRecord, NormalizedSemantics, ObligationBalanceRecord, RegionCloseRecord,
-    ResourceSurfaceRecord, TerminalOutcome, capture_cancellation, capture_loser_drain,
-    capture_obligation_balance, capture_region_close, run_live_adapter,
+    CancellationRecord, DualRunHarness, DualRunScenarioIdentity, LabConfig, LabRuntime,
+    LiveWitnessCollector, LoserDrainRecord, NormalizedSemantics, ObligationBalanceRecord,
+    RegionCloseRecord, ResourceSurfaceRecord, TerminalOutcome, capture_cancellation,
+    capture_loser_drain, capture_obligation_balance, capture_region_close, run_live_adapter,
 };
 use asupersync::observability::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire,
 };
+use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
+use asupersync::sync::{AcquireError, Semaphore};
 use asupersync::test_logging::derive_scenario_seed;
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
     TraceReader, VerificationOptions, verify_trace,
 };
+use asupersync::types::Budget;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use conformance::{
     ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
@@ -68,6 +72,8 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
@@ -4864,6 +4870,14 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
             execute: run_phase1_region_close_scenario,
         },
         LabDifferentialScenarioDefinition {
+            id: "phase1.sync.semaphore.cancel_recovery",
+            surface_id: "sync.semaphore.cancel_recovery",
+            surface_contract_version: SYNC_SEMAPHORE_CANCEL_RECOVERY_CONTRACT_VERSION,
+            description: "Semaphore differential pilot preserves waiter cancellation cleanup and permit recovery.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_sync_semaphore_cancel_recovery_scenario,
+        },
+        LabDifferentialScenarioDefinition {
             id: "calibration.combinator.loser_not_drained",
             surface_id: "combinator.race",
             surface_contract_version: "combinator.race.v1",
@@ -4964,6 +4978,7 @@ fn profile_includes_lab_differential_scenario(
                 | "phase1.channel.reserve_send.commit"
                 | "phase1.channel.reserve_send.abort_visible"
                 | "phase1.region.close.quiescent"
+                | "phase1.sync.semaphore.cancel_recovery"
         ),
         LabDifferentialProfile::Calibration => matches!(
             scenario_id,
@@ -5500,6 +5515,176 @@ fn make_normalized_semantics(
     }
 }
 
+const SYNC_SEMAPHORE_CANCEL_RECOVERY_CONTRACT_VERSION: &str = "sync.semaphore.cancel_recovery.v1";
+
+fn counter_i64(value: usize) -> i64 {
+    i64::try_from(value).expect("sync differential counters should fit in i64")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemaphoreCancelRecoveryObservation {
+    cancelled_waiters: usize,
+    recovered_acquisitions: usize,
+    available_after_cancel: usize,
+    final_available_permits: usize,
+}
+
+impl SemaphoreCancelRecoveryObservation {
+    fn to_semantics(self) -> NormalizedSemantics {
+        NormalizedSemantics {
+            terminal_outcome: TerminalOutcome::ok(),
+            cancellation: CancellationRecord::none(),
+            loser_drain: LoserDrainRecord::not_applicable(),
+            region_close: capture_region_close(true, true),
+            obligation_balance: ObligationBalanceRecord::zero(),
+            resource_surface: ResourceSurfaceRecord::empty("sync.semaphore.cancel_recovery")
+                .with_counter("cancelled_waiters", counter_i64(self.cancelled_waiters))
+                .with_counter(
+                    "recovered_acquisitions",
+                    counter_i64(self.recovered_acquisitions),
+                )
+                .with_counter(
+                    "available_after_cancel",
+                    counter_i64(self.available_after_cancel),
+                )
+                .with_counter(
+                    "final_available_permits",
+                    counter_i64(self.final_available_permits),
+                ),
+        }
+    }
+}
+
+fn live_semaphore_cancel_recovery_observation() -> SemaphoreCancelRecoveryObservation {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build live current-thread runtime");
+    runtime.block_on(runtime.handle().spawn(async {
+        let handle =
+            Runtime::current_handle().expect("runtime handle inside sync differential semaphore");
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
+        let cancel_cx = Cx::for_testing();
+        let waiter_cx = cancel_cx.clone();
+        let cancelled_waiters = Arc::new(AtomicUsize::new(0));
+        let waiter_result = Arc::clone(&cancelled_waiters);
+        let semaphore_for_waiter = Arc::clone(&semaphore);
+
+        let waiter = handle.spawn(async move {
+            match semaphore_for_waiter.acquire(&waiter_cx, 1).await {
+                Err(AcquireError::Cancelled) => {
+                    waiter_result.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(_permit) => {
+                    panic!("cancelled waiter unexpectedly acquired semaphore");
+                }
+                Err(err) => panic!("unexpected semaphore acquire error: {err:?}"),
+            }
+        });
+
+        for _ in 0..8 {
+            yield_now().await;
+        }
+        cancel_cx.set_cancel_requested(true);
+        drop(held);
+        waiter.await;
+
+        let available_after_cancel = semaphore.available_permits();
+        let recovered_acquisitions = semaphore.try_acquire(1).map_or(0, |permit| {
+            drop(permit);
+            1usize
+        });
+
+        SemaphoreCancelRecoveryObservation {
+            cancelled_waiters: cancelled_waiters.load(Ordering::SeqCst),
+            recovered_acquisitions,
+            available_after_cancel,
+            final_available_permits: semaphore.available_permits(),
+        }
+    }))
+}
+
+fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecoveryObservation {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(2_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let semaphore = Arc::new(Semaphore::new(1));
+    let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
+    let cancel_cx = Cx::for_testing();
+    let waiter_cx = cancel_cx.clone();
+    let cancelled_waiters = Arc::new(AtomicUsize::new(0));
+
+    let semaphore_for_waiter = Arc::clone(&semaphore);
+    let waiter_result = Arc::clone(&cancelled_waiters);
+    let (task_id, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async move {
+            match semaphore_for_waiter.acquire(&waiter_cx, 1).await {
+                Err(AcquireError::Cancelled) => {
+                    waiter_result.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(_permit) => {
+                    panic!("cancelled waiter unexpectedly acquired semaphore");
+                }
+                Err(err) => panic!("unexpected semaphore acquire error: {err:?}"),
+            }
+        })
+        .expect("create lab semaphore task");
+    runtime.scheduler.lock().schedule(task_id, 0);
+
+    for _ in 0..8 {
+        runtime.step_for_test();
+    }
+    cancel_cx.set_cancel_requested(true);
+    drop(held);
+    runtime.run_until_quiescent();
+
+    let violations = runtime.check_invariants();
+    assert!(
+        violations.is_empty(),
+        "lab semaphore pilot invariants violated: {violations:?}"
+    );
+
+    let available_after_cancel = semaphore.available_permits();
+    let recovered_acquisitions = semaphore.try_acquire(1).map_or(0, |permit| {
+        drop(permit);
+        1usize
+    });
+
+    SemaphoreCancelRecoveryObservation {
+        cancelled_waiters: cancelled_waiters.load(Ordering::SeqCst),
+        recovered_acquisitions,
+        available_after_cancel,
+        final_available_permits: semaphore.available_permits(),
+    }
+}
+
+fn make_sync_semaphore_live_result(
+    identity: &DualRunScenarioIdentity,
+) -> asupersync::lab::LiveRunResult {
+    run_live_adapter(identity, |_config, witness| {
+        let observation = live_semaphore_cancel_recovery_observation();
+        witness.set_outcome(TerminalOutcome::ok());
+        witness.set_region_close(capture_region_close(true, true));
+        witness.set_obligation_balance(ObligationBalanceRecord::zero());
+        witness.record_counter(
+            "cancelled_waiters",
+            counter_i64(observation.cancelled_waiters),
+        );
+        witness.record_counter(
+            "recovered_acquisitions",
+            counter_i64(observation.recovered_acquisitions),
+        );
+        witness.record_counter(
+            "available_after_cancel",
+            counter_i64(observation.available_after_cancel),
+        );
+        witness.record_counter(
+            "final_available_permits",
+            counter_i64(observation.final_available_permits),
+        );
+    })
+}
+
 fn run_configured_differential_scenario(
     canonical_seed: u64,
     scenario_id: &'static str,
@@ -5786,6 +5971,24 @@ fn run_phase1_region_close_scenario(canonical_seed: u64) -> asupersync::lab::Dua
             witness.record_counter("nested_children", 2);
         },
     )
+}
+
+fn run_phase1_sync_semaphore_cancel_recovery_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    let identity = DualRunScenarioIdentity::phase1(
+        "phase1.sync.semaphore.cancel_recovery",
+        "sync.semaphore.cancel_recovery",
+        SYNC_SEMAPHORE_CANCEL_RECOVERY_CONTRACT_VERSION,
+        "Semaphore differential pilot preserves waiter cancellation cleanup and permit recovery.",
+        canonical_seed,
+    );
+    let live_result = make_sync_semaphore_live_result(&identity);
+
+    DualRunHarness::from_identity(identity)
+        .lab(move |config| lab_semaphore_cancel_recovery_observation(config.seed).to_semantics())
+        .live_result(move |_seed, _entropy| live_result)
+        .run()
 }
 
 fn run_calibration_cleanup_missing_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
@@ -7189,7 +7392,8 @@ mod tests {
                 "phase1.combinator.race.one_loser".to_string(),
                 "phase1.channel.reserve_send.commit".to_string(),
                 "phase1.channel.reserve_send.abort_visible".to_string(),
-                "phase1.region.close.quiescent".to_string()
+                "phase1.region.close.quiescent".to_string(),
+                "phase1.sync.semaphore.cancel_recovery".to_string()
             ]
         );
     }
@@ -7626,6 +7830,47 @@ mod tests {
         assert_eq!(
             live_normalized["semantics"]["resource_surface"]["counters"]["nested_children"],
             2
+        );
+    }
+
+    #[test]
+    fn lab_differential_phase1_core_profile_covers_sync_semaphore_cancel_recovery_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Phase1Core,
+            scenarios: vec!["phase1.sync.semaphore.cancel_recovery".to_string()],
+            seed: 3551,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run sync semaphore differential profile");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["cancelled_waiters"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["recovered_acquisitions"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["available_after_cancel"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["final_available_permits"],
+            1
         );
     }
 

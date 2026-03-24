@@ -76,6 +76,8 @@ struct RaceRecord {
 /// Record of a completed race.
 #[derive(Debug, Clone)]
 struct RaceCompleteRecord {
+    /// All participants in the completed race.
+    participants: Vec<TaskId>,
     /// The winning task.
     winner: TaskId,
     /// When the race completed.
@@ -129,9 +131,14 @@ impl LoserDrainOracle {
 
     /// Records that a race has completed.
     pub fn on_race_complete(&mut self, race_id: u64, winner: TaskId, time: Time) {
+        let participants = self
+            .active_races
+            .remove(&race_id)
+            .map_or_else(Vec::new, |race| race.participants);
         self.completed_races.insert(
             race_id,
             RaceCompleteRecord {
+                participants,
                 winner,
                 complete_time: time,
             },
@@ -159,13 +166,9 @@ impl LoserDrainOracle {
             let Some(complete_record) = self.completed_races.get(&race_id) else {
                 continue;
             };
-            let Some(race_record) = self.active_races.get(&race_id) else {
-                continue;
-            };
-
             let mut undrained = Vec::new();
 
-            for &participant in &race_record.participants {
+            for &participant in &complete_record.participants {
                 // Skip the winner
                 if participant == complete_record.winner {
                     continue;
@@ -399,6 +402,28 @@ mod tests {
             violation.race_id
         );
         crate::test_complete!("multiple_races_independent");
+    }
+
+    #[test]
+    fn completed_race_is_retired_from_active_tracking() {
+        init_test("completed_race_is_retired_from_active_tracking");
+        let mut oracle = LoserDrainOracle::new();
+
+        let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
+        oracle.on_task_complete(task(1), t(50));
+        oracle.on_task_complete(task(2), t(60));
+        oracle.on_race_complete(race_id, task(1), t(100));
+
+        let active = oracle.active_race_count();
+        crate::assert_with_log!(active == 0, "active_race_count", 0, active);
+        let completed = oracle.completed_race_count();
+        crate::assert_with_log!(completed == 1, "completed_race_count", 1, completed);
+        let total = oracle.race_count();
+        crate::assert_with_log!(total == 1, "race_count", 1, total);
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("completed_race_is_retired_from_active_tracking");
     }
 
     #[test]

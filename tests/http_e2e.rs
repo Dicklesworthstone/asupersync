@@ -493,7 +493,7 @@ fn e2e_http_compression_negotiation() {
         ContentEncoding::Deflate,
         ContentEncoding::Brotli,
     ];
-    let result = negotiate_encoding("gzip, deflate", &supported);
+    let result = negotiate_encoding(Some("gzip, deflate"), &supported);
     tracing::info!(result = ?result.as_ref().map(ContentEncoding::as_token), "gzip negotiate");
     assert_with_log!(
         result.is_some(),
@@ -503,21 +503,21 @@ fn e2e_http_compression_negotiation() {
     );
 
     test_section!("test_brotli_preference");
-    let result2 = negotiate_encoding("br;q=1.0, gzip;q=0.8", &supported);
+    let result2 = negotiate_encoding(Some("br;q=1.0, gzip;q=0.8"), &supported);
     tracing::info!(
         result = ?result2.as_ref().map(ContentEncoding::as_token),
         "brotli negotiate"
     );
 
     test_section!("test_identity_fallback");
-    let result3 = negotiate_encoding("identity", &supported);
+    let result3 = negotiate_encoding(Some("identity"), &supported);
     tracing::info!(
         result = ?result3.as_ref().map(ContentEncoding::as_token),
         "identity negotiate"
     );
 
     test_section!("test_unsupported");
-    let result4 = negotiate_encoding("zstd", &supported);
+    let result4 = negotiate_encoding(Some("zstd"), &supported);
     tracing::info!(result = ?result4.is_none(), "unsupported rejected");
 
     test_complete!("e2e_http_compression_negotiation");

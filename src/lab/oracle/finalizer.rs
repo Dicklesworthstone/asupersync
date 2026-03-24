@@ -114,14 +114,29 @@ impl FinalizerOracle {
     ///
     /// Called when a finalizer is registered with a region.
     pub fn on_register(&mut self, id: FinalizerId, region: RegionId, time: Time) {
-        self.finalizers.insert(
+        if let Some(previous) = self.finalizers.insert(
             id,
             FinalizerRecord {
                 id,
                 region,
                 registered_at: time,
             },
-        );
+        ) {
+            let remove_previous_region = self
+                .finalizers_by_region
+                .get_mut(&previous.region)
+                .is_some_and(|finalizers| {
+                    finalizers.remove(&id);
+                    finalizers.is_empty()
+                });
+            if remove_previous_region {
+                self.finalizers_by_region.remove(&previous.region);
+            }
+        }
+
+        // A fresh registration must require a fresh run, even if the same ID
+        // had already completed in an earlier lifecycle.
+        self.ran_finalizers.remove(&id);
         self.finalizers_by_region
             .entry(region)
             .or_default()
@@ -433,6 +448,58 @@ mod tests {
             violation.region_close_time
         );
         crate::test_complete!("finalizer_run_after_close_still_violates");
+    }
+
+    #[test]
+    fn reregistered_finalizer_moves_out_of_previous_region() {
+        init_test("reregistered_finalizer_moves_out_of_previous_region");
+        let mut oracle = FinalizerOracle::new();
+
+        let finalizer = oracle.generate_id();
+        oracle.on_register(finalizer, region(0), t(10));
+        oracle.on_register(finalizer, region(1), t(20));
+
+        oracle.on_region_close(region(0), t(30));
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("reregistered_finalizer_moves_out_of_previous_region");
+    }
+
+    #[test]
+    fn reregistered_finalizer_requires_a_fresh_run() {
+        init_test("reregistered_finalizer_requires_a_fresh_run");
+        let mut oracle = FinalizerOracle::new();
+
+        let finalizer = oracle.generate_id();
+        oracle.on_register(finalizer, region(0), t(10));
+        oracle.on_run(finalizer, t(20));
+
+        oracle.on_register(finalizer, region(1), t(30));
+        oracle.on_region_close(region(1), t(40));
+
+        let violation = oracle
+            .check()
+            .expect_err("re-registering a finalizer must require a new run");
+        crate::assert_with_log!(
+            violation.region == region(1),
+            "violation region",
+            region(1),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.unrun_finalizers == vec![finalizer],
+            "unrun finalizers",
+            vec![finalizer],
+            violation.unrun_finalizers
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(40),
+            "region close time",
+            t(40),
+            violation.region_close_time
+        );
+        crate::test_complete!("reregistered_finalizer_requires_a_fresh_run");
     }
 
     #[test]

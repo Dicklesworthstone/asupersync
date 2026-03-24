@@ -339,8 +339,8 @@ fn e2e_multi_pool_compression_multihost() {
     // Different protocols may negotiate different encodings
     let supported = [ContentEncoding::Gzip, ContentEncoding::Brotli];
 
-    let http_enc = negotiate_encoding("gzip, deflate, br", &supported);
-    let grpc_enc = negotiate_encoding("identity, gzip", &supported);
+    let http_enc = negotiate_encoding(Some("gzip, deflate, br"), &supported);
+    let grpc_enc = negotiate_encoding(Some("identity, gzip"), &supported);
 
     tracing::info!(
         http_encoding = ?http_enc.as_ref().map(ContentEncoding::as_token),

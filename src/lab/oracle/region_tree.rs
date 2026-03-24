@@ -155,9 +155,14 @@ impl RegionTreeOracle {
     /// This method tracks the region and its parent relationship. It also
     /// automatically updates the parent's subregions set.
     pub fn on_region_create(&mut self, region: RegionId, parent: Option<RegionId>, time: Time) {
+        let (previous_parent, existing_subregions) = self.regions.get(&region).map_or_else(
+            || (None, HashSet::new()),
+            |previous| (previous.parent, previous.subregions.clone()),
+        );
+
         // If this region already existed with a different parent, remove the
         // stale edge from the old parent's subregion set.
-        if let Some(previous_parent) = self.regions.get(&region).and_then(|entry| entry.parent) {
+        if let Some(previous_parent) = previous_parent {
             if Some(previous_parent) != parent {
                 if let Some(previous_parent_entry) = self.regions.get_mut(&previous_parent) {
                     previous_parent_entry.subregions.remove(&region);
@@ -170,7 +175,9 @@ impl RegionTreeOracle {
             region,
             RegionTreeEntry {
                 parent,
-                subregions: HashSet::new(),
+                // Re-registration can move a region without changing its
+                // existing children; keep those edges intact.
+                subregions: existing_subregions,
                 created_at: time,
             },
         );
@@ -949,6 +956,26 @@ mod tests {
 
         assert!(oracle.check().is_ok());
         crate::test_complete!("duplicate_region_create_reparents_cleanly");
+    }
+
+    #[test]
+    fn duplicate_region_create_reparent_preserves_existing_children() {
+        init_test("duplicate_region_create_reparent_preserves_existing_children");
+        let mut oracle = RegionTreeOracle::new();
+
+        oracle.on_region_create(region(0), None, t(0));
+        oracle.on_region_create(region(2), Some(region(0)), t(1));
+        oracle.on_region_create(region(1), Some(region(0)), t(2));
+        oracle.on_region_create(region(3), Some(region(1)), t(3));
+
+        // Re-create region(1) with a new parent after it already has a child.
+        // The oracle should preserve region(1) -> region(3) while removing the
+        // stale region(0) -> region(1) edge.
+        oracle.on_region_create(region(1), Some(region(2)), t(4));
+
+        assert!(oracle.check().is_ok());
+        assert_eq!(oracle.depth(region(3)), Some(3));
+        crate::test_complete!("duplicate_region_create_reparent_preserves_existing_children");
     }
 
     #[test]
