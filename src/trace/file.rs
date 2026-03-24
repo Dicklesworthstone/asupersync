@@ -1129,6 +1129,18 @@ impl TraceReader {
             .read_exact(&mut compressed)
             .map_err(truncated_or_io)?;
 
+        // Guard against decompression bombs (OOM mitigation)
+        if compressed.len() >= 4 {
+            let uncompressed_len = u32::from_le_bytes(compressed[0..4].try_into().unwrap()) as usize;
+            if uncompressed_len > MAX_COMPRESSED_CHUNK_LEN {
+                return Err(TraceFileError::OversizedField {
+                    field: "decompressed_chunk_len",
+                    actual: uncompressed_len as u64,
+                    max: MAX_COMPRESSED_CHUNK_LEN as u64,
+                });
+            }
+        }
+
         // Decompress
         self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(
             |e: lz4_flex::block::DecompressError| TraceFileError::Decompression(e.to_string()),
@@ -1316,6 +1328,18 @@ impl TraceEventIterator {
         self.reader
             .read_exact(&mut compressed)
             .map_err(truncated_or_io)?;
+
+        // Guard against decompression bombs (OOM mitigation)
+        if compressed.len() >= 4 {
+            let uncompressed_len = u32::from_le_bytes(compressed[0..4].try_into().unwrap()) as usize;
+            if uncompressed_len > MAX_COMPRESSED_CHUNK_LEN {
+                return Err(TraceFileError::OversizedField {
+                    field: "decompressed_chunk_len",
+                    actual: uncompressed_len as u64,
+                    max: MAX_COMPRESSED_CHUNK_LEN as u64,
+                });
+            }
+        }
 
         // Decompress
         self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(

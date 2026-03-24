@@ -2188,9 +2188,9 @@ mod tests {
             let dbg = format!("{v:?}");
             assert!(!dbg.is_empty());
         }
-        assert!(format!("{:?}", variants[0]).contains("Stopped"));
-        assert!(format!("{:?}", variants[1]).contains('5'));
-        assert!(format!("{:?}", variants[2]).contains("Escalated"));
+        assert!(format!("{variants0:?}", variants0 = variants[0]).contains("Stopped"));
+        assert!(format!("{variants1:?}", variants1 = variants[1]).contains('5'));
+        assert!(format!("{variants2:?}", variants2 = variants[2]).contains("Escalated"));
     }
 
     #[test]

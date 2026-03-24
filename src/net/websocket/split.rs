@@ -410,7 +410,7 @@ where
         let write_id = write.shared.lock().id;
 
         if self_id != write_id {
-            return Err(ReuniteError { read: self, write });
+            return Err(ReuniteError::<IO> { read: self, write });
         }
 
         // Drop the write half first to release its Arc reference, then
@@ -426,7 +426,7 @@ where
                     shared: Arc::clone(&arc),
                 };
                 let read = Self { shared: arc };
-                return Err(ReuniteError { read, write });
+                return Err(ReuniteError::<IO> { read, write });
             }
         };
 
@@ -557,13 +557,13 @@ where
     ///
     /// Sends a close frame. The read half will receive the peer's response.
     pub async fn close(&mut self, reason: CloseReason) -> Result<(), WsError> {
-        self.initiate_close(reason).await
+        Self::initiate_close(self, reason).await
     }
 
     /// Send a ping frame.
     pub async fn ping(&mut self, payload: impl Into<Bytes>) -> Result<(), WsError> {
         let frame = Frame::ping(payload);
-        self.send_frame(&frame).await
+        Self::send_frame(self, &frame).await
     }
 
     /// Check if the connection is open.

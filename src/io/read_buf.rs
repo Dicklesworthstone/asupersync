@@ -71,7 +71,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         if let Some(message) = payload.downcast_ref::<&str>() {
             return (*message).to_owned();
         }
@@ -110,7 +110,7 @@ mod tests {
             read_buf.advance(usize::MAX);
         }))
         .expect_err("advance must fail closed on oversized step");
-        let message = panic_message(panic);
+        let message = panic_message(panic.as_ref());
         crate::assert_with_log!(
             message.contains("ReadBuf overflow"),
             "panic message",

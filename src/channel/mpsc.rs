@@ -203,9 +203,9 @@ impl<T> Sender<T> {
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
         match self.reserve(cx).await {
             Ok(permit) => permit.try_send(value),
-            Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
-            Err(SendError::Full(())) => Err(SendError::Full(value)),
-            Err(SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
+            Err(SendError::<()>::Disconnected(())) => Err(SendError::Disconnected(value)),
+            Err(SendError::<()>::Full(())) => Err(SendError::Full(value)),
+            Err(SendError::<()>::Cancelled(())) => Err(SendError::Cancelled(value)),
         }
     }
 
@@ -217,11 +217,11 @@ impl<T> Sender<T> {
         let mut inner = self.shared.inner.lock();
 
         if self.shared.receiver_dropped.load(Ordering::Relaxed) {
-            return Err(SendError::Disconnected(()));
+            return Err(SendError::<()>::Disconnected(()));
         }
 
         if !inner.send_wakers.is_empty() {
-            return Err(SendError::Full(()));
+            return Err(SendError::<()>::Full(()));
         }
 
         if inner.has_capacity(self.shared.capacity) {
@@ -232,7 +232,7 @@ impl<T> Sender<T> {
                 sent: false,
             })
         } else {
-            Err(SendError::Full(()))
+            Err(SendError::<()>::Full(()))
         }
     }
 
@@ -241,9 +241,9 @@ impl<T> Sender<T> {
     pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
         match self.try_reserve() {
             Ok(permit) => permit.try_send(value),
-            Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
-            Err(SendError::Full(())) => Err(SendError::Full(value)),
-            Err(SendError::Cancelled(())) => unreachable!(),
+            Err(SendError::<()>::Disconnected(())) => Err(SendError::Disconnected(value)),
+            Err(SendError::<()>::Full(())) => Err(SendError::Full(value)),
+            Err(SendError::<()>::Cancelled(())) => unreachable!(),
         }
     }
 
@@ -382,14 +382,14 @@ impl<'a, T> Future for Reserve<'a, T> {
                     w.wake();
                 }
             }
-            return Poll::Ready(Err(SendError::Cancelled(())));
+            return Poll::Ready(Err(SendError::<()>::Cancelled(())));
         }
 
         let mut inner = self.sender.shared.inner.lock();
 
         if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
             self.waiter_id = None; // Waiter is already cleared by Receiver::drop
-            return Poll::Ready(Err(SendError::Disconnected(())));
+            return Poll::Ready(Err(SendError::<()>::Disconnected(())));
         }
 
         let is_first = self.waiter_id.map_or_else(
@@ -1029,7 +1029,7 @@ mod tests {
 
         let try_reserve = tx.try_reserve();
         crate::assert_with_log!(
-            matches!(try_reserve, Err(SendError::Full(()))),
+            matches!(try_reserve, Err(SendError::<()>::Full(()))),
             "try_reserve full",
             "Err(Full(()))",
             format!("{:?}", try_reserve)
@@ -1182,7 +1182,7 @@ mod tests {
         let cx = cancelled_cx();
         let result = block_on(tx.reserve(&cx));
         crate::assert_with_log!(
-            matches!(result, Err(SendError::Cancelled(()))),
+            matches!(result, Err(SendError::<()>::Cancelled(()))),
             "reserve cancelled",
             "Err(Cancelled(()))",
             format!("{:?}", result)
@@ -1284,7 +1284,7 @@ mod tests {
 
         let try_reserve = tx.try_reserve();
         crate::assert_with_log!(
-            matches!(try_reserve, Err(SendError::Full(()))),
+            matches!(try_reserve, Err(SendError::<()>::Full(()))),
             "try_reserve full due to waiter",
             "Err(Full(()))",
             format!("{:?}", try_reserve)
@@ -1634,7 +1634,7 @@ mod tests {
         // refuse to jump the queue.
         let try_result = tx.try_reserve();
         crate::assert_with_log!(
-            matches!(try_result, Err(SendError::Full(()))),
+            matches!(try_result, Err(SendError::<()>::Full(()))),
             "try_reserve respects FIFO",
             "Err(Full)",
             format!("{:?}", try_result)
@@ -1697,7 +1697,7 @@ mod tests {
         wait_cx.set_cancel_requested(true);
         let cancelled_poll = reserve_fut.as_mut().poll(&mut cx_task);
         crate::assert_with_log!(
-            matches!(cancelled_poll, Poll::Ready(Err(SendError::Cancelled(())))),
+            matches!(cancelled_poll, Poll::Ready(Err(SendError::<()>::Cancelled(())))),
             "pending waiter observes cancellation",
             "Ready(Err(Cancelled(())))",
             format!("{:?}", cancelled_poll)
@@ -1743,7 +1743,7 @@ mod tests {
         drop(rx);
         let second_poll = reserve_fut.as_mut().poll(&mut cx_task);
         crate::assert_with_log!(
-            matches!(second_poll, Poll::Ready(Err(SendError::Disconnected(())))),
+            matches!(second_poll, Poll::Ready(Err(SendError::<()>::Disconnected(())))),
             "pending reserve sees disconnect after receiver drop",
             "Ready(Err(Disconnected(())))",
             format!("{:?}", second_poll)
@@ -1760,7 +1760,7 @@ mod tests {
 
         let try_reserve = tx.try_reserve();
         crate::assert_with_log!(
-            matches!(try_reserve, Err(SendError::Disconnected(()))),
+            matches!(try_reserve, Err(SendError::<()>::Disconnected(()))),
             "try_reserve reports disconnected",
             "Err(Disconnected(()))",
             format!("{:?}", try_reserve)

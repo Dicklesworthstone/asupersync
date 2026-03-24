@@ -886,7 +886,7 @@ impl<S: GenServer> GenServerHandle<S> {
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit = reply_tx.reserve(cx);
-        let envelope = Envelope::Call {
+        let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
         };
@@ -950,7 +950,7 @@ impl<S: GenServer> GenServerHandle<S> {
             cx.trace("gen_server::cast_rejected_stopped");
             return Err(CastError::ServerStopped);
         }
-        let envelope = Envelope::Cast { msg };
+        let envelope: Envelope<S> = Envelope::Cast { msg };
         self.sender.send(cx, envelope).await.map_err(|e| match e {
             mpsc::SendError::Cancelled(_) => {
                 cx.trace("gen_server::cast_send_cancelled");
@@ -978,7 +978,7 @@ impl<S: GenServer> GenServerHandle<S> {
         ) {
             return Err(CastError::ServerStopped);
         }
-        let envelope = Envelope::Cast { msg };
+        let envelope: Envelope<S> = Envelope::Cast { msg };
         match self.overflow_policy {
             CastOverflowPolicy::Reject => self.sender.try_send(envelope).map_err(|e| match e {
                 mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
@@ -1024,7 +1024,7 @@ impl<S: GenServer> GenServerHandle<S> {
             return Err(InfoError::ServerStopped);
         }
 
-        let envelope = Envelope::Info { msg };
+        let envelope: Envelope<S> = Envelope::Info { msg };
         self.sender.send(cx, envelope).await.map_err(|e| match e {
             mpsc::SendError::Cancelled(_) => {
                 let reason = cx
@@ -1046,7 +1046,7 @@ impl<S: GenServer> GenServerHandle<S> {
             return Err(InfoError::ServerStopped);
         }
 
-        let envelope = Envelope::Info { msg };
+        let envelope: Envelope<S> = Envelope::Info { msg };
         self.sender.try_send(envelope).map_err(|e| match e {
             mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
                 InfoError::ServerStopped
@@ -1278,7 +1278,7 @@ impl<S: GenServer> GenServerRef<S> {
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit = reply_tx.reserve(cx);
-        let envelope = Envelope::Call {
+        let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
         };
@@ -1340,7 +1340,7 @@ impl<S: GenServer> GenServerRef<S> {
             cx.trace("gen_server::cast_rejected_stopped");
             return Err(CastError::ServerStopped);
         }
-        let envelope = Envelope::Cast { msg };
+        let envelope: Envelope<S> = Envelope::Cast { msg };
         self.sender.send(cx, envelope).await.map_err(|e| match e {
             mpsc::SendError::Cancelled(_) => {
                 cx.trace("gen_server::cast_send_cancelled");
@@ -1366,7 +1366,7 @@ impl<S: GenServer> GenServerRef<S> {
         ) {
             return Err(CastError::ServerStopped);
         }
-        let envelope = Envelope::Cast { msg };
+        let envelope: Envelope<S> = Envelope::Cast { msg };
         match self.overflow_policy {
             CastOverflowPolicy::Reject => self.sender.try_send(envelope).map_err(|e| match e {
                 mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
@@ -1411,7 +1411,7 @@ impl<S: GenServer> GenServerRef<S> {
             return Err(InfoError::ServerStopped);
         }
 
-        let envelope = Envelope::Info { msg };
+        let envelope: Envelope<S> = Envelope::Info { msg };
         self.sender.send(cx, envelope).await.map_err(|e| match e {
             mpsc::SendError::Cancelled(_) => {
                 let reason = cx
@@ -1433,7 +1433,7 @@ impl<S: GenServer> GenServerRef<S> {
             return Err(InfoError::ServerStopped);
         }
 
-        let envelope = Envelope::Info { msg };
+        let envelope: Envelope<S> = Envelope::Info { msg };
         self.sender.try_send(envelope).map_err(|e| match e {
             mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
                 InfoError::ServerStopped
@@ -1602,7 +1602,7 @@ async fn dispatch_envelope<S: GenServer>(server: &mut S, cx: &Cx, envelope: Enve
             request,
             reply_permit,
         } => {
-            let reply = Reply::new(cx, reply_permit);
+            let reply = Reply::<S::Reply>::new(cx, reply_permit);
             server.handle_call(cx, request, reply).await;
         }
         Envelope::Cast { msg } => {
