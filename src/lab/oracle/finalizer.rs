@@ -72,7 +72,6 @@ impl std::error::Error for FinalizerViolation {}
 struct FinalizerRecord {
     id: FinalizerId,
     region: RegionId,
-    #[allow(dead_code)]
     registered_at: Time,
 }
 
@@ -114,6 +113,18 @@ impl FinalizerOracle {
     ///
     /// Called when a finalizer is registered with a region.
     pub fn on_register(&mut self, id: FinalizerId, region: RegionId, time: Time) {
+        if self
+            .finalizers
+            .get(&id)
+            .is_some_and(|existing| existing.region == region && existing.registered_at == time)
+        {
+            self.finalizers_by_region
+                .entry(region)
+                .or_default()
+                .insert(id);
+            return;
+        }
+
         if let Some(previous) = self.finalizers.insert(
             id,
             FinalizerRecord {
@@ -500,6 +511,26 @@ mod tests {
             violation.region_close_time
         );
         crate::test_complete!("reregistered_finalizer_requires_a_fresh_run");
+    }
+
+    #[test]
+    fn exact_duplicate_registration_preserves_completed_state() {
+        init_test("exact_duplicate_registration_preserves_completed_state");
+        let mut oracle = FinalizerOracle::new();
+
+        let finalizer = oracle.generate_id();
+        oracle.on_register(finalizer, region(0), t(10));
+        oracle.on_run(finalizer, t(20));
+
+        // Duplicate event for the same registration should be idempotent.
+        oracle.on_register(finalizer, region(0), t(10));
+        oracle.on_region_close(region(0), t(30));
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        let ran = oracle.ran_count();
+        crate::assert_with_log!(ran == 1, "ran count", 1, ran);
+        crate::test_complete!("exact_duplicate_registration_preserves_completed_state");
     }
 
     #[test]

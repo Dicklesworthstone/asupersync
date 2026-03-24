@@ -49,7 +49,6 @@ use asupersync::lab::{
 use asupersync::observability::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire,
 };
-use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
 use asupersync::sync::{AcquireError, Semaphore};
 use asupersync::test_logging::derive_scenario_seed;
 use asupersync::trace::{
@@ -69,11 +68,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File};
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
@@ -5521,6 +5523,25 @@ fn counter_i64(value: usize) -> i64 {
     i64::try_from(value).expect("sync differential counters should fit in i64")
 }
 
+struct CliNoopWaker;
+
+impl Wake for CliNoopWaker {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn cli_noop_waker() -> Waker {
+    Waker::from(Arc::new(CliNoopWaker))
+}
+
+fn poll_once<F>(future: &mut F) -> Poll<F::Output>
+where
+    F: Future + Unpin,
+{
+    let waker = cli_noop_waker();
+    let mut context = Context::from_waker(&waker);
+    Pin::new(future).poll(&mut context)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SemaphoreCancelRecoveryObservation {
     cancelled_waiters: usize,
@@ -5556,52 +5577,45 @@ impl SemaphoreCancelRecoveryObservation {
 }
 
 fn live_semaphore_cancel_recovery_observation() -> SemaphoreCancelRecoveryObservation {
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("build live current-thread runtime");
-    runtime.block_on(runtime.handle().spawn(async {
-        let handle =
-            Runtime::current_handle().expect("runtime handle inside sync differential semaphore");
-        let semaphore = Arc::new(Semaphore::new(1));
-        let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
-        let cancel_cx = Cx::for_testing();
-        let waiter_cx = cancel_cx.clone();
-        let cancelled_waiters = Arc::new(AtomicUsize::new(0));
-        let waiter_result = Arc::clone(&cancelled_waiters);
-        let semaphore_for_waiter = Arc::clone(&semaphore);
+    let semaphore = Semaphore::new(1);
+    let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
+    let cancel_cx = Cx::for_testing();
+    let mut waiter = semaphore.acquire(&cancel_cx, 1);
 
-        let waiter = handle.spawn(async move {
-            match semaphore_for_waiter.acquire(&waiter_cx, 1).await {
-                Err(AcquireError::Cancelled) => {
-                    waiter_result.fetch_add(1, Ordering::SeqCst);
-                }
-                Ok(_permit) => {
-                    panic!("cancelled waiter unexpectedly acquired semaphore");
-                }
-                Err(err) => panic!("unexpected semaphore acquire error: {err:?}"),
-            }
-        });
+    let waiter_pending = poll_once(&mut waiter).is_pending();
+    assert!(
+        waiter_pending,
+        "live semaphore differential waiter should first observe contention"
+    );
 
-        for _ in 0..8 {
-            yield_now().await;
-        }
-        cancel_cx.set_cancel_requested(true);
-        drop(held);
-        waiter.await;
+    cancel_cx.set_cancel_requested(true);
+    let cancel_result = poll_once(&mut waiter);
+    assert!(
+        matches!(cancel_result, Poll::Ready(Err(AcquireError::Cancelled))),
+        "live semaphore differential waiter should cancel after being queued, got {cancel_result:?}"
+    );
+    drop(waiter);
 
-        let available_after_cancel = semaphore.available_permits();
-        let recovered_acquisitions = semaphore.try_acquire(1).map_or(0, |permit| {
-            drop(permit);
-            1usize
-        });
+    let available_while_held = semaphore.available_permits();
+    assert_eq!(
+        available_while_held, 0,
+        "cancelled semaphore waiter must not leak permits while the original permit is still held"
+    );
 
-        SemaphoreCancelRecoveryObservation {
-            cancelled_waiters: cancelled_waiters.load(Ordering::SeqCst),
-            recovered_acquisitions,
-            available_after_cancel,
-            final_available_permits: semaphore.available_permits(),
-        }
-    }))
+    drop(held);
+
+    let available_after_cancel = semaphore.available_permits();
+    let recovered_acquisitions = semaphore.try_acquire(1).map_or(0, |permit| {
+        drop(permit);
+        1usize
+    });
+
+    SemaphoreCancelRecoveryObservation {
+        cancelled_waiters: 1,
+        recovered_acquisitions,
+        available_after_cancel,
+        final_available_permits: semaphore.available_permits(),
+    }
 }
 
 fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecoveryObservation {
@@ -7834,6 +7848,18 @@ mod tests {
     }
 
     #[test]
+    fn semaphore_cancel_recovery_observations_align_between_live_and_lab_helpers() {
+        let live = live_semaphore_cancel_recovery_observation();
+        let lab = lab_semaphore_cancel_recovery_observation(3551);
+
+        assert_eq!(live, lab);
+        assert_eq!(live.cancelled_waiters, 1);
+        assert_eq!(live.recovered_acquisitions, 1);
+        assert_eq!(live.available_after_cancel, 1);
+        assert_eq!(live.final_available_permits, 1);
+    }
+
+    #[test]
     fn lab_differential_phase1_core_profile_covers_sync_semaphore_cancel_recovery_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let args = LabDifferentialArgs {
@@ -7856,6 +7882,10 @@ mod tests {
             &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
         )
         .expect("parse live normalized");
+        let lab_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.lab_normalized_path).expect("read lab normalized"),
+        )
+        .expect("parse lab normalized");
         assert_eq!(
             live_normalized["semantics"]["resource_surface"]["counters"]["cancelled_waiters"],
             1
@@ -7871,6 +7901,10 @@ mod tests {
         assert_eq!(
             live_normalized["semantics"]["resource_surface"]["counters"]["final_available_permits"],
             1
+        );
+        assert_eq!(
+            lab_normalized["semantics"]["resource_surface"]["counters"],
+            live_normalized["semantics"]["resource_surface"]["counters"]
         );
     }
 

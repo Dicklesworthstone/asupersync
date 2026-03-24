@@ -131,6 +131,10 @@ impl LoserDrainOracle {
 
     /// Records that a race has completed.
     pub fn on_race_complete(&mut self, race_id: u64, winner: TaskId, time: Time) {
+        if self.completed_races.contains_key(&race_id) {
+            return;
+        }
+
         let participants = self
             .active_races
             .remove(&race_id)
@@ -424,6 +428,48 @@ mod tests {
         let ok = oracle.check().is_ok();
         crate::assert_with_log!(ok, "ok", true, ok);
         crate::test_complete!("completed_race_is_retired_from_active_tracking");
+    }
+
+    #[test]
+    fn duplicate_race_complete_preserves_original_participants() {
+        init_test("duplicate_race_complete_preserves_original_participants");
+        let mut oracle = LoserDrainOracle::new();
+
+        let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
+        oracle.on_task_complete(task(1), t(50));
+        oracle.on_race_complete(race_id, task(1), t(100));
+
+        // Duplicate completion events must not erase the original participant set.
+        oracle.on_race_complete(race_id, task(1), t(200));
+
+        let violation = oracle
+            .check()
+            .expect_err("duplicate complete must not erase the undrained loser");
+        crate::assert_with_log!(
+            violation.race_id == race_id,
+            "race_id",
+            race_id,
+            violation.race_id
+        );
+        crate::assert_with_log!(
+            violation.winner == task(1),
+            "winner",
+            task(1),
+            violation.winner
+        );
+        crate::assert_with_log!(
+            violation.undrained_losers == vec![task(2)],
+            "undrained_losers",
+            vec![task(2)],
+            violation.undrained_losers
+        );
+        crate::assert_with_log!(
+            violation.race_complete_time == t(100),
+            "race_complete_time",
+            t(100),
+            violation.race_complete_time
+        );
+        crate::test_complete!("duplicate_race_complete_preserves_original_participants");
     }
 
     #[test]
