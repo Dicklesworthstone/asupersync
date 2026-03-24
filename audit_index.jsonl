@@ -1125,3 +1125,9 @@
 {"file":"src/lab/oracle/obligation_leak.rs","lines":500,"batch":433,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Create overwrites but safe for ID reuse. Violations in Vec."}
 {"file":"src/lab/oracle/region_tree.rs","lines":500,"batch":433,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Explicit duplicate-registration handling preserves subregions."}
 {"file":"src/lab/oracle/deadline_monotone.rs","lines":500,"batch":433,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Violations pushed before insert. Re-validates children."}
+{"file":"src/types/typed_symbol.rs","lines":1480,"batch":434,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Header encode/decode symmetric. Payload len bounded by symbol_size. Clamping correct."}
+{"file":"src/record/symbolic_obligation.rs","lines":1477,"batch":434,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear types, drop bomb, saturating progress. Clean."}
+{"file":"src/types/resource.rs","lines":1416,"batch":434,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Pool zeroes buffers, ResourceGuard RAII, saturating arithmetic. Clean."}
+{"file":"src/trace/replay.rs","lines":1306,"batch":434,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Pure data schema. Complete roundtrip encoding. Clean."}
+{"file":"src/obligation/choreography/codegen.rs","lines":1300,"batch":434,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Pure code generation from validated AST. Structurally bounded recursion."}
+{"file":"src/record/distributed_region.rs","lines":1283,"batch":434,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"State machine validated. Transition history bounded. Quorum-checked recovery."}
