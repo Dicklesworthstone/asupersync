@@ -518,6 +518,31 @@ fn header_value_ci<'a>(req: &'a Request, header_name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+fn matches_content_type_media_type(content_type: &str, expected: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(expected))
+}
+
+fn matches_json_content_type(content_type: &str) -> bool {
+    let Some(media_type) = content_type.split(';').next() else {
+        return false;
+    };
+    let Some((ty, subtype)) = media_type.trim().split_once('/') else {
+        return false;
+    };
+    if !ty.trim().eq_ignore_ascii_case("application") {
+        return false;
+    }
+
+    let subtype = subtype.trim();
+    subtype.eq_ignore_ascii_case("json")
+        || subtype.rsplit_once('+').is_some_and(|(prefix, suffix)| {
+            !prefix.trim().is_empty() && suffix.eq_ignore_ascii_case("json")
+        })
+}
+
 #[allow(clippy::implicit_hasher)]
 fn parse_cookie_header(raw: &str) -> HashMap<String, String> {
     let mut parsed = HashMap::new();
@@ -635,10 +660,8 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
             ));
         }
 
-        let content_type = header_value_ci(&req, "content-type");
-        if let Some(ct) = content_type {
-            let ct_lower = ct.to_ascii_lowercase();
-            if !ct_lower.contains("application/json") {
+        if let Some(ct) = header_value_ci(&req, "content-type") {
+            if !matches_json_content_type(ct) {
                 return Err(ExtractionError::new(
                     super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     format!("expected application/json, got {ct}"),
@@ -686,10 +709,8 @@ impl FromRequest for Form<HashMap<String, String>> {
             ));
         }
 
-        let content_type = header_value_ci(&req, "content-type");
-        if let Some(ct) = content_type {
-            let ct_lower = ct.to_ascii_lowercase();
-            if !ct_lower.contains("application/x-www-form-urlencoded") {
+        if let Some(ct) = header_value_ci(&req, "content-type") {
+            if !matches_content_type_media_type(ct, "application/x-www-form-urlencoded") {
                 return Err(ExtractionError::new(
                     super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     format!("expected application/x-www-form-urlencoded, got {ct}"),
@@ -866,8 +887,9 @@ mod tests {
 
     #[test]
     fn form_extraction() {
-        let req =
-            Request::new("POST", "/login").with_body(Bytes::from_static(b"user=alice&pass=secret"));
+        let req = Request::new("POST", "/login")
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(Bytes::from_static(b"user=alice&pass=secret"));
 
         let Form(data) = Form::<HashMap<String, String>>::from_request(req).unwrap();
         assert_eq!(data.get("user").unwrap(), "alice");
@@ -1025,6 +1047,55 @@ mod tests {
     }
 
     #[test]
+    fn json_content_type_allows_parameters_but_rejects_substring_tricks() {
+        let with_charset = Request::new("POST", "/data")
+            .with_header("content-type", "application/json; charset=utf-8")
+            .with_body(Bytes::from_static(br#"{"ok":true}"#));
+        let Json(value) = Json::<serde_json::Value>::from_request(with_charset).unwrap();
+        assert_eq!(value.get("ok"), Some(&serde_json::Value::Bool(true)));
+
+        let structured_suffix = Request::new("POST", "/data")
+            .with_header("content-type", "application/cloudevents+json")
+            .with_body(Bytes::from_static(br#"{"ok":true}"#));
+        let Json(value) = Json::<serde_json::Value>::from_request(structured_suffix).unwrap();
+        assert_eq!(value.get("ok"), Some(&serde_json::Value::Bool(true)));
+
+        let misleading = Request::new("POST", "/data")
+            .with_header("content-type", "text/plain; note=application/json")
+            .with_body(Bytes::from_static(br#"{"ok":true}"#));
+        let err = Json::<serde_json::Value>::from_request(misleading).unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
+        let wrong_top_level = Request::new("POST", "/data")
+            .with_header("content-type", "text/cloudevents+json")
+            .with_body(Bytes::from_static(br#"{"ok":true}"#));
+        let err = Json::<serde_json::Value>::from_request(wrong_top_level).unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
+        let empty_structured_prefix = Request::new("POST", "/data")
+            .with_header("content-type", "application/+json")
+            .with_body(Bytes::from_static(br#"{"ok":true}"#));
+        let err = Json::<serde_json::Value>::from_request(empty_structured_prefix).unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
+
+    #[test]
+    fn json_missing_content_type_still_parses_valid_json() {
+        let req = Request::new("POST", "/data").with_body(Bytes::from_static(br#"{"ok":true}"#));
+        let Json(value) = Json::<serde_json::Value>::from_request(req).unwrap();
+        assert_eq!(value.get("ok"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
     fn form_wrong_content_type() {
         let req = Request::new("POST", "/form")
             .with_header("content-type", "text/plain")
@@ -1049,8 +1120,42 @@ mod tests {
     }
 
     #[test]
+    fn form_content_type_allows_parameters_but_rejects_substring_tricks() {
+        let with_charset = Request::new("POST", "/form")
+            .with_header(
+                "content-type",
+                "application/x-www-form-urlencoded; charset=utf-8",
+            )
+            .with_body(Bytes::from_static(b"user=alice&role=admin"));
+        let Form(values) = Form::<HashMap<String, String>>::from_request(with_charset).unwrap();
+        assert_eq!(values.get("user").map(String::as_str), Some("alice"));
+        assert_eq!(values.get("role").map(String::as_str), Some("admin"));
+
+        let misleading = Request::new("POST", "/form")
+            .with_header(
+                "content-type",
+                "application/x-www-form-urlencoded-bogus; charset=utf-8",
+            )
+            .with_body(Bytes::from_static(b"user=alice"));
+        let err = Form::<HashMap<String, String>>::from_request(misleading).unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
+
+    #[test]
+    fn form_missing_content_type_still_parses_urlencoded_body() {
+        let req = Request::new("POST", "/form").with_body(Bytes::from_static(b"user=alice"));
+        let Form(values) = Form::<HashMap<String, String>>::from_request(req).unwrap();
+        assert_eq!(values.get("user").map(String::as_str), Some("alice"));
+    }
+
+    #[test]
     fn form_invalid_utf8() {
-        let req = Request::new("POST", "/form").with_body(Bytes::from_static(b"\xff\xfe"));
+        let req = Request::new("POST", "/form")
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(Bytes::from_static(b"\xff\xfe"));
         let result = Form::<HashMap<String, String>>::from_request(req);
         assert!(result.is_err());
         let err = result.unwrap_err();

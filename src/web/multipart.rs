@@ -34,6 +34,9 @@ const DEFAULT_MAX_PARTS: usize = 1024;
 /// Default maximum header section size per part (8 KiB).
 const DEFAULT_MAX_PART_HEADERS: usize = 8 * 1024;
 
+/// Default maximum part body size (8 MiB).
+const DEFAULT_MAX_PART_BODY_SIZE: usize = 8 * 1024 * 1024;
+
 /// Configurable limits for multipart request parsing.
 ///
 /// Inject via request extensions to override defaults on a per-route or
@@ -56,6 +59,8 @@ pub struct MultipartLimits {
     pub max_parts: usize,
     /// Maximum header section size per part in bytes.
     pub max_part_headers: usize,
+    /// Maximum body size per part in bytes.
+    pub max_part_body_size: usize,
 }
 
 impl Default for MultipartLimits {
@@ -64,12 +69,13 @@ impl Default for MultipartLimits {
             max_total_size: DEFAULT_MAX_MULTIPART_SIZE,
             max_parts: DEFAULT_MAX_PARTS,
             max_part_headers: DEFAULT_MAX_PART_HEADERS,
+            max_part_body_size: DEFAULT_MAX_PART_BODY_SIZE,
         }
     }
 }
 
 impl MultipartLimits {
-    /// Create multipart limits with defaults (16 MiB total, 1024 parts, 8 KiB headers).
+    /// Create multipart limits with defaults (16 MiB total, 1024 parts, 8 KiB headers, 8 MiB part body).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -93,6 +99,13 @@ impl MultipartLimits {
     #[must_use]
     pub fn max_part_headers(mut self, bytes: usize) -> Self {
         self.max_part_headers = bytes;
+        self
+    }
+
+    /// Set the maximum body size per part.
+    #[must_use]
+    pub fn max_part_body_size(mut self, bytes: usize) -> Self {
+        self.max_part_body_size = bytes;
         self
     }
 }
@@ -345,6 +358,14 @@ fn parse_multipart(
         // the header terminator, strip_trailing_crlf might strip the header's CRLF,
         // causing body_end < body_start. We clamp it to prevent a panic.
         let body_end = strip_trailing_crlf(body, next_delim).max(body_start);
+
+        if body_end - body_start > limits.max_part_body_size {
+            return Err(ExtractionError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "multipart part body too large",
+            ));
+        }
+
         let part_body = Bytes::copy_from_slice(&body[body_start..body_end]);
 
         // Parse Content-Disposition for name and filename.
@@ -781,6 +802,24 @@ mod tests {
 
         let err = Multipart::from_request(req).unwrap_err();
         assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn from_request_part_body_too_large() {
+        let mut req = Request::new("POST", "/upload");
+        req.headers.insert(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=X".to_string(),
+        );
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--X\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n");
+        body.extend_from_slice(&vec![0u8; DEFAULT_MAX_PART_BODY_SIZE + 1]);
+        body.extend_from_slice(b"\r\n--X--\r\n");
+        req.body = Bytes::from(body);
+
+        let err = Multipart::from_request(req).unwrap_err();
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(err.message, "multipart part body too large");
     }
 
     // ================================================================
