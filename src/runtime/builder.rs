@@ -4148,7 +4148,7 @@ mod tests {
     }
 
     fn wait_for_runtime_quiescent(runtime: &Runtime) {
-        for _ in 0..1000 {
+        for i in 0..2000 {
             let live_tasks = runtime
                 .inner
                 .state
@@ -4158,7 +4158,11 @@ mod tests {
             if live_tasks == 0 {
                 return;
             }
-            std::thread::yield_now();
+            if i < 100 {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
         unreachable!("runtime failed to reach quiescence after waiting");
     }

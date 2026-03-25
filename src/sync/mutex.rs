@@ -42,6 +42,8 @@ pub enum LockError {
     Poisoned,
     /// Cancelled while waiting for the lock.
     Cancelled,
+    /// The future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for LockError {
@@ -49,6 +51,7 @@ impl std::fmt::Display for LockError {
         match self {
             Self::Poisoned => write!(f, "mutex poisoned"),
             Self::Cancelled => write!(f, "mutex lock cancelled"),
+            Self::PolledAfterCompletion => write!(f, "mutex future polled after completion"),
         }
     }
 }
@@ -147,6 +150,7 @@ impl<T> Mutex<T> {
             mutex: self,
             cx,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -210,6 +214,7 @@ pub struct LockFuture<'a, 'b, T> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl<'a, T> Future for LockFuture<'a, '_, T> {
@@ -217,14 +222,20 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.completed {
+            return Poll::Ready(Err(LockError::PolledAfterCompletion));
+        }
+
         // Check cancellation
         if let Err(_e) = self.cx.checkpoint() {
+            self.completed = true;
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
         let mut state = self.mutex.state.lock();
 
         if self.mutex.is_poisoned() {
+            self.completed = true;
             return Poll::Ready(Err(LockError::Poisoned));
         }
 
@@ -242,6 +253,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
             // Clear waiter_id so Drop doesn't uselessly lock and search the queue
             self.waiter_id = None;
+            self.completed = true;
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
         }
 
@@ -375,6 +387,7 @@ impl<T> OwnedMutexGuard<T> {
             mutex: Arc<Mutex<T>>,
             cx: Cx, // clone of cx
             waiter_id: Option<u64>,
+            completed: bool,
         }
 
         impl<T> Drop for OwnedLockFuture<T> {
@@ -407,11 +420,16 @@ impl<T> OwnedMutexGuard<T> {
             #[inline]
             fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
+                if this.completed {
+                    return Poll::Ready(Err(LockError::PolledAfterCompletion));
+                }
                 if this.cx.checkpoint().is_err() {
+                    this.completed = true;
                     return Poll::Ready(Err(LockError::Cancelled));
                 }
                 let mut state = this.mutex.state.lock();
                 if this.mutex.is_poisoned() {
+                    this.completed = true;
                     return Poll::Ready(Err(LockError::Poisoned));
                 }
                 if !state.locked {
@@ -428,6 +446,7 @@ impl<T> OwnedMutexGuard<T> {
                     drop(state);
                     // Clear waiter_id so Drop doesn't uselessly lock and search the queue
                     this.waiter_id = None;
+                    this.completed = true;
                     return Poll::Ready(Ok(OwnedMutexGuard {
                         mutex: this.mutex.clone(),
                     }));
@@ -470,6 +489,7 @@ impl<T> OwnedMutexGuard<T> {
             mutex,
             cx: cx.clone(),
             waiter_id: None,
+            completed: false,
         }
         .await
     }
