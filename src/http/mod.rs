@@ -22,8 +22,6 @@ pub mod body;
 pub mod compress;
 pub mod h1;
 pub mod h2;
-#[cfg(all(feature = "http3-compat", not(feature = "http3")))]
-pub mod h3;
 /// Native HTTP/3 API surface (T4.1).
 ///
 /// This module intentionally exports Tokio-free HTTP/3 primitives from
@@ -41,10 +39,6 @@ pub mod h3 {
         validate_request_pseudo_headers, validate_response_pseudo_headers,
     };
 }
-/// Compatibility HTTP/3 API when both native and compat lanes are enabled.
-#[cfg(all(feature = "http3-compat", feature = "http3"))]
-#[path = "h3/mod.rs"]
-pub mod h3_compat;
 pub mod h3_native;
 pub mod pool;
 
@@ -52,13 +46,6 @@ pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, Siz
 pub use h1::http_client::HttpClientBuilder;
 #[cfg(feature = "http3")]
 pub use h3::H3Error;
-#[cfg(all(feature = "http3-compat", not(feature = "http3")))]
-pub use h3::{H3Body, H3Client, H3Driver, H3Error};
-#[cfg(all(feature = "http3-compat", feature = "http3"))]
-pub use h3_compat::{
-    H3Body as H3CompatBody, H3Client as H3CompatClient, H3Driver as H3CompatDriver,
-    H3Error as H3CompatError,
-};
 pub use h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame as NativeH3Frame, H3NativeError,
     H3PseudoHeaders, H3QpackMode, H3RequestHead, H3RequestStreamState, H3ResponseHead,

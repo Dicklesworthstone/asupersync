@@ -68,18 +68,6 @@
 #[cfg(test)]
 extern crate self as asupersync;
 
-#[cfg(feature = "quic-compat")]
-compile_error!(
-    "feature `quic-compat` is reserved for legacy quinn-backed adapters and is disabled \
-     in this Tokio-free core build."
-);
-
-#[cfg(feature = "http3-compat")]
-compile_error!(
-    "feature `http3-compat` is reserved for legacy h3/h3-quinn adapters and is disabled \
-     in this Tokio-free core build."
-);
-
 #[cfg(all(
     target_arch = "wasm32",
     not(any(

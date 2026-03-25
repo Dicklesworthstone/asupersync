@@ -93,10 +93,8 @@ mysql = []
 # These expose Tokio-free native paths for inventory/build/test contracts.
 quic = []
 http3 = ["quic"]
-# Legacy compatibility wrappers over upstream quinn/h3 stacks.
-# Kept explicitly separate from native rollout; disabled by default.
-quic-compat = []
-http3-compat = ["quic-compat"]
+# Legacy Tokio-backed compatibility wrappers live in the separate
+# `asupersync-tokio-compat` crate, not in the core feature graph.
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
 # Enable HTTP response compression (gzip, deflate) via flate2.
