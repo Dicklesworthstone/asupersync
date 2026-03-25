@@ -369,6 +369,12 @@ impl RespValue {
                     let len = usize::try_from(len).map_err(|_| {
                         RedisError::Protocol(format!("invalid bulk string length: {len}"))
                     })?;
+                    if len > limits.max_bulk_string_len {
+                        return Err(RedisError::Protocol(format!(
+                            "bulk string length {len} exceeds maximum {}",
+                            limits.max_bulk_string_len
+                        )));
+                    }
                     let start_data = end + 2;
                     let end_data = start_data.saturating_add(len);
                     let end_crlf = end_data.saturating_add(2);
@@ -407,7 +413,9 @@ impl RespValue {
                             limits.max_array_len
                         )));
                     }
-                    let mut items = Vec::with_capacity(n);
+                    // Cap pre-allocation to avoid OOM from a large declared length
+                    // before actually receiving that many elements.
+                    let mut items = Vec::with_capacity(n.min(1024));
                     let mut pos = end + 2;
                     for _ in 0..n {
                         match decode_at(buf, pos, depth + 1, limits)? {
@@ -527,6 +535,9 @@ const DEFAULT_MAX_NESTING_DEPTH: usize = 64;
 /// Default maximum RESP array length.
 const DEFAULT_MAX_ARRAY_LEN: usize = 1_000_000;
 
+/// Default maximum bulk string length.
+const DEFAULT_MAX_BULK_STRING_LEN: usize = 512 * 1024 * 1024;
+
 /// Configurable protocol-level limits for the Redis RESP decoder.
 ///
 /// These limits protect against resource exhaustion from oversized or
@@ -539,6 +550,7 @@ const DEFAULT_MAX_ARRAY_LEN: usize = 1_000_000;
 /// | `max_frame_size` | 16 MiB | Maximum bytes buffered for a single RESP frame |
 /// | `max_nesting_depth` | 64 | Maximum RESP array nesting depth (stack overflow protection) |
 /// | `max_array_len` | 1,000,000 | Maximum elements in a single RESP array (memory protection) |
+/// | `max_bulk_string_len` | 512 MiB | Maximum size of a bulk string |
 #[derive(Debug, Clone, Copy)]
 pub struct RedisProtocolLimits {
     /// Maximum RESP frame size in bytes.
@@ -547,6 +559,8 @@ pub struct RedisProtocolLimits {
     pub max_nesting_depth: usize,
     /// Maximum RESP array element count.
     pub max_array_len: usize,
+    /// Maximum bulk string length.
+    pub max_bulk_string_len: usize,
 }
 
 impl Default for RedisProtocolLimits {
@@ -555,6 +569,7 @@ impl Default for RedisProtocolLimits {
             max_frame_size: DEFAULT_MAX_RESP_FRAME_SIZE,
             max_nesting_depth: DEFAULT_MAX_NESTING_DEPTH,
             max_array_len: DEFAULT_MAX_ARRAY_LEN,
+            max_bulk_string_len: DEFAULT_MAX_BULK_STRING_LEN,
         }
     }
 }
@@ -584,6 +599,13 @@ impl RedisProtocolLimits {
     #[must_use]
     pub fn max_array_len(mut self, len: usize) -> Self {
         self.max_array_len = len;
+        self
+    }
+
+    /// Set the maximum bulk string length.
+    #[must_use]
+    pub fn max_bulk_string_len(mut self, len: usize) -> Self {
+        self.max_bulk_string_len = len;
         self
     }
 }
@@ -2471,6 +2493,20 @@ mod tests {
 
         let err = RespValue::try_decode(&buf).expect_err("should reject deep nesting");
         assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("nesting depth")));
+    }
+
+    #[test]
+    fn resp_decode_rejects_excessive_array_len() {
+        let buf = b"*2000000\r\n:1\r\n:2\r\n".to_vec();
+        let err = RespValue::try_decode(&buf).expect_err("should reject large array length");
+        assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("array length")));
+    }
+
+    #[test]
+    fn resp_decode_rejects_excessive_bulk_string_len() {
+        let buf = b"$1000000000\r\n".to_vec();
+        let err = RespValue::try_decode(&buf).expect_err("should reject large bulk string length");
+        assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("bulk string length")));
     }
 
     #[test]
