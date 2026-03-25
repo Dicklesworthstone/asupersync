@@ -102,6 +102,7 @@ pub mod nats;
 pub mod policy;
 #[cfg(feature = "messaging-fabric")]
 pub mod privacy;
+pub mod protocol;
 pub mod redis;
 #[cfg(feature = "messaging-fabric")]
 pub mod service;
@@ -182,6 +183,11 @@ pub use privacy::{
     DerivedKeyMaterial, ExportedMetadataSummary, KeyHierarchyError, PoolEpochKeyMaterial,
     PrivacyBudgetLedger, PrivacyExportError, ReadDelegationSpec, ReadDelegationTicket,
     RestoreScrubRequest, SubgroupKeyContext, WitnessScopeMaterial, export_metadata_summary,
+};
+pub use protocol::{
+    DecodedProtocolMessage, ProtocolAdapter, ProtocolAdapterError, ProtocolCapabilities,
+    ProtocolConnectionState, ProtocolHealth, ProtocolNegotiation, ProtocolTransportEvent,
+    RespProtocolAdapter,
 };
 pub use redis::{RedisClient, RedisConfig, RedisError};
 #[cfg(feature = "messaging-fabric")]

@@ -289,7 +289,7 @@ impl RespValue {
     /// Returns `Ok(None)` if more bytes are required.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::use_self)]
-    fn try_decode_with_limits(
+    pub fn try_decode_with_limits(
         buf: &[u8],
         limits: &RedisProtocolLimits,
     ) -> Result<Option<(Self, usize)>, RedisError> {
@@ -446,7 +446,7 @@ impl RespValue {
     /// Decode one RESP value from the provided buffer using default limits.
     ///
     /// Returns `Ok(None)` if more bytes are required.
-    fn try_decode(buf: &[u8]) -> Result<Option<(Self, usize)>, RedisError> {
+    pub fn try_decode(buf: &[u8]) -> Result<Option<(Self, usize)>, RedisError> {
         Self::try_decode_with_limits(buf, &RedisProtocolLimits::default())
     }
 
