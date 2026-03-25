@@ -292,7 +292,7 @@ capability belong to right now?"
 |---|---|---|---|---|
 | Direct-runtime supported | Shipped, package-guarded, and covered by Browser Edition evidence lanes | browser main thread, dedicated worker, React client tree, Next client component | keep runtime creation inside that browser boundary and debug the specific failing capability | `docs/WASM.md`, matrix below |
 | Guarded direct-runtime support | Shipped only when explicit host or deployment prerequisites hold | `WebTransport` datagrams, browser-main-thread-only download helpers, `localStorage` substrate | check the prerequisite/denial reason first, then fall back to the documented safe lane instead of widening the support claim | `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` |
-| Direct-runtime feasible but not yet shipped | Real substrate exists, but there is no promoted public Browser Edition API/contract yet | service/shared worker direct runtime, public Rust-authored browser bootstrap, public messaging-surface APIs | do not present it as supported; keep it on explicit app-boundary or repo-internal validation lanes until promotion closes | `docs/WASM.md`, `docs/wasm_service_worker_broker_contract.md`, `docs/wasm_shared_worker_tenancy_lifecycle_contract.md` |
+| Direct-runtime feasible but not yet shipped | Real substrate exists, but there is no promoted public Browser Edition API/contract yet | service/shared worker direct runtime, public messaging-surface APIs | do not present it as supported; keep it on explicit app-boundary or repo-internal validation lanes until promotion closes | `docs/WASM.md`, `docs/wasm_service_worker_broker_contract.md`, `docs/wasm_shared_worker_tenancy_lifecycle_contract.md` |
 | Bridge-only | Direct Browser Edition runtime execution is not allowed at that boundary; use serialization or an adapter seam instead | React SSR, Next server components, Next route handlers, Next edge runtime | move runtime creation back into a browser-owned boundary and cross the server/edge hop with serializable data only | matrix below, `docs/wasm_troubleshooting_compendium.md` |
 | Impossible / unsupported | The browser security model or shipped package contract rules out direct Browser Edition runtime support | Node-only direct runtime, raw TCP/UDP, filesystem, process/signal, native DB clients | switch to native `asupersync` or an explicit bridge; do not add fake parity shims | `docs/WASM.md` |
 
@@ -335,6 +335,9 @@ Rules:
   from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next`.
 - If you need the truthful current Rust-authored workflow, use the maintained
   fixture and validation script rather than inventing a broader support claim.
+- If you are debugging the preview Rust builder lane, inspect
+  `selected_lane`, `host_role`, `reason_code`, `preferred_lane`, and
+  `downgrade_order` before widening any support claim.
 
 ### Runtime Capability Requirements and Compatibility Guidance
 

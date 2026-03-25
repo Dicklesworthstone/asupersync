@@ -89,7 +89,7 @@ live tree actually supports, not what is architecturally plausible later.
 |---|---|---|---|
 | Compile the semantic core under `wasm32` with one canonical browser profile | Supported today for contributors, CI, and contract validation | root `Cargo.toml` browser profile features; `src/lib.rs` compile-error gates; wasm profile commands in this doc and `docs/wasm_quickstart_migration.md` | This proves cfg/feature closure, not a public browser runtime bootstrap API |
 | Maintain the wasm ABI and package boundary from Rust | Supported today inside the repository via `asupersync-browser-core` and `asupersync-wasm` | `asupersync-browser-core/Cargo.toml`, `asupersync-wasm/Cargo.toml`, `packages/browser-core/`, `packages/browser/` | These crates exist to feed the JS/TS Browser Edition surface; they are not the ergonomic public Browser Edition API for external Rust consumers |
-| Build a browser app that creates Browser Edition runtimes directly from Rust consumer code | Not yet a public supported lane | `tests/wasm_browser_feasibility_matrix.rs` asserts feasibility-not-shipped; `src/runtime/builder.rs` now routes startup through `RuntimeHostServices` plus `BrowserHostServicesContract`, but only `NativeThreadHostServices` ships today | Do not document direct `Cx`/`Scope` browser bootstrapping from external Rust app code as supported today |
+| Build a browser app that creates Browser Edition runtimes directly from Rust consumer code | Preview public lane | `RuntimeBuilder::browser()`, `RuntimeBuilder::inspect_browser_execution_ladder(...)`, `tests/wasm_browser_feasibility_matrix.rs`, and `src/runtime/builder.rs` | Document this as a preview dispatcher-backed lane with truthful fail-closed diagnostics, not as stable parity with the JS/TS Browser Edition packages |
 
 Current rule of thumb:
 
@@ -127,7 +127,7 @@ explicit instead of implicit:
 - The maintained smoke harness remains
   `tests/fixtures/rust-browser-consumer/` plus
   `scripts/validate_rust_browser_consumer.sh`; use that fixture for end-to-end
-  diagnostics until the public Rust browser builder bead lands.
+  diagnostics even though the preview public Rust browser builder now exists.
 
 ### Practical lane selection for Rust authors
 
@@ -489,16 +489,17 @@ Invariant gate for steps 2 and 3:
 
 ## What Does Not Work Yet
 
-### Rust-to-WASM compilation path (feasible, but not yet a public lane)
+### Rust-to-WASM compilation path (preview public lane, still narrower than JS/TS)
 
-**Truthful current rule:** external Rust consumers do not yet have a public,
-supported Browser Edition runtime-construction API. The browser product lane is
-currently the JS/TS package stack, while the Rust-facing wasm story is limited
-to semantic-core profile validation plus repository binding crates.
+**Truthful current rule:** external Rust consumers do have a preview public
+Browser Edition runtime-construction API through `RuntimeBuilder::browser()`,
+but it is dispatcher-backed, fail-closed, and intentionally narrower than the
+shipped JS/TS Browser Edition packages.
 
 This matters because "the semantic core is portable" is weaker than "you can
-ship a browser app that constructs Asupersync runtimes directly from Rust
-consumer code." Today the repository supports the former, not the latter.
+ship a stable browser app that constructs Asupersync runtimes directly from
+Rust consumer code." Today the repository supports a preview version of the
+latter, but not broad stable parity with the JS/TS product lane.
 
 What Rust authors can rely on today:
 
@@ -506,19 +507,40 @@ What Rust authors can rely on today:
   canonical browser profile (`wasm-browser-minimal`, `wasm-browser-dev`,
   `wasm-browser-prod`, or `wasm-browser-deterministic`) to validate cfg/feature
   closure and browser-safe semantic-core surfaces.
+- `RuntimeBuilder::browser()` exposes preview truthful lane negotiation, while
+  `RuntimeBuilder::inspect_browser_execution_ladder(...)` and
+  `BrowserRuntimeBuilder::build_selection()` expose structured fail-closed
+  diagnostics for Rust-authored browser startup.
 - `asupersync-browser-core` and `asupersync-wasm` provide the Rust-side
   binding/export crates that generate and maintain the Browser Edition ABI and
   package artifacts consumed by `@asupersync/browser` and friends.
-- The live support matrix and contract tests treat the Rust-authored browser
-  lane as feasible-but-not-shipped, which keeps docs and tests aligned.
+- The maintained fixture workflow at `tests/fixtures/rust-browser-consumer/`
+  plus `scripts/validate_rust_browser_consumer.sh` remains the authoritative
+  end-to-end evidence bundle for this preview lane.
 
 What Rust authors cannot rely on yet:
 
-- a public `RuntimeBuilder` or equivalent Rust-callable API that bootstraps a
-  browser executor directly from external Rust app code,
 - a stable ergonomic Rust browser SDK parallel to `@asupersync/browser`,
+- stable parity between the preview Rust builder lane and the shipped JS/TS
+  Browser Edition packages,
 - native-runtime parity on `wasm32`, including raw OS/network/process surfaces
-  or ambient browser runtime discovery.
+  or ambient browser runtime discovery,
+- service-worker or shared-worker direct runtime lanes.
+
+When you use the preview Rust lane, inspect these fields first:
+
+- `selected_lane`
+- `host_role`
+- `reason_code`
+- `preferred_lane`
+- `downgrade_order`
+- `message` / `guidance`
+
+For end-to-end validation, keep using:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh
+```
 
 The core semantic layer (structured scopes, cancellation state machine,
 obligation accounting, combinators) is architecturally target-agnostic and
@@ -531,8 +553,7 @@ should be portable. However:
   `MessageChannel` / `setTimeout`) exists in the design but is not yet
   exposed as a Rust-callable API.
 - The public Rust browser builder path is preview-only and dispatcher-backed;
-  it should not be described as native runtime parity for external Rust
-  consumers.
+  it should not be described as stable parity for external Rust consumers.
 
 If and when a public Rust-authored browser lane ships, it should start from
 explicit browser-safe capability constructors and the same support matrix used

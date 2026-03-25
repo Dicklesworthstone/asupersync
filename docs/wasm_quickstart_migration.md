@@ -82,16 +82,16 @@ than consuming the shipped JS/TS packages.
 |---|---|---|
 | Verify browser-safe cfg/feature closure for the semantic core | Supported | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` |
 | Maintain the wasm ABI/export boundary from Rust | Supported for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` |
-| Ship a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Not yet a public supported lane | Treat this as future work under `asupersync-4l9iw`; use `@asupersync/browser` / `@asupersync/react` / `@asupersync/next` today |
+| Ship a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Preview public lane | Use `RuntimeBuilder::browser()` plus execution-ladder inspection for truthful lane negotiation and structured fail-closed diagnostics, while keeping the support claim narrower than the shipped JS/TS Browser Edition packages |
 
 Rules for migration guidance:
 
 - Do not describe `asupersync-browser-core` or `asupersync-wasm` as the public
   end-user Browser Edition SDK for Rust consumers. They are binding/export
   crates that feed the JS/TS packages.
-- Do not promise `RuntimeBuilder` parity or direct `Cx`/`Scope` browser
-  bootstrapping from external Rust app code until the runtime exposes that lane
-  explicitly.
+- Do not promise broad `RuntimeBuilder` parity or stable direct `Cx`/`Scope`
+  browser bootstrapping beyond the current preview dispatcher-backed
+  `RuntimeBuilder::browser()` lane.
 - Keep the Rust-authored browser story on the same support matrix as JS/TS:
   browser main thread and dedicated worker are the direct-runtime contexts for
   the shipped product, while service/shared workers, SAB-based parallelism, and
@@ -104,7 +104,7 @@ Use this table to choose the correct lane before writing browser-facing Rust.
 | Situation | Recommended lane | Why |
 |---|---|---|
 | You need a shipped browser SDK for application code today | Start from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next` | These are the public Browser Edition product surfaces; they own the supported runtime diagnostics and packaging story |
-| You need to prove the semantic core still closes under browser cfg/profile rules | Run the canonical `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` commands against `asupersync` | This validates wasm-safe semantic closure without claiming a public Rust browser bootstrap API |
+| You need to prove the semantic core still closes under browser cfg/profile rules | Run the canonical `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` commands against `asupersync` | This validates wasm-safe semantic closure without implying stable parity for the preview Rust browser builder lane |
 | You maintain the wasm ABI/package boundary inside this repository | Work in `asupersync-browser-core` or `asupersync-wasm` | These crates are the Rust-side binding/export infrastructure for the JS/TS packages, not the end-user browser SDK |
 | You need the maintained Rust-authored browser example that the tree actually proves | Use `tests/fixtures/rust-browser-consumer/` plus `scripts/validate_rust_browser_consumer.sh` | This is the truthful current Rust-authored browser workflow: an in-repo fixture with deterministic validation, not general external `RuntimeBuilder` parity |
 | You need service/shared workers, cross-origin-isolated `SharedArrayBuffer` parallelism, or native-only modules | Do not start from the Rust-authored browser lane | Those surfaces are deferred, guarded optional, bridge-only, or explicit non-goals today |
@@ -117,10 +117,11 @@ build and run a browser-facing Rust-authored wasm package layout while keeping
 the scope honest:
 
 - it uses the existing wasm dispatcher/provider helpers rather than inventing a
-  new public browser `RuntimeBuilder` story
+  second browser startup story alongside the preview public builder
 - it keeps the contract honest about the remaining blocker: `src/runtime/builder.rs`
   still assumes `std::thread`-backed worker and deadline-monitor startup, so
-  this fixture does not pretend a public browser bootstrap API already exists
+  this fixture does not pretend the preview public browser bootstrap API is
+  already broad stable parity
 - it proves lifecycle semantics plus truthful execution-ladder diagnostics
   through a real browser matrix on both browser main-thread and
   dedicated-worker entrypoints
@@ -133,7 +134,7 @@ Supported and unsupported contexts for this workflow:
 | Context / surface | Status for Rust-authored guidance | What to do |
 |---|---|---|
 | Browser main thread with `window`, `document`, and `WebAssembly` | Maintained repository workflow | Use the fixture pattern and validate it with `scripts/validate_rust_browser_consumer.sh` |
-| Dedicated worker | Maintained repository workflow inside the Rust browser matrix, still not a public Rust browser constructor | Use the same fixture workflow and read it as proof of truthful dedicated-worker diagnostics plus lifecycle behavior, not as broad external `RuntimeBuilder` parity |
+| Dedicated worker | Maintained repository workflow inside the Rust browser matrix, still not a stable Rust browser constructor | Use the same fixture workflow and read it as proof of truthful dedicated-worker diagnostics plus lifecycle behavior, not as broad external `RuntimeBuilder` parity |
 | Service worker / shared worker | Deferred / not shipped | Keep them on explicit message/data boundaries until host contracts and docs are promoted together |
 | Next.js server components, route handlers, edge runtimes, or plain Node.js | Bridge-only or native-only | Keep direct runtime creation in the browser/client boundary and move Rust server logic behind explicit RPC/API seams |
 | `SharedArrayBuffer` worker pools / multi-threaded WASM | Guarded optional, not shipped | Do not treat SAB-based parallelism as a default migration target |
@@ -159,6 +160,28 @@ The validation is only considered healthy when the browser-run report confirms:
 - `completed_task_outcome = "ok"`
 - `cancel_event_count = 1`
 - browser capabilities show `has_window`, `has_document`, and `has_webassembly`
+
+If you are evaluating the preview public builder directly, inspect the truthful
+execution ladder before promoting it in your own crate:
+
+```rust
+let ladder = RuntimeBuilder::new().inspect_browser_execution_ladder();
+let preferred = RuntimeBuilder::new()
+    .inspect_browser_execution_ladder_with_preferred_lane(
+        BrowserExecutionLane::DedicatedWorkerDirectRuntime,
+    );
+let selection = RuntimeBuilder::browser().build_selection();
+```
+
+The minimum fields to log or inspect are:
+
+- `selected_lane`
+- `host_role`
+- `reason_code`
+- `preferred_lane`
+- `downgrade_order`
+- `message`
+- `guidance`
 
 Migration rule of thumb:
 

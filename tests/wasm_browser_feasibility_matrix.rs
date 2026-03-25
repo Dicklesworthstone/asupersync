@@ -201,6 +201,77 @@ fn rust_browser_host_services_smoke_harness_is_pinned() {
     );
 }
 
+#[test]
+fn rust_browser_docs_pin_preview_public_builder_contract() {
+    let readme = read_file("README.md");
+    for marker in [
+        "RuntimeBuilder::browser()",
+        "inspect_browser_execution_ladder()",
+        "build_selection()",
+        "selected_lane",
+        "host_role",
+        "reason_code",
+        "preferred_lane",
+        "downgrade_order",
+    ] {
+        assert!(
+            readme.contains(marker),
+            "README must preserve Rust browser preview marker: {marker}"
+        );
+    }
+
+    let wasm_doc = read_file("docs/WASM.md");
+    for marker in [
+        "Preview public lane",
+        "RuntimeBuilder::browser()",
+        "build_selection()",
+        "selected_lane",
+        "host_role",
+        "reason_code",
+        "downgrade_order",
+        "validate_rust_browser_consumer.sh",
+    ] {
+        assert!(
+            wasm_doc.contains(marker),
+            "WASM guide must preserve Rust browser preview marker: {marker}"
+        );
+    }
+
+    let quickstart = read_file("docs/wasm_quickstart_migration.md");
+    for marker in [
+        "RuntimeBuilder::browser()",
+        "inspect_browser_execution_ladder()",
+        "inspect_browser_execution_ladder_with_preferred_lane",
+        "build_selection()",
+        "selected_lane",
+        "host_role",
+        "reason_code",
+        "preferred_lane",
+        "downgrade_order",
+    ] {
+        assert!(
+            quickstart.contains(marker),
+            "WASM quickstart must preserve Rust browser preview marker: {marker}"
+        );
+    }
+
+    let integration = read_file("docs/integration.md");
+    for marker in [
+        "Preview public lane",
+        "RuntimeBuilder::browser()",
+        "selected_lane",
+        "host_role",
+        "reason_code",
+        "preferred_lane",
+        "downgrade_order",
+    ] {
+        assert!(
+            integration.contains(marker),
+            "integration guide must preserve Rust browser preview marker: {marker}"
+        );
+    }
+}
+
 // ── Bridge-only / impossible contexts ────────────────────────────────
 
 #[test]

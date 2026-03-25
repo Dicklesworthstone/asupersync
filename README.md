@@ -1340,6 +1340,10 @@ applications via `wasm-bindgen`.
   `asupersync-browser-core` plus `asupersync-wasm` for the JS ABI/package
   boundary. That is real Rust-side browser infrastructure, but it is not yet a
   stable external Rust consumer runtime lane.
+- **Preview public Rust builder lane**: external Rust consumers now have a
+  preview browser-runtime bootstrap path through `RuntimeBuilder::browser()`.
+  It is dispatcher-backed, narrower than the shipped JS/TS Browser Edition
+  packages, and truthful about fail-closed host support.
 - **Core invariants preserved**: no orphan tasks, cancel-correctness,
   obligation accounting, and region-close-implies-quiescence all hold in
   the browser runtime.
@@ -1348,7 +1352,7 @@ applications via `wasm-bindgen`.
 
 ### What does not work yet
 
-- **Public Rust-authored Browser Edition runtime lane**: external Rust
+- **Stable Rust-authored Browser Edition runtime lane**: external Rust
   consumers now have a preview browser-runtime bootstrap API through
   `RuntimeBuilder::browser()`, but it is intentionally narrower than the
   shipped JS/TS Browser Edition packages. The current Rust-facing path is
@@ -1388,8 +1392,20 @@ semantic-core closure, use `asupersync-browser-core` / `asupersync-wasm` only
 as the Rust-side ABI/package boundary, and use the maintained fixture workflow
 at `tests/fixtures/rust-browser-consumer/` plus
 `scripts/validate_rust_browser_consumer.sh` for the repository's proven
-browser-facing Rust example. The repo does **not** yet expose a public
-`RuntimeBuilder`-style browser bootstrap API for external Rust consumers.
+browser-facing Rust example. The repo now exposes a preview public
+`RuntimeBuilder::browser()` lane for external Rust consumers, but the
+fixture-driven workflow remains the authoritative evidence for this path.
+
+For the preview Rust lane, inspect the truthful execution ladder before and
+after requesting a lane:
+
+```rust
+let ladder = RuntimeBuilder::new().inspect_browser_execution_ladder();
+let selection = RuntimeBuilder::browser().build_selection();
+```
+
+The key fields to inspect are `selected_lane`, `host_role`, `reason_code`,
+`preferred_lane`, and `downgrade_order`.
 
 See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,
 architecture diagrams, crate map, the current Rust-authored browser contract,
@@ -1415,7 +1431,7 @@ and known limitations.
 | Formal methods (Lean coverage artifacts + TLA+ export) | ✅ Implemented |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker / shared worker direct runtime | Deferred; not yet shipped |
-| Rust-to-WASM compilation path | Feasible, but not yet a public supported lane; current Rust support is profile validation plus binding/package infrastructure |
+| Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |
 
 ### What Asupersync Doesn't Do
 
