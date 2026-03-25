@@ -18,6 +18,7 @@ import initWasm, {
   RuntimeHandle as CoreRuntimeHandle,
   TaskHandle as CoreTaskHandle,
   abiFingerprint,
+  abiMetadata,
   abiVersion,
   createBudget,
   fetchRequest,
@@ -63,7 +64,6 @@ import initWasm, {
   type WebTransportRecvRequest,
   type WebTransportSendRequest,
 } from "@asupersync/browser-core";
-import abiMetadata from "@asupersync/browser-core/abi-metadata.json";
 import type { BrowserTraceRecord } from "./tracing.js";
 
 export {

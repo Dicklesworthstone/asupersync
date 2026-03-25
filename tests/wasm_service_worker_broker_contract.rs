@@ -697,6 +697,23 @@ fn browser_package_and_runtime_builder_preserve_service_worker_fail_closed_marke
 }
 
 #[test]
+fn browser_package_source_avoids_json_sidecar_import_for_node_esm() {
+    let browser = read_file("packages/browser/src/index.ts");
+    assert!(
+        !browser.contains("@asupersync/browser-core/abi-metadata.json"),
+        "browser package source must not depend on the JSON sidecar import path"
+    );
+
+    let (browser_core_import, _) = browser
+        .split_once("from \"@asupersync/browser-core\";")
+        .expect("browser package must import from @asupersync/browser-core");
+    assert!(
+        browser_core_import.contains("abiMetadata,"),
+        "browser package source must import abiMetadata from the browser-core root export"
+    );
+}
+
+#[test]
 fn doc_and_browser_package_pin_durable_handoff_listing_and_key_schema() {
     let doc = read_file(DOC_PATH);
     for marker in [

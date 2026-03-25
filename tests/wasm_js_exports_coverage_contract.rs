@@ -548,7 +548,7 @@ fn browser_src_index_preserves_low_level_aliases_for_core_surface() {
         "CoreTaskHandle",
         "CoreCancellationToken",
         "webtransportCancel,",
-        "@asupersync/browser-core/abi-metadata.json",
+        "abiMetadata,",
     ] {
         assert!(
             content.contains(marker),
