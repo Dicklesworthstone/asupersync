@@ -105,7 +105,7 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::BufReader;
+    use crate::io::{AsyncBufRead, AsyncRead, BufReader, ReadBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
@@ -139,6 +139,88 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct SplitReader {
+        chunks: Vec<Vec<u8>>,
+    }
+
+    impl AsyncRead for SplitReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            unreachable!("lines should use poll_fill_buf for this test")
+        }
+    }
+
+    impl AsyncBufRead for SplitReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                Poll::Ready(Ok(&[]))
+            } else {
+                Poll::Ready(Ok(&this.chunks[0]))
+            }
+        }
+
+        fn consume(self: Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                return;
+            }
+            if amt >= this.chunks[0].len() {
+                this.chunks.remove(0);
+            } else {
+                this.chunks[0] = this.chunks[0][amt..].to_vec();
+            }
+        }
+    }
+
+    struct PendingBetweenChunksReader {
+        chunks: Vec<Vec<u8>>,
+        pending_once: bool,
+    }
+
+    impl AsyncRead for PendingBetweenChunksReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            unreachable!("lines should use poll_fill_buf for this test")
+        }
+    }
+
+    impl AsyncBufRead for PendingBetweenChunksReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if this.pending_once {
+                this.pending_once = false;
+                return Poll::Pending;
+            }
+
+            if this.chunks.is_empty() {
+                Poll::Ready(Ok(&[]))
+            } else {
+                Poll::Ready(Ok(&this.chunks[0]))
+            }
+        }
+
+        fn consume(self: Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                return;
+            }
+
+            if amt >= this.chunks[0].len() {
+                this.chunks.remove(0);
+                this.pending_once = !this.chunks.is_empty();
+            } else {
+                this.chunks[0] = this.chunks[0][amt..].to_vec();
+            }
+        }
     }
 
     #[test]
