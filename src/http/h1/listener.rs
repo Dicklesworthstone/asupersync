@@ -377,18 +377,25 @@ where
             let handler = Arc::clone(&self.handler);
             let http_config = self.config.http_config.clone();
             let shutdown_signal = self.shutdown_signal.clone();
-            let handle = spawn_connection(
+            let handle = match spawn_connection(
                 stream,
                 guard,
                 handler,
                 http_config,
                 shutdown_signal,
                 runtime,
-            )
-            .map_err(|err| {
-                self.stats.record_spawn_failure();
-                io::Error::other(format!("failed to spawn connection task: {err}"))
-            })?;
+            ) {
+                Ok(handle) => handle,
+                Err(err) => {
+                    self.stats.record_spawn_failure();
+                    if should_retry_after_spawn_failure(&err) {
+                        continue;
+                    }
+                    return Err(io::Error::other(format!(
+                        "failed to spawn connection task: {err}"
+                    )));
+                }
+            };
             tasks.push(handle);
         }
 
@@ -544,11 +551,16 @@ fn transient_accept_now() -> Time {
     default_listener_time_getter()
 }
 
+fn should_retry_after_spawn_failure(err: &SpawnError) -> bool {
+    matches!(err, SpawnError::RegionAtCapacity { .. })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::http::h1::types::Response;
     use crate::io::AsyncWriteExt;
+    use crate::record::RegionLimits;
     use crate::runtime::RuntimeBuilder;
     use crate::runtime::yield_now;
     use crate::sync::Notify;
@@ -644,6 +656,112 @@ mod tests {
             transient_accept_backoff_delay(10_000),
             TRANSIENT_ACCEPT_BACKOFF_CAP
         );
+    }
+
+    #[test]
+    fn spawn_capacity_failure_is_connection_scoped() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::current_thread()
+            .root_region_limits(RegionLimits {
+                // One task slot is consumed by the listener itself; the second slot
+                // is filled by the blocker so accepted connections hit region capacity.
+                max_tasks: Some(2),
+                ..RegionLimits::unlimited()
+            })
+            .build()
+            .expect("build runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async {
+            let blocker_started = Arc::new(Notify::new());
+            let blocker_release = Arc::new(Notify::new());
+            let blocker_started_signal = Arc::clone(&blocker_started);
+            let blocker_release_signal = Arc::clone(&blocker_release);
+            let blocker = handle
+                .clone()
+                .try_spawn(async move {
+                    blocker_started_signal.notify_one();
+                    blocker_release_signal.notified().await;
+                })
+                .expect("spawn blocker");
+
+            blocker_started.notified().await;
+
+            let listener = Http1Listener::bind_with_config(
+                "127.0.0.1:0",
+                |_req| async { Response::new(200, "OK", b"listener alive".to_vec()) },
+                Http1ListenerConfig::default(),
+            )
+            .await
+            .expect("bind failed");
+
+            let addr = listener.local_addr().expect("local addr");
+            let stats_handle = listener.stats_handle();
+            let manager = listener.connection_manager().clone();
+            let shutdown = listener.shutdown_signal();
+
+            let run_handle = handle
+                .clone()
+                .try_spawn(async move { listener.run(&handle).await })
+                .expect("spawn listener");
+
+            let mut rejected_client = crate::net::tcp::stream::TcpStream::connect(addr)
+                .await
+                .expect("connect rejected client");
+            rejected_client
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .expect("write rejected request");
+
+            for _ in 0..64 {
+                if stats_handle.snapshot().spawn_failures_total == 1 {
+                    break;
+                }
+                crate::time::sleep(crate::time::wall_now(), Duration::from_millis(10)).await;
+            }
+
+            drop(rejected_client);
+
+            let stats = stats_handle.snapshot();
+            assert_eq!(stats.spawn_failures_total, 1);
+            assert_eq!(stats.accepted_total, 1);
+            assert!(
+                !run_handle.is_finished(),
+                "listener should keep running after a per-connection spawn failure"
+            );
+
+            blocker_release.notify_one();
+            blocker.await;
+
+            let mut healthy_client = crate::net::tcp::stream::TcpStream::connect(addr)
+                .await
+                .expect("connect healthy client");
+            healthy_client
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write healthy request");
+            drop(healthy_client);
+
+            for _ in 0..64 {
+                let snapshot = stats_handle.snapshot();
+                if snapshot.accepted_total == 2 && snapshot.spawn_failures_total == 1 {
+                    break;
+                }
+                crate::time::sleep(crate::time::wall_now(), Duration::from_millis(10)).await;
+            }
+
+            let recovered = stats_handle.snapshot();
+            assert_eq!(recovered.accepted_total, 2);
+            assert_eq!(recovered.spawn_failures_total, 1);
+            assert!(
+                !run_handle.is_finished(),
+                "listener should still be alive after capacity recovers"
+            );
+
+            assert!(manager.begin_drain(Duration::from_millis(0)));
+            let _ = run_handle.await.expect("listener run");
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        });
     }
 
     #[test]

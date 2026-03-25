@@ -993,6 +993,16 @@ impl Connection {
             return Err(H2Error::protocol("PUSH_PROMISE on server-initiated stream"));
         }
 
+        // RFC 9113 §6.8: After sending GOAWAY, refuse new streams with IDs
+        // above the advertised last_stream_id.
+        if self.goaway_sent && frame.promised_stream_id > self.last_stream_id {
+            self.pending_ops.push_back(PendingOp::RstStream {
+                stream_id: frame.promised_stream_id,
+                error_code: ErrorCode::RefusedStream,
+            });
+            return Ok(None);
+        }
+
         // RFC 7540 §5.1: "An endpoint receiving a PUSH_PROMISE on a stream
         // that is neither 'open' nor 'half-closed (local)' MUST treat this
         // as a connection error of type PROTOCOL_ERROR."
