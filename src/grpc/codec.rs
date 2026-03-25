@@ -111,7 +111,7 @@ impl Decoder for GrpcCodec {
         }
 
         // Check if we have the full message
-        if src.len() < MESSAGE_HEADER_SIZE + length {
+        if src.len() < MESSAGE_HEADER_SIZE.saturating_add(length) {
             return Ok(None);
         }
 
