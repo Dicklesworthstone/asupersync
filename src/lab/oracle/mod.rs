@@ -755,15 +755,15 @@ impl OracleEntryReport {
     ) -> Self {
         let passed = violation.is_none();
         let violation_text = violation.map(|violation| violation.to_string());
-        let _details = violation_text.as_deref().unwrap_or("clean");
+        let details = violation_text.as_deref().unwrap_or("clean");
 
-        crate::tracing_compat::info!(
+        tracing::info!(
             event = "oracle_check",
             invariant = invariant,
             passed,
             entities_tracked = stats.entities_tracked,
             events_recorded = stats.events_recorded,
-            details = _details,
+            details = details,
             "oracle_check"
         );
 

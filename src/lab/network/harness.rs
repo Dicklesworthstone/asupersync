@@ -666,7 +666,21 @@ impl DistributedHarness {
     /// Sends a remote message between nodes via the simulated network.
     fn send_message(&mut self, from: &NodeId, to: &NodeId, msg: &RemoteMessage) {
         let src = self.node_to_host[from];
-        let dst = self.node_to_host[to];
+        let Some(&dst) = self.node_to_host.get(to) else {
+            if let RemoteMessage::SpawnRequest(req) = msg {
+                if let Some(node) = self.nodes.get_mut(from) {
+                    let mut pending = node.pending_results.lock();
+                    if let Some(tx) = pending.remove(&req.remote_task_id) {
+                        let cx = Cx::for_testing();
+                        let _ = tx.send(
+                            &cx,
+                            Err(RemoteError::NodeUnreachable(to.as_str().to_owned())),
+                        );
+                    }
+                }
+            }
+            return;
+        };
 
         let msg_type = msg_type_name(msg);
         self.trace.push(HarnessTraceEvent {
