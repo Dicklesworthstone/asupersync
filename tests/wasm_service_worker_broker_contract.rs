@@ -667,6 +667,19 @@ fn doc_and_browser_package_pin_bounded_broker_exports() {
 }
 
 #[test]
+fn browser_package_source_avoids_json_sidecar_import_for_node_esm() {
+    let browser = read_file("packages/browser/src/index.ts");
+    assert!(
+        browser.contains("abiFingerprint,\n  abiMetadata,\n  abiVersion,"),
+        "browser source must import abiMetadata from @asupersync/browser-core"
+    );
+    assert!(
+        !browser.contains("@asupersync/browser-core/abi-metadata.json"),
+        "browser source must not depend on JSON sidecar imports for Node ESM compatibility"
+    );
+}
+
+#[test]
 fn browser_package_and_runtime_builder_preserve_service_worker_fail_closed_markers() {
     let browser = read_file("packages/browser/src/index.ts");
     for marker in [

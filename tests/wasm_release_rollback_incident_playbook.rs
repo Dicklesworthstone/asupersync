@@ -15,6 +15,11 @@ fn load_release_strategy() -> String {
         .expect("failed to load wasm release channel strategy")
 }
 
+fn load_troubleshooting_compendium() -> String {
+    std::fs::read_to_string("docs/wasm_troubleshooting_compendium.md")
+        .expect("failed to load wasm troubleshooting compendium")
+}
+
 fn load_ci_workflow() -> String {
     std::fs::read_to_string(".github/workflows/ci.yml").expect("failed to load CI workflow")
 }
@@ -151,6 +156,72 @@ fn playbook_defines_vnext_surface_specific_rollbacks() {
         assert!(
             playbook.contains(token),
             "playbook missing vNext rollback governance token: {token}"
+        );
+    }
+}
+
+#[test]
+fn optional_lane_operator_packet_is_self_contained_and_cross_linked() {
+    let strategy = load_release_strategy();
+    let playbook = load_playbook();
+    let troubleshooting = load_troubleshooting_compendium();
+
+    for token in [
+        "## Optional-Lane Operator Packet",
+        "self-contained operator guide",
+        "surface_id",
+        "requested_channel",
+        "channel_ceiling",
+        "support_bucket",
+        "Unit / contract evidence",
+        "Browser-harness evidence",
+        "Script-level and policy evidence",
+        "stable",
+        "guarded canary-only",
+        "preview_only",
+        "nightly-only",
+        "demoted",
+        "disabled",
+        "docs/wasm_release_rollback_incident_playbook.md",
+        "docs/wasm_troubleshooting_compendium.md",
+    ] {
+        assert!(
+            strategy.contains(token),
+            "release strategy missing optional-lane operator packet token: {token}"
+        );
+    }
+
+    for token in [
+        "## Optional-Lane Incident Packet",
+        "surface_id",
+        "requested_channel",
+        "channel_ceiling",
+        "support_bucket_before",
+        "support_bucket_after",
+        "Unit / contract evidence",
+        "Browser-harness evidence",
+        "Script-level evidence",
+        "NO_GO",
+        "docs/wasm_troubleshooting_compendium.md",
+    ] {
+        assert!(
+            playbook.contains(token),
+            "playbook missing optional-lane incident packet token: {token}"
+        );
+    }
+
+    for token in [
+        "Evidence classes to quote in every release review or failure report",
+        "Unit / contract evidence",
+        "Browser-harness evidence",
+        "Script-level evidence",
+        "Operator routing:",
+        "docs/wasm_release_channel_strategy.md",
+        "docs/wasm_release_rollback_incident_playbook.md",
+    ] {
+        assert!(
+            troubleshooting.contains(token),
+            "troubleshooting compendium missing optional-lane operator token: {token}"
         );
     }
 }

@@ -7,6 +7,7 @@
 
 use serde_json::{Value, json};
 use std::path::Path;
+use std::process::{Command, Output};
 
 fn load_doc() -> std::io::Result<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/lab_live_verification_taxonomy.md");
@@ -43,6 +44,45 @@ fn load_ci_matrix_policy_json() -> std::io::Result<Value> {
     let raw = load_ci_matrix_policy()?;
     serde_json::from_str(&raw)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+fn run_runner_function_probe(args: &[&str]) -> std::io::Result<Output> {
+    let temp = tempfile::tempdir()?;
+    let fake_rch = temp.path().join("fake-rch");
+    std::fs::write(
+        &fake_rch,
+        "#!/usr/bin/env bash\nprintf 'FAKE_RCH_ARGS=%s\\n' \"$*\"\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&fake_rch)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_rch, permissions)?;
+    }
+
+    let runner_script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run_lab_live_differential.sh");
+    Command::new("bash")
+        .arg("-lc")
+        .arg(
+            r#"
+set -euo pipefail
+source <(sed '/^profile=""/q' "$RUNNER_SCRIPT")
+ROOT_DIR="$MANIFEST_DIR"
+LOCAL_BIN="/definitely/missing"
+RCH_BIN="$FAKE_RCH"
+profile="smoke"
+run_differential "$@"
+"#,
+        )
+        .arg("runner-probe")
+        .args(args)
+        .env("RUNNER_SCRIPT", runner_script)
+        .env("MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
+        .env("FAKE_RCH", fake_rch)
+        .output()
 }
 
 #[test]
@@ -471,9 +511,20 @@ fn differential_runner_script_exists_and_uses_rch_cli_surface() -> std::io::Resu
     for token in [
         "target/debug/asupersync",
         "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
+        "default_cargo_target_dir()",
+        "extract_flag_value()",
+        "flag_present()",
+        "validate_remote_out_dir()",
+        "ASUPERSYNC_LAB_DIFFERENTIAL_CARGO_TARGET_DIR",
+        "CARGO_INCREMENTAL=\"${cargo_incremental}\"",
+        "CARGO_TARGET_DIR=\"${cargo_target_dir}\"",
         "run_differential()",
-        "\"${RCH_BIN}\" exec -- cargo run --features cli --bin asupersync -- lab differential",
-        "exec cargo run --features cli --bin asupersync -- lab differential \"${pass_through[@]}\"",
+        "\"${RCH_BIN}\" exec -- env CARGO_INCREMENTAL=\"${cargo_incremental}\" CARGO_TARGET_DIR=\"${cargo_target_dir}\" cargo run --features cli --bin asupersync -- lab differential",
+        "rch-backed differential runs require --out-dir to stay inside the repository so artifacts can sync back from the worker",
+        "use a repo-relative path such as target/... or artifacts/... or an absolute path under the repository root",
+        "CARGO_INCREMENTAL=\"${cargo_incremental}\" CARGO_TARGET_DIR=\"${cargo_target_dir}\" \\",
+        "cargo run --features cli --bin asupersync -- lab differential \"$@\"",
+        "run_differential \"${pass_through[@]}\"",
         "Nightly differential stress wrapper (`asupersync-2a6k9.8.2`)",
         "--profile nightly-stress",
         "--seed-count N",
@@ -491,6 +542,63 @@ fn differential_runner_script_exists_and_uses_rch_cli_surface() -> std::io::Resu
             "differential runner script missing token: {token}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn differential_runner_remote_out_dir_validation_uses_last_occurrence() -> std::io::Result<()> {
+    let success = run_runner_function_probe(&[
+        "--profile",
+        "smoke",
+        "--scenario",
+        "phase1.channel.reserve_send.commit",
+        "--seed",
+        "91",
+        "--out-dir",
+        "/tmp/codex-outside-first",
+        "--out-dir",
+        "target/e2e-results/lab_live_differential/probe-last-inside",
+        "--json",
+    ])?;
+    let success_stdout = String::from_utf8_lossy(&success.stdout);
+    let success_stderr = String::from_utf8_lossy(&success.stderr);
+    assert!(
+        success.status.success(),
+        "repo-local final out-dir should pass remote validation; stdout={success_stdout}; stderr={success_stderr}"
+    );
+    assert!(
+        success_stdout.contains("FAKE_RCH_ARGS=exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="),
+        "successful probe must route through fake rch, got stdout={success_stdout}"
+    );
+
+    let failure = run_runner_function_probe(&[
+        "--profile",
+        "smoke",
+        "--scenario",
+        "phase1.channel.reserve_send.commit",
+        "--seed",
+        "91",
+        "--out-dir",
+        "target/e2e-results/lab_live_differential/probe-first-inside",
+        "--out-dir",
+        "/tmp/codex-outside-last",
+        "--json",
+    ])?;
+    let failure_stdout = String::from_utf8_lossy(&failure.stdout);
+    let failure_stderr = String::from_utf8_lossy(&failure.stderr);
+    assert_eq!(
+        failure.status.code(),
+        Some(2),
+        "repo-external final out-dir should fail remote validation; stdout={failure_stdout}; stderr={failure_stderr}"
+    );
+    assert!(
+        failure_stdout.contains("\"path\":\"/tmp/codex-outside-last\""),
+        "failure payload must reference the final out-dir occurrence; stdout={failure_stdout}"
+    );
+    assert!(
+        failure_stdout.contains("\"title\":\"Unsupported remote artifact output path\""),
+        "failure payload should preserve the structured remote out-dir contract; stdout={failure_stdout}"
+    );
     Ok(())
 }
 

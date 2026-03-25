@@ -94,6 +94,12 @@ Rollback is mandatory when any condition is true:
 3. deterministic replay evidence is missing for required promotion gates.
 4. npm publish shows partial success or invalid channel/tag state.
 5. `publish.yml` rollback controls fail validation.
+6. an optional-lane tuple reports `candidate_lane_unhealthy`,
+   `demote_due_to_lane_health`, or exhausted retry budget.
+7. the unit / contract evidence, browser-harness evidence, or script-level
+   evidence required by `docs/wasm_release_channel_strategy.md` is missing,
+   stale, contradictory, or tied to a different candidate than the reviewed
+   release.
 
 ### Surface-Specific Rollback Defaults
 
@@ -110,6 +116,68 @@ allowed to blur together under one generic Browser Edition status line.
 | Shared-worker bounded coordinator attach + downgrade | attach/handshake evidence, protocol-version checks, downgrade logs, or bounded-coordinator policy docs/tests regress | demote the coordinator surface from `guarded canary-only` to `preview_only` and freeze further coordinator promotion | keep `shared_worker_direct_runtime_not_shipped` as the public truth, preserve the bounded coordinator framing, and route users back to dedicated-worker or browser main-thread fallback guidance |
 | Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | public claim appears without public SDK export closure or contract evidence | retract the public Browser Edition claim immediately | state that these surfaces remain application-boundary-only / unshipped |
 | `SharedArrayBuffer` / worker offload / parallel executor lanes | cross-origin-isolation, ownership/cancellation, replay, chaos, or perf evidence regresses | disable the lane immediately and demote `canary -> nightly` or preview-only | keep the single-threaded browser runtime as the only supported default |
+
+## Optional-Lane Incident Packet
+
+Use this packet whenever the incident touches an advanced browser lane governed
+by the optional-lane decision law in `docs/wasm_release_channel_strategy.md`.
+The packet keeps incident response aligned with rollout review instead of
+forcing operators to reconstruct the same reasoning from memory.
+
+Record these fields before deciding whether the lane remains disabled,
+`preview_only`, demoted, or eligible for re-enable:
+
+1. `surface_id`
+2. `requested_channel`
+3. `channel_ceiling`
+4. `support_bucket_before`
+5. `support_bucket_after`
+6. `support_class`
+7. `reason_code`
+8. `fallback_lane_id`
+9. `lane_health_status`
+10. `lane_health_failure_count`
+11. `lane_health_retry_budget_remaining`
+12. `lane_health_cooldown_until_ms`
+13. `lane_health_last_trigger`
+14. `demoted_lane_id`
+15. `repro_command`
+16. `policy_schema_version`
+
+Attach the same three evidence classes used during rollout review:
+
+- Unit / contract evidence:
+  `tests/wasm_browser_feasibility_matrix.rs`,
+  `tests/wasm_js_exports_coverage_contract.rs`, plus the exact surface-specific
+  contract or certification test output that failed.
+- Browser-harness evidence:
+  the newest maintained-fixture `summary.json`, any `browser-run.json`,
+  preserved `scenario_inventory`, artifact pointers under `artifacts`, and the
+  matching onboarding summary when the incident involved a worker or browser
+  bootstrap path.
+- Script-level evidence:
+  `python3 scripts/check_wasm_worker_offload_policy.py`,
+  `python3 scripts/check_wasm_benchmark_corpus.py`,
+  `python3 scripts/check_perf_regression.py`,
+  `rch exec -- ./scripts/run_perf_e2e.sh`, and
+  `rch exec -- bash ./scripts/run_nightly_stress_soak.sh`, together with the
+  emitted benchmark, perf, and nightly-stress artifacts for the reviewed
+  candidate.
+
+Interpretation rules:
+
+1. If unit / contract evidence fails, freeze the public claim immediately and
+   treat the lane as `NO_GO` until the contract and docs agree again.
+2. If browser-harness evidence fails, publish the documented fallback path and
+   demote the lane even when the policy scripts still pass.
+3. If benchmark, perf, replay, or stress evidence is missing, stale, or red,
+   do not waive the issue as "docs-only"; keep the lane at `preview_only`,
+   `nightly-only`, or a lower channel until fresh evidence is green.
+4. If `support_class` is `bridge_only` or `unsupported`, keep the downgrade or
+   fail-closed path as the supported public truth.
+5. Use `docs/wasm_troubleshooting_compendium.md` for symptom-first command
+   selection, but keep the optional-lane packet in the incident record so the
+   rollout and rollback decisions are auditable from one artifact set.
 
 ## Rollback Procedure (Deterministic Order)
 
@@ -179,7 +247,9 @@ Each incident ticket must include:
 8. `channel_ceiling_before` and `channel_ceiling_after`,
 9. `surface_evidence_paths`, including any `browser-run.json`,
    `scenario_inventory`, broker registration, durable handoff, or coordinator
-   downgrade artifacts that justified the rollback decision.
+   downgrade artifacts that justified the rollback decision,
+10. the unit / contract evidence path, browser-harness evidence path, and
+    script-level evidence path used to justify `NO_GO`, demotion, or re-enable.
 
 ## Postmortem Requirements
 

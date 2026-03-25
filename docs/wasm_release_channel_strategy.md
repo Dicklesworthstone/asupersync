@@ -207,6 +207,80 @@ Automatic `NO_GO` triggers for optional lanes:
 5. any replay, performance, benchmark-corpus, or nightly stress artifact is
    missing, stale, or not attributable to the reviewed candidate.
 
+## Optional-Lane Operator Packet
+
+This section is the self-contained operator guide for optional lanes. A release
+review, rollout decision, or failure investigation is incomplete unless one
+packet collects the prerequisites, decision tuple, evidence classes, and final
+go/no-go outcome in the same candidate window.
+
+Mandatory operator packet fields:
+
+1. `surface_id`
+2. `requested_channel`
+3. `channel_ceiling`
+4. `support_bucket`
+5. `support_class`
+6. `reason_code`
+7. `fallback_lane_id`
+8. `lane_health_status`
+9. `lane_health_failure_count`
+10. `lane_health_retry_budget_remaining`
+11. `lane_health_cooldown_until_ms`
+12. `lane_health_last_trigger`
+13. `demoted_lane_id`
+14. `repro_command`
+15. `policy_schema_version`
+
+All three evidence classes below must be attributable to the same reviewed
+candidate:
+
+| Evidence class | What operators must collect | Why it matters |
+|---|---|---|
+| Unit / contract evidence | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, and the surface-specific contract or certification test for the lane being reviewed | proves the public claim, fallback guidance, and exported diagnostics still match the documented support boundary |
+| Browser-harness evidence | `artifacts/onboarding/worker.summary.json` when worker lanes are involved, the latest consumer `summary.json`, any `browser-run.json`, preserved `scenario_inventory`, and artifact pointers under `artifacts` from the maintained browser fixtures | proves the lane still works in a real browser harness rather than only in policy documents |
+| Script-level and policy evidence | `python3 scripts/check_wasm_worker_offload_policy.py`, `python3 scripts/check_wasm_benchmark_corpus.py`, `python3 scripts/check_perf_regression.py`, `rch exec -- ./scripts/run_perf_e2e.sh`, and `rch exec -- bash ./scripts/run_nightly_stress_soak.sh` plus their summary artifacts | proves benchmarks, replay, chaos, and stress budgets stayed green for the same decision window |
+
+Deterministic rollout procedure for optional lanes:
+
+1. Confirm the requested exposure does not exceed the surface ceiling from the
+   vNext table and `docs/WASM.md`.
+2. Capture the full decision tuple from the latest ladder log before running
+   any rollout command.
+3. Re-run the required unit / contract evidence for the lane under review.
+4. Re-run the browser-harness evidence bundle and confirm the newest summaries
+   still name the same candidate, `browser-run.json`, `scenario_inventory`, and
+   artifact pointers under `artifacts` where applicable.
+5. Re-run the script-level and policy evidence bundle so benchmark, perf, and
+   nightly-stress artifacts are fresh for the current candidate.
+6. Evaluate the `Automatic NO_GO triggers for optional lanes` list plus the
+   surface-specific decision law above.
+7. Publish the final state as one of `stable`, `guarded canary-only`,
+   `preview_only`, `nightly-only`, `demoted`, or `disabled`, and include the
+   exact fallback path when the result is not a wider rollout.
+8. If the outcome is `NO_GO`, demotion, or incident response, carry the same
+   packet into `docs/wasm_release_rollback_incident_playbook.md` and
+   `docs/wasm_troubleshooting_compendium.md` instead of creating a second,
+   divergent diagnosis record.
+
+Explicit operator outcomes:
+
+- Keep the lane `disabled` when `support_class` is `bridge_only` or
+  `unsupported`, or when `reason_code` is a policy denial such as
+  `service_worker_direct_runtime_not_shipped`,
+  `shared_worker_direct_runtime_not_shipped`, or
+  `shared_array_buffer_requires_cross_origin_isolation`.
+- Keep the lane `preview_only` when the surface ceiling says
+  `preview_only`, when the maintained fixture is green but the public SDK/export
+  surface is not closed, or when prerequisite evidence exists only for
+  repository-maintained examples.
+- Demote the lane when `lane_health_status` is unhealthy, retry budget is
+  exhausted, browser-harness evidence regresses, or benchmark / chaos /
+  performance evidence is missing or stale.
+- Widen exposure only when the tuple, unit / contract evidence,
+  browser-harness evidence, and script-level and policy evidence are all green
+  for the same candidate window.
+
 ## Promotion Rules
 
 `nightly -> canary` promotion requires:

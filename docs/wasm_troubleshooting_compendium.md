@@ -455,6 +455,23 @@ Required evidence to capture:
   `lane_health_failure_count`, `lane_health_retry_budget_remaining`,
   `lane_health_last_trigger`, `demoted_lane_id`, and `repro_command`
 
+Evidence classes to quote in every release review or failure report:
+
+- Unit / contract evidence:
+  `tests/wasm_browser_feasibility_matrix.rs`,
+  `tests/wasm_js_exports_coverage_contract.rs`, and the exact
+  surface-specific contract or certification test that failed.
+- Browser-harness evidence:
+  the newest `artifacts/onboarding/worker.summary.json` when worker lanes are
+  involved, the latest maintained-fixture `summary.json`, any `browser-run.json`,
+  preserved `scenario_inventory`, and artifact pointers under `artifacts`.
+- Script-level evidence:
+  `python3 scripts/check_wasm_worker_offload_policy.py`,
+  `python3 scripts/check_wasm_benchmark_corpus.py`,
+  `python3 scripts/check_perf_regression.py`,
+  `rch exec -- ./scripts/run_perf_e2e.sh`, and
+  `rch exec -- bash ./scripts/run_nightly_stress_soak.sh`.
+
 Decision table:
 
 | Surface family | Truthful ceiling today | Green-light conditions | Mandatory no-go / demotion trigger |
@@ -481,6 +498,16 @@ Interpretation order:
    (`downgrade_to_websocket_or_fetch`,
    `downgrade_to_export_bytes_for_download`, bridge-only targets), describe the
    downgraded path as the actual supported product behavior.
+
+Operator routing:
+
+1. Use `docs/wasm_release_channel_strategy.md` when the task is a go/no-go or
+   channel-widening review.
+2. Switch to `docs/wasm_release_rollback_incident_playbook.md` when the same
+   evidence packet implies rollback, demotion, or incident ownership.
+3. Keep one packet with the tuple fields, unit / contract evidence,
+   browser-harness evidence, and script-level evidence; do not split the
+   reasoning across separate ad-hoc notes.
 
 ## Escalation Rules
 

@@ -5,7 +5,146 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCAL_BIN="${ROOT_DIR}/target/debug/asupersync"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
+default_cargo_target_dir() {
+  local profile_component
+  profile_component="$(sanitize_component "${profile:-adhoc}")"
+  printf '%s\n' "${ROOT_DIR}/target/lab-live-differential-cli/${profile_component}-pid-$$"
+}
+
+extract_flag_value() {
+  local needle="$1"
+  shift
+  local found=1
+  local last_value=""
+
+  while (($#)); do
+    case "$1" in
+      "${needle}")
+        last_value="${2-}"
+        found=0
+        if (($# >= 2)); then
+          shift 2
+        else
+          shift
+        fi
+        ;;
+      --profile|--seed|--seed-count|--seed-stride|--rotation-date|--out-dir|--scenario)
+        if (($# >= 2)); then
+          shift 2
+        else
+          shift
+        fi
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "${found}" -eq 0 ]]; then
+    printf '%s\n' "${last_value}"
+    return 0
+  fi
+
+  return 1
+}
+
+flag_present() {
+  local needle="$1"
+  shift
+
+  while (($#)); do
+    case "$1" in
+      "${needle}")
+        return 0
+        ;;
+      --profile|--seed|--seed-count|--seed-stride|--rotation-date|--out-dir|--scenario)
+        if (($# >= 2)); then
+          shift 2
+        else
+          shift
+        fi
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+report_remote_out_dir_error() {
+  local requested_out_dir="$1"
+  local json_requested="$2"
+  local resolved_requested_out_dir
+  local detail
+
+  resolved_requested_out_dir="$(resolve_out_dir "${requested_out_dir}")"
+  detail="rch-backed differential runs require --out-dir to stay inside the repository so artifacts can sync back from the worker"
+
+  if [[ "${json_requested}" -eq 1 ]]; then
+    jq -nc \
+      --arg type "artifact_output_error" \
+      --arg title "Unsupported remote artifact output path" \
+      --arg detail "${detail}" \
+      --arg path "${requested_out_dir}" \
+      --arg resolved_path "${resolved_requested_out_dir}" \
+      --arg repo_root "${ROOT_DIR}" \
+      --arg hint "use a repo-relative path such as target/... or artifacts/... or an absolute path under the repository root" \
+      '{
+        type: $type,
+        title: $title,
+        detail: $detail,
+        context: {
+          path: $path,
+          resolved_path: $resolved_path,
+          repo_root: $repo_root,
+          hint: $hint
+        },
+        exit_code: 2
+      }'
+    return
+  fi
+
+  {
+    echo "Unsupported remote artifact output path"
+    echo "${detail}"
+    echo "Requested path: ${requested_out_dir}"
+    echo "Resolved path: ${resolved_requested_out_dir}"
+    echo "Repository root: ${ROOT_DIR}"
+    echo "Hint: use a repo-relative path such as target/... or artifacts/... or an absolute path under the repository root"
+  } >&2
+}
+
+validate_remote_out_dir() {
+  local requested_out_dir="$1"
+  local json_requested="$2"
+  local resolved_requested_out_dir
+
+  resolved_requested_out_dir="$(resolve_out_dir "${requested_out_dir}")"
+  if [[ "${resolved_requested_out_dir}" == "${ROOT_DIR}" || "${resolved_requested_out_dir}" == "${ROOT_DIR}/"* ]]; then
+    return 0
+  fi
+
+  report_remote_out_dir_error "${requested_out_dir}" "${json_requested}"
+  return 2
+}
+
 run_differential() {
+  local cargo_incremental="${CARGO_INCREMENTAL:-0}"
+  local cargo_target_dir="${ASUPERSYNC_LAB_DIFFERENTIAL_CARGO_TARGET_DIR:-$(default_cargo_target_dir)}"
+  local requested_out_dir="target/e2e-results/lab_live_differential"
+  local json_requested=0
+  local extracted_out_dir
+
+  if extracted_out_dir="$(extract_flag_value "--out-dir" "$@")"; then
+    requested_out_dir="${extracted_out_dir}"
+  fi
+  if flag_present "--json" "$@"; then
+    json_requested=1
+  fi
+
   if [[ -x "${LOCAL_BIN}" ]]; then
     "${LOCAL_BIN}" lab differential "$@"
     return
@@ -13,11 +152,13 @@ run_differential() {
 
   cd "${ROOT_DIR}"
   if [[ -x "${RCH_BIN}" ]]; then
-    "${RCH_BIN}" exec -- cargo run --features cli --bin asupersync -- lab differential "$@"
+    validate_remote_out_dir "${requested_out_dir}" "${json_requested}" || return $?
+    "${RCH_BIN}" exec -- env CARGO_INCREMENTAL="${cargo_incremental}" CARGO_TARGET_DIR="${cargo_target_dir}" cargo run --features cli --bin asupersync -- lab differential "$@"
     return
   fi
 
-  cargo run --features cli --bin asupersync -- lab differential "$@"
+  CARGO_INCREMENTAL="${cargo_incremental}" CARGO_TARGET_DIR="${cargo_target_dir}" \
+    cargo run --features cli --bin asupersync -- lab differential "$@"
 }
 
 resolve_out_dir() {
@@ -42,6 +183,15 @@ PY
 
 sanitize_component() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'
+}
+
+json_array_from_args() {
+  if (($# == 0)); then
+    printf '[]'
+    return
+  fi
+
+  printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]'
 }
 
 print_nightly_stress_help() {
@@ -143,14 +293,8 @@ if [[ "${profile}" != "nightly-stress" ]]; then
     echo "nightly-stress-only flags require --profile nightly-stress" >&2
     exit 2
   fi
-  if [[ -x "${LOCAL_BIN}" ]]; then
-    exec "${LOCAL_BIN}" lab differential "${pass_through[@]}"
-  fi
-  cd "${ROOT_DIR}"
-  if [[ -x "${RCH_BIN}" ]]; then
-    exec "${RCH_BIN}" exec -- cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}"
-  fi
-  exec cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}"
+  run_differential "${pass_through[@]}"
+  exit $?
 fi
 
 if [[ "${show_help}" -eq 1 ]]; then
@@ -221,8 +365,21 @@ for ((offset = 0; offset < seed_count; offset++)); do
   operator_summary_path="${profile_root}/operator_summary.txt"
   artifact_index_path="${profile_root}/artifact_index.json"
   aggregate_event_log_path="${profile_root}/differential_event_log.jsonl"
+  missing_artifacts=()
 
-  if [[ ! -f "${runner_summary_path}" ]]; then
+  for required_artifact in \
+    "${runner_summary_path}" \
+    "${operator_summary_path}" \
+    "${artifact_index_path}" \
+    "${aggregate_event_log_path}"; do
+    if [[ ! -f "${required_artifact}" ]]; then
+      missing_artifacts+=("${required_artifact}")
+    fi
+  done
+
+  missing_artifacts_json="$(json_array_from_args "${missing_artifacts[@]}")"
+
+  if [[ "${#missing_artifacts[@]}" -ne 0 && ! -f "${runner_summary_path}" ]]; then
     overall_exit=1
     jq -nc \
       --argjson seed "${derived_seed}" \
@@ -233,6 +390,7 @@ for ((offset = 0; offset < seed_count; offset++)); do
       --arg aggregate_event_log_path "${aggregate_event_log_path}" \
       --arg run_log_path "${run_log}" \
       --arg status "artifact_contract_regression" \
+      --argjson missing_artifacts "${missing_artifacts_json}" \
       '{
         seed: $seed,
         exit_code: $exit_code,
@@ -242,6 +400,7 @@ for ((offset = 0; offset < seed_count; offset++)); do
         artifact_index_path: $artifact_index_path,
         aggregate_event_log_path: $aggregate_event_log_path,
         run_log_path: $run_log_path,
+        missing_artifacts: $missing_artifacts,
         scenario_count: 0,
         pass_count: 0,
         unexpected_divergence_count: 0,
@@ -266,6 +425,10 @@ for ((offset = 0; offset < seed_count; offset++)); do
     overall_exit=1
     run_status="failure"
   fi
+  if [[ "${#missing_artifacts[@]}" -ne 0 ]]; then
+    overall_exit=1
+    run_status="artifact_contract_regression"
+  fi
 
   jq -nc \
     --argjson seed "${derived_seed}" \
@@ -281,6 +444,7 @@ for ((offset = 0; offset < seed_count; offset++)); do
     --argjson unexpected_divergence_count "${unexpected_count}" \
     --argjson missing_expected_divergence_count "${missing_expected_count}" \
     --argjson replay_commands "${replay_commands_json}" \
+    --argjson missing_artifacts "${missing_artifacts_json}" \
     '{
       seed: $seed,
       exit_code: $exit_code,
@@ -290,6 +454,7 @@ for ((offset = 0; offset < seed_count; offset++)); do
       artifact_index_path: $artifact_index_path,
       aggregate_event_log_path: $aggregate_event_log_path,
       run_log_path: $run_log_path,
+      missing_artifacts: $missing_artifacts,
       scenario_count: $scenario_count,
       pass_count: $pass_count,
       unexpected_divergence_count: $unexpected_divergence_count,
@@ -401,7 +566,7 @@ jq -n \
   echo "Manifest: ${manifest_path}"
   echo
   echo "Per-seed runs:"
-  jq -r '.runs[] | "- seed \(.seed) [\(.status)]\n  runner_summary: \(.runner_summary_path)\n  operator_summary: \(.operator_summary_path)\n  artifact_index: \(.artifact_index_path)\n  run_log: \(.run_log_path)"' "${manifest_path}"
+  jq -r '.runs[] | "- seed \(.seed) [\(.status)]\n  runner_summary: \(.runner_summary_path)\n  operator_summary: \(.operator_summary_path)\n  artifact_index: \(.artifact_index_path)\n  run_log: \(.run_log_path)" + (if ((.missing_artifacts // []) | length) > 0 then "\n  missing_artifacts: " + ((.missing_artifacts // []) | join(", ")) else "" end)' "${manifest_path}"
   if [[ "${retained_count}" -gt 0 ]]; then
     echo
     echo "Promotion candidates:"
