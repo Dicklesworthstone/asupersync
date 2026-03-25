@@ -858,6 +858,9 @@ where
             idx
         };
 
+        let id = self.waiter_id.expect("waiter_id assigned above");
+        drop(state);
+
         if pos < available {
             return Poll::Ready(());
         }
@@ -865,8 +868,6 @@ where
         // Also register in the return_wakers list
         {
             let mut wakers = self.pool.return_wakers.lock();
-            let id = self.waiter_id.expect("waiter_id assigned above");
-
             if let Some((_, existing)) = wakers.iter_mut().find(|(wid, _)| *wid == id) {
                 if !existing.will_wake(cx.waker()) {
                     existing.clone_from(cx.waker());
@@ -876,7 +877,6 @@ where
             }
         }
 
-        drop(state);
         Poll::Pending
     }
 }
