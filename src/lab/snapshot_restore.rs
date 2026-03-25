@@ -63,7 +63,8 @@
 
 use crate::runtime::RuntimeState;
 use crate::runtime::state::{
-    ObligationStateSnapshot, RegionStateSnapshot, RuntimeSnapshot, TaskSnapshot, TaskStateSnapshot,
+    IdSnapshot, ObligationStateSnapshot, RegionStateSnapshot, RuntimeSnapshot, TaskSnapshot,
+    TaskStateSnapshot,
 };
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
@@ -329,20 +330,42 @@ impl RestorableSnapshot {
         let mut errors = Vec::new();
         let mut stats = SnapshotStats::default();
 
-        // Build lookup sets
-        let region_ids: HashSet<u32> = self.snapshot.regions.iter().map(|r| r.id.index).collect();
-        let task_ids: HashSet<u32> = self.snapshot.tasks.iter().map(|t| t.id.index).collect();
-        let obligation_ids: HashSet<u32> = self
+        // Referential integrity must include generations to reject stale slot reuse.
+        let region_ids: HashSet<SnapshotIdKey> = self
             .snapshot
-            .obligations
+            .regions
             .iter()
-            .map(|o| o.id.index)
+            .map(|region| snapshot_id_key(region.id))
             .collect();
-        let task_regions: HashMap<u32, u32> = self
+        let task_ids: HashSet<SnapshotIdKey> = self
             .snapshot
             .tasks
             .iter()
-            .map(|task| (task.id.index, task.region_id.index))
+            .map(|task| snapshot_id_key(task.id))
+            .collect();
+        let task_regions: HashMap<SnapshotIdKey, SnapshotIdKey> = self
+            .snapshot
+            .tasks
+            .iter()
+            .map(|task| (snapshot_id_key(task.id), snapshot_id_key(task.region_id)))
+            .collect();
+        let region_slots: HashSet<u32> = self
+            .snapshot
+            .regions
+            .iter()
+            .map(|region| region.id.index)
+            .collect();
+        let task_slots: HashSet<u32> = self
+            .snapshot
+            .tasks
+            .iter()
+            .map(|task| task.id.index)
+            .collect();
+        let obligation_slots: HashSet<u32> = self
+            .snapshot
+            .obligations
+            .iter()
+            .map(|obligation| obligation.id.index)
             .collect();
 
         stats.region_count = self.snapshot.regions.len();
@@ -351,7 +374,7 @@ impl RestorableSnapshot {
         let snapshot_time = self.snapshot.timestamp;
 
         // Check for duplicate region IDs
-        if region_ids.len() != self.snapshot.regions.len() {
+        if region_slots.len() != self.snapshot.regions.len() {
             // Find duplicates
             let mut seen = HashSet::new();
             for region in &self.snapshot.regions {
@@ -365,7 +388,7 @@ impl RestorableSnapshot {
         }
 
         // Check for duplicate task IDs
-        if task_ids.len() != self.snapshot.tasks.len() {
+        if task_slots.len() != self.snapshot.tasks.len() {
             let mut seen = HashSet::new();
             for task in &self.snapshot.tasks {
                 if !seen.insert(task.id.index) {
@@ -378,7 +401,7 @@ impl RestorableSnapshot {
         }
 
         // Check for duplicate obligation IDs
-        if obligation_ids.len() != self.snapshot.obligations.len() {
+        if obligation_slots.len() != self.snapshot.obligations.len() {
             let mut seen = HashSet::new();
             for obligation in &self.snapshot.obligations {
                 if !seen.insert(obligation.id.index) {
@@ -399,7 +422,7 @@ impl RestorableSnapshot {
                     entity: format!("task {} created_at", task.id.index),
                 });
             }
-            if !region_ids.contains(&task.region_id.index) {
+            if !region_ids.contains(&snapshot_id_key(task.region_id)) {
                 errors.push(RestoreError::OrphanTask {
                     task_id: task.id.index,
                     region_id: task.region_id.index,
@@ -419,23 +442,25 @@ impl RestorableSnapshot {
                     entity: format!("obligation {} created_at", obligation.id.index),
                 });
             }
-            if !task_ids.contains(&obligation.holder_task.index) {
+            if !task_ids.contains(&snapshot_id_key(obligation.holder_task)) {
                 errors.push(RestoreError::OrphanObligation {
                     obligation_id: obligation.id.index,
                     task_id: obligation.holder_task.index,
                 });
             }
-            if !region_ids.contains(&obligation.owning_region.index) {
+            if !region_ids.contains(&snapshot_id_key(obligation.owning_region)) {
                 errors.push(RestoreError::OrphanObligationRegion {
                     obligation_id: obligation.id.index,
                     region_id: obligation.owning_region.index,
                 });
-            } else if let Some(holder_region_id) = task_regions.get(&obligation.holder_task.index) {
-                if *holder_region_id != obligation.owning_region.index {
+            } else if let Some(holder_region_id) =
+                task_regions.get(&snapshot_id_key(obligation.holder_task))
+            {
+                if *holder_region_id != snapshot_id_key(obligation.owning_region) {
                     errors.push(RestoreError::ObligationRegionMismatch {
                         obligation_id: obligation.id.index,
                         task_id: obligation.holder_task.index,
-                        holder_region_id: *holder_region_id,
+                        holder_region_id: holder_region_id.0,
                         owning_region_id: obligation.owning_region.index,
                     });
                 }
@@ -446,11 +471,14 @@ impl RestorableSnapshot {
         }
 
         // Validate region tree structure
-        let mut parent_map: HashMap<u32, Option<u32>> = HashMap::new();
+        let mut parent_map: HashMap<SnapshotIdKey, Option<SnapshotIdKey>> = HashMap::new();
         for region in &self.snapshot.regions {
-            parent_map.insert(region.id.index, region.parent_id.map(|p| p.index));
+            parent_map.insert(
+                snapshot_id_key(region.id),
+                region.parent_id.map(snapshot_id_key),
+            );
             if let Some(parent_id) = &region.parent_id {
-                if !region_ids.contains(&parent_id.index) {
+                if !region_ids.contains(&snapshot_id_key(*parent_id)) {
                     errors.push(RestoreError::InvalidParent {
                         region_id: region.id.index,
                         parent_id: parent_id.index,
@@ -471,44 +499,45 @@ impl RestorableSnapshot {
         stats.max_depth = compute_max_depth(&parent_map);
 
         // Build region → tasks and region → children maps
-        let mut region_tasks: HashMap<u32, Vec<&TaskSnapshot>> = HashMap::new();
+        let mut region_tasks: HashMap<SnapshotIdKey, Vec<&TaskSnapshot>> = HashMap::new();
         for task in &self.snapshot.tasks {
             region_tasks
-                .entry(task.region_id.index)
+                .entry(snapshot_id_key(task.region_id))
                 .or_default()
                 .push(task);
         }
 
-        let mut region_children: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut closed_regions: HashSet<u32> = HashSet::new();
+        let mut region_children: HashMap<SnapshotIdKey, Vec<SnapshotIdKey>> = HashMap::new();
+        let mut closed_regions: HashSet<SnapshotIdKey> = HashSet::new();
         for region in &self.snapshot.regions {
             if is_region_closed(&region.state) {
-                closed_regions.insert(region.id.index);
+                closed_regions.insert(snapshot_id_key(region.id));
             }
             if let Some(parent_id) = region.parent_id {
                 region_children
-                    .entry(parent_id.index)
+                    .entry(snapshot_id_key(parent_id))
                     .or_default()
-                    .push(region.id.index);
+                    .push(snapshot_id_key(region.id));
             }
         }
 
         // Validate quiescence for closed regions
         for region in &self.snapshot.regions {
             if is_region_closed(&region.state) {
+                let region_id = snapshot_id_key(region.id);
                 let live_children: Vec<u32> = region_children
-                    .get(&region.id.index)
+                    .get(&region_id)
                     .map(|children| {
                         children
                             .iter()
                             .filter(|&&child_id| !closed_regions.contains(&child_id))
-                            .copied()
+                            .map(|&(child_index, _)| child_index)
                             .collect()
                     })
                     .unwrap_or_default();
 
                 let live_tasks: Vec<u32> = region_tasks
-                    .get(&region.id.index)
+                    .get(&region_id)
                     .map(|tasks| {
                         tasks
                             .iter()
@@ -568,8 +597,14 @@ fn is_region_closed(state: &RegionStateSnapshot) -> bool {
     matches!(state, RegionStateSnapshot::Closed)
 }
 
+type SnapshotIdKey = (u32, u32);
+
+fn snapshot_id_key(id: IdSnapshot) -> SnapshotIdKey {
+    (id.index, id.generation)
+}
+
 /// Detects a cycle in the parent map, returning the cycle if found.
-fn detect_cycle(parent_map: &HashMap<u32, Option<u32>>) -> Option<Vec<u32>> {
+fn detect_cycle(parent_map: &HashMap<SnapshotIdKey, Option<SnapshotIdKey>>) -> Option<Vec<u32>> {
     for &start in parent_map.keys() {
         let mut visited = HashSet::new();
         let mut path = Vec::new();
@@ -578,8 +613,8 @@ fn detect_cycle(parent_map: &HashMap<u32, Option<u32>>) -> Option<Vec<u32>> {
         while let Some(node) = current {
             if visited.contains(&node) {
                 // Found a cycle - extract it
-                if let Some(pos) = path.iter().position(|&n| n == node) {
-                    return Some(path[pos..].to_vec());
+                if let Some(pos) = path.iter().position(|&key| key == node) {
+                    return Some(path[pos..].iter().map(|(index, _)| *index).collect());
                 }
             }
             visited.insert(node);
@@ -591,7 +626,7 @@ fn detect_cycle(parent_map: &HashMap<u32, Option<u32>>) -> Option<Vec<u32>> {
 }
 
 /// Computes the maximum depth of the region tree.
-fn compute_max_depth(parent_map: &HashMap<u32, Option<u32>>) -> usize {
+fn compute_max_depth(parent_map: &HashMap<SnapshotIdKey, Option<SnapshotIdKey>>) -> usize {
     let mut max_depth = 0;
     for &start in parent_map.keys() {
         let mut depth = 0;
@@ -637,16 +672,14 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn snap_id(index: u32, generation: u32) -> IdSnapshot {
+        IdSnapshot { index, generation }
+    }
+
     fn make_region(id: u32, parent: Option<u32>, state: RegionStateSnapshot) -> RegionSnapshot {
         RegionSnapshot {
-            id: IdSnapshot {
-                index: id,
-                generation: 0,
-            },
-            parent_id: parent.map(|p| IdSnapshot {
-                index: p,
-                generation: 0,
-            }),
+            id: snap_id(id, 0),
+            parent_id: parent.map(|p| snap_id(p, 0)),
             state,
             budget: BudgetSnapshot {
                 deadline: None,
@@ -662,14 +695,8 @@ mod tests {
 
     fn make_task(id: u32, region_id: u32, state: TaskStateSnapshot) -> TaskSnapshot {
         TaskSnapshot {
-            id: IdSnapshot {
-                index: id,
-                generation: 0,
-            },
-            region_id: IdSnapshot {
-                index: region_id,
-                generation: 0,
-            },
+            id: snap_id(id, 0),
+            region_id: snap_id(region_id, 0),
             state,
             name: None,
             poll_count: 0,
@@ -693,20 +720,11 @@ mod tests {
         state: ObligationStateSnapshot,
     ) -> ObligationSnapshot {
         ObligationSnapshot {
-            id: IdSnapshot {
-                index: id,
-                generation: 0,
-            },
+            id: snap_id(id, 0),
             kind: ObligationKindSnapshot::SendPermit,
             state,
-            holder_task: IdSnapshot {
-                index: task_id,
-                generation: 0,
-            },
-            owning_region: IdSnapshot {
-                index: owning_region,
-                generation: 0,
-            },
+            holder_task: snap_id(task_id, 0),
+            owning_region: snap_id(owning_region, 0),
             created_at: 0,
         }
     }
@@ -798,6 +816,38 @@ mod tests {
     }
 
     #[test]
+    fn task_with_stale_region_generation_is_orphaned() {
+        init_test("task_with_stale_region_generation_is_orphaned");
+        let mut snapshot = make_snapshot(
+            vec![make_region(7, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 7, TaskStateSnapshot::Running)],
+            Vec::new(),
+        );
+        snapshot.snapshot.regions[0].id = snap_id(7, 1);
+
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_error = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                RestoreError::OrphanTask {
+                    task_id: 0,
+                    region_id: 7,
+                }
+            )
+        });
+        crate::assert_with_log!(
+            has_error,
+            "generation mismatch yields OrphanTask",
+            true,
+            has_error
+        );
+        crate::test_complete!("task_with_stale_region_generation_is_orphaned");
+    }
+
+    #[test]
     fn orphan_obligation_detected() {
         init_test("orphan_obligation_detected");
         let snapshot = make_snapshot(
@@ -815,6 +865,38 @@ mod tests {
             .any(|e| matches!(e, RestoreError::OrphanObligation { .. }));
         crate::assert_with_log!(has_error, "has OrphanObligation error", true, has_error);
         crate::test_complete!("orphan_obligation_detected");
+    }
+
+    #[test]
+    fn obligation_with_stale_holder_generation_is_orphaned() {
+        init_test("obligation_with_stale_holder_generation_is_orphaned");
+        let mut snapshot = make_snapshot(
+            vec![make_region(0, None, RegionStateSnapshot::Open)],
+            vec![make_task(5, 0, TaskStateSnapshot::Running)],
+            vec![make_obligation(0, 5, ObligationStateSnapshot::Reserved)],
+        );
+        snapshot.snapshot.tasks[0].id = snap_id(5, 1);
+
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_error = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                RestoreError::OrphanObligation {
+                    obligation_id: 0,
+                    task_id: 5,
+                }
+            )
+        });
+        crate::assert_with_log!(
+            has_error,
+            "generation mismatch yields OrphanObligation",
+            true,
+            has_error
+        );
+        crate::test_complete!("obligation_with_stale_holder_generation_is_orphaned");
     }
 
     #[test]
@@ -845,6 +927,44 @@ mod tests {
             has_error
         );
         crate::test_complete!("orphan_obligation_region_detected");
+    }
+
+    #[test]
+    fn obligation_with_stale_owning_region_generation_is_orphaned() {
+        init_test("obligation_with_stale_owning_region_generation_is_orphaned");
+        let mut snapshot = make_snapshot(
+            vec![make_region(3, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 3, TaskStateSnapshot::Running)],
+            vec![make_obligation_in_region(
+                0,
+                0,
+                3,
+                ObligationStateSnapshot::Reserved,
+            )],
+        );
+        snapshot.snapshot.regions[0].id = snap_id(3, 1);
+        snapshot.snapshot.tasks[0].region_id = snap_id(3, 1);
+
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_error = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                RestoreError::OrphanObligationRegion {
+                    obligation_id: 0,
+                    region_id: 3,
+                }
+            )
+        });
+        crate::assert_with_log!(
+            has_error,
+            "generation mismatch yields OrphanObligationRegion",
+            true,
+            has_error
+        );
+        crate::test_complete!("obligation_with_stale_owning_region_generation_is_orphaned");
     }
 
     #[test]
@@ -901,6 +1021,41 @@ mod tests {
             .any(|e| matches!(e, RestoreError::InvalidParent { .. }));
         crate::assert_with_log!(has_error, "has InvalidParent error", true, has_error);
         crate::test_complete!("invalid_parent_detected");
+    }
+
+    #[test]
+    fn parent_generation_mismatch_detected() {
+        init_test("parent_generation_mismatch_detected");
+        let mut snapshot = make_snapshot(
+            vec![
+                make_region(0, None, RegionStateSnapshot::Open),
+                make_region(1, Some(0), RegionStateSnapshot::Open),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        snapshot.snapshot.regions[0].id = snap_id(0, 1);
+
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_error = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                RestoreError::InvalidParent {
+                    region_id: 1,
+                    parent_id: 0,
+                }
+            )
+        });
+        crate::assert_with_log!(
+            has_error,
+            "generation mismatch yields InvalidParent",
+            true,
+            has_error
+        );
+        crate::test_complete!("parent_generation_mismatch_detected");
     }
 
     #[test]

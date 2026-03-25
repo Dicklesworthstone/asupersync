@@ -284,26 +284,31 @@ impl RespValue {
         }
     }
 
-    /// Decode one RESP value from the provided buffer.
+    /// Decode one RESP value from the provided buffer using the given protocol limits.
     ///
     /// Returns `Ok(None)` if more bytes are required.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::use_self)]
-    fn try_decode(buf: &[u8]) -> Result<Option<(Self, usize)>, RedisError> {
-        /// Maximum nesting depth for RESP arrays to prevent stack overflow
-        /// from malicious deeply-nested responses.
-        const MAX_NESTING_DEPTH: usize = 64;
-
+    fn try_decode_with_limits(
+        buf: &[u8],
+        limits: &RedisProtocolLimits,
+    ) -> Result<Option<(Self, usize)>, RedisError> {
         enum Decoded {
             NeedMore,
             Ok { value: RespValue, next: usize },
         }
 
         #[allow(clippy::too_many_lines)]
-        fn decode_at(buf: &[u8], i: usize, depth: usize) -> Result<Decoded, RedisError> {
-            if depth > MAX_NESTING_DEPTH {
+        fn decode_at(
+            buf: &[u8],
+            i: usize,
+            depth: usize,
+            limits: &RedisProtocolLimits,
+        ) -> Result<Decoded, RedisError> {
+            if depth > limits.max_nesting_depth {
                 return Err(RedisError::Protocol(format!(
-                    "RESP nesting depth exceeds maximum ({MAX_NESTING_DEPTH})"
+                    "RESP nesting depth exceeds maximum ({})",
+                    limits.max_nesting_depth
                 )));
             }
             if i >= buf.len() {
@@ -381,7 +386,6 @@ impl RespValue {
                     })
                 }
                 b'*' => {
-                    const MAX_ARRAY_LEN: usize = 1_000_000;
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
@@ -397,16 +401,16 @@ impl RespValue {
                     }
                     let n = usize::try_from(n)
                         .map_err(|_| RedisError::Protocol(format!("invalid array length: {n}")))?;
-                    // Guard against absurdly large declared arrays (limit to 1M elements)
-                    if n > MAX_ARRAY_LEN {
+                    if n > limits.max_array_len {
                         return Err(RedisError::Protocol(format!(
-                            "array length {n} exceeds maximum {MAX_ARRAY_LEN}"
+                            "array length {n} exceeds maximum {}",
+                            limits.max_array_len
                         )));
                     }
                     let mut items = Vec::with_capacity(n);
                     let mut pos = end + 2;
                     for _ in 0..n {
-                        match decode_at(buf, pos, depth + 1)? {
+                        match decode_at(buf, pos, depth + 1, limits)? {
                             Decoded::NeedMore => return Ok(Decoded::NeedMore),
                             Decoded::Ok { value, next } => {
                                 items.push(value);
@@ -425,10 +429,17 @@ impl RespValue {
             }
         }
 
-        match decode_at(buf, 0, 0)? {
+        match decode_at(buf, 0, 0, limits)? {
             Decoded::NeedMore => Ok(None),
             Decoded::Ok { value, next } => Ok(Some((value, next))),
         }
+    }
+
+    /// Decode one RESP value from the provided buffer using default limits.
+    ///
+    /// Returns `Ok(None)` if more bytes are required.
+    fn try_decode(buf: &[u8]) -> Result<Option<(Self, usize)>, RedisError> {
+        Self::try_decode_with_limits(buf, &RedisProtocolLimits::default())
     }
 
     /// Try to extract as a bulk string (bytes).
@@ -508,7 +519,74 @@ fn expect_ok_response(resp: &RespValue, command: &str) -> Result<(), RedisError>
     }
 }
 
-const MAX_RESP_FRAME_SIZE: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_RESP_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
+/// Default maximum nesting depth for RESP arrays.
+const DEFAULT_MAX_NESTING_DEPTH: usize = 64;
+
+/// Default maximum RESP array length.
+const DEFAULT_MAX_ARRAY_LEN: usize = 1_000_000;
+
+/// Configurable protocol-level limits for the Redis RESP decoder.
+///
+/// These limits protect against resource exhaustion from oversized or
+/// malicious responses. Inject into [`RedisConfig`] to override defaults.
+///
+/// # Defaults
+///
+/// | Limit | Default | Purpose |
+/// |-------|---------|---------|
+/// | `max_frame_size` | 16 MiB | Maximum bytes buffered for a single RESP frame |
+/// | `max_nesting_depth` | 64 | Maximum RESP array nesting depth (stack overflow protection) |
+/// | `max_array_len` | 1,000,000 | Maximum elements in a single RESP array (memory protection) |
+#[derive(Debug, Clone, Copy)]
+pub struct RedisProtocolLimits {
+    /// Maximum RESP frame size in bytes.
+    pub max_frame_size: usize,
+    /// Maximum RESP array nesting depth.
+    pub max_nesting_depth: usize,
+    /// Maximum RESP array element count.
+    pub max_array_len: usize,
+}
+
+impl Default for RedisProtocolLimits {
+    fn default() -> Self {
+        Self {
+            max_frame_size: DEFAULT_MAX_RESP_FRAME_SIZE,
+            max_nesting_depth: DEFAULT_MAX_NESTING_DEPTH,
+            max_array_len: DEFAULT_MAX_ARRAY_LEN,
+        }
+    }
+}
+
+impl RedisProtocolLimits {
+    /// Create protocol limits with defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the maximum RESP frame size.
+    #[must_use]
+    pub fn max_frame_size(mut self, bytes: usize) -> Self {
+        self.max_frame_size = bytes;
+        self
+    }
+
+    /// Set the maximum RESP array nesting depth.
+    #[must_use]
+    pub fn max_nesting_depth(mut self, depth: usize) -> Self {
+        self.max_nesting_depth = depth;
+        self
+    }
+
+    /// Set the maximum RESP array element count.
+    #[must_use]
+    pub fn max_array_len(mut self, len: usize) -> Self {
+        self.max_array_len = len;
+        self
+    }
+}
 
 #[derive(Debug)]
 struct RespReadBuffer {
@@ -571,6 +649,8 @@ pub struct RedisConfig {
     pub username: Option<String>,
     /// Password for AUTH.
     pub password: Option<String>,
+    /// Protocol-level limits for the RESP decoder.
+    pub protocol_limits: RedisProtocolLimits,
 }
 
 impl std::fmt::Debug for RedisConfig {
@@ -581,6 +661,7 @@ impl std::fmt::Debug for RedisConfig {
             .field("database", &self.database)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("protocol_limits", &self.protocol_limits)
             .finish()
     }
 }
@@ -593,6 +674,7 @@ impl Default for RedisConfig {
             database: 0,
             username: None,
             password: None,
+            protocol_limits: RedisProtocolLimits::default(),
         }
     }
 }
@@ -723,14 +805,18 @@ impl RedisConnection {
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
-            if let Some((value, consumed)) = RespValue::try_decode(self.read_buf.available())? {
+            if let Some((value, consumed)) = RespValue::try_decode_with_limits(
+                self.read_buf.available(),
+                &self.config.protocol_limits,
+            )? {
                 self.read_buf.consume(consumed);
                 return Ok(value);
             }
 
-            if self.read_buf.len() > MAX_RESP_FRAME_SIZE {
+            let frame_limit = self.config.protocol_limits.max_frame_size;
+            if self.read_buf.len() > frame_limit {
                 return Err(RedisError::Protocol(format!(
-                    "RESP frame exceeds limit ({MAX_RESP_FRAME_SIZE} bytes)"
+                    "RESP frame exceeds limit ({frame_limit} bytes)"
                 )));
             }
 

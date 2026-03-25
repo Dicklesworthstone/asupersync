@@ -29,8 +29,8 @@ use super::response::{Response, StatusCode};
 /// Default max-age for Cache-Control (1 hour).
 const DEFAULT_MAX_AGE: u32 = 3600;
 
-/// Maximum file size to serve (256 MiB).
-const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
+/// Default maximum file size to serve (256 MiB).
+const DEFAULT_MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
 // ─── StaticFiles ────────────────────────────────────────────────────────────
 
@@ -39,6 +39,7 @@ const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 pub struct StaticFiles {
     root: PathBuf,
     max_age: u32,
+    max_file_size: u64,
     index_file: Option<String>,
     custom_headers: HashMap<String, String>,
 }
@@ -48,6 +49,7 @@ impl fmt::Debug for StaticFiles {
         f.debug_struct("StaticFiles")
             .field("root", &self.root)
             .field("max_age", &self.max_age)
+            .field("max_file_size", &self.max_file_size)
             .field("index_file", &self.index_file)
             .field("custom_headers", &self.custom_headers)
             .finish()
@@ -61,6 +63,7 @@ impl StaticFiles {
         Self {
             root: root.into(),
             max_age: DEFAULT_MAX_AGE,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
             index_file: Some("index.html".to_string()),
             custom_headers: HashMap::new(),
         }
@@ -70,6 +73,16 @@ impl StaticFiles {
     #[must_use]
     pub fn max_age(mut self, seconds: u32) -> Self {
         self.max_age = seconds;
+        self
+    }
+
+    /// Set the maximum file size to serve in bytes.
+    ///
+    /// Files larger than this limit receive a 413 Payload Too Large response.
+    /// Defaults to 256 MiB.
+    #[must_use]
+    pub fn max_file_size(mut self, bytes: u64) -> Self {
+        self.max_file_size = bytes;
         self
     }
 
@@ -140,7 +153,7 @@ impl StaticFiles {
             return Response::empty(StatusCode::NOT_FOUND);
         };
 
-        if metadata.len() > MAX_FILE_SIZE {
+        if metadata.len() > self.max_file_size {
             return Response::empty(StatusCode::PAYLOAD_TOO_LARGE);
         }
 

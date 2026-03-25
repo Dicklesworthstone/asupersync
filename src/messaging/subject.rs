@@ -469,8 +469,8 @@ pub struct Sublist {
     next_id: AtomicU64,
     /// Cache of literal-subject lookups, invalidated by generation changes.
     cache: RwLock<SublistCache>,
-    /// Round-robin counter per queue group for deterministic selection.
-    queue_round_robin: Mutex<HashMap<String, u64>>,
+    /// Round-robin counter per effective queue-delivery set.
+    queue_round_robin: Mutex<HashMap<QueueCursorKey, u64>>,
 }
 
 /// Generation-tagged cache entry storing raw matched subscriber info
@@ -482,6 +482,17 @@ struct CacheEntry {
     plain_ids: Vec<SubscriptionId>,
     /// Queue-group subscriber ids grouped by group name.
     queue_groups: Vec<(String, Vec<SubscriptionId>)>,
+}
+
+/// Stable queue-group cursor key.
+///
+/// Queue-group fairness must not be global by group name alone, otherwise
+/// unrelated delivery sets that both use e.g. `workers` will perturb each
+/// other's round-robin state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct QueueCursorKey {
+    group: String,
+    members: Vec<SubscriptionId>,
 }
 
 /// Literal-subject lookup cache.
@@ -599,9 +610,12 @@ impl Sublist {
         {
             let mut trie = self.trie.write();
             insert_into_trie(&mut trie, pattern.segments(), subscriber);
+            // Queue cursor keys are derived from the active member set, so any
+            // subscription mutation must retire stale cursor state before
+            // readers can observe the new trie topology.
+            self.queue_round_robin.lock().clear();
+            self.generation.fetch_add(1, Ordering::Release);
         }
-
-        self.generation.fetch_add(1, Ordering::Release);
 
         SubscriptionGuard {
             id,
@@ -615,6 +629,10 @@ impl Sublist {
     fn unsubscribe(&self, id: SubscriptionId, pattern: &SubjectPattern) {
         let mut trie = self.trie.write();
         remove_from_trie(&mut trie, pattern.segments(), id);
+        // Keep the topology change, cursor reset, and generation bump in the
+        // same write-locked critical section so lookups cannot observe stale
+        // cache generations after the removal has become visible.
+        self.queue_round_robin.lock().clear();
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -625,8 +643,11 @@ impl Sublist {
     /// round-robin advances correctly on each call.
     #[must_use]
     pub fn lookup(&self, subject: &Subject) -> SublistResult {
+        // Hold the trie read lock across the entire lookup so cache hits remain
+        // linearized with subscribe/unsubscribe mutations.
+        let trie = self.trie.read();
         let current_gen = self.generation.load(Ordering::Acquire);
-        let entry = self.resolve_entry(subject, current_gen);
+        let entry = self.resolve_entry_locked(&trie, subject, current_gen);
         self.apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups)
     }
 
@@ -640,12 +661,15 @@ impl Sublist {
         subject: &Subject,
         link_cache: &mut SublistLinkCache,
     ) -> SublistResult {
+        // Keep the trie read lock held for both link-cache hits and misses so a
+        // completed unsubscribe cannot race past a stale cached lookup.
+        let trie = self.trie.read();
         let current_gen = self.generation.load(Ordering::Acquire);
         if let Some(entry) = link_cache.get(subject.as_str(), current_gen) {
             return self.apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups);
         }
 
-        let entry = self.resolve_entry(subject, current_gen);
+        let entry = self.resolve_entry_locked(&trie, subject, current_gen);
         link_cache.insert(subject.as_str().to_owned(), entry.clone());
         self.apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups)
     }
@@ -672,11 +696,22 @@ impl Sublist {
             }
         }
 
-        let queue_groups = groups.into_iter().collect();
+        let queue_groups = groups
+            .into_iter()
+            .map(|(group, mut ids)| {
+                ids.sort_unstable_by_key(|id| id.raw());
+                (group, ids)
+            })
+            .collect();
         (plain, queue_groups)
     }
 
-    fn resolve_entry(&self, subject: &Subject, current_gen: u64) -> CacheEntry {
+    fn resolve_entry_locked(
+        &self,
+        trie: &TrieNode,
+        subject: &Subject,
+        current_gen: u64,
+    ) -> CacheEntry {
         // Check cache first (read lock only). Cache stores raw match sets;
         // queue group selection runs fresh each time.
         {
@@ -689,9 +724,8 @@ impl Sublist {
         }
 
         // Cache miss — walk the trie.
-        let trie = self.trie.read();
         let mut raw_matches: Vec<&Subscriber> = Vec::new();
-        collect_matches(&trie, subject.tokens(), &mut raw_matches);
+        collect_matches(trie, subject.tokens(), &mut raw_matches);
 
         // Split into plain and queue-group buckets.
         let (plain_ids, queue_groups) = Self::split_matches(&raw_matches);
@@ -725,7 +759,11 @@ impl Sublist {
                 if members.is_empty() {
                     continue;
                 }
-                let counter = rr.entry(group.clone()).or_insert(0);
+                let key = QueueCursorKey {
+                    group: group.clone(),
+                    members: members.clone(),
+                };
+                let counter = rr.entry(key).or_insert(0);
                 let index = (*counter as usize) % members.len();
                 queue_group_picks.push((group.clone(), members[index]));
                 *counter = counter.wrapping_add(1);
@@ -2191,6 +2229,32 @@ mod tests {
     }
 
     #[test]
+    fn sublist_queue_group_round_robin_isolated_by_delivery_set() {
+        let sl = sublist();
+        let orders = SubjectPattern::new("orders.created");
+        let payments = SubjectPattern::new("payments.created");
+        let orders_a = sl.subscribe(&orders, Some("workers".to_owned()));
+        let orders_b = sl.subscribe(&orders, Some("workers".to_owned()));
+        let payments_a = sl.subscribe(&payments, Some("workers".to_owned()));
+        let payments_b = sl.subscribe(&payments, Some("workers".to_owned()));
+
+        let orders_subject = Subject::new("orders.created");
+        let payments_subject = Subject::new("payments.created");
+
+        let orders_first = sl.lookup(&orders_subject).queue_group_picks[0].1;
+        let payments_first = sl.lookup(&payments_subject).queue_group_picks[0].1;
+        let payments_second = sl.lookup(&payments_subject).queue_group_picks[0].1;
+
+        assert!(orders_first == orders_a.id() || orders_first == orders_b.id());
+        assert_eq!(
+            payments_first,
+            payments_a.id(),
+            "unrelated delivery sets with the same queue-group name must not share fairness state"
+        );
+        assert_eq!(payments_second, payments_b.id());
+    }
+
+    #[test]
     fn sublist_concurrent_read_access() {
         use std::thread;
 
@@ -2259,6 +2323,155 @@ mod tests {
 
         // After all threads complete, no subscriptions should remain.
         assert_eq!(sl.count(), 0);
+    }
+
+    #[test]
+    fn sublist_rapid_subscribe_cancel_cycles_leave_no_ghost_interest() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("events.>");
+        let subject = Subject::new("events.user.created");
+
+        for _ in 0..256 {
+            let guard = sl.subscribe(&pattern, None);
+            assert_eq!(sl.lookup(&subject).subscribers, vec![guard.id()]);
+            drop(guard);
+            assert_eq!(sl.lookup(&subject).total(), 0);
+        }
+
+        assert_eq!(sl.count(), 0);
+    }
+
+    #[test]
+    fn sublist_lookup_never_reports_subscription_after_cancel_completes() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::thread;
+
+        let sl = sublist();
+        let pattern = SubjectPattern::new("events.>");
+        let guard = sl.subscribe(&pattern, None);
+        let cancelled_id = guard.id();
+        let subject = Subject::new("events.user.created");
+        let cancel_complete = Arc::new(AtomicBool::new(false));
+        let reader_subject = subject.clone();
+
+        let sl_reader = Arc::clone(&sl);
+        let reader_flag = Arc::clone(&cancel_complete);
+        let reader = thread::spawn(move || {
+            let mut saw_after_cancel = false;
+            for _ in 0..4_096 {
+                let result = sl_reader.lookup(&reader_subject);
+                if reader_flag.load(AtomicOrdering::Acquire)
+                    && result.subscribers.contains(&cancelled_id)
+                {
+                    saw_after_cancel = true;
+                    break;
+                }
+                thread::yield_now();
+            }
+            saw_after_cancel
+        });
+
+        let writer_flag = Arc::clone(&cancel_complete);
+        let writer = thread::spawn(move || {
+            thread::yield_now();
+            drop(guard);
+            writer_flag.store(true, AtomicOrdering::Release);
+        });
+
+        writer.join().expect("writer");
+        let saw_after_cancel = reader.join().expect("reader");
+
+        assert!(
+            !saw_after_cancel,
+            "lookup returned a cancelled subscriber after unsubscribe completed"
+        );
+        assert_eq!(sl.lookup(&subject).total(), 0);
+    }
+
+    #[test]
+    fn sublist_queue_round_robin_state_does_not_accumulate_stale_delivery_sets() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("events.>");
+        let subject = Subject::new("events.user.created");
+
+        for _ in 0..128 {
+            let g1 = sl.subscribe(&pattern, Some("workers".to_owned()));
+            let g2 = sl.subscribe(&pattern, Some("workers".to_owned()));
+
+            let _ = sl.lookup(&subject);
+            assert_eq!(sl.queue_round_robin.lock().len(), 1);
+
+            drop(g2);
+            assert_eq!(sl.queue_round_robin.lock().len(), 0);
+
+            let _ = sl.lookup(&subject);
+            assert_eq!(sl.queue_round_robin.lock().len(), 1);
+
+            drop(g1);
+            assert_eq!(sl.queue_round_robin.lock().len(), 0);
+        }
+
+        assert_eq!(sl.count(), 0);
+        assert_eq!(sl.queue_round_robin.lock().len(), 0);
+    }
+
+    #[test]
+    fn sublist_link_cache_lookup_never_reports_subscription_after_cancel_completes() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::thread;
+
+        let sl = sublist();
+        let pattern = SubjectPattern::new("events.>");
+        let guard = sl.subscribe(&pattern, None);
+        let cancelled_id = guard.id();
+        let subject = Subject::new("events.user.created");
+        let cancel_complete = Arc::new(AtomicBool::new(false));
+        let reader_subject = subject.clone();
+        let mut reader_link_cache = SublistLinkCache::new(4);
+
+        assert_eq!(
+            sl.lookup_with_link_cache(&subject, &mut reader_link_cache)
+                .subscribers,
+            vec![cancelled_id]
+        );
+
+        let sl_reader = Arc::clone(&sl);
+        let reader_flag = Arc::clone(&cancel_complete);
+        let reader = thread::spawn(move || {
+            let mut saw_after_cancel = false;
+            for _ in 0..4_096 {
+                let result =
+                    sl_reader.lookup_with_link_cache(&reader_subject, &mut reader_link_cache);
+                if reader_flag.load(AtomicOrdering::Acquire)
+                    && result.subscribers.contains(&cancelled_id)
+                {
+                    saw_after_cancel = true;
+                    break;
+                }
+                thread::yield_now();
+            }
+            saw_after_cancel
+        });
+
+        let writer_flag = Arc::clone(&cancel_complete);
+        let writer = thread::spawn(move || {
+            thread::yield_now();
+            drop(guard);
+            writer_flag.store(true, AtomicOrdering::Release);
+        });
+
+        writer.join().expect("writer");
+        let saw_after_cancel = reader.join().expect("reader");
+
+        assert!(
+            !saw_after_cancel,
+            "link-cache lookup returned a cancelled subscriber after unsubscribe completed"
+        );
+        let mut link_cache = SublistLinkCache::new(4);
+        assert_eq!(
+            sl.lookup_with_link_cache(&subject, &mut link_cache).total(),
+            0
+        );
     }
 
     #[test]
@@ -2428,13 +2641,13 @@ mod tests {
         let index = sharded_sublist();
         let mut counts = vec![0usize; index.shard_count()];
 
-        for tenant in 0..256 {
+        for tenant in 0..1_000 {
             let subject = Subject::new(format!("tenant{tenant}.events").as_str());
             let shard = index.shard_index_for_subject(&subject);
             counts[shard] += 1;
         }
 
-        let average = 256 / index.shard_count();
+        let average = 1_000 / index.shard_count();
         let worst = counts.into_iter().max().expect("shards exist");
         assert!(
             worst <= average * 2,

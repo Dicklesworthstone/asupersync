@@ -539,11 +539,75 @@ fn parse_cookie_header(raw: &str) -> HashMap<String, String> {
     parsed
 }
 
+// ─── BodyLimits ──────────────────────────────────────────────────────────────
+
+/// Default maximum JSON body size (10 MiB).
+const DEFAULT_MAX_JSON_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Default maximum form body size (2 MiB).
+const DEFAULT_MAX_FORM_BODY_SIZE: usize = 2 * 1024 * 1024;
+
+/// Configurable body size limits for request extractors.
+///
+/// Middleware can inject this into request extensions to override the default
+/// limits on a per-route or per-server basis. Extractors (`Json`, `Form`)
+/// check for this type in extensions and fall back to defaults if absent.
+///
+/// # Example
+///
+/// ```ignore
+/// // Server-wide: allow 50 MiB JSON bodies
+/// let limits = BodyLimits::new()
+///     .max_json_body_size(50 * 1024 * 1024);
+/// // Inject via middleware into request.extensions.insert_typed(limits)
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct BodyLimits {
+    /// Maximum JSON body size in bytes.
+    pub max_json_body_size: usize,
+    /// Maximum form body size in bytes.
+    pub max_form_body_size: usize,
+}
+
+impl Default for BodyLimits {
+    fn default() -> Self {
+        Self {
+            max_json_body_size: DEFAULT_MAX_JSON_BODY_SIZE,
+            max_form_body_size: DEFAULT_MAX_FORM_BODY_SIZE,
+        }
+    }
+}
+
+impl BodyLimits {
+    /// Create body limits with defaults (10 MiB JSON, 2 MiB form).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the maximum JSON body size.
+    #[must_use]
+    pub fn max_json_body_size(mut self, bytes: usize) -> Self {
+        self.max_json_body_size = bytes;
+        self
+    }
+
+    /// Set the maximum form body size.
+    #[must_use]
+    pub fn max_form_body_size(mut self, bytes: usize) -> Self {
+        self.max_form_body_size = bytes;
+        self
+    }
+}
+
 // ─── Json<T> ─────────────────────────────────────────────────────────────────
 
 /// Extract JSON request body.
 ///
 /// Deserializes the request body as JSON.
+///
+/// The body size limit defaults to 10 MiB but can be overridden by injecting
+/// [`BodyLimits`] into the request extensions via middleware.
 ///
 /// ```ignore
 /// async fn create_user(Json(user): Json<CreateUser>) -> StatusCode {
@@ -554,21 +618,19 @@ fn parse_cookie_header(raw: &str) -> HashMap<String, String> {
 #[derive(Debug, Clone)]
 pub struct Json<T>(pub T);
 
-/// Maximum JSON body size (10 MiB).
-const MAX_JSON_BODY_SIZE: usize = 10 * 1024 * 1024;
-
-/// Maximum form body size (2 MiB).
-const MAX_FORM_BODY_SIZE: usize = 2 * 1024 * 1024;
-
 impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
-        if req.body.len() > MAX_JSON_BODY_SIZE {
+        let limit = req
+            .extensions
+            .get_typed::<BodyLimits>()
+            .map_or(DEFAULT_MAX_JSON_BODY_SIZE, |l| l.max_json_body_size);
+        if req.body.len() > limit {
             return Err(ExtractionError::new(
                 super::response::StatusCode::PAYLOAD_TOO_LARGE,
                 format!(
                     "JSON body too large: {} bytes (limit {})",
                     req.body.len(),
-                    MAX_JSON_BODY_SIZE
+                    limit
                 ),
             ));
         }
@@ -609,13 +671,17 @@ pub struct Form<T>(pub T);
 #[allow(clippy::implicit_hasher)]
 impl FromRequest for Form<HashMap<String, String>> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
-        if req.body.len() > MAX_FORM_BODY_SIZE {
+        let limit = req
+            .extensions
+            .get_typed::<BodyLimits>()
+            .map_or(DEFAULT_MAX_FORM_BODY_SIZE, |l| l.max_form_body_size);
+        if req.body.len() > limit {
             return Err(ExtractionError::new(
                 super::response::StatusCode::PAYLOAD_TOO_LARGE,
                 format!(
                     "form body too large: {} bytes (limit {})",
                     req.body.len(),
-                    MAX_FORM_BODY_SIZE
+                    limit
                 ),
             ));
         }
@@ -923,7 +989,7 @@ mod tests {
 
     #[test]
     fn form_body_too_large() {
-        let oversized = vec![b'a'; MAX_FORM_BODY_SIZE + 1];
+        let oversized = vec![b'a'; DEFAULT_MAX_FORM_BODY_SIZE + 1];
         let req = Request::new("POST", "/form").with_body(Bytes::from(oversized));
         let result = Form::<HashMap<String, String>>::from_request(req);
         assert!(result.is_err());
@@ -936,7 +1002,7 @@ mod tests {
 
     #[test]
     fn json_body_too_large() {
-        let oversized = vec![b'a'; MAX_JSON_BODY_SIZE + 1];
+        let oversized = vec![b'a'; DEFAULT_MAX_JSON_BODY_SIZE + 1];
         let req = Request::new("POST", "/data")
             .with_header("content-type", "application/json")
             .with_body(Bytes::from(oversized));

@@ -20,7 +20,8 @@ fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
     Pin::new(fut).poll(&mut cx)
 }
 
-fn main() {
+#[test]
+fn notify_bug_test() {
     let notify = Notify::new();
 
     // fut1 created BEFORE broadcast

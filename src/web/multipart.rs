@@ -25,14 +25,77 @@ use super::extract::{ExtractionError, FromRequest, Request};
 use super::response::StatusCode;
 use crate::bytes::Bytes;
 
-/// Maximum multipart body size (16 MiB).
-const MAX_MULTIPART_SIZE: usize = 16 * 1024 * 1024;
+/// Default maximum multipart body size (16 MiB).
+const DEFAULT_MAX_MULTIPART_SIZE: usize = 16 * 1024 * 1024;
 
-/// Maximum number of parts to prevent abuse.
-const MAX_PARTS: usize = 1024;
+/// Default maximum number of parts to prevent abuse.
+const DEFAULT_MAX_PARTS: usize = 1024;
 
-/// Maximum header section size per part (8 KiB).
-const MAX_PART_HEADERS: usize = 8 * 1024;
+/// Default maximum header section size per part (8 KiB).
+const DEFAULT_MAX_PART_HEADERS: usize = 8 * 1024;
+
+/// Configurable limits for multipart request parsing.
+///
+/// Inject via request extensions to override defaults on a per-route or
+/// per-server basis. The multipart parser checks for this type in extensions
+/// and falls back to defaults if absent.
+///
+/// # Example
+///
+/// ```ignore
+/// let limits = MultipartLimits::new()
+///     .max_total_size(100 * 1024 * 1024)  // 100 MiB
+///     .max_parts(50);
+/// // Inject via middleware into request.extensions.insert_typed(limits)
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MultipartLimits {
+    /// Maximum total multipart body size in bytes.
+    pub max_total_size: usize,
+    /// Maximum number of parts.
+    pub max_parts: usize,
+    /// Maximum header section size per part in bytes.
+    pub max_part_headers: usize,
+}
+
+impl Default for MultipartLimits {
+    fn default() -> Self {
+        Self {
+            max_total_size: DEFAULT_MAX_MULTIPART_SIZE,
+            max_parts: DEFAULT_MAX_PARTS,
+            max_part_headers: DEFAULT_MAX_PART_HEADERS,
+        }
+    }
+}
+
+impl MultipartLimits {
+    /// Create multipart limits with defaults (16 MiB total, 1024 parts, 8 KiB headers).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the maximum total multipart body size.
+    #[must_use]
+    pub fn max_total_size(mut self, bytes: usize) -> Self {
+        self.max_total_size = bytes;
+        self
+    }
+
+    /// Set the maximum number of parts.
+    #[must_use]
+    pub fn max_parts(mut self, count: usize) -> Self {
+        self.max_parts = count;
+        self
+    }
+
+    /// Set the maximum header section size per part.
+    #[must_use]
+    pub fn max_part_headers(mut self, bytes: usize) -> Self {
+        self.max_part_headers = bytes;
+        self
+    }
+}
 
 // ─── MultipartField ─────────────────────────────────────────────────────────
 
@@ -139,14 +202,20 @@ impl Multipart {
 
 impl FromRequest for Multipart {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        let limits = req
+            .extensions
+            .get_typed::<MultipartLimits>()
+            .copied()
+            .unwrap_or_default();
+
         // Size check.
-        if req.body.len() > MAX_MULTIPART_SIZE {
+        if req.body.len() > limits.max_total_size {
             return Err(ExtractionError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!(
                     "multipart body too large: {} bytes (max {})",
                     req.body.len(),
-                    MAX_MULTIPART_SIZE
+                    limits.max_total_size
                 ),
             ));
         }
@@ -179,7 +248,7 @@ impl FromRequest for Multipart {
             ExtractionError::bad_request("missing or invalid boundary in Content-Type")
         })?;
 
-        let fields = parse_multipart(&req.body, &boundary)?;
+        let fields = parse_multipart(&req.body, &boundary, &limits)?;
 
         Ok(Self { fields })
     }
@@ -213,7 +282,11 @@ fn extract_boundary(content_type: &str) -> Option<String> {
 }
 
 /// Parse multipart body given a boundary string.
-fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<MultipartField>, ExtractionError> {
+fn parse_multipart(
+    body: &[u8],
+    boundary: &str,
+    limits: &MultipartLimits,
+) -> Result<Vec<MultipartField>, ExtractionError> {
     let delimiter = format!("--{boundary}");
     let delimiter_bytes = delimiter.as_bytes();
     let close_delimiter = format!("--{boundary}--");
@@ -236,9 +309,10 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<MultipartField>, E
     pos = skip_line_ending(body, pos);
 
     loop {
-        if fields.len() >= MAX_PARTS {
+        if fields.len() >= limits.max_parts {
             return Err(ExtractionError::bad_request(format!(
-                "too many multipart parts (max {MAX_PARTS})"
+                "too many multipart parts (max {})",
+                limits.max_parts
             )));
         }
 
@@ -250,7 +324,7 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<MultipartField>, E
         })?;
 
         let headers_section = &body[pos..headers_end.0];
-        if headers_section.len() > MAX_PART_HEADERS {
+        if headers_section.len() > limits.max_part_headers {
             return Err(ExtractionError::bad_request(
                 "multipart part headers too large",
             ));
@@ -570,7 +644,7 @@ mod tests {
                 b"alice",
             )],
         );
-        let fields = parse_multipart(&body, "BOUNDARY").unwrap();
+        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "username");
         assert_eq!(fields[0].text().unwrap(), "alice");
@@ -587,7 +661,7 @@ mod tests {
                 ("Content-Disposition: form-data; name=\"c\"", b"3"),
             ],
         );
-        let fields = parse_multipart(&body, "B").unwrap();
+        let fields = parse_multipart(&body, "B", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0].name(), "a");
         assert_eq!(fields[1].name(), "b");
@@ -603,7 +677,7 @@ mod tests {
                 b"Hello, world!",
             )],
         );
-        let fields = parse_multipart(&body, "X").unwrap();
+        let fields = parse_multipart(&body, "X", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "doc");
         assert_eq!(fields[0].filename().unwrap(), "readme.txt");
@@ -621,7 +695,7 @@ mod tests {
                 &binary,
             )],
         );
-        let fields = parse_multipart(&body, "BIN").unwrap();
+        let fields = parse_multipart(&body, "BIN", &MultipartLimits::default()).unwrap();
         assert_eq!(fields[0].body().as_ref(), &binary[..]);
         assert!(fields[0].text().is_err()); // Not valid UTF-8.
     }
@@ -632,14 +706,14 @@ mod tests {
             "E",
             &[("Content-Disposition: form-data; name=\"empty\"", b"")],
         );
-        let fields = parse_multipart(&body, "E").unwrap();
+        let fields = parse_multipart(&body, "E", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 1);
         assert!(fields[0].body().is_empty());
     }
 
     #[test]
     fn parse_missing_boundary_error() {
-        let result = parse_multipart(b"no boundary here", "MISSING");
+        let result = parse_multipart(b"no boundary here", "MISSING", &MultipartLimits::default());
         assert!(result.is_err());
     }
 
@@ -703,7 +777,7 @@ mod tests {
             "content-type".to_string(),
             "multipart/form-data; boundary=X".to_string(),
         );
-        req.body = Bytes::copy_from_slice(&vec![0u8; MAX_MULTIPART_SIZE + 1]);
+        req.body = Bytes::copy_from_slice(&vec![0u8; DEFAULT_MAX_MULTIPART_SIZE + 1]);
 
         let err = Multipart::from_request(req).unwrap_err();
         assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
@@ -722,7 +796,7 @@ mod tests {
                 ("Content-Disposition: form-data; name=\"y\"", b"2"),
             ],
         );
-        let fields = parse_multipart(&body, "F").unwrap();
+        let fields = parse_multipart(&body, "F", &MultipartLimits::default()).unwrap();
         let mp = Multipart { fields };
 
         assert_eq!(mp.field("x").unwrap().text().unwrap(), "1");
@@ -739,7 +813,7 @@ mod tests {
                 ("Content-Disposition: form-data; name=\"tag\"", b"b"),
             ],
         );
-        let fields = parse_multipart(&body, "R").unwrap();
+        let fields = parse_multipart(&body, "R", &MultipartLimits::default()).unwrap();
         let mp = Multipart { fields };
 
         let tags = mp.fields_by_name("tag");
@@ -757,7 +831,7 @@ mod tests {
     fn multipart_into_fields() {
         let body =
             make_multipart_body("I", &[("Content-Disposition: form-data; name=\"k\"", b"v")]);
-        let fields = parse_multipart(&body, "I").unwrap();
+        let fields = parse_multipart(&body, "I", &MultipartLimits::default()).unwrap();
         let mp = Multipart { fields };
         let mut owned = mp.into_fields();
         assert_eq!(owned.len(), 1);
@@ -777,7 +851,7 @@ mod tests {
         body.extend_from_slice(b"data");
         body.extend_from_slice(b"\n--B--\n");
 
-        let fields = parse_multipart(&body, "B").unwrap();
+        let fields = parse_multipart(&body, "B", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].text().unwrap(), "data");
     }
@@ -791,7 +865,7 @@ mod tests {
         body.extend_from_slice(b"val");
         body.extend_from_slice(b"\r\n--BOUND--\r\n");
 
-        let fields = parse_multipart(&body, "BOUND").unwrap();
+        let fields = parse_multipart(&body, "BOUND", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].text().unwrap(), "val");
     }
