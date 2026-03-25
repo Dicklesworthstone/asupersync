@@ -6,29 +6,40 @@ mod common;
 use common::{init_test_logging, test_context_with_seed};
 
 use asupersync::cx::Cx;
+use asupersync::distributed::RegionBridge;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::messaging::capability::FabricCapability as RuntimeFabricCapability;
 use asupersync::messaging::consumer::{
     AckResolution, ConsumerDemandClass, ConsumerDispatchMode, FabricConsumer, FabricConsumerConfig,
     FabricConsumerOwner, PullDispatchOutcome, PullRequest, RecoverableCapsule, SequenceWindow,
 };
+use asupersync::messaging::control::{ControlBudget, SystemSubjectFamily};
 use asupersync::messaging::fabric::{
     CellEpoch, CellTemperature, DataCapsule, NodeRole, PlacementPolicy, RepairPolicy,
     StewardCandidate, StorageClass, SubjectCell, SubjectPattern,
+};
+use asupersync::messaging::federation::{
+    FederationBridge, FederationRole, GatewayConfig, ReplicationCatchUpAction, ReplicationConfig,
 };
 use asupersync::messaging::ir::ReplySpaceRule;
 use asupersync::messaging::service::{
     CompensationSemantics, EvidenceLevel, MobilityConstraint, OverloadPolicy, RequestCertificate,
     ServiceAdmission, ValidatedServiceRequest,
 };
-use asupersync::messaging::{AckKind, CapturePolicy, DeliveryClass, Fabric, FabricStreamConfig};
+use asupersync::messaging::stream::{
+    CapturePolicy as StreamCapturePolicy, InMemoryStorageBackend, Stream, StreamConfig,
+};
+use asupersync::messaging::{
+    AckKind, CapturePolicy, DeliveryClass, Fabric, FabricCapability as MorphismCapability,
+    FabricStreamConfig, Morphism, ShardedSublist, Subject,
+};
 use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::remote::NodeId;
 use asupersync::runtime::yield_now;
 use asupersync::test_logging::{TestHarness, TestReportAggregator, TestSummary};
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -92,6 +103,29 @@ struct ConsumerFlowOutcome {
     no_data_waiting_after_error: usize,
     total_acquired: u64,
     total_committed: u64,
+    log: Vec<FabricLogEntry>,
+    steps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MirrorSourceDrainOutcome {
+    catch_up_action: ReplicationCatchUpAction,
+    snapshot_sequence: u64,
+    target_task_count: usize,
+    close_blocked_before_drain: bool,
+    closed_after_drain: bool,
+    mirror_remaining: usize,
+    source_remaining: usize,
+    log: Vec<FabricLogEntry>,
+    steps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ControlPlaneAdvisoryOutcome {
+    propagated_interest_count: usize,
+    forwarded_advisory_count: usize,
+    timed_out: bool,
+    no_ghost_interest: bool,
     log: Vec<FabricLogEntry>,
     steps: u64,
 }
@@ -744,6 +778,427 @@ fn run_consumer_flow(seed: u64) -> ConsumerFlowOutcome {
     summary
 }
 
+fn run_mirror_source_drain(seed: u64) -> MirrorSourceDrainOutcome {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<MirrorSourceDrainOutcome>));
+    let stream = Arc::new(Mutex::new(
+        Stream::new(
+            "orders-mirror",
+            RegionId::new_for_test(60, 0),
+            Time::ZERO,
+            StreamConfig {
+                subject_filter: SubjectPattern::new("orders.>"),
+                capture_policy: StreamCapturePolicy::IncludeReplySubjects,
+                delivery_class: DeliveryClass::DurableOrdered,
+                ..StreamConfig::default()
+            },
+            InMemoryStorageBackend::default(),
+        )
+        .expect("stream"),
+    ));
+
+    {
+        let mut stream = stream.lock().expect("stream lock");
+        stream
+            .append(
+                asupersync::messaging::Subject::new("orders.created"),
+                b"snapshot".to_vec(),
+                Time::ZERO,
+            )
+            .expect("append record");
+        stream
+            .add_mirror_region(RegionId::new_for_test(61, 0))
+            .expect("mirror region");
+        stream
+            .add_source_region(RegionId::new_for_test(62, 0))
+            .expect("source region");
+    }
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let removed = Arc::new(AtomicUsize::new(0));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let ready = Arc::clone(&ready);
+        let removed = Arc::clone(&removed);
+        let stream = Arc::clone(&stream);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let mut federation = FederationBridge::new(
+                    FederationRole::ReplicationLink(ReplicationConfig::default()),
+                    vec![Morphism::default()],
+                    Vec::new(),
+                    [MorphismCapability::RewriteNamespace],
+                )
+                .expect("replication bridge");
+                push_log(&log, &seq, "mirror", "bridge", "replication-link-ready");
+
+                let mut source =
+                    RegionBridge::new_local(RegionId::new_for_test(70, 0), None, Budget::new());
+                source
+                    .add_task(TaskId::new_for_test(71, 0))
+                    .expect("source task");
+                let transfer = federation
+                    .export_replication_transfer(&mut source)
+                    .expect("export transfer");
+                push_log(
+                    &log,
+                    &seq,
+                    "mirror",
+                    "export_transfer",
+                    format!("sequence={}", transfer.sequence),
+                );
+
+                let catch_up = federation
+                    .plan_replication_catch_up(transfer.sequence, 0)
+                    .expect("plan catch up");
+                push_log(
+                    &log,
+                    &seq,
+                    "mirror",
+                    "plan_catch_up",
+                    format!("action={:?}", catch_up.action),
+                );
+
+                let mut target =
+                    RegionBridge::new_local(RegionId::new_for_test(70, 0), None, Budget::new());
+                let snapshot = federation
+                    .apply_replication_transfer(&mut target, &transfer)
+                    .expect("apply transfer");
+                push_log(
+                    &log,
+                    &seq,
+                    "mirror",
+                    "apply_transfer",
+                    format!("target_tasks={}", target.local().task_ids().len()),
+                );
+
+                let close_blocked_before_drain = {
+                    let mut stream = stream.lock().expect("stream lock");
+                    stream.close().is_err()
+                };
+                push_log(
+                    &log,
+                    &seq,
+                    "mirror",
+                    "close_before_drain",
+                    format!("blocked={close_blocked_before_drain}"),
+                );
+                ready.store(true, Ordering::SeqCst);
+
+                for _ in 0..16 {
+                    if removed.load(Ordering::SeqCst) == 2 {
+                        break;
+                    }
+                    yield_now().await;
+                }
+                assert_eq!(
+                    removed.load(Ordering::SeqCst),
+                    2,
+                    "mirror and source should drain"
+                );
+
+                let mut stream = stream.lock().expect("stream lock");
+                let closed_after_drain = stream.close().is_ok();
+                let snapshot_state = stream.snapshot().expect("snapshot");
+                push_log(
+                    &log,
+                    &seq,
+                    "mirror",
+                    "close_after_drain",
+                    format!(
+                        "closed={closed_after_drain} mirror_remaining={} source_remaining={}",
+                        snapshot_state.mirror_regions.len(),
+                        snapshot_state.source_regions.len()
+                    ),
+                );
+
+                *summary.lock().expect("summary lock") = Some(MirrorSourceDrainOutcome {
+                    catch_up_action: catch_up.action,
+                    snapshot_sequence: snapshot.sequence,
+                    target_task_count: target.local().task_ids().len(),
+                    close_blocked_before_drain,
+                    closed_after_drain,
+                    mirror_remaining: snapshot_state.mirror_regions.len(),
+                    source_remaining: snapshot_state.source_regions.len(),
+                    log: Vec::new(),
+                    steps: 0,
+                });
+            })
+            .expect("create mirror/source controller");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let ready = Arc::clone(&ready);
+        let removed = Arc::clone(&removed);
+        let stream = Arc::clone(&stream);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                while !ready.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+                if stream
+                    .lock()
+                    .expect("stream lock")
+                    .remove_mirror_region(RegionId::new_for_test(61, 0))
+                {
+                    removed.fetch_add(1, Ordering::SeqCst);
+                    push_log(&log, &seq, "mirror", "remove_mirror", "removed");
+                }
+            })
+            .expect("create mirror drain task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let ready = Arc::clone(&ready);
+        let removed = Arc::clone(&removed);
+        let stream = Arc::clone(&stream);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                while !ready.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+                yield_now().await;
+                if stream
+                    .lock()
+                    .expect("stream lock")
+                    .remove_source_region(RegionId::new_for_test(62, 0))
+                {
+                    removed.fetch_add(1, Ordering::SeqCst);
+                    push_log(&log, &seq, "mirror", "remove_source", "removed");
+                }
+            })
+            .expect("create source drain task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    assert_runtime_clean(&mut runtime, "mirror/source drain e2e");
+
+    let mut summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("mirror/source summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    summary.log = log_entries;
+    summary.steps = runtime.steps();
+    summary
+}
+
+fn run_control_plane_advisory_flow(seed: u64) -> ControlPlaneAdvisoryOutcome {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<ControlPlaneAdvisoryOutcome>));
+    let bridge = Arc::new(Mutex::new(
+        FederationBridge::new(
+            FederationRole::GatewayFabric(GatewayConfig::default()),
+            vec![Morphism::default()],
+            Vec::new(),
+            [MorphismCapability::RewriteNamespace],
+        )
+        .expect("gateway bridge"),
+    ));
+    let ready = Arc::new(AtomicBool::new(false));
+    let interests_done = Arc::new(AtomicUsize::new(0));
+    let advisories_done = Arc::new(AtomicUsize::new(0));
+
+    {
+        let bridge = Arc::clone(&bridge);
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let ready = Arc::clone(&ready);
+        let interests_done = Arc::clone(&interests_done);
+        let advisories_done = Arc::clone(&advisories_done);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let index = ShardedSublist::with_prefix_depth(8, 1);
+                let guard = index.subscribe(&SubjectPattern::new("advisory.>"), None);
+                assert_eq!(index.lookup(&Subject::new("advisory.control.tick")).total(), 1);
+
+                bridge
+                    .lock()
+                    .expect("bridge lock")
+                    .activate()
+                    .expect("activate");
+                push_log(&log, &seq, "advisory", "activate", "gateway-ready");
+                ready.store(true, Ordering::SeqCst);
+
+                for _ in 0..20 {
+                    if interests_done.load(Ordering::SeqCst) == 3
+                        && advisories_done.load(Ordering::SeqCst) == 4
+                    {
+                        break;
+                    }
+                    yield_now().await;
+                }
+                assert_eq!(
+                    interests_done.load(Ordering::SeqCst),
+                    3,
+                    "all interests should plan"
+                );
+                assert_eq!(
+                    advisories_done.load(Ordering::SeqCst),
+                    4,
+                    "all advisories should forward"
+                );
+
+                drop(guard);
+                let no_ghost_interest =
+                    index.lookup(&Subject::new("advisory.control.tick")).total() == 0;
+                push_log(
+                    &log,
+                    &seq,
+                    "advisory",
+                    "ghost_interest_cleared",
+                    format!("cleared={no_ghost_interest}"),
+                );
+
+                let timed_out = bridge
+                    .lock()
+                    .expect("bridge lock")
+                    .reconcile_gateway_convergence(Duration::from_secs(20))
+                    .expect("convergence")
+                    .timed_out;
+                push_log(
+                    &log,
+                    &seq,
+                    "advisory",
+                    "convergence",
+                    format!("timed_out={timed_out}"),
+                );
+
+                let (propagated_interest_count, forwarded_advisory_count) = {
+                    let runtime = bridge.lock().expect("bridge lock").runtime();
+                    match runtime {
+                        asupersync::messaging::federation::FederationBridgeRuntime::Gateway(
+                            runtime,
+                        ) => (
+                            runtime.propagated_interests.len(),
+                            runtime.forwarded_advisories.len(),
+                        ),
+                        other => panic!("expected gateway runtime, got {other:?}"),
+                    }
+                };
+                push_log(
+                    &log,
+                    &seq,
+                    "advisory",
+                    "runtime_counts",
+                    format!(
+                        "interests={propagated_interest_count} advisories={forwarded_advisory_count}"
+                    ),
+                );
+
+                *summary.lock().expect("summary lock") = Some(ControlPlaneAdvisoryOutcome {
+                    propagated_interest_count,
+                    forwarded_advisory_count,
+                    timed_out,
+                    no_ghost_interest,
+                    log: Vec::new(),
+                    steps: 0,
+                });
+            })
+            .expect("create advisory controller");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    for pattern in ["tenant.route.>", "tenant.replay.>", "tenant.audit.>"] {
+        let bridge = Arc::clone(&bridge);
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let ready = Arc::clone(&ready);
+        let interests_done = Arc::clone(&interests_done);
+        let pattern = pattern.to_string();
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                while !ready.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+                bridge
+                    .lock()
+                    .expect("bridge lock")
+                    .plan_gateway_interest(
+                        SystemSubjectFamily::Route,
+                        SubjectPattern::new(&pattern),
+                        2,
+                        ControlBudget::default(),
+                    )
+                    .expect("plan interest");
+                interests_done.fetch_add(1, Ordering::SeqCst);
+                push_log(&log, &seq, "advisory", "plan_interest", pattern);
+            })
+            .expect("create interest task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    for pattern in [
+        "tenant.advisory.alpha",
+        "tenant.advisory.beta",
+        "tenant.advisory.gamma",
+        "tenant.advisory.delta",
+    ] {
+        let bridge = Arc::clone(&bridge);
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let ready = Arc::clone(&ready);
+        let advisories_done = Arc::clone(&advisories_done);
+        let pattern = pattern.to_string();
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                while !ready.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+                bridge
+                    .lock()
+                    .expect("bridge lock")
+                    .forward_gateway_advisory(
+                        SystemSubjectFamily::Replay,
+                        SubjectPattern::new(&pattern),
+                        ControlBudget::break_glass(),
+                    )
+                    .expect("forward advisory");
+                advisories_done.fetch_add(1, Ordering::SeqCst);
+                push_log(&log, &seq, "advisory", "forward_advisory", pattern);
+            })
+            .expect("create advisory task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    assert_runtime_clean(&mut runtime, "control-plane advisory e2e");
+
+    let mut summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("control-plane advisory summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    summary.log = log_entries;
+    summary.steps = runtime.steps();
+    summary
+}
+
 fn log_scenario_summary<T: Serialize>(scenario: &str, summary: &T) {
     tracing::info!(
         scenario = scenario,
@@ -948,6 +1403,74 @@ fn consumer_flow_subtest(seed: u64) -> TestSummary {
     harness.finish()
 }
 
+fn mirror_source_drain_subtest(seed: u64) -> TestSummary {
+    let mut harness = TestHarness::with_context(
+        "fabric_e2e_mirror_source_drain",
+        test_context_with_seed("fabric-e2e-mirror-source-drain", seed),
+    );
+    harness.enter_phase("run");
+    let summary = run_mirror_source_drain(seed);
+    log_scenario_summary("mirror_source_drain", &summary);
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    harness.assert_eq(
+        "catch up action",
+        &ReplicationCatchUpAction::SnapshotThenDelta,
+        &summary.catch_up_action,
+    );
+    harness.assert_eq("snapshot sequence", &1_u64, &summary.snapshot_sequence);
+    harness.assert_eq("target task count", &1_usize, &summary.target_task_count);
+    harness.assert_true(
+        "close blocked before drain",
+        summary.close_blocked_before_drain,
+    );
+    harness.assert_true("closed after drain", summary.closed_after_drain);
+    harness.assert_eq("mirror remaining", &0_usize, &summary.mirror_remaining);
+    harness.assert_eq("source remaining", &0_usize, &summary.source_remaining);
+    harness.assert_true("timeline captured", summary.log.len() >= 6);
+    harness.collect_artifact(
+        "mirror_source_drain_summary.json",
+        &serde_json::to_string_pretty(&summary).expect("serialize mirror/source summary"),
+    );
+    harness.exit_phase();
+
+    harness.finish()
+}
+
+fn control_plane_advisory_flow_subtest(seed: u64) -> TestSummary {
+    let mut harness = TestHarness::with_context(
+        "fabric_e2e_control_plane_advisory_flow",
+        test_context_with_seed("fabric-e2e-control-plane-advisory-flow", seed),
+    );
+    harness.enter_phase("run");
+    let summary = run_control_plane_advisory_flow(seed);
+    log_scenario_summary("control_plane_advisory_flow", &summary);
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    harness.assert_eq(
+        "propagated interest count",
+        &3_usize,
+        &summary.propagated_interest_count,
+    );
+    harness.assert_eq(
+        "forwarded advisory count",
+        &4_usize,
+        &summary.forwarded_advisory_count,
+    );
+    harness.assert_true("convergence timed out", summary.timed_out);
+    harness.assert_true("ghost interest cleared", summary.no_ghost_interest);
+    harness.assert_true("timeline captured", summary.log.len() >= 11);
+    harness.collect_artifact(
+        "control_plane_advisory_flow_summary.json",
+        &serde_json::to_string_pretty(&summary).expect("serialize advisory summary"),
+    );
+    harness.exit_phase();
+
+    harness.finish()
+}
+
 #[test]
 fn fabric_e2e_aggregated_report_covers_public_surface_scenarios() {
     init_test_logging();
@@ -957,13 +1480,15 @@ fn fabric_e2e_aggregated_report_covers_public_surface_scenarios() {
     aggregator.add(certified_request_subtest(0xFABC_0002));
     aggregator.add(stream_handle_subtest(0xFABC_0003));
     aggregator.add(consumer_flow_subtest(0xFABC_0004));
+    aggregator.add(mirror_source_drain_subtest(0xFABC_0005));
+    aggregator.add(control_plane_advisory_flow_subtest(0xFABC_0006));
 
     let report = aggregator.report();
-    assert_eq!(report.total_tests, 4);
-    assert_eq!(report.passed_tests, 4);
+    assert_eq!(report.total_tests, 6);
+    assert_eq!(report.passed_tests, 6);
     assert_eq!(report.failed_tests, 0);
-    assert_eq!(report.coverage_matrix.len(), 4);
-    assert!(report.total_assertions >= 20);
+    assert_eq!(report.coverage_matrix.len(), 6);
+    assert!(report.total_assertions >= 30);
     assert!(
         report
             .coverage_matrix
@@ -996,4 +1521,12 @@ fn fabric_e2e_fixed_seed_scenarios_are_deterministic() {
     let first_consumer = run_consumer_flow(0xFADE_1004);
     let second_consumer = run_consumer_flow(0xFADE_1004);
     assert_eq!(first_consumer, second_consumer);
+
+    let first_mirror_source = run_mirror_source_drain(0xFADE_1005);
+    let second_mirror_source = run_mirror_source_drain(0xFADE_1005);
+    assert_eq!(first_mirror_source, second_mirror_source);
+
+    let first_advisory = run_control_plane_advisory_flow(0xFADE_1006);
+    let second_advisory = run_control_plane_advisory_flow(0xFADE_1006);
+    assert_eq!(first_advisory, second_advisory);
 }
