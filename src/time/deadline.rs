@@ -152,6 +152,76 @@ mod tests {
     }
 
     #[test]
+    fn with_timeout_saturates_at_time_max_for_huge_duration() {
+        init_test("with_timeout_saturates_at_time_max_for_huge_duration");
+        let scope = Scope::<FailFast>::new(test_region(), Budget::INFINITE);
+        let now = Time::from_secs(1);
+
+        let new_scope = with_timeout(&scope, Duration::MAX, now);
+        crate::assert_with_log!(
+            new_scope.budget().deadline == Some(Time::MAX),
+            "huge duration saturates to Time::MAX",
+            Some(Time::MAX),
+            new_scope.budget().deadline
+        );
+        crate::test_complete!("with_timeout_saturates_at_time_max_for_huge_duration");
+    }
+
+    #[test]
+    fn with_timeout_saturates_when_now_is_near_time_max() {
+        init_test("with_timeout_saturates_when_now_is_near_time_max");
+        let scope = Scope::<FailFast>::new(test_region(), Budget::INFINITE);
+        let now = Time::MAX.saturating_sub_nanos(5);
+
+        let new_scope = with_timeout(&scope, Duration::from_nanos(10), now);
+        crate::assert_with_log!(
+            new_scope.budget().deadline == Some(Time::MAX),
+            "near-max now plus timeout saturates",
+            Some(Time::MAX),
+            new_scope.budget().deadline
+        );
+        crate::test_complete!("with_timeout_saturates_when_now_is_near_time_max");
+    }
+
+    #[test]
+    fn with_deadline_preserves_non_deadline_budget_fields() {
+        init_test("with_deadline_preserves_non_deadline_budget_fields");
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(7)
+            .with_cost_quota(11)
+            .with_priority(222);
+        let scope = Scope::<FailFast>::new(test_region(), budget);
+
+        let new_scope = with_deadline(&scope, Time::from_secs(3));
+        crate::assert_with_log!(
+            new_scope.budget().deadline == Some(Time::from_secs(3)),
+            "deadline tightened",
+            Some(Time::from_secs(3)),
+            new_scope.budget().deadline
+        );
+        crate::assert_with_log!(
+            new_scope.budget().poll_quota == 7,
+            "poll quota preserved",
+            7,
+            new_scope.budget().poll_quota
+        );
+        crate::assert_with_log!(
+            new_scope.budget().cost_quota == Some(11),
+            "cost quota preserved",
+            Some(11),
+            new_scope.budget().cost_quota
+        );
+        crate::assert_with_log!(
+            new_scope.budget().priority == 222,
+            "priority preserved",
+            222,
+            new_scope.budget().priority
+        );
+        crate::test_complete!("with_deadline_preserves_non_deadline_budget_fields");
+    }
+
+    #[test]
     fn with_deadline_zero_deadline() {
         init_test("with_deadline_zero_deadline");
         let scope = Scope::<FailFast>::new(test_region(), Budget::INFINITE);

@@ -497,7 +497,7 @@ impl<T: Clone> FaultSender<T> {
         };
         let mut flush_recorded = false;
 
-        while let Some(msg) = guard.pending.as_mut().unwrap().next() {
+        while let Some(msg) = guard.pending.as_mut().and_then(std::iter::Iterator::next) {
             guard.current = Some(msg);
 
             let permit = match self.inner.reserve(cx).await {
@@ -512,7 +512,9 @@ impl<T: Clone> FaultSender<T> {
                 }
             };
 
-            let msg = guard.current.take().unwrap();
+            let Some(msg) = guard.current.take() else {
+                continue;
+            };
             match permit.try_send(msg) {
                 Ok(()) => {
                     if !flush_recorded {

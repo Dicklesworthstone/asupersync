@@ -552,28 +552,35 @@ pub fn join2_to_result<T1, T2, E>(
     }
 }
 
-/// Macro for joining multiple futures (placeholder).
+/// Macro for joining multiple futures.
 ///
-/// In the full implementation, this expands to spawn + join operations.
-/// Once the scheduler loop is implemented, this will spawn tasks and
-/// wait for all of them to complete.
+/// **Not yet implemented as a macro.** Use the functional API instead:
 ///
-/// # Example (API shape)
+/// - [`Scope::join`] for two futures
+/// - [`Scope::join_all`] for N futures
+///
+/// # Example
 /// ```ignore
-/// let (r1, r2, r3) = join!(
-///     async { compute_a().await },
-///     async { compute_b().await },
-///     async { compute_c().await },
-/// );
+/// // Two futures:
+/// let (r1, r2) = scope.join(cx, handle_a, handle_b).await;
+///
+/// // N futures:
+/// let results = scope.join_all(cx, handles).await;
 /// ```
+///
+/// # Why `compile_error!`
+///
+/// The previous placeholder silently discarded all futures without executing
+/// them — a correctness hazard. This `compile_error!` ensures callers migrate
+/// to the functional API, which properly spawns into a child region, waits for
+/// all branches to complete, and aggregates outcomes via the severity lattice.
 #[macro_export]
 macro_rules! join {
     ($($future:expr),+ $(,)?) => {
-        // Placeholder: in real implementation, this spawns and joins
-        // For now, just a marker that shows the API shape
-        {
-            $(let _ = $future;)+
-        }
+        compile_error!(
+            "join! macro is not yet implemented. Use Scope::join() for two futures \
+             or Scope::join_all() for N futures instead."
+        );
     };
 }
 

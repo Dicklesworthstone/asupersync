@@ -104,10 +104,11 @@ impl<T> Frame<T> {
     }
 }
 
-/// A simple header map type for trailers.
+/// A header map type for trailers.
 ///
-/// In a full implementation, this would integrate with a proper HTTP
-/// headers library. For now, we use a simple vector of key-value pairs.
+/// Uses a vector of key-value pairs internally, which is well-suited for
+/// trailers (typically 1-3 headers). Header names are case-insensitive
+/// per HTTP/2 requirements (lowercased on construction in [`HeaderName`]).
 #[derive(Debug, Clone, Default)]
 pub struct HeaderMap {
     headers: Vec<(HeaderName, HeaderValue)>,
@@ -542,9 +543,8 @@ impl<S> StreamBody<S> {
     }
 }
 
-// We implement Body for StreamBody when S implements the necessary traits.
-// In a full implementation, this would use futures::Stream.
-// For now, we provide a manual poll-based implementation.
+// Body implementation for StreamBody uses manual polling (no futures::Stream
+// dependency). This is intentional: Asupersync avoids the futures crate.
 
 /// A body that collects data from another body.
 ///

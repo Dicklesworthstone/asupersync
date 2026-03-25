@@ -29,10 +29,40 @@ pub const DEFAULT_CONNECTION_WINDOW_SIZE: i32 = 65535;
 /// Protects against CVE-2023-44487 (Rapid Reset) class attacks where a peer
 /// opens and immediately resets streams in a tight loop, exhausting server
 /// resources while each individual stream appears short-lived.
-const RST_STREAM_RATE_LIMIT: u32 = 100;
+const DEFAULT_RST_STREAM_RATE_LIMIT: u32 = 100;
 
-/// Window duration for RST_STREAM rate limiting (in milliseconds).
-const RST_STREAM_RATE_WINDOW_MS: u128 = 30_000;
+/// Default window duration for RST_STREAM rate limiting (in milliseconds).
+const DEFAULT_RST_STREAM_RATE_WINDOW_MS: u128 = 30_000;
+
+/// Configurable RST_STREAM rate limit for CVE-2023-44487 protection.
+///
+/// **Security warning**: Increasing these limits or disabling rate limiting
+/// exposes the server to Rapid Reset attacks. Only relax these values if your
+/// deployment has external DoS protection (e.g., a reverse proxy or load
+/// balancer that performs its own RST_STREAM rate limiting).
+///
+/// # Defaults
+///
+/// | Parameter | Default | Meaning |
+/// |-----------|---------|---------|
+/// | `max_rst_streams` | 100 | Max RST_STREAM frames per window |
+/// | `rst_window_ms` | 30,000 | Window duration in milliseconds |
+#[derive(Debug, Clone, Copy)]
+pub struct RstStreamRateLimit {
+    /// Maximum RST_STREAM frames allowed within the window.
+    pub max_rst_streams: u32,
+    /// Window duration in milliseconds.
+    pub rst_window_ms: u128,
+}
+
+impl Default for RstStreamRateLimit {
+    fn default() -> Self {
+        Self {
+            max_rst_streams: DEFAULT_RST_STREAM_RATE_LIMIT,
+            rst_window_ms: DEFAULT_RST_STREAM_RATE_WINDOW_MS,
+        }
+    }
+}
 
 fn wall_clock_now() -> Instant {
     Instant::now()
@@ -233,6 +263,8 @@ pub struct Connection {
     continuation_started_at: Option<Instant>,
     /// Pending PUSH_PROMISE header block, if any.
     pending_push_promise: Option<PushPromiseAccumulator>,
+    /// RST_STREAM rate limit configuration.
+    rst_rate_limit: RstStreamRateLimit,
     /// RST_STREAM frames received in the current rate-limit window.
     rst_stream_count: u32,
     /// Start of the current RST_STREAM rate-limit window.
@@ -272,6 +304,7 @@ impl Connection {
             continuation_stream_id: None,
             continuation_started_at: None,
             pending_push_promise: None,
+            rst_rate_limit: RstStreamRateLimit::default(),
             rst_stream_count: 0,
             rst_stream_window_start: time_getter(),
         }
@@ -309,9 +342,20 @@ impl Connection {
             continuation_stream_id: None,
             continuation_started_at: None,
             pending_push_promise: None,
+            rst_rate_limit: RstStreamRateLimit::default(),
             rst_stream_count: 0,
             rst_stream_window_start: time_getter(),
         }
+    }
+
+    /// Configure the RST_STREAM rate limit for CVE-2023-44487 protection.
+    ///
+    /// **Security warning**: Relaxing these limits exposes the server to Rapid
+    /// Reset attacks. Only increase if external DoS protection is in place.
+    #[must_use]
+    pub fn rst_stream_rate_limit(mut self, limit: RstStreamRateLimit) -> Self {
+        self.rst_rate_limit = limit;
+        self
     }
 
     /// Get the connection state.
@@ -833,8 +877,8 @@ impl Connection {
     /// be treated as a connection error of type PROTOCOL_ERROR.
     ///
     /// Includes rate limiting to protect against CVE-2023-44487 (HTTP/2 Rapid
-    /// Reset) class attacks. If the peer sends more than `RST_STREAM_RATE_LIMIT`
-    /// RST_STREAM frames within `RST_STREAM_RATE_WINDOW_MS`, the connection is
+    /// Reset) class attacks. If the peer sends more than `DEFAULT_RST_STREAM_RATE_LIMIT`
+    /// RST_STREAM frames within `DEFAULT_RST_STREAM_RATE_WINDOW_MS`, the connection is
     /// terminated with ENHANCE_YOUR_CALM.
     fn process_rst_stream(&mut self, frame: RstStreamFrame) -> Result<ReceivedFrame, H2Error> {
         // RFC 7540 §6.4: RST_STREAM frames MUST NOT be sent for stream 0.
@@ -855,13 +899,13 @@ impl Connection {
         let elapsed = (self.time_getter)()
             .saturating_duration_since(self.rst_stream_window_start)
             .as_millis();
-        if elapsed >= RST_STREAM_RATE_WINDOW_MS {
+        if elapsed >= self.rst_rate_limit.rst_window_ms {
             // Reset the window.
             self.rst_stream_count = 1;
             self.rst_stream_window_start = (self.time_getter)();
         } else {
             self.rst_stream_count += 1;
-            if self.rst_stream_count > RST_STREAM_RATE_LIMIT {
+            if self.rst_stream_count > self.rst_rate_limit.max_rst_streams {
                 return Err(H2Error::connection(
                     ErrorCode::EnhanceYourCalm,
                     "RST_STREAM flood detected",
@@ -3298,7 +3342,7 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Open and reset streams up to the rate limit.
-        for i in 0..RST_STREAM_RATE_LIMIT {
+        for i in 0..DEFAULT_RST_STREAM_RATE_LIMIT {
             let stream_id = i * 2 + 1;
             let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
             conn.process_frame(headers).unwrap();
@@ -3308,7 +3352,7 @@ mod tests {
         }
 
         // One more RST_STREAM should trigger the rate limit.
-        let stream_id = RST_STREAM_RATE_LIMIT * 2 + 1;
+        let stream_id = DEFAULT_RST_STREAM_RATE_LIMIT * 2 + 1;
         let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
         conn.process_frame(headers).unwrap();
 
@@ -3329,7 +3373,7 @@ mod tests {
         let mut conn = Connection::server_with_time_getter(Settings::default(), test_now);
         conn.state = ConnectionState::Open;
 
-        for i in 0..RST_STREAM_RATE_LIMIT {
+        for i in 0..DEFAULT_RST_STREAM_RATE_LIMIT {
             let stream_id = i * 2 + 1;
             let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
             conn.process_frame(headers).unwrap();
@@ -3339,10 +3383,10 @@ mod tests {
         }
 
         advance_test_time(Duration::from_millis(
-            u64::try_from(RST_STREAM_RATE_WINDOW_MS).expect("window fits u64") + 1,
+            u64::try_from(DEFAULT_RST_STREAM_RATE_WINDOW_MS).expect("window fits u64") + 1,
         ));
 
-        let stream_id = RST_STREAM_RATE_LIMIT * 2 + 1;
+        let stream_id = DEFAULT_RST_STREAM_RATE_LIMIT * 2 + 1;
         let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
         conn.process_frame(headers).unwrap();
 

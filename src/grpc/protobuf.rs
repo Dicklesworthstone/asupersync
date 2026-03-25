@@ -42,8 +42,8 @@ use crate::bytes::Bytes;
 
 use super::codec::Codec;
 
-/// Default maximum message size for protobuf messages (4 MB).
-pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+// Re-export from parent module (single source of truth).
+pub use super::DEFAULT_MAX_MESSAGE_SIZE;
 
 /// Error type for protobuf encoding/decoding operations.
 #[derive(Debug, thiserror::Error)]
@@ -261,7 +261,12 @@ mod tests {
         let encoded = codec.encode(&original).unwrap();
         let decoded = codec.decode(&encoded).unwrap();
 
-        crate::assert_with_log!(decoded == original, "roundtrip", original.name, decoded.name);
+        crate::assert_with_log!(
+            decoded == original,
+            "roundtrip",
+            original.name,
+            decoded.name
+        );
         crate::test_complete!("test_prost_codec_roundtrip");
     }
 
@@ -385,7 +390,9 @@ mod tests {
         let mut codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
 
         // Invalid protobuf data (malformed varint)
-        let invalid_data = Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+        let invalid_data = Bytes::from_static(&[
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
+        ]);
 
         let result = codec.decode(&invalid_data);
         let is_err = matches!(result, Err(ProtobufError::DecodeError(_)));
@@ -435,8 +442,18 @@ mod tests {
         let encoded3 = codec.encode(&message).unwrap();
 
         // All encodings should be identical
-        crate::assert_with_log!(encoded1 == encoded2, "encoding 1 == 2", true, encoded1 == encoded2);
-        crate::assert_with_log!(encoded2 == encoded3, "encoding 2 == 3", true, encoded2 == encoded3);
+        crate::assert_with_log!(
+            encoded1 == encoded2,
+            "encoding 1 == 2",
+            true,
+            encoded1 == encoded2
+        );
+        crate::assert_with_log!(
+            encoded2 == encoded3,
+            "encoding 2 == 3",
+            true,
+            encoded2 == encoded3
+        );
         crate::test_complete!("test_prost_codec_deterministic_encoding");
     }
 
@@ -466,7 +483,12 @@ mod tests {
 
         let expected = codec.max_message_size();
         let actual = cloned.max_message_size();
-        crate::assert_with_log!(actual == expected, "clone preserves max size", expected, actual);
+        crate::assert_with_log!(
+            actual == expected,
+            "clone preserves max size",
+            expected,
+            actual
+        );
         crate::test_complete!("test_prost_codec_clone");
     }
 
@@ -484,7 +506,12 @@ mod tests {
         let encoded = codec.encode(&message).unwrap();
         let decoded = codec.decode(&encoded).unwrap();
 
-        crate::assert_with_log!(decoded == message, "symmetric roundtrip", true, decoded == message);
+        crate::assert_with_log!(
+            decoded == message,
+            "symmetric roundtrip",
+            true,
+            decoded == message
+        );
         crate::test_complete!("test_symmetric_codec_alias");
     }
 }

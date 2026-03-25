@@ -2049,7 +2049,7 @@ impl PgConnection {
         // Terminating null
         buf.write_byte(0);
 
-        let msg = buf.build_startup_message();
+        let msg = buf.build_startup_message()?;
         self.write_all(&msg).await?;
 
         Ok(())
@@ -2350,7 +2350,10 @@ impl PgConnection {
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
-        let msg = buf.build_message(b'Q')?;
+        let msg = match buf.build_message(b'Q') {
+            Ok(m) => m,
+            Err(e) => return Outcome::Err(e),
+        };
 
         if let Err(e) = self.write_all(&msg).await {
             return Outcome::Err(e);
@@ -2467,7 +2470,10 @@ impl PgConnection {
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
-        let msg = buf.build_message(b'Q')?;
+        let msg = match buf.build_message(b'Q') {
+            Ok(m) => m,
+            Err(e) => return Outcome::Err(e),
+        };
 
         if let Err(e) = self.write_all(&msg).await {
             return Outcome::Err(e);
@@ -2701,8 +2707,14 @@ impl PgConnection {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };
-        let execute = build_execute_msg("", 0);
-        let sync = build_sync_msg();
+        let execute = match build_execute_msg("", 0) {
+            Ok(e) => e,
+            Err(e) => return Outcome::Err(e),
+        };
+        let sync = match build_sync_msg() {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(e),
+        };
 
         let total = parse.len() + bind.len() + execute.len() + sync.len();
         let mut combined = Vec::with_capacity(total);
@@ -2903,8 +2915,14 @@ impl PgConnection {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
         };
-        let execute = build_execute_msg("", 0);
-        let sync = build_sync_msg();
+        let execute = match build_execute_msg("", 0) {
+            Ok(e) => e,
+            Err(e) => return Outcome::Err(e),
+        };
+        let sync = match build_sync_msg() {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(e),
+        };
 
         let total = bind.len() + execute.len() + sync.len();
         let mut combined = Vec::with_capacity(total);
@@ -3831,7 +3849,7 @@ mod tests {
         buf.write_cstring("testuser");
         buf.write_byte(0);
 
-        let msg = buf.build_startup_message();
+        let msg = buf.build_startup_message().unwrap();
         assert!(msg.len() > 4); // At least length prefix
     }
 
@@ -4210,7 +4228,7 @@ mod tests {
         buf.write_cstring("user");
         buf.write_cstring("test");
         buf.write_byte(0);
-        let msg = buf.build_startup_message();
+        let msg = buf.build_startup_message().unwrap();
         // bytes 0-3: length (includes itself)
         let len = i32::from_be_bytes([msg[0], msg[1], msg[2], msg[3]]);
         assert_eq!(len as usize, msg.len());
@@ -5105,27 +5123,27 @@ mod tests {
 
     #[test]
     fn build_describe_msg_portal() {
-        let msg = build_describe_msg(b'P', "");
+        let msg = build_describe_msg(b'P', "").unwrap();
         assert_eq!(msg[0], b'D');
         assert_eq!(msg[5], b'P'); // portal target
     }
 
     #[test]
     fn build_describe_msg_statement() {
-        let msg = build_describe_msg(b'S', "my_stmt");
+        let msg = build_describe_msg(b'S', "my_stmt").unwrap();
         assert_eq!(msg[0], b'D');
         assert_eq!(msg[5], b'S'); // statement target
     }
 
     #[test]
     fn build_execute_msg_all_rows() {
-        let msg = build_execute_msg("", 0);
+        let msg = build_execute_msg("", 0).unwrap();
         assert_eq!(msg[0], b'E');
     }
 
     #[test]
     fn build_sync_msg_structure() {
-        let msg = build_sync_msg();
+        let msg = build_sync_msg().unwrap();
         assert_eq!(msg[0], b'S');
         // Sync has no body, just type + length(4)
         assert_eq!(msg.len(), 5);

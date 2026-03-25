@@ -144,14 +144,11 @@ impl AdaptiveHedgePolicy {
         }
 
         let mut sorted = self.history[0..n].to_vec();
-        // Sort unstable is O(N log N) but N is small (e.g. 100).
-        sorted.sort_unstable();
-
-        // Conformal Prediction formula for the upper prediction bound:
-        // Rank = ceiling((n + 1) * (1 - alpha))
         let rank = conformal_rank(n, self.alpha);
 
-        let bound_micros = sorted[rank];
+        // Select nth unstable is O(N) average case, faster than O(N log N) full sort.
+        let (_, &mut bound_micros, _) = sorted.select_nth_unstable(rank);
+
         let delay = Duration::from_micros(bound_micros);
 
         delay.clamp(self.min_delay, self.max_delay)

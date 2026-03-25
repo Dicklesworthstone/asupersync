@@ -53,6 +53,16 @@ pub mod status;
 pub mod streaming;
 pub mod web;
 
+/// Default maximum gRPC message size (4 MiB).
+///
+/// This is the single source of truth for the default message size limit,
+/// used by both [`codec::GrpcCodec`] and [`protobuf::ProtobufCodec`].
+/// Override via the `max_message_size` field on the respective codec builder
+/// or via [`ServerConfig`] / [`ChannelConfig`].
+///
+/// Matches the gRPC ecosystem convention (gRPC-Go, Tonic both default to 4 MiB).
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 // Re-export commonly used types
 pub use client::{
     Channel, ChannelBuilder, ChannelConfig, ClientInterceptor, CompressionEncoding, GrpcClient,

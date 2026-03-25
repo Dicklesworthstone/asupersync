@@ -345,23 +345,33 @@ macro_rules! timeout {
 
 /// Joins multiple futures, short-circuiting on the first error.
 ///
-/// Unlike `join!` which waits for all futures, `try_join!` cancels
-/// remaining futures when any future returns an error.
+/// **Not yet implemented as a macro.** Use the functional API instead:
 ///
-/// # Semantics
+/// - [`Scope::join`] with [`FailFast`](crate::types::policy::FailFast) policy
+/// - [`join2_fail_fast`](super::join::join2_fail_fast) for two futures
 ///
+/// # Example
 /// ```ignore
-/// let (a, b, c) = try_join!(fut_a, fut_b, fut_c).await?;
+/// // Functional API:
+/// let result = join2_fail_fast(outcome_a, outcome_b);
+/// // Or with scope:
+/// scope.region(state, cx, FailFast, |child, state| async move { ... }).await;
 /// ```
 ///
-/// - If all succeed: return tuple of values
-/// - If any fails: cancel remaining, return first error
-/// - If any panics: cancel remaining, return Panicked
+/// # Why `compile_error!`
+///
+/// The previous placeholder silently discarded all futures without executing
+/// them — a correctness hazard. This `compile_error!` ensures callers migrate
+/// to the functional API, which properly spawns futures, short-circuits on
+/// the first error, cancels and drains remaining losers per structured
+/// concurrency invariants, and returns the first error encountered.
 #[macro_export]
 macro_rules! try_join {
     ($($future:expr),+ $(,)?) => {{
-        // Placeholder: in real implementation, this joins with short-circuit
-        $(let _ = $future;)+
+        compile_error!(
+            "try_join! macro is not yet implemented. Use Scope::join() with FailFast \
+             policy or join2_fail_fast() instead."
+        );
     }};
 }
 

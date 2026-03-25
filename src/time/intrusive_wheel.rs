@@ -295,7 +295,7 @@ impl TimerSlot {
     /// # Safety
     ///
     /// All nodes in the slot must be valid.
-    unsafe fn collect_expired(&self, now: Instant) -> Vec<Waker> {
+    unsafe fn collect_expired(&self, now: Instant) -> (Vec<Waker>, usize) {
         let mut wakers = Vec::with_capacity(self.count.get());
         let mut expired = Vec::with_capacity(self.count.get());
 
@@ -312,6 +312,7 @@ impl TimerSlot {
             current = next;
         }
 
+        let removed_count = expired.len();
         // Second pass: remove expired and collect wakers
         for node_ptr in expired {
             self.remove(node_ptr);
@@ -320,7 +321,7 @@ impl TimerSlot {
             }
         }
 
-        wakers
+        (wakers, removed_count)
     }
 }
 
@@ -452,6 +453,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         let slot = node.slot.get();
         let node_ptr = NonNull::from(&*node);
         self.slots[slot].remove(node_ptr);
+        let _ = node.as_ref().take_waker();
         self.count = self.count.saturating_sub(1);
     }
 
@@ -464,8 +466,8 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
     /// All timer nodes in the wheel must be valid.
     pub unsafe fn tick(&mut self, now: Instant) -> Vec<Waker> {
         // Collect expired timers from current slot
-        let wakers = self.slots[self.current].collect_expired(now);
-        self.count = self.count.saturating_sub(wakers.len());
+        let (wakers, removed_count) = self.slots[self.current].collect_expired(now);
+        self.count = self.count.saturating_sub(removed_count);
 
         // Advance cursor
         self.current = (self.current + 1) % SLOTS;
@@ -490,8 +492,8 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         let target_tick_u64 = target_tick.min(u128::from(u64::MAX)) as u64;
 
         if target_tick_u64 <= self.current_tick {
-            let wakers = self.slots[self.current].collect_expired(now);
-            self.count = self.count.saturating_sub(wakers.len());
+            let (wakers, removed) = self.slots[self.current].collect_expired(now);
+            self.count = self.count.saturating_sub(removed);
             return wakers;
         }
 
@@ -501,8 +503,8 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         if ticks_to_advance >= SLOTS as u64 {
             // Full rotation or more: collect expired from ALL slots
             for slot in &self.slots {
-                let wakers = slot.collect_expired(now);
-                self.count = self.count.saturating_sub(wakers.len());
+                let (wakers, removed) = slot.collect_expired(now);
+                self.count = self.count.saturating_sub(removed);
                 all_wakers.extend(wakers);
             }
             self.current = (target_tick_u64 % (SLOTS as u64)) as usize;
@@ -511,15 +513,15 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
 
             // Process slots until we reach target (handling wrap-around)
             while self.current != target_slot {
-                let wakers = self.slots[self.current].collect_expired(now);
-                self.count = self.count.saturating_sub(wakers.len());
+                let (wakers, removed) = self.slots[self.current].collect_expired(now);
+                self.count = self.count.saturating_sub(removed);
                 all_wakers.extend(wakers);
                 self.current = (self.current + 1) % SLOTS;
             }
 
             // Process the target slot
-            let wakers = self.slots[self.current].collect_expired(now);
-            self.count = self.count.saturating_sub(wakers.len());
+            let (wakers, removed) = self.slots[self.current].collect_expired(now);
+            self.count = self.count.saturating_sub(removed);
             all_wakers.extend(wakers);
         }
 
@@ -724,6 +726,7 @@ impl HierarchicalTimerWheel {
         let level = node.level.get();
         let node_ptr = NonNull::from(&*node);
         self.remove_node(level, slot, node_ptr);
+        let _ = node.as_ref().take_waker();
         self.count = self.count.saturating_sub(1);
     }
 
@@ -733,8 +736,8 @@ impl HierarchicalTimerWheel {
     ///
     /// All timer nodes in the wheel must be valid.
     pub unsafe fn tick(&mut self, now: Instant) -> Vec<Waker> {
-        let mut wakers = self.level0.slots[self.level0.cursor].collect_expired(now);
-        self.count = self.count.saturating_sub(wakers.len());
+        let (mut wakers, removed) = self.level0.slots[self.level0.cursor].collect_expired(now);
+        self.count = self.count.saturating_sub(removed);
 
         self.level0.cursor = (self.level0.cursor + 1) % LEVEL0_SLOTS;
         self.current_tick = self.current_tick.saturating_add(1);
@@ -823,8 +826,8 @@ impl HierarchicalTimerWheel {
         }
 
         // One more pass to flush any expired entries in the current slot.
-        let mut current = self.level0.slots[self.level0.cursor].collect_expired(now);
-        self.count = self.count.saturating_sub(current.len());
+        let (mut current, removed) = self.level0.slots[self.level0.cursor].collect_expired(now);
+        self.count = self.count.saturating_sub(removed);
         wakers.append(&mut current);
 
         wakers

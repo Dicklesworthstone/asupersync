@@ -150,6 +150,11 @@ pub struct NatsConfig {
     pub request_timeout: Duration,
     /// Maximum payload size (default 1MB).
     pub max_payload: usize,
+    /// Maximum read buffer size in bytes (default 8 MiB).
+    ///
+    /// Prevents unbounded memory growth if the server sends data faster
+    /// than the client can consume. Also limits individual MSG payload size.
+    pub max_read_buffer: usize,
 }
 
 impl Default for NatsConfig {
@@ -165,6 +170,7 @@ impl Default for NatsConfig {
             pedantic: false,
             request_timeout: Duration::from_secs(10),
             max_payload: 1_048_576, // 1MB
+            max_read_buffer: DEFAULT_MAX_READ_BUFFER,
         }
     }
 }
@@ -397,22 +403,28 @@ fn random_suffix(cx: &Cx) -> String {
     format!("{:016x}", hi ^ lo)
 }
 
-/// Maximum read buffer size (8 MiB). Prevents unbounded memory growth
+/// Default maximum read buffer size (8 MiB). Prevents unbounded memory growth
 /// if the server sends data faster than the client can consume.
-const MAX_READ_BUFFER: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_READ_BUFFER: usize = 8 * 1024 * 1024;
 
 /// Internal read buffer for NATS protocol parsing.
 #[derive(Debug)]
 struct NatsReadBuffer {
     buf: Vec<u8>,
     pos: usize,
+    max_size: usize,
 }
 
 impl NatsReadBuffer {
     fn new() -> Self {
+        Self::with_limit(DEFAULT_MAX_READ_BUFFER)
+    }
+
+    fn with_limit(max_size: usize) -> Self {
         Self {
             buf: Vec::new(),
             pos: 0,
+            max_size,
         }
     }
 
@@ -421,9 +433,10 @@ impl NatsReadBuffer {
     }
 
     fn extend(&mut self, bytes: &[u8]) -> Result<(), NatsError> {
-        if self.buf.len() + bytes.len() - self.pos > MAX_READ_BUFFER {
+        if self.buf.len() + bytes.len() - self.pos > self.max_size {
             return Err(NatsError::Protocol(format!(
-                "read buffer exceeds maximum size ({MAX_READ_BUFFER} bytes)"
+                "read buffer exceeds maximum size ({} bytes)",
+                self.max_size
             )));
         }
         self.buf.extend_from_slice(bytes);
@@ -539,10 +552,11 @@ impl NatsClient {
         let addr = format!("{}:{}", config.host, config.port);
         let stream = TcpStream::connect(addr).await?;
 
+        let read_buf_limit = config.max_read_buffer;
         let mut client = Self {
             config,
             stream,
-            read_buf: NatsReadBuffer::new(),
+            read_buf: NatsReadBuffer::with_limit(read_buf_limit),
             state: Arc::new(SharedState::new()),
             next_sid: AtomicU64::new(1),
             connected: false,
@@ -818,9 +832,10 @@ impl NatsClient {
         };
 
         // Guard against oversized payloads from the server to prevent OOM.
-        if payload_len > MAX_READ_BUFFER {
+        let max_buf = self.config.max_read_buffer;
+        if payload_len > max_buf {
             return Err(NatsError::Protocol(format!(
-                "MSG payload length {payload_len} exceeds maximum ({MAX_READ_BUFFER})"
+                "MSG payload length {payload_len} exceeds maximum ({max_buf} bytes)"
             )));
         }
 
@@ -1902,13 +1917,13 @@ mod tests {
 
     #[test]
     fn test_max_read_buffer_constant() {
-        assert_eq!(MAX_READ_BUFFER, 8 * 1024 * 1024);
+        assert_eq!(DEFAULT_MAX_READ_BUFFER, 8 * 1024 * 1024);
     }
 
     #[test]
     fn test_read_buffer_rejects_oversized() {
         let mut buf = NatsReadBuffer::new();
-        let big = vec![0u8; MAX_READ_BUFFER + 1];
+        let big = vec![0u8; DEFAULT_MAX_READ_BUFFER + 1];
         let err = buf.extend(&big).unwrap_err();
         assert!(matches!(err, NatsError::Protocol(_)));
     }
@@ -1916,19 +1931,19 @@ mod tests {
     #[test]
     fn test_read_buffer_accepts_max() {
         let mut buf = NatsReadBuffer::new();
-        let data = vec![0u8; MAX_READ_BUFFER];
+        let data = vec![0u8; DEFAULT_MAX_READ_BUFFER];
         buf.extend(&data).unwrap();
-        assert_eq!(buf.available().len(), MAX_READ_BUFFER);
+        assert_eq!(buf.available().len(), DEFAULT_MAX_READ_BUFFER);
     }
 
     #[test]
     fn test_read_buffer_consumed_data_not_counted() {
         let mut buf = NatsReadBuffer::new();
         // Fill to near max
-        let data = vec![0u8; MAX_READ_BUFFER - 100];
+        let data = vec![0u8; DEFAULT_MAX_READ_BUFFER - 100];
         buf.extend(&data).unwrap();
         // Consume most of it
-        buf.consume(MAX_READ_BUFFER - 200);
+        buf.consume(DEFAULT_MAX_READ_BUFFER - 200);
         // Now should be able to add more
         let more = vec![0u8; 200];
         buf.extend(&more).unwrap();

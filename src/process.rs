@@ -2383,7 +2383,7 @@ mod tests {
         );
         crate::assert_with_log!(
             !has_ambient_cx,
-            "spawned task without spawn_with_cx runs without ambient cx",
+            "spawned task runs without ambient cx",
             false,
             has_ambient_cx
         );

@@ -750,24 +750,35 @@ impl StreamTable {
             return None;
         }
 
-        let start_cursor = self.rr_cursor.unwrap_or(StreamId(0));
+        // We need an allocation-free round-robin traversal of the BTreeMap.
+        // We find elements AFTER the cursor, then chain elements BEFORE the cursor.
+
+        let cursor = self.rr_cursor;
 
         let iter1 = self.streams.range((
-            std::ops::Bound::Excluded(start_cursor),
+            cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
             std::ops::Bound::Unbounded,
-        ));
-        let iter2 = self.streams.range((
-            std::ops::Bound::Unbounded,
-            std::ops::Bound::Included(start_cursor),
         ));
 
-        for (id, stream) in iter1.chain(iter2) {
+        let iter2 = self.streams.range((
+            std::ops::Bound::Unbounded,
+            cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Included),
+        ));
+
+        // If cursor was None, iter1 covers everything and iter2 covers everything,
+        // so we just take iter1. If cursor was Some, we chain them.
+        for (id, stream) in iter1.chain(
+            if cursor.is_none() { None } else { Some(iter2) }
+                .into_iter()
+                .flatten(),
+        ) {
             let writable = match id.direction() {
                 StreamDirection::Bidirectional => true,
                 StreamDirection::Unidirectional => id.is_local_for(self.role),
             } && stream.send_reset.is_none()
                 && stream.stop_sending_error_code.is_none()
                 && stream.send_credit.remaining() > 0;
+
             if writable {
                 self.rr_cursor = Some(*id);
                 return Some(*id);

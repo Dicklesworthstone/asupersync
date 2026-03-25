@@ -361,8 +361,11 @@ impl Interceptor for MetadataPropagator {
     }
 
     fn intercept_response(&self, response: &mut Response<Bytes>) -> Result<(), Status> {
-        // In a real implementation, we would copy the values from request context
-        // For now, we just acknowledge the propagation intent
+        // Response-side propagation requires access to the original request's
+        // metadata, which the current Interceptor trait does not provide.
+        // Implementing this requires either extending the trait with request
+        // context or using per-request state (e.g., task-local storage).
+        // The request side (intercept_request) handles outbound propagation.
         let _ = response;
         Ok(())
     }

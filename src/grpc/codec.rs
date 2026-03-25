@@ -11,8 +11,8 @@ use std::fmt;
 
 use super::status::GrpcError;
 
-/// Default maximum message size (4 MB).
-pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+// Re-export from parent module (single source of truth).
+pub use super::DEFAULT_MAX_MESSAGE_SIZE;
 
 /// gRPC message header size (1 byte flag + 4 bytes length).
 pub const MESSAGE_HEADER_SIZE: usize = 5;

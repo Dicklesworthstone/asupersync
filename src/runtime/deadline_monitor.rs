@@ -134,13 +134,14 @@ impl DurationHistory {
             return None;
         }
         let mut values: Vec<u64> = self.samples.iter().copied().collect();
-        values.sort_unstable();
         let pct = percentile.clamp(0.0, 1.0);
         let scaled = (pct * 1_000_000.0).round() as u64;
         let len = values.len() as u64;
         let rank = (scaled * len).div_ceil(1_000_000);
         let idx = rank.saturating_sub(1).min(len.saturating_sub(1)) as usize;
-        values.get(idx).copied()
+
+        let (_, &mut value, _) = values.select_nth_unstable(idx);
+        Some(value)
     }
 }
 

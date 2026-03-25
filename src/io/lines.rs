@@ -108,12 +108,23 @@ mod tests {
     use crate::io::BufReader;
     use crate::io::{AsyncBufRead, AsyncRead, ReadBuf};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
 
     impl Wake for NoopWaker {
         fn wake(self: Arc<Self>) {}
+    }
+
+    struct CountWaker {
+        wakes: AtomicUsize,
+    }
+
+    impl Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     fn noop_waker() -> Waker {
@@ -337,6 +348,42 @@ mod tests {
         let done = matches!(Pin::new(&mut lines).poll_next(&mut cx), Poll::Ready(None));
         crate::assert_with_log!(done, "done", true, done);
         crate::test_complete!("lines_crlf_after_pending_between_chunks");
+    }
+
+    #[test]
+    fn lines_bounded_self_wake_after_many_immediately_ready_chunks() {
+        init_test("lines_bounded_self_wake_after_many_immediately_ready_chunks");
+        let mut chunks = vec![vec![b'a']; 40];
+        chunks.push(vec![b'\n']);
+        let reader = SplitReader { chunks };
+        let mut lines = Lines::new(reader);
+        let wake_counter = Arc::new(CountWaker {
+            wakes: AtomicUsize::new(0),
+        });
+        let waker = Waker::from(wake_counter.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        let first_pending = matches!(Pin::new(&mut lines).poll_next(&mut cx), Poll::Pending);
+        crate::assert_with_log!(
+            first_pending,
+            "bounded self-wake pending",
+            true,
+            first_pending
+        );
+
+        let woke_self = wake_counter.wakes.load(Ordering::SeqCst) > 0;
+        crate::assert_with_log!(woke_self, "self wake recorded", true, woke_self);
+
+        let expected = "a".repeat(40);
+        let second = matches!(
+            Pin::new(&mut lines).poll_next(&mut cx),
+            Poll::Ready(Some(Ok(ref s))) if s == &expected
+        );
+        crate::assert_with_log!(second, "line after rewake", true, second);
+
+        let done = matches!(Pin::new(&mut lines).poll_next(&mut cx), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_bounded_self_wake_after_many_immediately_ready_chunks");
     }
 
     #[test]

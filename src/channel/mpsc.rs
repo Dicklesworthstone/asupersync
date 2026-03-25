@@ -473,7 +473,10 @@ impl<T> Drop for Reserve<'_, T> {
                     inner.send_wakers.remove(pos);
                 }
 
-                // Propagate wake if we were blocking capacity.
+                // Only the actual head waiter may hand the wake baton to the next
+                // sender. A missing waiter id means some other path already
+                // reconciled this future; treating "not found" as baton ownership
+                // spuriously wakes unrelated waiters.
                 if is_head && inner.has_capacity(self.sender.shared.capacity) {
                     inner.take_next_sender_waker()
                 } else {
@@ -1891,5 +1894,51 @@ mod tests {
 
         // B should be woken.
         assert!(wake_count_b.load(Ordering::Relaxed) > 0, "B was not woken!");
+    }
+
+    #[test]
+    fn stale_missing_waiter_drop_does_not_wake_next_sender() {
+        init_test("stale_missing_waiter_drop_does_not_wake_next_sender");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<i32>(1);
+
+        let permit = tx.try_reserve().expect("fill capacity");
+        permit.send(1);
+
+        let mut reserve_a = Box::pin(tx.reserve(&cx));
+        let waker_a = noop_waker();
+        let mut ctx_a = Context::from_waker(&waker_a);
+        assert!(reserve_a.as_mut().poll(&mut ctx_a).is_pending());
+
+        let wake_count_b = Arc::new(AtomicUsize::new(0));
+        let mut reserve_b = Box::pin(tx.reserve(&cx));
+        let reserve_waker_b = counting_waker(Arc::clone(&wake_count_b));
+        let mut ctx_b = Context::from_waker(&reserve_waker_b);
+        assert!(reserve_b.as_mut().poll(&mut ctx_b).is_pending());
+
+        {
+            let mut inner = tx.shared.inner.lock();
+            let waiter_id_a = reserve_a.waiter_id.expect("waiter id for A");
+            let waiter_pos_a = inner
+                .send_wakers
+                .iter()
+                .position(|w| w.id == waiter_id_a)
+                .expect("A queued");
+            inner.send_wakers.remove(waiter_pos_a);
+            inner.queue.clear();
+        }
+
+        drop(reserve_a);
+
+        let wakes_after_drop = wake_count_b.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            wakes_after_drop == 0,
+            "stale drop does not spuriously wake next waiter",
+            0,
+            wakes_after_drop
+        );
+
+        drop(reserve_b);
+        crate::test_complete!("stale_missing_waiter_drop_does_not_wake_next_sender");
     }
 }
