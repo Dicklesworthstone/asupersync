@@ -1147,9 +1147,9 @@
 {"file":"src/web/multipart.rs","lines":815,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes audit: boundary parsing, disposition params, body clamping, limits enforcement all correct"}
 {"file":"src/web/static_files.rs","lines":797,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes audit: path traversal, symlink checks, ETag, percent decoding all correct"}
 {"file":"src/time/intrusive_wheel.rs","lines":1321,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes audit of recent diff: collect_expired count fix correct (expired.len vs wakers.len), cancel_timer waker cleanup correct"}
-{"file":"src/combinator/join.rs","lines":1101,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: join\! macro replaced with compile_error, no logic change in functional API"}
-{"file":"src/combinator/quorum.rs","lines":810,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: quorum\! macro replaced with compile_error, no logic change"}
-{"file":"src/combinator/timeout.rs","lines":830,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: try_join\! macro replaced with compile_error, no logic change"}
+{"file":"src/combinator/join.rs","lines":1101,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: join! macro replaced with compile_error, no logic change in functional API"}
+{"file":"src/combinator/quorum.rs","lines":810,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: quorum! macro replaced with compile_error, no logic change"}
+{"file":"src/combinator/timeout.rs","lines":830,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: try_join! macro replaced with compile_error, no logic change"}
 {"file":"src/time/deadline.rs","lines":237,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: new saturation and budget preservation tests, all correct"}
 {"file":"src/combinator/hedge.rs","lines":1284,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: select_nth_unstable optimization correct, O(N) vs O(N log N)"}
 {"file":"src/database/postgres.rs","lines":5493,"batch":442,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes diff audit: build_startup_message now returns Result, build_message error handling improved with explicit match instead of ? in Outcome-returning fns"}
@@ -1286,3 +1286,67 @@
 {"file":"src/combinator/laws.rs","lines":1027,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/lab/meta/mutation.rs","lines":1133,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/distributed/tests.rs","lines":1077,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/cli/doctor/mod.rs","lines":21716,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"backfill: 3 MEDIUM fixed (parse_package_name, sanitize_line, pending_ack_count)"}
+{"file":"src/raptorq/gf256.rs","lines":4063,"batch":315,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 315+369"}
+{"file":"src/lab/runtime.rs","lines":4462,"batch":312,"date":"2026-03-12","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"backfill: 2 MEDIUM fixed (clock skew log ordering, cancel+budget collision)"}
+{"file":"src/obligation/choreography/mod.rs","lines":3528,"batch":312,"date":"2026-03-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"backfill: 1 MEDIUM fixed (loop label scope leak)"}
+{"file":"src/observability/spectral_health.rs","lines":3292,"batch":313,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited Mar 13a"}
+{"file":"src/plan/analysis.rs","lines":2752,"batch":311,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 311"}
+{"file":"src/observability/diagnostics.rs","lines":2711,"batch":312,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 312"}
+{"file":"src/plan/latency_algebra.rs","lines":2689,"batch":313,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 313"}
+{"file":"src/process.rs","lines":1863,"batch":321,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 321"}
+{"file":"src/obligation/separation_logic.rs","lines":2429,"batch":313,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited Mar 13a"}
+{"file":"src/obligation/lyapunov.rs","lines":2302,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367"}
+{"file":"src/obligation/no_aliasing_proof.rs","lines":2140,"batch":313,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited Mar 13a"}
+{"file":"src/raptorq/systematic.rs","lines":1939,"batch":322,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 322"}
+{"file":"src/raptorq/test_log_schema.rs","lines":1926,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 369"}
+{"file":"src/plan/certificate.rs","lines":1873,"batch":322,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 322"}
+{"file":"src/raptorq/linalg.rs","lines":1834,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367"}
+{"file":"src/messaging/jetstream.rs","lines":1718,"batch":316,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 316"}
+{"file":"src/plan/rewrite.rs","lines":1707,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 341"}
+{"file":"src/observability/otel.rs","lines":1590,"batch":325,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 325"}
+{"file":"src/obligation/session_types.rs","lines":1476,"batch":326,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 326"}
+{"file":"src/obligation/no_leak_proof.rs","lines":1475,"batch":311,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 311 area"}
+{"file":"src/raptorq/proof.rs","lines":1453,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367/370"}
+{"file":"src/obligation/marking.rs","lines":1446,"batch":326,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 326"}
+{"file":"src/plan/mod.rs","lines":1440,"batch":346,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 346-347"}
+{"file":"src/obligation/saga.rs","lines":1375,"batch":327,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 327"}
+{"file":"src/console.rs","lines":1322,"batch":327,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 327"}
+{"file":"src/observability/task_inspector.rs","lines":1278,"batch":366,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 366"}
+{"file":"src/raptorq/pipeline.rs","lines":1233,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367"}
+{"file":"src/lab/injection.rs","lines":1224,"batch":364,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 364"}
+{"file":"src/lab/scenario_runner.rs","lines":1206,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 341"}
+{"file":"src/lab/oracle/mod.rs","lines":1161,"batch":364,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 364"}
+{"file":"src/lab/scenario.rs","lines":1152,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367"}
+{"file":"src/lab/meta/mutation.rs","lines":1133,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367"}
+{"file":"src/raptorq/decision_contract.rs","lines":1116,"batch":328,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 328"}
+{"file":"src/encoding.rs","lines":1042,"batch":361,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 361/369"}
+{"file":"src/http/h1/listener.rs","lines":1038,"batch":375,"date":"2026-03-14","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"backfill: clippy lints fixed, session Mar 14d"}
+{"file":"src/observability/resource_accounting.rs","lines":915,"batch":366,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 366"}
+{"file":"src/obligation/recovery.rs","lines":827,"batch":365,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 365"}
+{"file":"src/obligation/guarded.rs","lines":821,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367/370"}
+{"file":"src/lab/fuzz.rs","lines":793,"batch":373,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 373"}
+{"file":"src/raptorq/regression.rs","lines":778,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 369"}
+{"file":"src/raptorq/rfc6330.rs","lines":742,"batch":367,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 367"}
+{"file":"src/net/unix/ancillary.rs","lines":324,"batch":364,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 364"}
+{"file":"src/net/resolve.rs","lines":146,"batch":364,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 364"}
+{"file":"src/io/ext/seek_ext.rs","lines":202,"batch":358,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"backfill: audited batch 358/361"}
+{"file":"src/io/stream_adapters.rs","lines":377,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/codec/framed_write.rs","lines":366,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/runtime/reactor/token.rs","lines":893,"batch":450,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TokenSlab with generation ABA prevention, free list O(1), wrapping arithmetic, 32/64-bit, 15+ tests"}
+{"file":"src/runtime/reactor/registration.rs","lines":838,"batch":450,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RAII Registration, Weak reactor ref, panic-safe deregister, retry on transient errors, 13+ tests"}
+{"file":"src/runtime/config.rs","lines":972,"batch":450,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Config types with normalize() clamping, LeakEscalation, BrowserWorkerOffload, 15+ tests"}
+{"file":"src/runtime/reactor/macos.rs","lines":1164,"batch":450,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"kqueue reactor, edge-triggered, fd cleanup, bookkeeping preserved on hard delete, ENOENT/EBADF, 12 BSD-only tests"}
+{"file":"src/runtime/scheduler/global_injector.rs","lines":823,"batch":450,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lane-aware global injection, EDF min-heap, FIFO tiebreaking, saturating decrement, cached deadline, 20+ tests"}
+{"file":"src/lab/fuzz.rs","lines":793,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/raptorq/rfc6330.rs","lines":742,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/conformance/mod.rs","lines":649,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/migration/mod.rs","lines":643,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/bytes/buf/buf_trait.rs","lines":609,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/net/quic_native/tls.rs","lines":573,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/opportunity.rs","lines":461,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/protocol/mod.rs","lines":452,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/net/quic/config.rs","lines":434,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/observability/mod.rs","lines":424,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/http/h2/error.rs","lines":417,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/io/write.rs","lines":407,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
