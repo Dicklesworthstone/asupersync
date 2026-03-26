@@ -1368,3 +1368,9 @@
 {"file":"src/lab/mod.rs","lines":169,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/http/h3/client.rs","lines":149,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/lab/http/server.rs","lines":118,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/mod.rs","lines":1089,"batch":452,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Stream trait, extension methods, blanket impl, combinator constructors, comprehensive tests"}
+{"file":"src/service/filter.rs","lines":788,"batch":452,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Service filter layer, ready window protocol, proper state machine, affine future safety"}
+{"file":"src/runtime/region_heap.rs","lines":781,"batch":452,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Type-erased allocator, generation-based ABA prevention (u32 wrapping impractical), free-list management"}
+{"file":"src/sync/barrier.rs","lines":770,"batch":452,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cancel-aware barrier, generation-based trip detection, slot-based waker removal, proper lock management"}
+{"file":"src/types/symbol_set.rs","lines":761,"batch":452,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Memory-budgeted symbol set, threshold detection with NaN/inf handling, saturating arithmetic"}
+{"file":"src/session.rs","lines":740,"batch":452,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session types with compile-time protocol enforcement, correct duality, type erasure via Any"}
