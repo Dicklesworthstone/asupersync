@@ -748,7 +748,7 @@ impl Sublist {
                 if members.is_empty() {
                     continue;
                 }
-                
+
                 let mut hasher = DetHasher::default();
                 group.hash(&mut hasher);
                 members.hash(&mut hasher);
