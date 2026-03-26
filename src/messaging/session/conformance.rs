@@ -218,13 +218,29 @@ impl RoleConformanceState {
     }
 
     fn normalize(&mut self) {
+        // Track which Recurse labels have been resolved to detect degenerate
+        // cycles like `RecursePoint("L", Recurse("L"))`.  Such contracts pass
+        // validation but would loop forever without this guard.
+        let mut resolved_recurse_labels: Vec<Label> = Vec::new();
         loop {
             match self.current.clone() {
                 AnnotatedLocalType::RecursePoint { label, body } => {
-                    self.recursion_points.insert(label, (*body).clone());
-                    self.current = *body;
+                    let body_val = *body;
+                    self.recursion_points.insert(label, body_val.clone());
+                    self.current = body_val;
                 }
                 AnnotatedLocalType::Recurse { label } => {
+                    if resolved_recurse_labels.contains(&label) {
+                        // Degenerate cycle: the recursion body immediately
+                        // recurses back without any protocol step.  Treat as
+                        // end-of-protocol so callers get `Complete` instead
+                        // of an infinite loop or a panic.
+                        self.current = AnnotatedLocalType::End {
+                            path: SessionPath::root(),
+                        };
+                        break;
+                    }
+                    resolved_recurse_labels.push(label.clone());
                     self.current =
                         self.recursion_points
                             .get(&label)
@@ -1668,5 +1684,38 @@ mod tests {
         );
 
         crate::test_complete!("observe_with_cx_logs_conformance_check_event");
+    }
+
+    #[test]
+    fn degenerate_recurse_to_self_does_not_loop() {
+        init_test("degenerate_recurse_to_self_does_not_loop");
+        let client = RoleName::from("client");
+        let server = RoleName::from("server");
+        // Build a contract whose body is RecursePoint("L", Recurse("L"))
+        // — a degenerate empty loop.  This passes validation but previously
+        // caused normalize() to spin forever.
+        let request = MessageType::new("ping", client.clone(), server.clone(), "Ping");
+        let contract = ProtocolContract::new(
+            "degenerate",
+            SchemaVersion::new(0, 0, 1),
+            vec![client.clone(), server.clone()],
+            GlobalSessionType::new(SessionType::send(
+                request.clone(),
+                SessionType::recurse_point("L", SessionType::recurse("L")),
+            )),
+        );
+        // Construction must not hang.
+        let monitor = ConformanceMonitor::new(&contract).expect("monitor should not loop");
+        // After the first send, both roles should reach a synthetic End
+        // because the degenerate recursion is treated as completion.
+        let mut monitor = monitor;
+        monitor
+            .observe(&client, Some(&request), None)
+            .expect("client send");
+        assert!(
+            monitor.is_role_complete(&client),
+            "client should be complete after degenerate recursion resolves to End"
+        );
+        crate::test_complete!("degenerate_recurse_to_self_does_not_loop");
     }
 }
