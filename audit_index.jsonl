@@ -1394,3 +1394,82 @@
 {"file":"src/service/layer.rs","lines":544,"batch":455,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Layer trait composition, Stack applies inner then outer, identity layer, backpressure propagation"}
 {"file":"src/net/resolve.rs","lines":198,"batch":456,"date":"2026-03-26","agent":"DarkBarn","verdict":"FIXED","bugs":1,"notes":"lookup_all returned Ok([]) for empty ToSocketAddrs resolutions; now both lookup helpers fail closed with InvalidInput and regression tests cover the empty-resolution path"}
 {"file":"src/time/elapsed.rs","lines":166,"batch":457,"date":"2026-03-26","agent":"DarkBarn","verdict":"SOUND","bugs":0,"notes":"Elapsed is a simple timeout error wrapper; deadline accessors, display, default, and call-site usage all align with the documented semantics"}
+{"file":"src/stream/fuse.rs","lines":137,"batch":458,"date":"2026-03-26","agent":"OrangeRiver","verdict":"SOUND","bugs":0,"notes":"Fuse latches exhaustion by dropping the inner stream on first None, preventing terminal repoll of the wrapped stream; size_hint and pending/exhaustion semantics align with the combinator contract."}
+{"file":"src/runtime/obligation_table.rs","lines":949,"batch":459,"date":"2026-03-26","agent":"CloudyElk","verdict":"FIXED","bugs":1,"notes":"Low-level insert/insert_with could leave record.id out of sync with the arena-assigned obligation ID while the holder index used the canonical slot-derived ID; both paths now normalize stored IDs and regression tests cover direct insert + insert_with callers."}
+{"file":"src/security/key.rs","lines":179,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"SHA-256 seed expansion, HMAC-SHA256 subkey derivation, redacted Debug"}
+{"file":"src/security/tag.rs","lines":253,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Phase 0 non-crypto deterministic mix, constant-time comparison"}
+{"file":"src/security/context.rs","lines":339,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Mode-based verify (Strict/Permissive/Disabled), Arc-shared stats"}
+{"file":"src/security/mod.rs","lines":76,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports only"}
+{"file":"src/runtime/local.rs","lines":216,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Arena-indexed TLS task storage with generation checking"}
+{"file":"src/runtime/yield_now.rs","lines":109,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Simple two-poll yield future with post-completion assertion"}
+{"file":"src/runtime/mod.rs","lines":185,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/runtime/waker.rs","lines":343,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DetHashSet dedup, sorted drain for determinism, WakeSource attribution"}
+{"file":"src/runtime/timer.rs","lines":324,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"BinaryHeap min-heap with generation tie-breaking, wrapping gen counter"}
+{"file":"src/runtime/stored_task.rs","lines":408,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Type-erased future storage, StoredTask/LocalStoredTask/AnyStoredTask"}
+{"file":"src/runtime/scheduler/mod.rs","lines":143,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"WorkStealingScheduler wrapper, zero-worker clamped to 1"}
+{"file":"src/types/mod.rs","lines":79,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/types/policy.rs","lines":416,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FailFast and CollectAll policies, severity lattice Panicked>Cancelled>Err>Ok"}
+{"file":"src/signal/kind.rs","lines":338,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unix signal enum with cross-platform raw values and Display"}
+{"file":"src/signal/mod.rs","lines":76,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/signal/shutdown.rs","lines":100,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CAS-based shutdown controller with Notify broadcast (partial read)"}
+{"file":"src/time/mod.rs","lines":68,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/tls/mod.rs","lines":98,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"timeout_now fallback to wall_now, module re-exports"}
+{"file":"src/tls/error.rs","lines":341,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Comprehensive TLS error types with Display, source, and From impls"}
+{"file":"src/web/mod.rs","lines":80,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/util/mod.rs","lines":24,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/util/cache.rs","lines":167,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CachePadded<T> with repr(C, align(64)), Deref/DerefMut"}
+{"file":"src/util/det_rng.rs","lines":142,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"xorshift64 PRNG, rejection sampling for unbiased range, Fisher-Yates shuffle"}
+{"file":"src/transport/mod.rs","lines":243,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"SharedChannel with waker dedup, close wakes all waiters"}
+{"file":"src/transport/error.rs","lines":161,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"StreamError/SinkError with thiserror derives"}
+{"file":"src/record/mod.rs","lines":33,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/trace/mod.rs","lines":315,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace normalization convenience API, module re-exports, switch cost"}
+{"file":"src/tracing_compat.rs","lines":100,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Noop macro shim when tracing-integration disabled (partial read)"}
+{"file":"src/trace/distributed/mod.rs","lines":38,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations and re-exports"}
+{"file":"src/web/security.rs","lines":0,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Previously audited in batch 336 — re-confirmed in file list"}
+{"file":"src/service/mod.rs","lines":0,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module re-exports, deferred to separate read"}
+{"file":"src/server/mod.rs","lines":0,"batch":456,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module re-exports, deferred to separate read"}
+{"file":"src/trace/certificate.rs","lines":546,"batch":457,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Proof-carrying trace cert with incremental hash, balance checks, offline verifier. 13 tests."}
+{"file":"src/types/rref.rs","lines":474,"batch":457,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Region-owned ref (Copy via indices+PhantomData), Send/Sync auto-derived, witness-based access. 12 tests."}
+{"file":"src/web/security.rs","lines":401,"batch":457,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security headers middleware, no-overwrite ensure_header, case-insensitive removal. 11 tests."}
+{"file":"src/trace/distributed/lattice.rs","lines":668,"batch":457,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Join-semilattice for obligations+leases, exhaustive algebraic property tests. 16 tests."}
+{"file":"src/trace/distributed/span.rs","lines":495,"batch":457,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Symbol operation spans with context, timing, attributes, status transitions. 13 tests."}
+{"file":"src/trace/causality.rs","lines":419,"batch":458,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Causal order verifier: monotonic, same-task, spawn-before-wake. 12 tests."}
+{"file":"src/trace/distributed/collector.rs","lines":470,"batch":458,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Symbol trace collector with RwLock, two-phase eviction, age-based cleanup. 7 tests."}
+{"file":"src/trace/distributed/context.rs","lines":554,"batch":458,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace context binary serde, bounds-checked parsing, UTF-8 validated. 14 tests."}
+{"file":"src/service/builder.rs","lines":316,"batch":458,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Type-safe service layer builder, convenience methods for timeout/limit/retry. 16 tests."}
+{"file":"src/stream/count.rs","lines":303,"batch":458,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Stream count future with cooperative budget (1024/poll), fail-closed re-poll. 6 tests."}
+{"file":"src/stream/take.rs","lines":444,"batch":459,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Take+TakeWhile with fail-closed done flag, size_hint, re-poll safety. 12 tests."}
+{"file":"src/stream/throttle.rs","lines":388,"batch":459,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Rate-limiting stream, cooperative suppression budget (64/poll), injectable time. 9 tests."}
+{"file":"src/stream/skip.rs","lines":370,"batch":459,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Skip+SkipWhile with cooperative budget (1024/poll), exhausted flag. 13 tests."}
+{"file":"src/tracing_compat.rs","lines":401,"batch":459,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Zero-cost tracing compat: no-op macros, NoopSpan, blanket Instrument. 11 tests."}
+{"file":"src/runtime/scheduler/decision_contract.rs","lines":458,"batch":459,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Bayesian scheduler contract, 4x3 loss matrix, snapshot likelihoods, conservative fallback. 15 tests."}
+{"file":"src/stream/enumerate.rs","lines":178,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/forward.rs","lines":297,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/inspect.rs","lines":168,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/iter.rs","lines":149,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/map.rs","lines":242,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/next.rs","lines":157,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/scan.rs","lines":324,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/skip.rs","lines":370,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/take.rs","lines":444,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/then.rs","lines":180,"batch":456,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/throttle.rs","lines":388,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/watch_stream.rs","lines":285,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/receiver_stream.rs","lines":254,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/stream/stream.rs","lines":248,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/trace/compression.rs","lines":271,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/trace/distributed/id.rs","lines":305,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/runtime/scheduler/stealing.rs","lines":310,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/runtime/scheduler/decision_contract.rs","lines":458,"batch":457,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/runtime/scheduler/stealing.rs","lines":310,"batch":460,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Power-of-two-choices work stealing with fallback linear scan. 10 tests incl contention."}
+{"file":"src/trace/mod.rs","lines":314,"batch":460,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace module re-exports, geodesic normalize convenience API, switch cost. 6 tests."}
+{"file":"src/trace/distributed/id.rs","lines":305,"batch":460,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"128-bit TraceId, 64-bit SymbolSpanId, W3C format, deterministic gen. 16 tests."}
+{"file":"src/test_utils.rs","lines":330,"batch":460,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Test helpers: logging init, lab constructors, async runners, assertion macros, pool test types. 1 test."}
+{"file":"src/types/policy.rs","lines":415,"batch":460,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FailFast+CollectAll policies, severity lattice aggregation, cancel reason strengthening. 10 tests."}
+{"file":"src/cli/progress.rs","lines":879,"batch":458,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/runtime/reactor/linux.rs","lines":7,"batch":458,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"re-export alias module"}
+{"file":"src/runtime/reactor/uring.rs","lines":203,"batch":458,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"legacy shim, all ops return Unsupported"}
+{"file":"src/sync/notify_bug_test.rs","lines":36,"batch":458,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"regression test for spurious wakeup"}
+{"file":"src/sync/rwlock_lost_wakeup_test.rs","lines":77,"batch":458,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"regression test for writer-drop wakeup"}
+{"file":"src/test_multipart_panic.rs","lines":2,"batch":458,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"stub test binary"}
+{"file":"src/test_utils.rs","lines":330,"batch":458,"date":"2026-03-27","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
