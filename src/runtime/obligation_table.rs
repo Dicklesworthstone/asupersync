@@ -143,10 +143,16 @@ impl ObligationTable {
     }
 
     /// Inserts a new obligation record into the arena.
-    pub fn insert(&mut self, record: ObligationRecord) -> ArenaIndex {
+    pub fn insert(&mut self, mut record: ObligationRecord) -> ArenaIndex {
         let is_pending = record.is_pending();
         let holder = record.holder;
-        let idx = self.obligations.insert(record);
+        let idx = self.obligations.insert_with(|idx| {
+            // The arena slot defines the canonical obligation ID. Normalize the
+            // stored record so low-level callers cannot desynchronize `record.id`
+            // from the holder index or later lifecycle operations.
+            record.id = ObligationId::from_arena(idx);
+            record
+        });
         self.push_holder_id(holder, ObligationId::from_arena(idx));
         if is_pending {
             self.cached_pending += 1;
@@ -178,7 +184,12 @@ impl ObligationTable {
     where
         F: FnOnce(ArenaIndex) -> ObligationRecord,
     {
-        let idx = self.obligations.insert_with(f);
+        let idx = self.obligations.insert_with(|idx| {
+            let mut record = f(idx);
+            // Mirror `insert()`: the assigned arena slot is the only stable ID.
+            record.id = ObligationId::from_arena(idx);
+            record
+        });
         if let Some(record) = self.obligations.get(idx) {
             let holder = record.holder;
             let is_pending = record.is_pending();
@@ -802,6 +813,46 @@ mod tests {
         for window in sorted.windows(2) {
             assert!(window[0] < window[1], "should be sorted");
         }
+    }
+
+    #[test]
+    fn insert_normalizes_record_id_to_assigned_slot() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(11);
+        let region = test_region_id(4);
+        let stale_id = ObligationId::from_arena(ArenaIndex::new(99, 0));
+
+        let idx = table.insert(ObligationRecord::new(
+            stale_id,
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::ZERO,
+        ));
+        let canonical = ObligationId::from_arena(idx);
+        let record = table.get(idx).expect("obligation exists");
+
+        assert_eq!(record.id, canonical);
+        assert_ne!(record.id, stale_id);
+        assert_eq!(table.ids_for_holder(task), &[canonical]);
+    }
+
+    #[test]
+    fn insert_with_normalizes_record_id_to_assigned_slot() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(12);
+        let region = test_region_id(5);
+        let stale_id = ObligationId::from_arena(ArenaIndex::new(77, 1));
+
+        let idx = table.insert_with(|_| {
+            ObligationRecord::new(stale_id, ObligationKind::Ack, task, region, Time::ZERO)
+        });
+        let canonical = ObligationId::from_arena(idx);
+        let record = table.get(idx).expect("obligation exists");
+
+        assert_eq!(record.id, canonical);
+        assert_ne!(record.id, stale_id);
+        assert_eq!(table.pending_obligation_ids_for_task(task), vec![canonical]);
     }
 
     // Pure data-type tests (wave 34 – CyanBarn)

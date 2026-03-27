@@ -433,6 +433,79 @@ impl<T> Receiver<T> {
         }
     }
 
+    pub(crate) fn poll_changed(
+        &mut self,
+        cx: &Cx,
+        context: &Context<'_>,
+    ) -> Poll<Result<(), RecvError>> {
+        if cx.checkpoint().is_err() {
+            cx.trace("watch::changed cancelled");
+            return Poll::Ready(Err(RecvError::Cancelled));
+        }
+
+        if self.inner.is_sender_dropped() {
+            let current = self.inner.current_version();
+            if current != self.seen_version {
+                self.seen_version = current;
+                return Poll::Ready(Ok(()));
+            }
+            cx.trace("watch::changed sender dropped");
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        let current = self.inner.current_version();
+        if current != self.seen_version {
+            self.seen_version = current;
+            cx.trace("watch::changed received update");
+            return Poll::Ready(Ok(()));
+        }
+
+        match self.waiter.as_ref() {
+            Some(w) if !w.load(Ordering::Acquire) => {
+                w.store(true, Ordering::Release);
+                self.inner.register_waker(WatchWaiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(w),
+                });
+            }
+            Some(w) => {
+                if !self.inner.refresh_waker(w, context.waker()) {
+                    self.inner.register_waker(WatchWaiter {
+                        waker: context.waker().clone(),
+                        queued: Arc::clone(w),
+                    });
+                }
+            }
+            None => {
+                let w = Arc::new(AtomicBool::new(true));
+                self.inner.register_waker(WatchWaiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(&w),
+                });
+                self.waiter = Some(w);
+            }
+        }
+
+        let current = self.inner.current_version();
+        if current != self.seen_version {
+            self.seen_version = current;
+            cx.trace("watch::changed received update");
+            return Poll::Ready(Ok(()));
+        }
+
+        if self.inner.is_sender_dropped() {
+            let current = self.inner.current_version();
+            if current != self.seen_version {
+                self.seen_version = current;
+                return Poll::Ready(Ok(()));
+            }
+            cx.trace("watch::changed sender dropped");
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        Poll::Pending
+    }
+
     /// Returns a reference to the current value.
     ///
     /// This does NOT update `seen_version`. Use `mark_seen()` after
@@ -533,90 +606,13 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
             return Poll::Ready(Err(RecvError::PolledAfterCompletion));
         }
 
-        // Check cancellation
-        if this.cx.checkpoint().is_err() {
-            this.cx.trace("watch::changed cancelled");
-            this.completed = true;
-            return Poll::Ready(Err(RecvError::Cancelled));
-        }
-
-        // Check sender dropped
-        if this.receiver.inner.is_sender_dropped() {
-            let current = this.receiver.inner.current_version();
-            if current != this.receiver.seen_version {
-                this.receiver.seen_version = current;
+        match this.receiver.poll_changed(this.cx, context) {
+            Poll::Ready(result) => {
                 this.completed = true;
-                return Poll::Ready(Ok(()));
+                Poll::Ready(result)
             }
-            this.cx.trace("watch::changed sender dropped");
-            this.completed = true;
-            return Poll::Ready(Err(RecvError::Closed));
+            Poll::Pending => Poll::Pending,
         }
-
-        // Check version
-        let current = this.receiver.inner.current_version();
-        if current != this.receiver.seen_version {
-            this.receiver.seen_version = current;
-            this.cx.trace("watch::changed received update");
-            this.completed = true;
-            return Poll::Ready(Ok(()));
-        }
-
-        // Register waker before re-checking (avoids missed notification).
-        // Use Arc<AtomicBool> dedup to prevent unbounded Vec growth when
-        // the future is re-polled without an intervening send().
-        match this.receiver.waiter.as_ref() {
-            Some(w) if !w.load(Ordering::Acquire) => {
-                // We were woken (queued=false) but version hasn't changed yet.
-                // Re-register with a fresh waker.
-                w.store(true, Ordering::Release);
-                this.receiver.inner.register_waker(WatchWaiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(w),
-                });
-            }
-            Some(w) => {
-                // Still queued, but the task's waker may have changed.
-                // Refresh in-place without pre-cloning — avoids Waker clone +
-                // Arc::clone on the common re-poll path.
-                if !this.receiver.inner.refresh_waker(w, context.waker()) {
-                    // Waiter was pruned (stale); re-register with a fresh entry.
-                    this.receiver.inner.register_waker(WatchWaiter {
-                        waker: context.waker().clone(),
-                        queued: Arc::clone(w),
-                    });
-                }
-            }
-            None => {
-                // First poll — create a new waiter.
-                let w = Arc::new(AtomicBool::new(true));
-                this.receiver.inner.register_waker(WatchWaiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(&w),
-                });
-                this.receiver.waiter = Some(w);
-            }
-        }
-
-        // Re-check after registration to close the race window
-        let current = this.receiver.inner.current_version();
-        if current != this.receiver.seen_version {
-            this.receiver.seen_version = current;
-            this.cx.trace("watch::changed received update");
-            return Poll::Ready(Ok(()));
-        }
-
-        if this.receiver.inner.is_sender_dropped() {
-            let current = this.receiver.inner.current_version();
-            if current != this.receiver.seen_version {
-                this.receiver.seen_version = current;
-                return Poll::Ready(Ok(()));
-            }
-            this.cx.trace("watch::changed sender dropped");
-            return Poll::Ready(Err(RecvError::Closed));
-        }
-
-        Poll::Pending
     }
 }
 

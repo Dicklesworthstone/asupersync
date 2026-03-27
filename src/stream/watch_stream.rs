@@ -3,7 +3,6 @@
 use crate::channel::watch;
 use crate::cx::Cx;
 use crate::stream::Stream;
-use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -55,13 +54,7 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
             return Poll::Ready(Some(this.inner.borrow_and_update_clone()));
         }
 
-        // Poll the changed future (non-blocking, waker-based)
-        let runtime_cx = this.cx.clone();
-        let result = {
-            let mut future = this.inner.changed(&runtime_cx);
-            Pin::new(&mut future).poll(context)
-        };
-        match result {
+        match this.inner.poll_changed(&this.cx, context) {
             Poll::Ready(Ok(())) => Poll::Ready(Some(this.inner.borrow_and_update_clone())),
             Poll::Ready(Err(_)) => {
                 this.terminated = true;
@@ -76,6 +69,7 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
 
     struct NoopWaker;
@@ -86,6 +80,28 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct CountingWaker {
+        wake_count: AtomicUsize,
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (Arc<CountingWaker>, Waker) {
+        let state = Arc::new(CountingWaker {
+            wake_count: AtomicUsize::new(0),
+        });
+        let waker = Waker::from(Arc::clone(&state));
+        (state, waker)
     }
 
     fn init_test(name: &str) {
@@ -221,5 +237,49 @@ mod tests {
         crate::assert_with_log!(is_none, "terminated after sender drop", true, is_none);
 
         crate::test_complete!("watch_stream_terminates_after_sender_drop");
+    }
+
+    #[test]
+    fn watch_stream_pending_poll_retains_waiter_registration() {
+        init_test("watch_stream_pending_poll_retains_waiter_registration");
+        let cx: Cx = Cx::for_testing();
+        let (tx, rx) = watch::channel(0);
+        let mut stream = WatchStream::from_changes(cx, rx);
+        let (wake_state, waker) = counting_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "initial poll waits for a change",
+            true,
+            first.is_pending()
+        );
+        let wake_count = wake_state.wake_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(wake_count == 0, "no wake before send", 0, wake_count);
+
+        let send_result = tx.send(1);
+        crate::assert_with_log!(
+            send_result.is_ok(),
+            "send after pending poll succeeds",
+            true,
+            send_result.is_ok()
+        );
+        let wake_count = wake_state.wake_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            wake_count > 0,
+            "pending waiter is woken by send",
+            "> 0",
+            wake_count
+        );
+
+        let second = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Some(1))),
+            "woken poll yields new value",
+            "Ready(Some(1))",
+            format!("{second:?}")
+        );
+        crate::test_complete!("watch_stream_pending_poll_retains_waiter_registration");
     }
 }

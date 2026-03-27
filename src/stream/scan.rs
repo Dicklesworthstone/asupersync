@@ -53,7 +53,7 @@ impl<S, St, F> Scan<S, St, F> {
 
 impl<S, St, B, F> Stream for Scan<S, St, F>
 where
-    S: Stream + Unpin,
+    S: Stream,
     F: FnMut(&mut St, S::Item) -> Option<B>,
 {
     type Item = B;
@@ -86,7 +86,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::iter;
+    use crate::stream::{StreamExt, iter};
+    use std::marker::PhantomPinned;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -126,6 +127,35 @@ mod tests {
             );
             self.completed = true;
             Poll::Ready(None)
+        }
+    }
+
+    #[pin_project::pin_project]
+    struct PinnedOnce {
+        item: Option<i32>,
+        _pin: PhantomPinned,
+    }
+
+    impl PinnedOnce {
+        fn new(item: i32) -> Self {
+            Self {
+                item: Some(item),
+                _pin: PhantomPinned,
+            }
+        }
+    }
+
+    impl Stream for PinnedOnce {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.project();
+            Poll::Ready(this.item.take())
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = usize::from(self.item.is_some());
+            (remaining, Some(remaining))
         }
     }
 
@@ -271,5 +301,24 @@ mod tests {
         );
         let dbg = format!("{stream:?}");
         assert!(dbg.contains("Scan"));
+    }
+
+    #[test]
+    fn scan_accepts_pinned_non_unpin_streams() {
+        init_test("scan_accepts_pinned_non_unpin_streams");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let stream = PinnedOnce::new(7).scan(10i32, |acc: &mut i32, item| {
+            *acc += item;
+            Some(*acc)
+        });
+        let mut stream = std::pin::pin!(stream);
+
+        assert_eq!(stream.as_ref().get_ref().size_hint(), (1, Some(1)));
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(Some(17)));
+        assert_eq!(stream.as_ref().get_ref().size_hint(), (0, Some(0)));
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("scan_accepts_pinned_non_unpin_streams");
     }
 }

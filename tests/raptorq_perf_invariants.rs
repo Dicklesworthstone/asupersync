@@ -2575,6 +2575,48 @@ fn e5_live_dual_policy_snapshot_surfaces_decision_provenance() {
     }
 }
 
+/// Validate the Track-E bench/probe contract keeps host architecture truth
+/// separate from the selected profile-pack architecture when env requests
+/// intentionally choose a different supported pack.
+#[test]
+fn e5_probe_contract_keeps_host_vs_selected_profile_architecture_fields_distinct() {
+    let script = include_str!("../scripts/run_raptorq_e2e.sh");
+
+    for required in [
+        "\"architecture_class\": policy.architecture_class.as_str()",
+        "\"active_profile_architecture_class\": active_profile.architecture_class.as_str()",
+        "\"profile_pack_env_requested\": policy.override_mask.profile_pack_env_requested()",
+    ] {
+        assert!(
+            RAPTORQ_BENCH_RS.contains(required),
+            "Track-E bench probe/log surface must keep token {required}",
+        );
+    }
+
+    assert_ne!(
+        RAPTORQ_BENCH_RS
+            .find("\"architecture_class\": policy.architecture_class.as_str()")
+            .expect("bench source must emit host architecture class"),
+        RAPTORQ_BENCH_RS
+            .find(
+                "\"active_profile_architecture_class\": active_profile.architecture_class.as_str()"
+            )
+            .expect("bench source must emit active profile architecture class"),
+        "bench source must keep host architecture and selected-profile architecture as distinct fields",
+    );
+
+    for required in [
+        "(.architecture_class | type == \"string\" and length > 0)",
+        "(.active_profile_architecture_class | type == \"string\" and length > 0)",
+        "(.profile_pack_env_requested | type == \"boolean\")",
+    ] {
+        assert!(
+            script.contains(required),
+            "Track-E probe validation contract must require token {required}",
+        );
+    }
+}
+
 /// Validate the Track-E bench policy logs emit the live decision-metadata
 /// fields needed to keep runtime policy and artifact reasoning aligned.
 #[test]

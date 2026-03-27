@@ -5146,6 +5146,58 @@ mod tests {
     }
 
     #[test]
+    fn supported_profile_pack_env_request_keeps_host_and_profile_architectures_truthful() {
+        let selection = ProfilePackSelection {
+            profile_pack: Gf256ProfilePackId::ScalarConservativeV1,
+            architecture_class: Gf256ArchitectureClass::X86Avx2,
+            fallback_reason: None,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_SCALAR,
+        };
+        let mut policy = policy_fixture_from_selection(selection);
+        policy.override_mask.set_profile_pack_env_requested();
+
+        apply_effective_selection_contract(&mut policy);
+        let metadata = effective_profile_pack_metadata(&policy);
+        let candidate = tuning_candidate_metadata(policy.selected_tuning_candidate_id)
+            .expect("supported scalar profile request should keep catalog tuning metadata");
+
+        assert!(policy_uses_canonical_selection_contract(&policy));
+        assert!(policy.override_mask.profile_pack_env_requested());
+        assert_eq!(policy.architecture_class, Gf256ArchitectureClass::X86Avx2);
+        assert_eq!(
+            policy.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            metadata.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            metadata.architecture_class,
+            Gf256ArchitectureClass::GenericScalar
+        );
+        assert_ne!(policy.architecture_class, metadata.architecture_class);
+        assert_eq!(
+            metadata.selected_tuning_candidate_id,
+            policy.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            candidate.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            candidate.architecture_class,
+            Gf256ArchitectureClass::GenericScalar
+        );
+        assert_eq!(metadata.decision_artifact_id, SCALAR_DECISION_ARTIFACT_ID);
+        assert_eq!(metadata.decision_role, SCALAR_DECISION_ROLE);
+        assert_eq!(
+            metadata.decision_evidence_status,
+            SCALAR_DECISION_EVIDENCE_STATUS
+        );
+    }
+
+    #[test]
     fn manual_numeric_override_scrubs_canonical_selection_metadata() {
         let mut policy = DualKernelPolicy {
             profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,

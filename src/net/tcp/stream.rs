@@ -302,10 +302,12 @@ impl TcpStream {
             match future_with_timeout(connect_future, timeout_duration, time_getter).await {
                 Ok(Ok(stream)) => return Ok(stream),
                 Ok(Err(err)) => last_err = Some(err),
-                Err(_) => last_err = Some(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "tcp connect timeout",
-                )),
+                Err(_) => {
+                    last_err = Some(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "tcp connect timeout",
+                    ))
+                }
             }
         }
 

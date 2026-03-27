@@ -90,14 +90,14 @@ pub enum ColorChoice {
 }
 
 impl ColorChoice {
-    /// Detect appropriate color setting based on environment.
+    /// Detect appropriate color setting for a specific output stream.
     ///
     /// Respects:
     /// - `NO_COLOR` environment variable (<https://no-color.org/>)
     /// - `CLICOLOR_FORCE` environment variable
-    /// - Terminal detection
+    /// - The target stream's terminal state
     #[must_use]
-    pub fn auto_detect() -> Self {
+    pub fn auto_detect_for(target_is_terminal: bool) -> Self {
         // NO_COLOR takes precedence (https://no-color.org/)
         if std::env::var("NO_COLOR").is_ok() {
             return Self::Never;
@@ -108,21 +108,37 @@ impl ColorChoice {
             return Self::Always;
         }
 
-        // Auto-detect based on terminal
-        if io::stdout().is_terminal() {
+        if target_is_terminal {
             Self::Auto
         } else {
             Self::Never
         }
     }
 
+    /// Detect appropriate color setting based on environment.
+    ///
+    /// Respects:
+    /// - `NO_COLOR` environment variable (<https://no-color.org/>)
+    /// - `CLICOLOR_FORCE` environment variable
+    /// - Terminal detection
+    #[must_use]
+    pub fn auto_detect() -> Self {
+        Self::auto_detect_for(io::stdout().is_terminal())
+    }
+
     /// Check if colors should be used.
     #[must_use]
     pub fn should_colorize(&self) -> bool {
+        self.should_colorize_for(io::stdout().is_terminal())
+    }
+
+    /// Check if colors should be used for a specific output stream.
+    #[must_use]
+    pub const fn should_colorize_for(&self, target_is_terminal: bool) -> bool {
         match self {
             Self::Always => true,
             Self::Never => false,
-            Self::Auto => io::stdout().is_terminal(),
+            Self::Auto => target_is_terminal,
         }
     }
 }
@@ -345,6 +361,17 @@ mod tests {
         let should = ColorChoice::Always.should_colorize();
         crate::assert_with_log!(should, "always colorize", true, should);
         crate::test_complete!("color_choice_always_returns_true");
+    }
+
+    #[test]
+    fn color_choice_auto_follows_target_terminal_state() {
+        init_test("color_choice_auto_follows_target_terminal_state");
+        let should = ColorChoice::Auto.should_colorize_for(true);
+        crate::assert_with_log!(should, "auto colorizes terminal", true, should);
+
+        let should = ColorChoice::Auto.should_colorize_for(false);
+        crate::assert_with_log!(!should, "auto avoids non-terminal", false, should);
+        crate::test_complete!("color_choice_auto_follows_target_terminal_state");
     }
 
     #[test]

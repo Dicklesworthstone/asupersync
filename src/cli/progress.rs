@@ -4,7 +4,7 @@
 //! Automatically formats based on output mode.
 
 use serde::Serialize;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use super::output::{ColorChoice, OutputFormat};
@@ -162,20 +162,23 @@ pub struct ProgressReporter {
     operation: Option<String>,
     last_line_length: usize,
     update_line_active: bool,
+    target_is_terminal: bool,
 }
 
 impl ProgressReporter {
     /// Create a new progress reporter.
     #[must_use]
     pub fn new(format: OutputFormat) -> Self {
+        let target_is_terminal = io::stderr().is_terminal();
         Self {
             format,
-            color: ColorChoice::auto_detect(),
+            color: ColorChoice::auto_detect_for(target_is_terminal),
             start_time: Instant::now(),
             writer: Box::new(io::stderr()),
             operation: None,
             last_line_length: 0,
             update_line_active: false,
+            target_is_terminal,
         }
     }
 
@@ -190,6 +193,7 @@ impl ProgressReporter {
             operation: None,
             last_line_length: 0,
             update_line_active: false,
+            target_is_terminal: false,
         }
     }
 
@@ -236,7 +240,7 @@ impl ProgressReporter {
 
     /// Report for human consumption.
     fn report_human(&mut self, event: &ProgressEvent) -> io::Result<()> {
-        let use_color = self.color.should_colorize();
+        let use_color = self.color.should_colorize_for(self.target_is_terminal);
 
         // Clear the currently rendered in-place update line before rewriting
         // another update or emitting a terminal status line.
@@ -829,5 +833,47 @@ mod tests {
         let dbg = format!("{:?}", reporter.elapsed());
         assert!(!dbg.is_empty());
         crate::test_complete!("progress_reporter_with_color");
+    }
+
+    #[test]
+    fn progress_reporter_auto_color_follows_target_terminal_state() {
+        init_test("progress_reporter_auto_color_follows_target_terminal_state");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared)
+            .with_color(ColorChoice::Auto);
+        reporter.target_is_terminal = true;
+
+        reporter.start("begin").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        crate::assert_with_log!(
+            output.contains("\x1b[34m"),
+            "started event color follows terminal target",
+            "contains blue ANSI prefix",
+            output
+        );
+        crate::test_complete!("progress_reporter_auto_color_follows_target_terminal_state");
+    }
+
+    #[test]
+    fn progress_reporter_auto_color_avoids_redirected_target() {
+        init_test("progress_reporter_auto_color_avoids_redirected_target");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared)
+            .with_color(ColorChoice::Auto);
+        reporter.target_is_terminal = false;
+
+        reporter.start("begin").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        crate::assert_with_log!(
+            !output.contains("\x1b["),
+            "auto color avoids redirected target",
+            "no ANSI escapes",
+            output
+        );
+        crate::test_complete!("progress_reporter_auto_color_avoids_redirected_target");
     }
 }

@@ -11,8 +11,9 @@
 //! synchronous resolution. The async API is maintained for forward compatibility
 //! with future async DNS implementations.
 
+use std::future::Future;
 use std::io;
-use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -372,37 +373,39 @@ impl Resolver {
     ///
     /// # Cancellation Safety
     ///
-    /// This function is cancel-safe. If the future is dropped, the underlying
-    /// connection attempt continues on the blocking pool but the result is discarded.
+    /// This function is cancel-safe. It uses the runtime's timeout-aware TCP
+    /// connect path so timed-out attempts do not pin a fallback blocking thread
+    /// until the operating system eventually gives up on the socket.
     async fn try_connect_timeout(
         &self,
         addr: SocketAddr,
         timeout_duration: Duration,
     ) -> Result<TcpStream, DnsError> {
+        self.try_connect_timeout_with_connector(
+            addr,
+            timeout_duration,
+            TcpStream::connect_timeout_with_time_getter,
+        )
+        .await
+    }
+
+    async fn try_connect_timeout_with_connector<Fut, Connector>(
+        &self,
+        addr: SocketAddr,
+        timeout_duration: Duration,
+        connector: Connector,
+    ) -> Result<TcpStream, DnsError>
+    where
+        Fut: Future<Output = io::Result<TcpStream>>,
+        Connector: FnOnce(SocketAddr, Duration, fn() -> Time) -> Fut,
+    {
         if timeout_duration.is_zero() {
             return Err(DnsError::Timeout);
         }
 
-        // Keep blocking connect off the runtime thread even when a current
-        // `Cx` exists without a blocking pool handle.
-        let connect = Box::pin(spawn_blocking_dns(move || {
-            let stream =
-                StdTcpStream::connect(addr).map_err(|e| DnsError::Connection(e.to_string()))?;
-
-            stream
-                .set_nonblocking(true)
-                .map_err(|e| DnsError::Io(e.to_string()))?;
-
-            Ok::<_, DnsError>(stream)
-        }));
-
-        let result = self
-            .timeout_future(timeout_duration, connect)
+        connector(addr, timeout_duration, self.time_getter)
             .await
-            .map_or(Err(DnsError::Timeout), |result| result)?;
-
-        // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
-        TcpStream::from_std(result).map_err(|e| DnsError::Io(e.to_string()))
+            .map_err(|err| Self::classify_connect_error(&err))
     }
 
     /// Looks up MX records for a domain.
@@ -1129,6 +1132,44 @@ mod tests {
         crate::test_complete!(
             "resolver_happy_eyeballs_race_timeout_preserves_timeout_classification"
         );
+    }
+
+    #[test]
+    fn resolver_sequential_connect_maps_timed_out_connector_to_timeout() {
+        init_test("resolver_sequential_connect_maps_timed_out_connector_to_timeout");
+
+        let resolver = Resolver::with_time_getter(
+            ResolverConfig {
+                happy_eyeballs: false,
+                ..Default::default()
+            },
+            test_time,
+        );
+        let addr: SocketAddr = "198.51.100.42:443".parse().unwrap();
+
+        let result = future::block_on(async {
+            resolver
+                .try_connect_timeout_with_connector(
+                    addr,
+                    Duration::from_secs(1),
+                    |_addr, _timeout_duration, _time_getter| async {
+                        Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "simulated connector timeout",
+                        ))
+                    },
+                )
+                .await
+        });
+
+        crate::assert_with_log!(
+            matches!(result, Err(DnsError::Timeout)),
+            "sequential connect path preserves timeout classification",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_sequential_connect_maps_timed_out_connector_to_timeout");
     }
 
     #[test]
