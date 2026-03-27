@@ -5592,7 +5592,7 @@ fn live_semaphore_cancel_recovery_observation() -> SemaphoreCancelRecoveryObserv
     let cancel_result = poll_once(&mut waiter);
     assert!(
         matches!(cancel_result, Poll::Ready(Err(AcquireError::Cancelled))),
-        "live semaphore differential waiter should cancel after being queued, got {cancel_result:?}"
+        "live semaphore differential waiter should cancel after being queued"
     );
     drop(waiter);
 
