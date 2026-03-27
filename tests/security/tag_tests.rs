@@ -1,6 +1,6 @@
 use crate::common::*;
 use asupersync::security::{AuthKey, AuthenticationTag};
-use asupersync::types::Symbol;
+use asupersync::types::{Symbol, SymbolId, SymbolKind};
 
 fn symbol_with(data: &[u8]) -> Symbol {
     Symbol::new_for_test(1, 0, 0, data)
@@ -87,6 +87,39 @@ fn verify_rejects_different_esi() {
     let ok = tag.verify(&key, &different_esi);
     assert_with_log!(!ok, "different esi should fail", false, ok);
     test_complete!("verify_rejects_different_esi");
+}
+
+#[test]
+fn verify_rejects_different_symbol_kind() {
+    init_test_logging();
+    test_phase!("verify_rejects_different_symbol_kind");
+    let key = AuthKey::from_seed(42);
+    let id = SymbolId::new_for_test(1, 0, 0);
+    let source = Symbol::new(id, vec![1, 2, 3, 4], SymbolKind::Source);
+    let repair = Symbol::new(id, vec![1, 2, 3, 4], SymbolKind::Repair);
+
+    let source_tag = AuthenticationTag::compute(&key, &source);
+    let repair_tag = AuthenticationTag::compute(&key, &repair);
+
+    assert_with_log!(
+        source_tag != repair_tag,
+        "source and repair tags should differ",
+        source_tag,
+        repair_tag
+    );
+    assert_with_log!(
+        !source_tag.verify(&key, &repair),
+        "source tag should fail against repair symbol",
+        false,
+        source_tag.verify(&key, &repair)
+    );
+    assert_with_log!(
+        !repair_tag.verify(&key, &source),
+        "repair tag should fail against source symbol",
+        false,
+        repair_tag.verify(&key, &source)
+    );
+    test_complete!("verify_rejects_different_symbol_kind");
 }
 
 #[test]

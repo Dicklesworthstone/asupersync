@@ -4,7 +4,7 @@
 
 use crate::util::DetRng;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -24,19 +24,14 @@ pub struct AuthKey {
 impl AuthKey {
     /// Creates a new key from a 64-bit seed.
     ///
-    /// This uses a deterministic expansion to generate 32 bytes from the seed.
-    /// Seed 0 is remapped to a fixed non-zero value to keep seed-to-key
-    /// uniqueness while avoiding the xorshift zero-state lockup.
+    /// This uses domain-separated SHA-256 to deterministically expand the seed
+    /// into 32 bytes without depending on `DetRng`'s zero-seed normalization.
     #[must_use]
     pub fn from_seed(seed: u64) -> Self {
-        let seed = if seed == 0 {
-            0x9e37_79b9_7f4a_7c15
-        } else {
-            seed
-        };
-        let mut bytes = [0u8; AUTH_KEY_SIZE];
-        let mut rng = DetRng::new(seed);
-        rng.fill_bytes(&mut bytes);
+        let mut hasher = Sha256::new();
+        hasher.update(b"asupersync::security::AuthKey::from_seed:v1");
+        hasher.update(seed.to_le_bytes());
+        let bytes: [u8; AUTH_KEY_SIZE] = hasher.finalize().into();
         Self { bytes }
     }
 
@@ -104,6 +99,13 @@ mod tests {
         let k0 = AuthKey::from_seed(0);
         let k1 = AuthKey::from_seed(1);
         assert_ne!(k0, k1);
+    }
+
+    #[test]
+    fn test_from_seed_zero_does_not_collide_with_legacy_magic_seed() {
+        let zero = AuthKey::from_seed(0);
+        let legacy_magic = AuthKey::from_seed(0x9e37_79b9_7f4a_7c15);
+        assert_ne!(zero, legacy_magic);
     }
 
     #[test]

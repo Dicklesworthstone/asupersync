@@ -112,6 +112,21 @@ fn zero_seed_produces_nonzero_key() {
 }
 
 #[test]
+fn zero_seed_does_not_collide_with_legacy_magic_seed() {
+    init_test_logging();
+    test_phase!("zero_seed_does_not_collide_with_legacy_magic_seed");
+    let zero = AuthKey::from_seed(0);
+    let legacy_magic = AuthKey::from_seed(0x9e37_79b9_7f4a_7c15);
+    assert_with_log!(
+        zero != legacy_magic,
+        "zero seed should differ from legacy magic remap seed",
+        zero,
+        legacy_magic
+    );
+    test_complete!("zero_seed_does_not_collide_with_legacy_magic_seed");
+}
+
+#[test]
 fn debug_does_not_leak_full_key_material() {
     init_test_logging();
     test_phase!("debug_does_not_leak_full_key_material");

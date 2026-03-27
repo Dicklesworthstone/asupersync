@@ -4,7 +4,7 @@
 //! integrity and authenticity of symbols.
 
 use crate::security::key::{AUTH_KEY_SIZE, AuthKey};
-use crate::types::Symbol;
+use crate::types::{Symbol, SymbolKind};
 use std::fmt;
 
 /// Size of an authentication tag in bytes.
@@ -34,6 +34,12 @@ impl AuthenticationTag {
         for (i, &b) in id_bytes.iter().enumerate() {
             tag[i % TAG_SIZE] ^= b;
         }
+
+        // Mix symbol kind so source and repair symbols do not authenticate interchangeably.
+        tag[TAG_SIZE - 1] ^= match symbol.kind() {
+            SymbolKind::Source => 0x53,
+            SymbolKind::Repair => 0xA7,
+        };
 
         // Mix SBN and ESI
         tag[0] ^= symbol.sbn();
@@ -220,7 +226,7 @@ mod tests {
     /// Invariant: tag differs when symbol kind changes (Source vs Repair)
     /// even if data and position are identical.
     #[test]
-    fn tag_depends_on_symbol_kind_via_id() {
+    fn tag_depends_on_symbol_kind() {
         let key = AuthKey::from_seed(42);
         let data = vec![1, 2, 3];
         let id_source = SymbolId::new_for_test(1, 0, 0);
@@ -230,10 +236,17 @@ mod tests {
         let tag_source = AuthenticationTag::compute(&key, &s_source);
         let tag_repair = AuthenticationTag::compute(&key, &s_repair);
 
-        // These may or may not differ since the tag mixes id, sbn, esi, and data
-        // but does not explicitly mix SymbolKind. This test documents the behavior.
-        // If they happen to be equal, it means SymbolKind is NOT mixed into the tag —
-        // which is a known Phase 0 limitation to document.
-        let _ = (tag_source, tag_repair); // just compute, no assertion on inequality
+        assert_ne!(
+            tag_source, tag_repair,
+            "source and repair symbols with the same id/data must not share a tag"
+        );
+        assert!(
+            !tag_source.verify(&key, &s_repair),
+            "a source tag must not verify against a repair symbol"
+        );
+        assert!(
+            !tag_repair.verify(&key, &s_source),
+            "a repair tag must not verify against a source symbol"
+        );
     }
 }
