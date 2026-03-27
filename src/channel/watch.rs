@@ -1092,16 +1092,16 @@ mod tests {
         init_test("recv_error_display");
         let closed_text = RecvError::Closed.to_string();
         crate::assert_with_log!(
-            closed_text == "watch channel sender was dropped",
+            closed_text == "receiving on a closed watch channel",
             "display",
-            "watch channel sender was dropped",
+            "receiving on a closed watch channel",
             closed_text
         );
         let cancelled_text = RecvError::Cancelled.to_string();
         crate::assert_with_log!(
-            cancelled_text == "watch receive operation cancelled",
+            cancelled_text == "receive operation cancelled",
             "display",
-            "watch receive operation cancelled",
+            "receive operation cancelled",
             cancelled_text
         );
         crate::test_complete!("recv_error_display");
@@ -1190,11 +1190,12 @@ mod tests {
             );
         }
 
+        // ChangedFuture::drop eagerly cleans up the waiter entry from the shared list.
         let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
-            waiter_count == 1,
-            "cancelled waiter slot retained for receiver reuse",
-            1,
+            waiter_count == 0,
+            "cancelled future drop cleans up waiter entry",
+            0,
             waiter_count
         );
 
@@ -1208,13 +1209,23 @@ mod tests {
                 true,
                 repoll.is_pending()
             );
+
+            // While alive, the re-registered waiter is present.
+            let waiter_count = tx.inner.waiters.lock().len();
+            crate::assert_with_log!(
+                waiter_count == 1,
+                "re-poll re-registers waiter",
+                1,
+                waiter_count
+            );
         }
 
+        // After future drop, waiter is cleaned up again.
         let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
-            waiter_count == 1,
-            "re-poll reuses waiter slot without growth",
-            1,
+            waiter_count == 0,
+            "future drop cleans up re-registered waiter",
+            0,
             waiter_count
         );
 
@@ -1383,14 +1394,23 @@ mod tests {
                 let result = Pin::new(&mut future).poll(&mut task_cx);
                 assert!(result.is_pending());
             }
+
+            // While the future is alive, the waiters vec should have exactly 1 entry, not 100.
+            let waiter_count = tx.inner.waiters.lock().len();
+            crate::assert_with_log!(
+                waiter_count == 1,
+                "waiter count after repeated polls (future alive)",
+                1,
+                waiter_count
+            );
         }
 
-        // The waiters vec should have exactly 1 entry, not 100.
+        // ChangedFuture::drop eagerly cleans up the waiter entry.
         let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
-            waiter_count == 1,
-            "waiter count after repeated polls",
-            1,
+            waiter_count == 0,
+            "waiter cleaned up after future drop",
+            0,
             waiter_count
         );
 
@@ -1419,19 +1439,24 @@ mod tests {
         let mut task_cx = Context::from_waker(waker);
 
         // Create and drop futures 50 times without sending.
-        // Stale entries should be pruned on each re-registration.
+        // ChangedFuture::drop eagerly cleans up each waiter entry,
+        // so after the last drop the count is 0.
         for _ in 0..50 {
             let mut future = rx.changed(&cx);
             let result = Pin::new(&mut future).poll(&mut task_cx);
             assert!(result.is_pending());
-            // future dropped here
+            // Verify bounded while alive.
+            let waiter_count = tx.inner.waiters.lock().len();
+            assert!(waiter_count <= 1, "at most 1 waiter while future alive");
+            // future dropped here → waiter entry cleaned up
         }
 
+        // All futures dropped → waiter entries cleaned up.
         let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
-            waiter_count == 1,
-            "stale entries pruned across cancel cycles",
-            1,
+            waiter_count == 0,
+            "all waiter entries cleaned up after future drops",
+            0,
             waiter_count
         );
 
@@ -1451,7 +1476,8 @@ mod tests {
         let waker = Waker::noop();
         let mut task_cx = Context::from_waker(waker);
 
-        // Register rx1 waiter, then drop rx1 without any send.
+        // Register rx1 waiter, then drop future and rx1 without any send.
+        // ChangedFuture::drop eagerly removes the waiter entry.
         {
             let mut future = rx1.changed(&cx);
             let result = Pin::new(&mut future).poll(&mut task_cx);
@@ -1459,18 +1485,27 @@ mod tests {
         }
         drop(rx1);
 
-        // Next registration should prune dropped receiver's stale waiter.
+        // rx2 registers its own waiter — verify it's present while alive.
         {
             let mut future = rx2.changed(&cx);
             let result = Pin::new(&mut future).poll(&mut task_cx);
             assert!(result.is_pending());
+
+            let waiter_count = tx.inner.waiters.lock().len();
+            crate::assert_with_log!(
+                waiter_count == 1,
+                "rx2 waiter registered while future alive",
+                1,
+                waiter_count
+            );
         }
 
+        // After rx2's future drops, waiter is cleaned up.
         let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
-            waiter_count == 1,
-            "dropped receiver waiter pruned",
-            1,
+            waiter_count == 0,
+            "rx2 waiter cleaned up after future drop",
+            0,
             waiter_count
         );
         crate::test_complete!("dropped_receiver_waiter_is_pruned_on_next_registration");
@@ -1488,10 +1523,20 @@ mod tests {
             let mut future = rx.changed(&cx);
             let result = Pin::new(&mut future).poll(&mut task_cx);
             assert!(result.is_pending());
+
+            // Waiter is present while future is alive.
+            let waiter_count = tx.inner.waiters.lock().len();
+            crate::assert_with_log!(waiter_count == 1, "waiter registered", 1, waiter_count);
         }
 
+        // ChangedFuture::drop already cleaned up the waiter entry.
         let waiter_count = tx.inner.waiters.lock().len();
-        crate::assert_with_log!(waiter_count == 1, "waiter registered", 1, waiter_count);
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "waiter cleaned by future drop",
+            0,
+            waiter_count
+        );
 
         drop(rx);
 
