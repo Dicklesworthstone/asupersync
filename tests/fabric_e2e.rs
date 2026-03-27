@@ -15,8 +15,9 @@ use asupersync::messaging::consumer::{
 };
 use asupersync::messaging::control::{ControlBudget, SystemSubjectFamily};
 use asupersync::messaging::fabric::{
-    CellEpoch, CellTemperature, DataCapsule, NodeRole, PlacementPolicy, RepairPolicy,
-    StewardCandidate, StorageClass, SubjectCell, SubjectPattern,
+    CellEpoch, CellTemperature, ControlCapsuleError, DataCapsule, NodeRole, ObservedCellLoad,
+    PlacementPolicy, RebalanceBudget, RebalanceCutEvidence, RebalanceObligationSummary,
+    RepairPolicy, RepairSymbolBinding, StewardCandidate, StorageClass, SubjectCell, SubjectPattern,
 };
 use asupersync::messaging::federation::{
     FederationBridge, FederationRole, GatewayConfig, ReplicationCatchUpAction, ReplicationConfig,
@@ -130,6 +131,22 @@ struct ControlPlaneAdvisoryOutcome {
     steps: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct BrokerlessRebalanceOutcome {
+    next_temperature: String,
+    next_stewards: Vec<String>,
+    drained_stewards: Vec<String>,
+    control_append_sequence: u64,
+    resulting_generation: u64,
+    joint_fence_generation: u64,
+    repair_holder_count: usize,
+    shared_control_shard_id: Option<String>,
+    shared_control_shard_slot: Option<usize>,
+    old_sequencer_fenced: bool,
+    log: Vec<FabricLogEntry>,
+    steps: u64,
+}
+
 static ENDPOINT_NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn test_fabric_cx(slot: u32) -> Cx {
@@ -199,6 +216,19 @@ fn candidate(name: &str, domain: &str) -> StewardCandidate {
         .with_storage_class(StorageClass::Durable)
 }
 
+fn rebalance_candidate(
+    name: &str,
+    domain: &str,
+    storage_class: StorageClass,
+    latency_millis: u32,
+) -> StewardCandidate {
+    StewardCandidate::new(NodeId::new(name), domain)
+        .with_role(NodeRole::Steward)
+        .with_role(NodeRole::RepairWitness)
+        .with_storage_class(storage_class)
+        .with_latency_millis(latency_millis)
+}
+
 fn test_cell() -> SubjectCell {
     SubjectCell::new(
         &SubjectPattern::parse("orders.created").expect("pattern"),
@@ -221,6 +251,63 @@ fn test_cell() -> SubjectCell {
         },
     )
     .expect("cell")
+}
+
+fn brokerless_rebalance_policy() -> PlacementPolicy {
+    PlacementPolicy {
+        cold_stewards: 1,
+        warm_stewards: 3,
+        hot_stewards: 4,
+        candidate_pool_size: 6,
+        rebalance_budget: RebalanceBudget {
+            max_steward_changes: 3,
+        },
+        ..PlacementPolicy::default()
+    }
+}
+
+fn brokerless_rebalance_candidates() -> Vec<StewardCandidate> {
+    vec![
+        rebalance_candidate("node-a", "rack-a", StorageClass::Durable, 5),
+        rebalance_candidate("node-b", "rack-b", StorageClass::Durable, 6),
+        rebalance_candidate("node-c", "rack-c", StorageClass::Standard, 7),
+        rebalance_candidate("node-d", "rack-d", StorageClass::Standard, 8),
+        rebalance_candidate("node-e", "rack-e", StorageClass::Standard, 9),
+        rebalance_candidate("node-f", "rack-f", StorageClass::Standard, 10),
+    ]
+}
+
+fn brokerless_repair_bindings(
+    cell: &SubjectCell,
+    next_stewards: &[NodeId],
+    next_temperature: CellTemperature,
+    candidates: &[StewardCandidate],
+    retention_generation: u64,
+) -> Vec<RepairSymbolBinding> {
+    let witness_target = match next_temperature {
+        CellTemperature::Cold | CellTemperature::Warm => cell.repair_policy.cold_witnesses,
+        CellTemperature::Hot => cell.repair_policy.hot_witnesses,
+    };
+    let required_holders = next_stewards
+        .len()
+        .saturating_add(witness_target)
+        .max(cell.repair_policy.recoverability_target as usize);
+
+    let mut holders = next_stewards.to_vec();
+    for candidate in candidates {
+        if holders.len() >= required_holders {
+            break;
+        }
+        if holders.iter().any(|node| node == &candidate.node_id) || !candidate.can_repair() {
+            continue;
+        }
+        holders.push(candidate.node_id.clone());
+    }
+
+    holders
+        .into_iter()
+        .map(|node_id| RepairSymbolBinding::new(node_id, cell.epoch, retention_generation))
+        .collect()
 }
 
 fn service_admission(
@@ -1199,6 +1286,191 @@ fn run_control_plane_advisory_flow(seed: u64) -> ControlPlaneAdvisoryOutcome {
     summary
 }
 
+fn run_brokerless_rebalance(seed: u64) -> BrokerlessRebalanceOutcome {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<BrokerlessRebalanceOutcome>));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let policy = brokerless_rebalance_policy();
+                let candidates = brokerless_rebalance_candidates();
+                let repair_policy = RepairPolicy {
+                    recoverability_target: 3,
+                    cold_witnesses: 1,
+                    hot_witnesses: 2,
+                };
+                let cell = SubjectCell::new(
+                    &SubjectPattern::parse("orders.created").expect("pattern"),
+                    CellEpoch::new(11, 2),
+                    &candidates,
+                    &policy,
+                    repair_policy,
+                    DataCapsule::default(),
+                )
+                .expect("subject cell");
+                let observed_load = ObservedCellLoad::new(256);
+
+                yield_now().await;
+                let plan = policy
+                    .plan_rebalance(
+                        &cell.subject_partition,
+                        &candidates,
+                        &cell.steward_set,
+                        cell.data_capsule.temperature,
+                        observed_load,
+                    )
+                    .expect("rebalance plan");
+                push_log(
+                    &log,
+                    &seq,
+                    "rebalance",
+                    "plan",
+                    format!(
+                        "temperature={:?} stewards={}",
+                        plan.next_temperature,
+                        plan.next_stewards.len()
+                    ),
+                );
+
+                let next_sequencer = plan
+                    .added_stewards
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| plan.next_stewards[0].clone());
+                let retention_generation = 7;
+                let repair_symbols = brokerless_repair_bindings(
+                    &cell,
+                    &plan.next_stewards,
+                    plan.next_temperature,
+                    &candidates,
+                    retention_generation,
+                );
+                let cut_evidence = RebalanceCutEvidence {
+                    next_sequencer: next_sequencer.clone(),
+                    retention_generation,
+                    obligation_summary: RebalanceObligationSummary {
+                        publish_obligations_below_cut: 0,
+                        active_consumer_leases: 2,
+                        transferred_consumer_leases: 2,
+                        ambiguous_consumer_lease_owners: 0,
+                        active_reply_rights: 1,
+                        reissued_reply_rights: 1,
+                        dangling_reply_rights: 0,
+                    },
+                    repair_symbols,
+                };
+                push_log(
+                    &log,
+                    &seq,
+                    "rebalance",
+                    "cut_evidence",
+                    format!("repair_holders={}", cut_evidence.repair_symbols.len()),
+                );
+
+                yield_now().await;
+                let original_lease = cell
+                    .control_capsule
+                    .active_sequencer_lease()
+                    .expect("active sequencer lease");
+                let mut certified = cell
+                    .certify_self_rebalance(&policy, &candidates, observed_load, cut_evidence)
+                    .expect("certified rebalance");
+                push_log(
+                    &log,
+                    &seq,
+                    "rebalance",
+                    "certify",
+                    format!(
+                        "epoch={}:{} fence={}",
+                        certified.resulting_cell.epoch.membership_epoch,
+                        certified.resulting_cell.epoch.generation,
+                        certified.joint_config.fence_generation
+                    ),
+                );
+
+                let old_sequencer_fenced = matches!(
+                    certified
+                        .resulting_cell
+                        .control_capsule
+                        .authoritative_append(&original_lease),
+                    Err(ControlCapsuleError::StaleSequencerLease {
+                        current_holder,
+                        current_fence_generation,
+                        ..
+                    }) if current_holder == next_sequencer
+                        && current_fence_generation == certified.resulting_cell.epoch.generation
+                );
+                push_log(
+                    &log,
+                    &seq,
+                    "rebalance",
+                    "fence_old_sequencer",
+                    format!("fenced={old_sequencer_fenced}"),
+                );
+
+                let shared_control_shard_id = certified
+                    .resulting_cell
+                    .control_capsule
+                    .shared_control_shard
+                    .as_ref()
+                    .map(|shard| shard.shard_id.clone());
+                let shared_control_shard_slot = certified
+                    .resulting_cell
+                    .control_capsule
+                    .shared_control_shard
+                    .as_ref()
+                    .map(|shard| shard.slot_index);
+
+                *summary.lock().expect("summary lock") = Some(BrokerlessRebalanceOutcome {
+                    next_temperature: format!("{:?}", certified.plan.next_temperature),
+                    next_stewards: certified
+                        .plan
+                        .next_stewards
+                        .iter()
+                        .map(|node| node.as_str().to_owned())
+                        .collect(),
+                    drained_stewards: certified
+                        .drained_stewards
+                        .iter()
+                        .map(|node| node.as_str().to_owned())
+                        .collect(),
+                    control_append_sequence: certified.control_append.identity.sequence,
+                    resulting_generation: certified.resulting_cell.epoch.generation,
+                    joint_fence_generation: certified.joint_config.fence_generation,
+                    repair_holder_count: certified.cut_evidence.repair_symbols.len(),
+                    shared_control_shard_id,
+                    shared_control_shard_slot,
+                    old_sequencer_fenced,
+                    log: Vec::new(),
+                    steps: 0,
+                });
+            })
+            .expect("create brokerless rebalance task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    assert_runtime_clean(&mut runtime, "brokerless rebalance e2e");
+
+    let mut summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("brokerless rebalance summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    summary.log = log_entries;
+    summary.steps = runtime.steps();
+    summary
+}
+
 fn log_scenario_summary<T: Serialize>(scenario: &str, summary: &T) {
     tracing::info!(
         scenario = scenario,
@@ -1471,6 +1743,65 @@ fn control_plane_advisory_flow_subtest(seed: u64) -> TestSummary {
     harness.finish()
 }
 
+fn brokerless_rebalance_subtest(seed: u64) -> TestSummary {
+    let mut harness = TestHarness::with_context(
+        "fabric_e2e_brokerless_rebalance",
+        test_context_with_seed("fabric-e2e-brokerless-rebalance", seed),
+    );
+    harness.enter_phase("run");
+    let summary = run_brokerless_rebalance(seed);
+    log_scenario_summary("brokerless_rebalance", &summary);
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    harness.assert_eq(
+        "next temperature",
+        &"Warm".to_string(),
+        &summary.next_temperature,
+    );
+    harness.assert_eq("next steward count", &3_usize, &summary.next_stewards.len());
+    harness.assert_eq(
+        "control append sequence",
+        &1_u64,
+        &summary.control_append_sequence,
+    );
+    harness.assert_eq(
+        "resulting generation",
+        &3_u64,
+        &summary.resulting_generation,
+    );
+    harness.assert_eq(
+        "joint fence generation",
+        &summary.resulting_generation,
+        &summary.joint_fence_generation,
+    );
+    harness.assert_eq(
+        "repair holder count",
+        &4_usize,
+        &summary.repair_holder_count,
+    );
+    harness.assert_true(
+        "shared control shard assigned",
+        summary.shared_control_shard_id.is_some(),
+    );
+    harness.assert_true(
+        "shared control shard slot captured",
+        summary.shared_control_shard_slot.is_some(),
+    );
+    harness.assert_true(
+        "old sequencer lease is fenced",
+        summary.old_sequencer_fenced,
+    );
+    harness.assert_true("timeline captured", summary.log.len() >= 4);
+    harness.collect_artifact(
+        "brokerless_rebalance_summary.json",
+        &serde_json::to_string_pretty(&summary).expect("serialize brokerless rebalance summary"),
+    );
+    harness.exit_phase();
+
+    harness.finish()
+}
+
 #[test]
 fn fabric_e2e_aggregated_report_covers_public_surface_scenarios() {
     init_test_logging();
@@ -1482,13 +1813,14 @@ fn fabric_e2e_aggregated_report_covers_public_surface_scenarios() {
     aggregator.add(consumer_flow_subtest(0xFABC_0004));
     aggregator.add(mirror_source_drain_subtest(0xFABC_0005));
     aggregator.add(control_plane_advisory_flow_subtest(0xFABC_0006));
+    aggregator.add(brokerless_rebalance_subtest(0xFABC_0007));
 
     let report = aggregator.report();
-    assert_eq!(report.total_tests, 6);
-    assert_eq!(report.passed_tests, 6);
+    assert_eq!(report.total_tests, 7);
+    assert_eq!(report.passed_tests, 7);
     assert_eq!(report.failed_tests, 0);
-    assert_eq!(report.coverage_matrix.len(), 6);
-    assert!(report.total_assertions >= 30);
+    assert_eq!(report.coverage_matrix.len(), 7);
+    assert!(report.total_assertions >= 39);
     assert!(
         report
             .coverage_matrix
@@ -1529,4 +1861,8 @@ fn fabric_e2e_fixed_seed_scenarios_are_deterministic() {
     let first_advisory = run_control_plane_advisory_flow(0xFADE_1006);
     let second_advisory = run_control_plane_advisory_flow(0xFADE_1006);
     assert_eq!(first_advisory, second_advisory);
+
+    let first_rebalance = run_brokerless_rebalance(0xFADE_1007);
+    let second_rebalance = run_brokerless_rebalance(0xFADE_1007);
+    assert_eq!(first_rebalance, second_rebalance);
 }
