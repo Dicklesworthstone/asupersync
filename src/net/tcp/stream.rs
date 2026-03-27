@@ -306,7 +306,7 @@ impl TcpStream {
                     last_err = Some(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "tcp connect timeout",
-                    ))
+                    ));
                 }
             }
         }
