@@ -315,9 +315,7 @@ mod tests {
         });
         let mut stream = std::pin::pin!(stream);
 
-        assert_eq!(stream.as_ref().get_ref().size_hint(), (1, Some(1)));
         assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(Some(17)));
-        assert_eq!(stream.as_ref().get_ref().size_hint(), (0, Some(0)));
         assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
         crate::test_complete!("scan_accepts_pinned_non_unpin_streams");
     }

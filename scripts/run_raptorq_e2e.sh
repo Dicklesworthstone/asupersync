@@ -352,6 +352,7 @@ validate_dual_policy_probe_contract() {
             (.command_bundle | type == "string" and test("^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark -- gf256_primitives)")) and
             (.decision_artifact_id | type == "string" and length > 0) and
             (.decision_role | type == "string" and length > 0) and
+            (.decision_evidence_status | type == "string" and length > 0) and
             (.selected_candidate_summary | type == "string" and length > 0) and
             (.rejected_candidate_set_summary | type == "string" and length > 0) and
             (.selected_mul_delta_vs_baseline_pct | type == "string" and length > 0) and
@@ -395,6 +396,7 @@ validate_dual_policy_probe_contract() {
                     .command_bundle == "rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives" and
                     .decision_artifact_id == "manual_env_override_unbacked" and
                     .decision_role == "runtime_override_not_canonical_profile_selection" and
+                    .decision_evidence_status == "runtime-override-unbacked" and
                     .replay_pointer == "replay:rq-e-gf256-profile-pack-env-override-v1" and
                     (
                         .mode != "Auto" or
@@ -412,6 +414,7 @@ validate_dual_policy_probe_contract() {
                     .command_bundle == "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives" and
                     .decision_artifact_id != "manual_env_override_unbacked" and
                     .decision_role != "runtime_override_not_canonical_profile_selection" and
+                    .decision_evidence_status != "runtime-override-unbacked" and
                     .replay_pointer != "replay:rq-e-gf256-profile-pack-env-override-v1"
              end) and
             (if .addmul_decision == "Fused"
