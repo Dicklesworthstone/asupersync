@@ -900,7 +900,7 @@ impl ConformanceMonitor {
         role: &RoleName,
         message: Option<&MessageType>,
         label: Option<&Label>,
-    ) -> Result<ConformanceCheckRecord, ConformanceViolation> {
+    ) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
         self.observe_at_inner(role, message, label, None)
     }
 
@@ -911,7 +911,7 @@ impl ConformanceMonitor {
         message: Option<&MessageType>,
         label: Option<&Label>,
         now: Time,
-    ) -> Result<ConformanceCheckRecord, ConformanceViolation> {
+    ) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
         self.observe_at_inner(role, message, label, Some(now))
     }
 
@@ -922,7 +922,7 @@ impl ConformanceMonitor {
         role: &RoleName,
         message: Option<&MessageType>,
         label: Option<&Label>,
-    ) -> Result<ConformanceCheckRecord, ConformanceViolation> {
+    ) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
         let now = cx.now();
         match self.observe_at(role, message, label, now) {
             Ok(record) => {
@@ -937,7 +937,7 @@ impl ConformanceMonitor {
                 Ok(record)
             }
             Err(violation) => {
-                let path = violation_path(&violation);
+                let path = violation_path(violation.as_ref());
                 trace_conformance_check(
                     cx,
                     &self.contract_name,
@@ -952,7 +952,7 @@ impl ConformanceMonitor {
     }
 
     /// Check whether any role timed out by `now`.
-    pub fn check_timeout(&self, now: Time) -> Result<(), ConformanceViolation> {
+    pub fn check_timeout(&self, now: Time) -> Result<(), Box<ConformanceViolation>> {
         for (role, state) in &self.roles {
             if state.is_complete() {
                 continue;
@@ -963,13 +963,13 @@ impl ConformanceMonitor {
             let elapsed_nanos = now.duration_since(state.entered_at);
             let timeout_nanos = duration_to_nanos(timeout);
             if elapsed_nanos > timeout_nanos {
-                return Err(ConformanceViolation::Timeout {
+                return Err(Box::new(ConformanceViolation::Timeout {
                     contract_name: self.contract_name.clone(),
                     role: role.clone(),
                     expected: state.current.expectation(),
                     elapsed: Duration::from_nanos(elapsed_nanos),
                     evidence: Box::new(state.current.violation_evidence(&self.contract_name, role)),
-                });
+                }));
             }
         }
         Ok(())
@@ -981,23 +981,22 @@ impl ConformanceMonitor {
         message: Option<&MessageType>,
         label: Option<&Label>,
         now: Option<Time>,
-    ) -> Result<ConformanceCheckRecord, ConformanceViolation> {
+    ) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
         let contract_name = self.contract_name.clone();
         let observed = ConformanceObserved::from_inputs(message, label);
-        let role_state =
-            self.roles
-                .get_mut(role)
-                .ok_or_else(|| ConformanceViolation::UnknownRole {
-                    contract_name: contract_name.clone(),
-                    role: role.clone(),
-                })?;
+        let role_state = self.roles.get_mut(role).ok_or_else(|| {
+            Box::new(ConformanceViolation::UnknownRole {
+                contract_name: contract_name.clone(),
+                role: role.clone(),
+            })
+        })?;
 
         if role_state.is_complete() {
-            return Err(ConformanceViolation::AlreadyComplete {
+            return Err(Box::new(ConformanceViolation::AlreadyComplete {
                 contract_name,
                 role: role.clone(),
                 observed,
-            });
+            }));
         }
 
         if let Some(now) = now {
@@ -1005,7 +1004,7 @@ impl ConformanceMonitor {
                 let elapsed_nanos = now.duration_since(role_state.entered_at);
                 let timeout_nanos = duration_to_nanos(timeout);
                 if elapsed_nanos > timeout_nanos {
-                    return Err(ConformanceViolation::Timeout {
+                    return Err(Box::new(ConformanceViolation::Timeout {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected: role_state.current.expectation(),
@@ -1013,7 +1012,7 @@ impl ConformanceMonitor {
                         evidence: Box::new(
                             role_state.current.violation_evidence(&contract_name, role),
                         ),
-                    });
+                    }));
                 }
             }
         }
@@ -1026,7 +1025,7 @@ impl ConformanceMonitor {
                 next,
             } => {
                 if label.is_some() || message != Some(&expected_message) {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected: ConformanceExpectation::Send {
@@ -1038,7 +1037,7 @@ impl ConformanceMonitor {
                             role,
                             path,
                         )),
-                    });
+                    }));
                 }
                 let record = ConformanceCheckRecord {
                     role: role.clone(),
@@ -1063,7 +1062,7 @@ impl ConformanceMonitor {
                 next,
             } => {
                 if label.is_some() || message != Some(&expected_message) {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected: ConformanceExpectation::Receive {
@@ -1075,7 +1074,7 @@ impl ConformanceMonitor {
                             role,
                             path,
                         )),
-                    });
+                    }));
                 }
                 let record = ConformanceCheckRecord {
                     role: role.clone(),
@@ -1098,7 +1097,7 @@ impl ConformanceMonitor {
                     labels: branches.iter().map(|branch| branch.label.clone()).collect(),
                 };
                 let Some(observed_label) = label else {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected,
@@ -1108,10 +1107,10 @@ impl ConformanceMonitor {
                             role,
                             &branches,
                         )),
-                    });
+                    }));
                 };
                 if message.is_some() {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected,
@@ -1121,14 +1120,14 @@ impl ConformanceMonitor {
                             role,
                             &branches,
                         )),
-                    });
+                    }));
                 }
                 let Some(branch) = branches
                     .iter()
                     .find(|branch| &branch.label == observed_label)
                     .cloned()
                 else {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected,
@@ -1138,7 +1137,7 @@ impl ConformanceMonitor {
                             role,
                             &branches,
                         )),
-                    });
+                    }));
                 };
                 let record = ConformanceCheckRecord {
                     role: role.clone(),
@@ -1164,7 +1163,7 @@ impl ConformanceMonitor {
                     labels: branches.iter().map(|branch| branch.label.clone()).collect(),
                 };
                 let Some(observed_label) = label else {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected,
@@ -1174,10 +1173,10 @@ impl ConformanceMonitor {
                             role,
                             &branches,
                         )),
-                    });
+                    }));
                 };
                 if message.is_some() {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected,
@@ -1187,14 +1186,14 @@ impl ConformanceMonitor {
                             role,
                             &branches,
                         )),
-                    });
+                    }));
                 }
                 let Some(branch) = branches
                     .iter()
                     .find(|branch| &branch.label == observed_label)
                     .cloned()
                 else {
-                    return Err(ConformanceViolation::UnexpectedObservation {
+                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
                         contract_name: contract_name.clone(),
                         role: role.clone(),
                         expected,
@@ -1204,7 +1203,7 @@ impl ConformanceMonitor {
                             role,
                             &branches,
                         )),
-                    });
+                    }));
                 };
                 let record = ConformanceCheckRecord {
                     role: role.clone(),
@@ -1279,11 +1278,11 @@ impl ConformanceOracle {
         role: &RoleName,
         message: Option<&MessageType>,
         label: Option<&Label>,
-    ) -> Result<ConformanceCheckRecord, ConformanceViolation> {
+    ) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
         match self.monitor.observe(role, message, label) {
             Ok(record) => Ok(record),
             Err(violation) => {
-                self.violations.push(violation.clone());
+                self.violations.push((*violation).clone());
                 Err(violation)
             }
         }
@@ -1296,11 +1295,11 @@ impl ConformanceOracle {
         message: Option<&MessageType>,
         label: Option<&Label>,
         now: Time,
-    ) -> Result<ConformanceCheckRecord, ConformanceViolation> {
+    ) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
         match self.monitor.observe_at(role, message, label, now) {
             Ok(record) => Ok(record),
             Err(violation) => {
-                self.violations.push(violation.clone());
+                self.violations.push((*violation).clone());
                 Err(violation)
             }
         }
@@ -1313,29 +1312,29 @@ impl ConformanceOracle {
         role: &RoleName,
         message: Option<&MessageType>,
         label: Option<&Label>,
-    ) -> Result<ConformanceCheckRecord, ConformanceViolation> {
+    ) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
         match self.monitor.observe_with_cx(cx, role, message, label) {
             Ok(record) => Ok(record),
             Err(violation) => {
-                self.violations.push(violation.clone());
+                self.violations.push((*violation).clone());
                 Err(violation)
             }
         }
     }
 
     /// Check for timeout violations at a specific logical time.
-    pub fn check_timeout(&mut self, now: Time) -> Result<(), ConformanceViolation> {
+    pub fn check_timeout(&mut self, now: Time) -> Result<(), Box<ConformanceViolation>> {
         match self.monitor.check_timeout(now) {
             Ok(()) => Ok(()),
             Err(violation) => {
-                self.violations.push(violation.clone());
+                self.violations.push((*violation).clone());
                 Err(violation)
             }
         }
     }
 
     /// Check the monitor against the current `LabRuntime` virtual time.
-    pub fn check_lab(&mut self, runtime: &LabRuntime) -> Result<(), ConformanceViolation> {
+    pub fn check_lab(&mut self, runtime: &LabRuntime) -> Result<(), Box<ConformanceViolation>> {
         self.check_timeout(runtime.now())
     }
 }
@@ -1552,16 +1551,19 @@ mod tests {
             .observe(&caller, None, Some(&Label::from("queued")))
             .expect_err("unexpected label should fail");
         assert!(
-            matches!(err, ConformanceViolation::UnexpectedObservation { .. }),
+            matches!(
+                err.as_ref(),
+                ConformanceViolation::UnexpectedObservation { .. }
+            ),
             "unexpected violation: {err:?}"
         );
         if let ConformanceViolation::UnexpectedObservation {
             expected, evidence, ..
-        } = err
+        } = err.as_ref()
         {
             assert_eq!(
                 expected,
-                ConformanceExpectation::ObserveBranch {
+                &ConformanceExpectation::ObserveBranch {
                     labels: vec![Label::from("granted"), Label::from("denied")],
                 }
             );
@@ -1594,7 +1596,7 @@ mod tests {
             .check_timeout(Time::from_secs(2))
             .expect_err("server receive should time out after 1s default");
         assert!(
-            matches!(err, ConformanceViolation::Timeout { .. }),
+            matches!(err.as_ref(), ConformanceViolation::Timeout { .. }),
             "unexpected violation: {err:?}"
         );
         if let ConformanceViolation::Timeout {
@@ -1602,12 +1604,12 @@ mod tests {
             expected,
             evidence,
             ..
-        } = err
+        } = err.as_ref()
         {
-            assert_eq!(role, server);
+            assert_eq!(role, &server);
             assert_eq!(
                 expected,
-                ConformanceExpectation::Receive { message: request }
+                &ConformanceExpectation::Receive { message: request }
             );
             assert_eq!(evidence.path, Some(path(&["send:get_user"])));
             assert_eq!(evidence.timeout, Some(Duration::from_secs(1)));
@@ -1626,10 +1628,10 @@ mod tests {
             .check_timeout(Time::from_secs(2))
             .expect_err("initial send should time out");
         assert!(
-            matches!(err, ConformanceViolation::Timeout { .. }),
+            matches!(err.as_ref(), ConformanceViolation::Timeout { .. }),
             "unexpected violation: {err:?}"
         );
-        if let ConformanceViolation::Timeout { evidence, .. } = err {
+        if let ConformanceViolation::Timeout { evidence, .. } = err.as_ref() {
             assert_eq!(evidence.path, Some(path(&["send:get_user"])));
             assert!(
                 evidence
@@ -1654,7 +1656,7 @@ mod tests {
         let err = oracle
             .check_lab(&runtime)
             .expect_err("oracle should report timeout");
-        assert!(matches!(err, ConformanceViolation::Timeout { .. }));
+        assert!(matches!(err.as_ref(), ConformanceViolation::Timeout { .. }));
         assert_eq!(oracle.violations().len(), 1);
 
         crate::test_complete!("lab_runtime_oracle_reports_timeout");
