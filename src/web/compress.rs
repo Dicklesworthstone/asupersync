@@ -49,6 +49,7 @@ impl Default for CompressionPolicy {
     fn default() -> Self {
         Self {
             supported_encodings: vec![
+                ContentEncoding::Brotli,
                 ContentEncoding::Gzip,
                 ContentEncoding::Deflate,
                 ContentEncoding::Identity,
@@ -186,10 +187,9 @@ fn content_encoding_available(encoding: ContentEncoding) -> bool {
     match encoding {
         ContentEncoding::Identity => true,
         #[cfg(feature = "compression")]
-        ContentEncoding::Gzip | ContentEncoding::Deflate => true,
+        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => true,
         #[cfg(not(feature = "compression"))]
-        ContentEncoding::Gzip | ContentEncoding::Deflate => false,
-        ContentEncoding::Brotli => false,
+        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => false,
     }
 }
 
@@ -456,6 +456,16 @@ mod tests {
 
     #[cfg(feature = "compression")]
     #[test]
+    fn brotli_preferred_over_gzip_by_default() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("br, gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.headers.get("content-encoding").unwrap(), "br");
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
     fn respects_client_quality_preference() {
         let policy = CompressionPolicy::default().with_min_body_size(0);
         let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
@@ -489,6 +499,29 @@ mod tests {
 
     #[cfg(feature = "compression")]
     #[test]
+    fn brotli_roundtrip_body_integrity() {
+        use crate::http::compress::BrotliDecompressor;
+        use crate::http::compress::Decompressor;
+
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("br");
+        let resp = mw.call(req);
+
+        let mut dec = BrotliDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&resp.body, &mut decompressed).unwrap();
+        dec.finish(&mut decompressed).unwrap();
+        let expected = "Hello, World! ".repeat(100);
+        assert_eq!(
+            String::from_utf8(decompressed).unwrap(),
+            expected,
+            "decompressed body should match original"
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
     fn min_body_size_threshold() {
         let policy = CompressionPolicy::default().with_min_body_size(10_000);
         let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
@@ -510,7 +543,8 @@ mod tests {
     fn compression_policy_default() {
         let policy = CompressionPolicy::default();
         assert_eq!(policy.min_body_size, 256);
-        assert_eq!(policy.supported_encodings.len(), 3);
+        assert_eq!(policy.supported_encodings.len(), 4);
+        assert_eq!(policy.supported_encodings[0], ContentEncoding::Brotli);
     }
 
     /// Regression: compression must not clobber a pre-existing Vary header

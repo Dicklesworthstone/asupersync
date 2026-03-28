@@ -282,6 +282,15 @@ impl Decompressor for IdentityDecompressor {
     }
 }
 
+#[cfg(feature = "compression")]
+const BROTLI_BUFFER_SIZE: usize = 4096;
+
+#[cfg(feature = "compression")]
+const BROTLI_DEFAULT_QUALITY: u32 = 5;
+
+#[cfg(feature = "compression")]
+const BROTLI_DEFAULT_LGWIN: u32 = 22;
+
 // ─── Gzip Compressor ────────────────────────────────────────────────────────
 
 /// Gzip compressor using the flate2 (miniz_oxide) backend.
@@ -333,10 +342,10 @@ impl Compressor for GzipCompressor {
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
         if self.finished {
             return Ok(());
         }
-        use io::Write;
         self.encoder.flush()?;
         // Take the inner buffer, reset encoder with a new empty vec.
         let inner = std::mem::replace(
@@ -463,10 +472,10 @@ impl Compressor for DeflateCompressor {
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
         if self.finished {
             return Ok(());
         }
-        use io::Write;
         self.encoder.flush()?;
         let inner = std::mem::replace(
             &mut self.encoder,
@@ -539,12 +548,152 @@ impl Decompressor for DeflateDecompressor {
     }
 }
 
+// ─── Brotli Compressor ──────────────────────────────────────────────────────
+
+/// Brotli compressor using the `brotli` crate's streaming writer.
+///
+/// Uses a balanced default quality tuned for HTTP response bodies rather than
+/// maximum offline compression ratio.
+#[cfg(feature = "compression")]
+pub struct BrotliCompressor {
+    encoder: brotli::CompressorWriter<Vec<u8>>,
+    finished: bool,
+}
+
+#[cfg(feature = "compression")]
+impl BrotliCompressor {
+    /// Create a new Brotli compressor with balanced HTTP-oriented defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_params(BROTLI_DEFAULT_QUALITY, BROTLI_DEFAULT_LGWIN)
+    }
+
+    /// Create a new Brotli compressor with explicit quality and window.
+    #[must_use]
+    pub fn with_params(quality: u32, lgwin: u32) -> Self {
+        Self {
+            encoder: brotli::CompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE, quality, lgwin),
+            finished: false,
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Default for BrotliCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Compressor for BrotliCompressor {
+    fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        self.encoder.write_all(input)?;
+        self.encoder.flush()?;
+        let buf = self.encoder.get_mut();
+        if !buf.is_empty() {
+            output.extend_from_slice(buf);
+            buf.clear();
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        if self.finished {
+            return Ok(());
+        }
+        self.encoder.flush()?;
+        let finished = std::mem::replace(
+            &mut self.encoder,
+            brotli::CompressorWriter::new(
+                Vec::new(),
+                BROTLI_BUFFER_SIZE,
+                BROTLI_DEFAULT_QUALITY,
+                BROTLI_DEFAULT_LGWIN,
+            ),
+        )
+        .into_inner();
+        output.extend_from_slice(&finished);
+        self.finished = true;
+        Ok(())
+    }
+
+    fn encoding(&self) -> ContentEncoding {
+        ContentEncoding::Brotli
+    }
+}
+
+/// Brotli decompressor using the `brotli` crate's streaming writer.
+#[cfg(feature = "compression")]
+pub struct BrotliDecompressor {
+    max_size: Option<usize>,
+    total: usize,
+    decoder: brotli::DecompressorWriter<Vec<u8>>,
+    finished: bool,
+}
+
+#[cfg(feature = "compression")]
+impl BrotliDecompressor {
+    /// Create a new Brotli decompressor with an optional size limit.
+    #[must_use]
+    pub fn new(max_size: Option<usize>) -> Self {
+        Self {
+            max_size,
+            total: 0,
+            decoder: brotli::DecompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE),
+            finished: false,
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Decompressor for BrotliDecompressor {
+    fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        if let Some(max) = self.max_size {
+            let remaining = max
+                .saturating_sub(self.total)
+                .saturating_add(BROTLI_BUFFER_SIZE);
+            let buf = self.decoder.get_mut();
+            if buf.capacity() > remaining {
+                buf.shrink_to(remaining);
+            }
+        }
+        self.decoder.write_all(input)?;
+        self.decoder.flush()?;
+        let buf = self.decoder.get_mut();
+        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+        output.extend_from_slice(buf);
+        buf.clear();
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        if self.finished {
+            return Ok(());
+        }
+        self.decoder.flush()?;
+        self.decoder.close()?;
+        let buf = std::mem::take(self.decoder.get_mut());
+        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+        output.extend_from_slice(&buf);
+        self.finished = true;
+        Ok(())
+    }
+
+    fn encoding(&self) -> ContentEncoding {
+        ContentEncoding::Brotli
+    }
+}
+
 // ─── Compressor factory ─────────────────────────────────────────────────────
 
 /// Create a compressor for the given encoding.
 ///
-/// Returns `None` for unsupported encodings (Brotli requires a separate
-/// feature flag that is not yet implemented).
+/// Returns `None` for encodings that are unavailable in the current build.
 #[must_use]
 pub fn make_compressor(encoding: ContentEncoding) -> Option<Box<dyn Compressor>> {
     match encoding {
@@ -553,9 +702,10 @@ pub fn make_compressor(encoding: ContentEncoding) -> Option<Box<dyn Compressor>>
         ContentEncoding::Gzip => Some(Box::new(GzipCompressor::new())),
         #[cfg(feature = "compression")]
         ContentEncoding::Deflate => Some(Box::new(DeflateCompressor::new())),
+        #[cfg(feature = "compression")]
+        ContentEncoding::Brotli => Some(Box::new(BrotliCompressor::new())),
         #[cfg(not(feature = "compression"))]
-        ContentEncoding::Gzip | ContentEncoding::Deflate => None,
-        ContentEncoding::Brotli => None,
+        ContentEncoding::Gzip | ContentEncoding::Deflate | ContentEncoding::Brotli => None,
     }
 }
 
@@ -1027,6 +1177,15 @@ mod tests {
         assert_eq!(comp.unwrap().encoding(), ContentEncoding::Identity);
     }
 
+    #[cfg(feature = "compression")]
+    #[test]
+    fn make_compressor_brotli() {
+        let comp = make_compressor(ContentEncoding::Brotli);
+        assert!(comp.is_some());
+        assert_eq!(comp.unwrap().encoding(), ContentEncoding::Brotli);
+    }
+
+    #[cfg(not(feature = "compression"))]
     #[test]
     fn make_compressor_brotli_unsupported() {
         let comp = make_compressor(ContentEncoding::Brotli);
@@ -1320,6 +1479,138 @@ mod tests {
     #[test]
     fn deflate_double_finish_is_idempotent() {
         let mut comp = DeflateCompressor::new();
+        let mut out = Vec::new();
+        comp.compress(b"hello", &mut out).unwrap();
+        comp.finish(&mut out).unwrap();
+        let len_after_first = out.len();
+        comp.finish(&mut out).unwrap();
+        assert_eq!(
+            out.len(),
+            len_after_first,
+            "second finish must not append extra bytes"
+        );
+    }
+
+    // ====================================================================
+    // Brotli compressor/decompressor tests
+    // ====================================================================
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_decompressor_state_across_chunks() {
+        let input = b"Hello, World! Here is some data to compress and decompress in chunks.";
+        let mut compressor = BrotliCompressor::new();
+        let mut compressed = Vec::new();
+        compressor.compress(input, &mut compressed).unwrap();
+        compressor.finish(&mut compressed).unwrap();
+
+        let mut decompressor = BrotliDecompressor::new(None);
+        let mut decompressed = Vec::new();
+
+        for chunk in compressed.chunks(5) {
+            decompressor.decompress(chunk, &mut decompressed).unwrap();
+        }
+        decompressor.finish(&mut decompressed).unwrap();
+
+        assert_eq!(decompressed, input);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_compress_decompress_roundtrip() {
+        let input = b"Hello, World! This is a test of brotli compression.";
+        let mut comp = BrotliCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        assert!(!compressed.is_empty());
+
+        let mut dec = BrotliDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&compressed, &mut decompressed).unwrap();
+        dec.finish(&mut decompressed).unwrap();
+        assert_eq!(&decompressed, input);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_empty_input() {
+        let mut comp = BrotliCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(b"", &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = BrotliDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&compressed, &mut decompressed).unwrap();
+        dec.finish(&mut decompressed).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_compressor_default() {
+        let comp = BrotliCompressor::default();
+        assert_eq!(comp.encoding(), ContentEncoding::Brotli);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_decompressor_size_limit() {
+        let input = b"Hello, World! This is a test of brotli compression.";
+        let mut comp = BrotliCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = BrotliDecompressor::new(Some(10));
+        let mut decompressed = Vec::new();
+        let result = dec.decompress(&compressed, &mut decompressed);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_decompressor_overflow_is_rejected() {
+        let mut comp = BrotliCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(b"x", &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = BrotliDecompressor {
+            max_size: None,
+            total: usize::MAX,
+            decoder: brotli::DecompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE),
+            finished: false,
+        };
+        let mut decompressed = Vec::new();
+        let result = dec.decompress(&compressed, &mut decompressed);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(decompressed.is_empty());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_compresses_repetitive_data() {
+        let input: Vec<u8> = "cccc".repeat(1000).into_bytes();
+        let mut comp = BrotliCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(&input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+        assert!(
+            compressed.len() < input.len() / 2,
+            "brotli should compress repetitive data: {} -> {}",
+            input.len(),
+            compressed.len()
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn brotli_double_finish_is_idempotent() {
+        let mut comp = BrotliCompressor::new();
         let mut out = Vec::new();
         comp.compress(b"hello", &mut out).unwrap();
         comp.finish(&mut out).unwrap();

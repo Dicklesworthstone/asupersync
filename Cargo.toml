@@ -97,8 +97,8 @@ http3 = ["quic"]
 # `asupersync-tokio-compat` crate, not in the core feature graph.
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
-# Enable HTTP response compression (gzip, deflate) via flate2.
-compression = ["dep:flate2"]
+# Enable HTTP response compression (gzip, deflate, Brotli).
+compression = ["dep:flate2", "dep:brotli"]
 # Enable unsafe AVX2/NEON intrinsics for ~8x GF(256) throughput in RaptorQ.
 # When disabled, the safe portable SIMD fallback (std::simd) still provides ~2-3x
 # over scalar table lookups. Disable to keep the raptorq module free of unsafe code.
@@ -198,6 +198,8 @@ hashbrown = "0.15"
 futures-lite = "2.6"
 # Optional gzip/deflate compression via pure-Rust miniz_oxide backend.
 flate2 = { version = "1.1", optional = true }
+# Optional Brotli compression for HTTP response bodies.
+brotli = { version = "8.0", optional = true }
 crossbeam-deque = "0.8.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]

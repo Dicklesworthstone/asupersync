@@ -50,7 +50,7 @@ use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy};
 use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
-use crate::http::compress::{ContentEncoding, negotiate_encoding};
+use crate::http::compress::{ContentEncoding, make_compressor, negotiate_encoding};
 use crate::tracing_compat::{debug, warn};
 use crate::types::Time;
 
@@ -662,7 +662,12 @@ pub struct CompressionConfig {
 impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
-            supported: vec![ContentEncoding::Identity],
+            supported: vec![
+                ContentEncoding::Brotli,
+                ContentEncoding::Gzip,
+                ContentEncoding::Deflate,
+                ContentEncoding::Identity,
+            ],
             min_body_size: 256,
         }
     }
@@ -674,11 +679,6 @@ impl Default for CompressionConfig {
 /// Uses [`negotiate_encoding`] to select the best encoding from the
 /// client's Accept-Encoding header against the server's supported set.
 /// Only compresses when the response body exceeds `min_body_size`.
-///
-/// Negotiation is already wired so the middleware can emit truthful `406`
-/// responses and `Vary: accept-encoding` even before real compressors land.
-/// Until non-identity encoders are implemented here, negotiated non-identity
-/// responses still carry the identity payload.
 pub struct CompressionMiddleware<H> {
     inner: H,
     config: CompressionConfig,
@@ -697,12 +697,29 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         let accept_encoding = header_value(&req, "accept-encoding");
         let mut resp = self.inner.call(req);
 
+        if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
+            return resp;
+        }
+
+        if let Some(existing_encoding) = resp.remove_header("content-encoding") {
+            resp.set_header("content-encoding", existing_encoding);
+            return resp;
+        }
+
         // Skip compression for small bodies.
         if resp.body.len() < self.config.min_body_size {
             return resp;
         }
 
-        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &self.config.supported)
+        let available_encodings: Vec<_> = self
+            .config
+            .supported
+            .iter()
+            .copied()
+            .filter(|encoding| compression_encoding_available(*encoding))
+            .collect();
+
+        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &available_encodings)
         else {
             if accept_encoding.is_some() {
                 return Response::new(
@@ -719,11 +736,37 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             return resp;
         }
 
-        // Future extension point for real compressors. Until then, return
-        // identity payload while still marking cache variance.
+        let Some(mut compressor) = make_compressor(encoding) else {
+            return resp;
+        };
+
+        let mut compressed = Vec::new();
+        if compressor.compress(&resp.body, &mut compressed).is_err() {
+            return resp;
+        }
+        if compressor.finish(&mut compressed).is_err() {
+            return resp;
+        }
+
+        if compressed.len() >= resp.body.len() {
+            append_vary_header(&mut resp, "accept-encoding");
+            return resp;
+        }
+
+        resp.body = compressed.into();
+        resp.set_header("content-encoding", encoding.as_token().to_string());
         append_vary_header(&mut resp, "accept-encoding");
-        let _ = encoding;
         resp
+    }
+}
+
+fn compression_encoding_available(encoding: ContentEncoding) -> bool {
+    match encoding {
+        ContentEncoding::Identity => true,
+        #[cfg(feature = "compression")]
+        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => true,
+        #[cfg(not(feature = "compression"))]
+        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => false,
     }
 }
 
@@ -2417,13 +2460,19 @@ mod tests {
         let req = make_request().with_header("Accept-Encoding", "gzip");
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::OK);
-        // Non-identity compression is not yet wired, so payload remains
-        // identity and no content-encoding header is emitted.
-        assert!(!resp.headers.contains_key("content-encoding"));
         assert_eq!(
             resp.headers.get("vary"),
             Some(&"accept-encoding".to_string())
         );
+
+        #[cfg(feature = "compression")]
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            Some(&"gzip".to_string())
+        );
+
+        #[cfg(not(feature = "compression"))]
+        assert!(!resp.headers.contains_key("content-encoding"));
     }
 
     #[test]
@@ -2434,7 +2483,7 @@ mod tests {
 
         let config = CompressionConfig {
             min_body_size: 256,
-            supported: vec![ContentEncoding::Gzip],
+            supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
         let resp = mw.call(make_request());
@@ -2477,6 +2526,34 @@ mod tests {
         let resp = mw.call(req);
         // Identity encoding means no content-encoding header.
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn compression_brotli_roundtrip() {
+        use crate::http::compress::{BrotliDecompressor, Decompressor};
+
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, "brotli me".repeat(128).into_bytes())
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 0,
+            supported: vec![ContentEncoding::Brotli, ContentEncoding::Identity],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "br");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            Some(&"br".to_string())
+        );
+
+        let mut dec = BrotliDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&resp.body, &mut decompressed).unwrap();
+        dec.finish(&mut decompressed).unwrap();
+        assert_eq!(decompressed, "brotli me".repeat(128).into_bytes());
     }
 
     // --- RequestBodyLimitMiddleware ---
