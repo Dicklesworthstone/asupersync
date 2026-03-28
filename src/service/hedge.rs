@@ -8,12 +8,23 @@
 //! Scale" (Dean & Barroso, 2013).
 
 use super::{Layer, Service};
+use crate::time::{Sleep, wall_now};
+use crate::types::Time;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    wall_now()
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
 
 // ─── HedgeLayer ───────────────────────────────────────────────────────────
 
@@ -54,6 +65,7 @@ pub struct HedgeConfig {
     pub delay: Duration,
     /// Maximum number of outstanding hedge requests.
     pub max_pending: u32,
+    time_getter: fn() -> Time,
 }
 
 impl HedgeConfig {
@@ -63,6 +75,7 @@ impl HedgeConfig {
         Self {
             delay,
             max_pending: 10,
+            time_getter: wall_clock_now,
         }
     }
 
@@ -71,6 +84,19 @@ impl HedgeConfig {
     pub fn max_pending(mut self, max: u32) -> Self {
         self.max_pending = max;
         self
+    }
+
+    /// Set the time source used for hedge deadlines.
+    #[must_use]
+    pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.time_getter = time_getter;
+        self
+    }
+
+    /// Returns the time source used for hedge deadlines.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
     }
 }
 
@@ -128,7 +154,7 @@ impl<E: std::error::Error + 'static> std::error::Error for HedgeError<E> {
 pub struct Hedge<S> {
     inner: S,
     config: HedgeConfig,
-    stats: HedgeStats,
+    stats: Arc<HedgeStats>,
     /// Tracks whether this clone has observed readiness for one call.
     ready_observed: bool,
 }
@@ -140,6 +166,50 @@ struct HedgeStats {
     hedged: AtomicU64,
     /// Times the hedge response won.
     hedge_wins: AtomicU64,
+    /// Number of hedge requests currently occupying a pending slot.
+    pending: AtomicU64,
+}
+
+impl HedgeStats {
+    fn record_hedge(&self) {
+        self.hedged.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn try_acquire_pending_slot(&self, max_pending: u32) -> bool {
+        if max_pending == 0 {
+            return false;
+        }
+
+        let max_pending = u64::from(max_pending);
+        loop {
+            let current = self.pending.load(Ordering::Acquire);
+            if current >= max_pending {
+                return false;
+            }
+            if self
+                .pending
+                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn release_pending_slot(&self) {
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_sub(1)
+            });
+    }
+
+    fn finish_started_hedge(&self, hedge_won: bool) {
+        if hedge_won {
+            self.hedge_wins.fetch_add(1, Ordering::Relaxed);
+        }
+        self.release_pending_slot();
+    }
 }
 
 impl<S> Hedge<S> {
@@ -149,11 +219,12 @@ impl<S> Hedge<S> {
         Self {
             inner,
             config,
-            stats: HedgeStats {
+            stats: Arc::new(HedgeStats {
                 total: AtomicU64::new(0),
                 hedged: AtomicU64::new(0),
                 hedge_wins: AtomicU64::new(0),
-            },
+                pending: AtomicU64::new(0),
+            }),
             ready_observed: false,
         }
     }
@@ -250,11 +321,7 @@ impl<S: Clone> Clone for Hedge<S> {
         Self {
             inner: self.inner.clone(),
             config: self.config.clone(),
-            stats: HedgeStats {
-                total: AtomicU64::new(0),
-                hedged: AtomicU64::new(0),
-                hedge_wins: AtomicU64::new(0),
-            },
+            stats: Arc::clone(&self.stats),
             // Readiness tickets are handle-local and must not be cloned.
             ready_observed: false,
         }
@@ -263,13 +330,13 @@ impl<S: Clone> Clone for Hedge<S> {
 
 impl<S, Request> Service<Request> for Hedge<S>
 where
-    S: Service<Request> + Clone,
+    S: Service<Request> + Clone + Unpin,
     S::Future: Unpin,
-    Request: Clone,
+    Request: Clone + Unpin,
 {
     type Response = S::Response;
     type Error = HedgeError<S::Error>;
-    type Future = HedgeFuture<S::Future>;
+    type Future = HedgeFuture<S, Request>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.inner.poll_ready(cx) {
@@ -293,33 +360,65 @@ where
             return HedgeFuture::not_ready();
         }
 
-        let fut = self.inner.call(req);
+        let primary = self.inner.call(req.clone());
+        let hedge_service = if self.config.max_pending == 0 {
+            None
+        } else {
+            Some(self.inner.clone())
+        };
         self.record_request();
-        HedgeFuture::inner(fut)
+        HedgeFuture::new(
+            primary,
+            hedge_service,
+            req,
+            &self.config,
+            Arc::clone(&self.stats),
+        )
     }
 }
 
 /// Future returned by the [`Hedge`] service.
-///
-/// In Phase 0, this simply wraps the primary future. Full hedging
-/// with timers requires async runtime support (Phase 1).
-pub struct HedgeFuture<F> {
-    state: HedgeFutureState<F>,
+pub struct HedgeFuture<S, Request>
+where
+    S: Service<Request>,
+{
+    state: HedgeFutureState<S, Request>,
 }
 
-enum HedgeFutureState<F> {
+enum HedgeFutureState<S, Request>
+where
+    S: Service<Request>,
+{
     NotReady,
-    Inner(F),
+    Running {
+        primary: Option<S::Future>,
+        hedge_service: Option<S>,
+        hedge_request: Option<Request>,
+        hedge_future: Option<S::Future>,
+        sleep: Sleep,
+        time_getter: fn() -> Time,
+        max_pending: u32,
+        stats: Arc<HedgeStats>,
+        slot_held: bool,
+        primary_error: Option<Box<S::Error>>,
+        hedge_error: Option<Box<S::Error>>,
+    },
     Done,
 }
 
-impl<F> fmt::Debug for HedgeFuture<F> {
+impl<S, Request> fmt::Debug for HedgeFuture<S, Request>
+where
+    S: Service<Request>,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HedgeFuture").finish()
     }
 }
 
-impl<F> HedgeFuture<F> {
+impl<S, Request> HedgeFuture<S, Request>
+where
+    S: Service<Request>,
+{
     #[must_use]
     fn not_ready() -> Self {
         Self {
@@ -328,33 +427,221 @@ impl<F> HedgeFuture<F> {
     }
 
     #[must_use]
-    fn inner(inner: F) -> Self {
+    fn new(
+        primary: S::Future,
+        hedge_service: Option<S>,
+        request: Request,
+        config: &HedgeConfig,
+        stats: Arc<HedgeStats>,
+    ) -> Self {
+        let deadline = (config.time_getter)().saturating_add_nanos(duration_to_nanos(config.delay));
         Self {
-            state: HedgeFutureState::Inner(inner),
+            state: HedgeFutureState::Running {
+                primary: Some(primary),
+                hedge_service,
+                hedge_request: Some(request),
+                hedge_future: None,
+                sleep: Sleep::with_time_getter(deadline, config.time_getter),
+                time_getter: config.time_getter,
+                max_pending: config.max_pending,
+                stats,
+                slot_held: false,
+                primary_error: None,
+                hedge_error: None,
+            },
         }
     }
 }
 
-impl<F, T, E> Future for HedgeFuture<F>
+impl<S, Request> Drop for HedgeFuture<S, Request>
 where
-    F: Future<Output = Result<T, E>> + Unpin,
+    S: Service<Request>,
 {
-    type Output = Result<T, HedgeError<E>>;
+    fn drop(&mut self) {
+        if let HedgeFutureState::Running {
+            stats,
+            slot_held: true,
+            ..
+        } = &mut self.state
+        {
+            stats.release_pending_slot();
+        }
+    }
+}
 
+#[allow(clippy::too_many_lines)]
+impl<S, Request> Future for HedgeFuture<S, Request>
+where
+    S: Service<Request> + Clone + Unpin,
+    S::Future: Unpin,
+    Request: Clone + Unpin,
+{
+    type Output = Result<S::Response, HedgeError<S::Error>>;
+
+    #[allow(clippy::too_many_lines)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match &mut self.state {
-            HedgeFutureState::NotReady => {
-                self.state = HedgeFutureState::Done;
-                Poll::Ready(Err(HedgeError::NotReady))
-            }
-            HedgeFutureState::Inner(inner) => {
-                let polled = Pin::new(inner).poll(cx);
-                if polled.is_ready() {
-                    self.state = HedgeFutureState::Done;
+        let this = self.as_mut().get_mut();
+
+        loop {
+            match &mut this.state {
+                HedgeFutureState::NotReady => {
+                    this.state = HedgeFutureState::Done;
+                    return Poll::Ready(Err(HedgeError::NotReady));
                 }
-                polled.map_err(HedgeError::Inner)
+                HedgeFutureState::Done => {
+                    return Poll::Ready(Err(HedgeError::PolledAfterCompletion));
+                }
+                HedgeFutureState::Running {
+                    primary,
+                    hedge_service,
+                    hedge_request,
+                    hedge_future,
+                    sleep,
+                    time_getter,
+                    max_pending,
+                    stats,
+                    slot_held,
+                    primary_error,
+                    hedge_error,
+                } => {
+                    let mut progressed = false;
+
+                    if let Some(primary_future) = primary.as_mut() {
+                        match Pin::new(primary_future).poll(cx) {
+                            Poll::Ready(Ok(response)) => {
+                                if *slot_held {
+                                    stats.finish_started_hedge(false);
+                                    *slot_held = false;
+                                }
+                                this.state = HedgeFutureState::Done;
+                                return Poll::Ready(Ok(response));
+                            }
+                            Poll::Ready(Err(err)) => {
+                                *primary = None;
+                                *primary_error = Some(Box::new(err));
+                                progressed = true;
+                            }
+                            Poll::Pending => {}
+                        }
+                    }
+
+                    if let Some(hedge_request_future) = hedge_future.as_mut() {
+                        match Pin::new(hedge_request_future).poll(cx) {
+                            Poll::Ready(Ok(response)) => {
+                                if *slot_held {
+                                    stats.finish_started_hedge(true);
+                                    *slot_held = false;
+                                }
+                                this.state = HedgeFutureState::Done;
+                                return Poll::Ready(Ok(response));
+                            }
+                            Poll::Ready(Err(err)) => {
+                                if *slot_held {
+                                    stats.release_pending_slot();
+                                    *slot_held = false;
+                                }
+                                *hedge_future = None;
+                                *hedge_error = Some(Box::new(err));
+                                progressed = true;
+                            }
+                            Poll::Pending => {}
+                        }
+                    }
+
+                    if primary.is_none() {
+                        if let Some(hedge_err) = hedge_error.take() {
+                            let primary_err = primary_error
+                                .take()
+                                .expect("primary error must exist when primary future is gone");
+                            this.state = HedgeFutureState::Done;
+                            return Poll::Ready(Err(HedgeError::BothFailed {
+                                primary: *primary_err,
+                                hedge: *hedge_err,
+                            }));
+                        }
+
+                        if hedge_future.is_none() && !*slot_held {
+                            let primary_err = primary_error
+                                .take()
+                                .expect("primary error must exist when primary future is gone");
+                            this.state = HedgeFutureState::Done;
+                            return Poll::Ready(Err(HedgeError::Inner(*primary_err)));
+                        }
+                    }
+
+                    if hedge_service.is_some() && (primary.is_some() || *slot_held) {
+                        let delay_elapsed = if sleep.poll_with_time(time_getter()).is_ready() {
+                            true
+                        } else {
+                            let _ = Pin::new(sleep).poll(cx);
+                            false
+                        };
+
+                        if delay_elapsed {
+                            if !*slot_held {
+                                if stats.try_acquire_pending_slot(*max_pending) {
+                                    *slot_held = true;
+                                    progressed = true;
+                                } else if primary.is_some() {
+                                    return Poll::Pending;
+                                }
+                            }
+
+                            if *slot_held
+                                && hedge_future.is_none()
+                                && let Some(service) = hedge_service.as_mut()
+                            {
+                                match service.poll_ready(cx) {
+                                    Poll::Ready(Ok(())) => {
+                                        let request = hedge_request
+                                            .take()
+                                            .expect("hedge request must exist before dispatch");
+                                        let future = service.call(request);
+                                        *hedge_future = Some(future);
+                                        *hedge_service = None;
+                                        stats.record_hedge();
+                                        progressed = true;
+                                    }
+                                    Poll::Ready(Err(err)) => {
+                                        stats.release_pending_slot();
+                                        *slot_held = false;
+                                        *hedge_service = None;
+                                        *hedge_request = None;
+                                        *hedge_error = Some(Box::new(err));
+                                        progressed = true;
+                                    }
+                                    Poll::Pending => {}
+                                }
+                            }
+                        }
+                    }
+
+                    if primary.is_none()
+                        && hedge_future.is_none()
+                        && *slot_held
+                        && hedge_service.is_none()
+                    {
+                        let primary_err = primary_error
+                            .take()
+                            .expect("primary error must exist when primary future is gone");
+                        let hedge_err = hedge_error
+                            .take()
+                            .expect("hedge error must exist when hedge dispatch failed");
+                        stats.release_pending_slot();
+                        *slot_held = false;
+                        this.state = HedgeFutureState::Done;
+                        return Poll::Ready(Err(HedgeError::BothFailed {
+                            primary: *primary_err,
+                            hedge: *hedge_err,
+                        }));
+                    }
+
+                    if progressed {
+                        continue;
+                    }
+                    return Poll::Pending;
+                }
             }
-            HedgeFutureState::Done => Poll::Ready(Err(HedgeError::PolledAfterCompletion)),
         }
     }
 }
@@ -364,9 +651,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use std::collections::VecDeque;
+    use std::future::Future as StdFuture;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
 
     fn init_test(name: &str) {
@@ -383,6 +673,94 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Arc::new(NoopWaker).into()
+    }
+
+    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+    }
+
+    #[derive(Debug)]
+    struct TimedPlan {
+        ready_at: u64,
+        result: Result<u32, &'static str>,
+    }
+
+    impl TimedPlan {
+        fn ok_at(ready_at: u64, value: u32) -> Self {
+            Self {
+                ready_at,
+                result: Ok(value),
+            }
+        }
+
+        fn err_at(ready_at: u64, err: &'static str) -> Self {
+            Self {
+                ready_at,
+                result: Err(err),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TimedService {
+        plans: Arc<Mutex<VecDeque<TimedPlan>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl TimedService {
+        fn new(plans: Vec<TimedPlan>, calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                plans: Arc::new(Mutex::new(plans.into())),
+                calls,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct TimedFuture {
+        ready_at: u64,
+        result: Option<Result<u32, &'static str>>,
+    }
+
+    impl StdFuture for TimedFuture {
+        type Output = Result<u32, &'static str>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if TEST_NOW.load(Ordering::SeqCst) >= self.ready_at {
+                Poll::Ready(
+                    self.result
+                        .take()
+                        .expect("timed future must only complete once"),
+                )
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Service<u32> for TimedService {
+        type Response = u32;
+        type Error = &'static str;
+        type Future = TimedFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let plan = self
+                .plans
+                .lock()
+                .pop_front()
+                .expect("timed service exhausted test plans");
+            TimedFuture {
+                ready_at: plan.ready_at,
+                result: Some(plan.result),
+            }
+        }
     }
 
     // ================================================================
@@ -412,6 +790,13 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(cloned.delay, Duration::from_millis(100));
         assert_eq!(config.delay, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn config_with_time_getter() {
+        TEST_NOW.store(55, Ordering::SeqCst);
+        let config = HedgeConfig::new(Duration::from_nanos(5)).with_time_getter(test_time);
+        assert_eq!((config.time_getter())(), Time::from_nanos(55));
     }
 
     // ================================================================
@@ -619,6 +1004,163 @@ mod tests {
     }
 
     #[test]
+    fn hedge_primary_completes_before_delay_without_backup() {
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            TimedService::new(
+                vec![TimedPlan::ok_at(5, 11), TimedPlan::ok_at(20, 22)],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10)).with_time_getter(test_time),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut future = hedge.call(7);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        TEST_NOW.store(5, Ordering::SeqCst);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(11))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(hedge.hedged_requests(), 0);
+        assert_eq!(hedge.hedge_wins(), 0);
+    }
+
+    #[test]
+    fn hedge_dispatches_backup_after_delay_and_backup_can_win() {
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            TimedService::new(
+                vec![TimedPlan::ok_at(30, 11), TimedPlan::ok_at(12, 22)],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10))
+                .max_pending(1)
+                .with_time_getter(test_time),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut future = hedge.call(7);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        TEST_NOW.store(10, Ordering::SeqCst);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(hedge.hedged_requests(), 1);
+
+        TEST_NOW.store(12, Ordering::SeqCst);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(22))));
+        assert_eq!(hedge.hedge_wins(), 1);
+    }
+
+    #[test]
+    fn hedge_backup_can_rescue_primary_error() {
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            TimedService::new(
+                vec![
+                    TimedPlan::err_at(30, "primary failed"),
+                    TimedPlan::ok_at(12, 77),
+                ],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10))
+                .max_pending(1)
+                .with_time_getter(test_time),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut future = hedge.call(7);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+
+        TEST_NOW.store(10, Ordering::SeqCst);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        TEST_NOW.store(12, Ordering::SeqCst);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(77))));
+        assert_eq!(hedge.hedged_requests(), 1);
+        assert_eq!(hedge.hedge_wins(), 1);
+    }
+
+    #[test]
+    fn hedge_reports_both_failed_when_primary_and_backup_fail() {
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            TimedService::new(
+                vec![
+                    TimedPlan::err_at(30, "primary failed"),
+                    TimedPlan::err_at(12, "hedge failed"),
+                ],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10))
+                .max_pending(1)
+                .with_time_getter(test_time),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut future = hedge.call(7);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        TEST_NOW.store(10, Ordering::SeqCst);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        TEST_NOW.store(12, Ordering::SeqCst);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        TEST_NOW.store(30, Ordering::SeqCst);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(HedgeError::BothFailed {
+                primary: "primary failed",
+                hedge: "hedge failed"
+            }))
+        ));
+    }
+
+    #[test]
+    fn hedge_max_pending_zero_disables_backup_dispatch() {
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            TimedService::new(
+                vec![TimedPlan::ok_at(30, 11), TimedPlan::ok_at(12, 22)],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10))
+                .max_pending(0)
+                .with_time_getter(test_time),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut future = hedge.call(7);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        TEST_NOW.store(10, Ordering::SeqCst);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(hedge.hedged_requests(), 0);
+
+        TEST_NOW.store(30, Ordering::SeqCst);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(11))));
+    }
+
+    #[test]
     fn hedge_inner() {
         let hedge = Hedge::new(42u32, HedgeConfig::new(Duration::from_millis(100)));
         assert_eq!(*hedge.inner(), 42);
@@ -649,8 +1191,8 @@ mod tests {
         let hedge = Hedge::new(MockSvc, HedgeConfig::new(Duration::from_millis(100)));
         hedge.record_request();
         let cloned = hedge.clone();
-        // Stats are reset on clone.
-        assert_eq!(cloned.total_requests(), 0);
+        // Clone shares hedge statistics but not readiness tickets.
+        assert_eq!(cloned.total_requests(), 1);
         assert_eq!(cloned.delay(), Duration::from_millis(100));
         assert_eq!(hedge.total_requests(), 1);
     }
@@ -728,7 +1270,22 @@ mod tests {
 
     #[test]
     fn hedge_future_debug() {
-        let fut = HedgeFuture::inner(std::future::ready(Ok::<i32, std::io::Error>(42)));
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let fut = HedgeFuture::new(
+            TimedFuture {
+                ready_at: 5,
+                result: Some(Ok(42)),
+            },
+            None::<TimedService>,
+            7_u32,
+            &HedgeConfig::new(Duration::from_nanos(10)).with_time_getter(test_time),
+            Arc::new(HedgeStats {
+                total: AtomicU64::new(0),
+                hedged: AtomicU64::new(0),
+                hedge_wins: AtomicU64::new(0),
+                pending: AtomicU64::new(0),
+            }),
+        );
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("HedgeFuture"));
     }
@@ -737,7 +1294,22 @@ mod tests {
     fn hedge_future_second_poll_fails_closed() {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut fut = HedgeFuture::inner(std::future::ready(Ok::<i32, std::io::Error>(42)));
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let mut fut = HedgeFuture::new(
+            TimedFuture {
+                ready_at: 0,
+                result: Some(Ok(42)),
+            },
+            None::<TimedService>,
+            7_u32,
+            &HedgeConfig::new(Duration::from_nanos(10)).with_time_getter(test_time),
+            Arc::new(HedgeStats {
+                total: AtomicU64::new(0),
+                hedged: AtomicU64::new(0),
+                hedge_wins: AtomicU64::new(0),
+                pending: AtomicU64::new(0),
+            }),
+        );
 
         let first = Pin::new(&mut fut).poll(&mut cx);
         assert!(matches!(first, Poll::Ready(Ok(42))));
