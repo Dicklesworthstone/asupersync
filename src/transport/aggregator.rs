@@ -142,7 +142,7 @@ impl PathCharacteristics {
         let latency_score = 1000.0 / (f64::from(self.latency_ms) + 1.0);
         // Guard against log10(0) = -inf: treat zero bandwidth as minimal positive value.
         let bandwidth_score = (self.bandwidth_bps.max(1) as f64).log10();
-        let loss_score = 1.0 - self.loss_rate;
+        let loss_score = 1.0 - self.loss_rate.clamp(0.0, 1.0);
         let jitter_score = 100.0 / (f64::from(self.jitter_ms) + 1.0);
 
         // Weighted combination
@@ -1146,7 +1146,11 @@ impl SymbolDeduplicator {
         }
 
         drop(objects);
-        self.unique_symbols.fetch_sub(1, Ordering::Relaxed);
+        // Saturating decrement — a double-rollback (caller bug) must not
+        // wrap the counter to u64::MAX.
+        let _ = self
+            .unique_symbols
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
         true
     }
 
