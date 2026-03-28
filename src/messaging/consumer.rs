@@ -1431,6 +1431,7 @@ impl FabricConsumerState {
             .pending_acks
             .values()
             .map(|p| p.window.start())
+            .filter(|&s| s > 0) // Ignore zero-start windows — they cannot meaningfully bound the floor
             .min()
             .unwrap_or(u64::MAX);
         // Only advance as far as the lowest pending window allows,
