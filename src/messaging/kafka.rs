@@ -7,7 +7,10 @@
 //! # Design
 //!
 //! The implementation wraps the rdkafka crate (when available) with a Cx
-//! integration layer. In Phase 0, this provides the API shape as stubs.
+//! integration layer. When the `kafka` feature is disabled, the non-transactional
+//! producer surface uses a deterministic local fallback and the transactional
+//! surface simulates atomic staging/commit/abort without pretending a broker ack
+//! occurred.
 //!
 //! # Exactly-Once Semantics
 //!
@@ -21,15 +24,15 @@
 //! - Cancellation waits for pending acks (with bounded timeout)
 //! - Uncommitted transactions abort on cancellation
 
-// Phase 0 stubs return errors immediately; async is for API consistency
-// with eventual rdkafka integration.
-
 use crate::cx::Cx;
+use crate::runtime::spawn_blocking::{spawn_blocking, spawn_blocking_on_thread};
+#[cfg(not(feature = "kafka"))]
+use crate::sync::Notify;
 use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
 use rdkafka::producer::Producer;
 #[cfg(not(feature = "kafka"))]
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 #[cfg(not(feature = "kafka"))]
@@ -419,6 +422,28 @@ fn build_producer(
         .map_err(|err| map_rdkafka_error(&err, None))
 }
 
+#[allow(clippy::future_not_send)]
+async fn run_kafka_blocking<F, T>(cx: &Cx, f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    if cx.blocking_pool_handle().is_some() {
+        let _guard = Cx::set_current(Some(cx.clone()));
+        return spawn_blocking(f).await;
+    }
+
+    spawn_blocking_on_thread(f).await
+}
+
+#[cfg(feature = "kafka")]
+async fn run_kafka_transaction_op<F>(cx: &Cx, f: F) -> Result<(), KafkaError>
+where
+    F: FnOnce() -> Result<(), RdKafkaError> + Send + 'static,
+{
+    run_kafka_blocking(cx, move || f().map_err(|err| map_rdkafka_error(&err, None))).await
+}
+
 #[cfg(feature = "kafka")]
 async fn send_with_producer(
     producer: &ThreadedProducer<KafkaContext>,
@@ -463,17 +488,114 @@ async fn send_with_producer(
 }
 
 #[cfg(not(feature = "kafka"))]
-static STUB_DELIVERY_OFFSETS: OnceLock<Mutex<HashMap<(String, i32), i64>>> = OnceLock::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StubBrokerRecord {
+    pub topic: String,
+    pub partition: i32,
+    pub key: Option<Vec<u8>>,
+    pub payload: Vec<u8>,
+    pub timestamp: Option<i64>,
+    pub headers: Vec<(String, Vec<u8>)>,
+}
 
 #[cfg(not(feature = "kafka"))]
-fn next_stub_offset(topic: &str, partition: i32) -> i64 {
-    let offsets = STUB_DELIVERY_OFFSETS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut offsets = offsets.lock();
-    let entry = offsets.entry((topic.to_string(), partition)).or_insert(0);
-    let offset = *entry;
-    *entry += 1;
-    drop(offsets);
-    offset
+#[derive(Debug, Default)]
+struct StubBrokerState {
+    partitions: BTreeMap<(String, i32), Vec<StubBrokerRecord>>,
+}
+
+#[cfg(not(feature = "kafka"))]
+#[derive(Debug)]
+struct StubBroker {
+    state: Mutex<StubBrokerState>,
+    notify: Notify,
+}
+
+#[cfg(not(feature = "kafka"))]
+impl Default for StubBroker {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(StubBrokerState::default()),
+            notify: Notify::new(),
+        }
+    }
+}
+
+#[cfg(not(feature = "kafka"))]
+static STUB_BROKER: OnceLock<StubBroker> = OnceLock::new();
+
+#[cfg(not(feature = "kafka"))]
+fn stub_broker() -> &'static StubBroker {
+    STUB_BROKER.get_or_init(StubBroker::default)
+}
+
+#[cfg(not(feature = "kafka"))]
+pub(crate) fn stub_broker_notify() -> &'static Notify {
+    &stub_broker().notify
+}
+
+#[cfg(not(feature = "kafka"))]
+pub(crate) fn stub_broker_end_offset(topic: &str, partition: i32) -> i64 {
+    let state = stub_broker().state.lock();
+    state
+        .partitions
+        .get(&(topic.to_string(), partition))
+        .map_or(0, |partition_log| {
+            i64::try_from(partition_log.len()).unwrap_or(i64::MAX)
+        })
+}
+
+#[cfg(not(feature = "kafka"))]
+pub(crate) fn stub_broker_fetch(
+    topic: &str,
+    partition: i32,
+    offset: i64,
+) -> Option<StubBrokerRecord> {
+    if offset < 0 {
+        return None;
+    }
+
+    let state = stub_broker().state.lock();
+    state
+        .partitions
+        .get(&(topic.to_string(), partition))
+        .and_then(|partition_log| {
+            usize::try_from(offset)
+                .ok()
+                .and_then(|index| partition_log.get(index).cloned())
+        })
+}
+
+#[cfg(not(feature = "kafka"))]
+pub(crate) fn stub_broker_publish(record: StubBrokerRecord) -> RecordMetadata {
+    let metadata = {
+        let mut state = stub_broker().state.lock();
+        let partition_log = state
+            .partitions
+            .entry((record.topic.clone(), record.partition))
+            .or_default();
+        let offset = i64::try_from(partition_log.len()).unwrap_or(i64::MAX);
+        let metadata = RecordMetadata {
+            topic: record.topic.clone(),
+            partition: record.partition,
+            offset,
+            timestamp: record.timestamp,
+        };
+        partition_log.push(record);
+        drop(state);
+        metadata
+    };
+
+    stub_broker().notify.notify_waiters();
+    metadata
+}
+
+#[cfg(all(not(feature = "kafka"), test))]
+pub(crate) fn reset_stub_broker_for_tests() {
+    if let Some(broker) = STUB_BROKER.get() {
+        broker.state.lock().partitions.clear();
+        broker.notify.notify_waiters();
+    }
 }
 
 fn validate_topic(topic: &str) -> Result<(), KafkaError> {
@@ -657,10 +779,21 @@ pub struct RecordMetadata {
     pub timestamp: Option<i64>,
 }
 
-/// Kafka producer (Phase 0 stub).
+#[derive(Debug, Default)]
+struct TransactionalProducerState {
+    active: bool,
+    needs_abort: bool,
+    #[cfg(feature = "kafka")]
+    initialized: bool,
+    #[cfg(not(feature = "kafka"))]
+    staged_records: Vec<StubBrokerRecord>,
+}
+
+/// Kafka producer with Cx integration.
 ///
-/// Provides the API shape for a Kafka producer with Cx integration.
-/// Full implementation requires rdkafka integration.
+/// With the `kafka` feature enabled this wraps a real `rdkafka` producer.
+/// Without it, the producer uses a deterministic local fallback for tests and
+/// contract validation.
 pub struct KafkaProducer {
     config: ProducerConfig,
     closed: AtomicBool,
@@ -744,15 +877,14 @@ impl KafkaProducer {
 
         #[cfg(not(feature = "kafka"))]
         {
-            let _ = key;
-            let partition = partition.unwrap_or(0);
-            let offset = next_stub_offset(topic, partition);
-            Ok(RecordMetadata {
+            Ok(stub_broker_publish(StubBrokerRecord {
                 topic: topic.to_string(),
-                partition,
-                offset,
+                partition: partition.unwrap_or(0),
+                key: key.map(std::borrow::ToOwned::to_owned),
+                payload: payload.to_vec(),
                 timestamp: None,
-            })
+                headers: Vec::new(),
+            }))
         }
     }
 
@@ -803,16 +935,17 @@ impl KafkaProducer {
 
         #[cfg(not(feature = "kafka"))]
         {
-            let _ = key;
-            let _ = headers;
-            let partition = 0;
-            let offset = next_stub_offset(topic, partition);
-            Ok(RecordMetadata {
+            Ok(stub_broker_publish(StubBrokerRecord {
                 topic: topic.to_string(),
-                partition,
-                offset,
+                partition: 0,
+                key: key.map(std::borrow::ToOwned::to_owned),
+                payload: payload.to_vec(),
                 timestamp: None,
-            })
+                headers: headers
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_vec()))
+                    .collect(),
+            }))
         }
     }
 
@@ -932,10 +1065,26 @@ impl TransactionalConfig {
 
 /// Transactional Kafka producer for exactly-once semantics.
 ///
-/// Provides atomic message publishing across multiple topics/partitions.
-#[derive(Debug)]
+/// Provides atomic message publishing across multiple topics/partitions. The
+/// `kafka` feature uses broker-backed Kafka transactions; the fallback path
+/// simulates transactional staging locally so commit/abort semantics stay
+/// truthful instead of hard-erroring.
 pub struct TransactionalProducer {
     config: TransactionalConfig,
+    state: Mutex<TransactionalProducerState>,
+    #[cfg(feature = "kafka")]
+    producer: ThreadedProducer<KafkaContext>,
+}
+
+impl fmt::Debug for TransactionalProducer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.lock();
+        f.debug_struct("TransactionalProducer")
+            .field("config", &self.config)
+            .field("active", &state.active)
+            .field("needs_abort", &state.needs_abort)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TransactionalProducer {
@@ -949,20 +1098,53 @@ impl TransactionalProducer {
             ));
         }
 
-        Ok(Self { config })
+        #[cfg(feature = "kafka")]
+        let producer = build_producer(&config.producer, Some(&config))?;
+
+        Ok(Self {
+            config,
+            state: Mutex::new(TransactionalProducerState::default()),
+            #[cfg(feature = "kafka")]
+            producer,
+        })
     }
 
     /// Begin a new transaction.
     ///
     /// Returns a `Transaction` that must be committed or aborted.
-    #[allow(unused_variables, clippy::unused_async)]
-    pub fn begin_transaction(&self, cx: &Cx) -> Result<Transaction<'_>, KafkaError> {
+    pub async fn begin_transaction(&self, cx: &Cx) -> Result<Transaction<'_>, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.recover_abandoned_transaction(cx).await?;
+        self.ensure_ready_to_begin()?;
+        self.ensure_initialized(cx).await?;
 
-        // Phase 0: stub implementation
-        Err(KafkaError::Io(io::Error::other(
-            "Phase 0: requires rdkafka integration",
-        )))
+        {
+            let mut state = self.state.lock();
+            if state.active {
+                return Err(KafkaError::Transaction(
+                    "transaction already active".to_string(),
+                ));
+            }
+            state.active = true;
+            #[cfg(not(feature = "kafka"))]
+            state.staged_records.clear();
+        }
+
+        #[cfg(feature = "kafka")]
+        if let Err(err) = run_kafka_transaction_op(cx, {
+            let producer = self.producer.clone();
+            move || producer.begin_transaction()
+        })
+        .await
+        {
+            self.mark_transaction_finished(false);
+            return Err(err);
+        }
+
+        Ok(Transaction {
+            producer: self,
+            finished: false,
+        })
     }
 
     /// Get the transaction ID.
@@ -976,6 +1158,104 @@ impl TransactionalProducer {
     pub const fn config(&self) -> &TransactionalConfig {
         &self.config
     }
+
+    fn ensure_ready_to_begin(&self) -> Result<(), KafkaError> {
+        let state = self.state.lock();
+        if state.active {
+            return Err(KafkaError::Transaction(
+                "transaction already active".to_string(),
+            ));
+        }
+        if state.needs_abort {
+            return Err(KafkaError::Transaction(
+                "previous transaction requires abort recovery".to_string(),
+            ));
+        }
+        drop(state);
+        Ok(())
+    }
+
+    fn ensure_active_transaction(&self) -> Result<(), KafkaError> {
+        let state = self.state.lock();
+        if state.needs_abort {
+            return Err(KafkaError::Transaction(
+                "transaction is poisoned and must be aborted before reuse".to_string(),
+            ));
+        }
+        if !state.active {
+            return Err(KafkaError::Transaction("no active transaction".to_string()));
+        }
+        drop(state);
+        Ok(())
+    }
+
+    fn mark_transaction_finished(&self, needs_abort: bool) {
+        let mut state = self.state.lock();
+        state.active = false;
+        state.needs_abort = needs_abort;
+        #[cfg(not(feature = "kafka"))]
+        state.staged_records.clear();
+    }
+
+    fn mark_transaction_dropped(&self) {
+        let mut state = self.state.lock();
+        if !state.active {
+            return;
+        }
+        state.active = false;
+        state.needs_abort = true;
+        #[cfg(not(feature = "kafka"))]
+        state.staged_records.clear();
+    }
+
+    #[cfg(feature = "kafka")]
+    async fn ensure_initialized(&self, cx: &Cx) -> Result<(), KafkaError> {
+        if self.state.lock().initialized {
+            return Ok(());
+        }
+
+        run_kafka_transaction_op(cx, {
+            let producer = self.producer.clone();
+            let timeout = self.config.transaction_timeout;
+            move || producer.init_transactions(timeout)
+        })
+        .await?;
+
+        self.state.lock().initialized = true;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[allow(clippy::unused_async)]
+    async fn ensure_initialized(&self, _cx: &Cx) -> Result<(), KafkaError> {
+        Ok(())
+    }
+
+    #[allow(clippy::unused_async)]
+    async fn recover_abandoned_transaction(&self, cx: &Cx) -> Result<(), KafkaError> {
+        if !self.state.lock().needs_abort {
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "kafka"))]
+        let _ = cx;
+
+        #[cfg(feature = "kafka")]
+        run_kafka_transaction_op(cx, {
+            let producer = self.producer.clone();
+            let timeout = self.config.transaction_timeout;
+            move || producer.abort_transaction(timeout)
+        })
+        .await?;
+
+        let mut state = self.state.lock();
+        state.needs_abort = false;
+        state.active = false;
+        #[cfg(not(feature = "kafka"))]
+        state.staged_records.clear();
+        drop(state);
+        Ok(())
+    }
 }
 
 /// An active Kafka transaction.
@@ -985,7 +1265,7 @@ impl TransactionalProducer {
 #[derive(Debug)]
 pub struct Transaction<'a> {
     producer: &'a TransactionalProducer,
-    committed: bool,
+    finished: bool,
 }
 
 impl Transaction<'_> {
@@ -999,10 +1279,53 @@ impl Transaction<'_> {
         payload: &[u8],
     ) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.producer.ensure_active_transaction()?;
+        validate_topic(topic)?;
 
-        Err(KafkaError::Io(io::Error::other(
-            "Phase 0: requires rdkafka integration",
-        )))
+        if payload.len() > self.producer.config.producer.max_message_size {
+            return Err(KafkaError::MessageTooLarge {
+                size: payload.len(),
+                max_size: self.producer.config.producer.max_message_size,
+            });
+        }
+
+        #[cfg(feature = "kafka")]
+        {
+            send_with_producer(
+                &self.producer.producer,
+                cx,
+                &self.producer.config.producer,
+                SendRequest {
+                    topic,
+                    key,
+                    payload,
+                    partition: None,
+                    headers: None,
+                },
+            )
+            .await
+            .map(|_metadata| ())
+        }
+
+        #[cfg(not(feature = "kafka"))]
+        {
+            let mut state = self.producer.state.lock();
+            if !state.active || state.needs_abort {
+                return Err(KafkaError::Transaction(
+                    "transaction is not available for sends".to_string(),
+                ));
+            }
+            state.staged_records.push(StubBrokerRecord {
+                topic: topic.to_string(),
+                partition: 0,
+                key: key.map(std::borrow::ToOwned::to_owned),
+                payload: payload.to_vec(),
+                timestamp: None,
+                headers: Vec::new(),
+            });
+            drop(state);
+            Ok(())
+        }
     }
 
     /// Commit the transaction.
@@ -1011,13 +1334,45 @@ impl Transaction<'_> {
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.producer.ensure_active_transaction()?;
 
-        // Phase 0: stub - mark as committed to prevent drop warning
-        self.committed = true;
+        #[cfg(feature = "kafka")]
+        {
+            self.producer.mark_transaction_finished(false);
+            let result = run_kafka_transaction_op(cx, {
+                let producer = self.producer.producer.clone();
+                let timeout = self.producer.config.transaction_timeout;
+                move || producer.commit_transaction(timeout)
+            })
+            .await;
+            self.finished = true;
+            if let Err(err) = result {
+                self.producer.mark_transaction_finished(true);
+                return Err(err);
+            }
+        }
 
-        Err(KafkaError::Io(io::Error::other(
-            "Phase 0: requires rdkafka integration",
-        )))
+        #[cfg(not(feature = "kafka"))]
+        {
+            let staged = {
+                let mut state = self.producer.state.lock();
+                if !state.active || state.needs_abort {
+                    return Err(KafkaError::Transaction(
+                        "transaction is not active".to_string(),
+                    ));
+                }
+                state.active = false;
+                state.needs_abort = false;
+                std::mem::take(&mut state.staged_records)
+            };
+
+            for record in staged {
+                let _ = stub_broker_publish(record);
+            }
+            self.finished = true;
+        }
+
+        Ok(())
     }
 
     /// Abort the transaction.
@@ -1026,21 +1381,38 @@ impl Transaction<'_> {
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn abort(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.producer.ensure_active_transaction()?;
 
-        // Phase 0: stub - mark as committed to prevent drop warning
-        self.committed = true;
+        #[cfg(feature = "kafka")]
+        {
+            self.producer.mark_transaction_finished(false);
+            let result = run_kafka_transaction_op(cx, {
+                let producer = self.producer.producer.clone();
+                let timeout = self.producer.config.transaction_timeout;
+                move || producer.abort_transaction(timeout)
+            })
+            .await;
+            self.finished = true;
+            if let Err(err) = result {
+                self.producer.mark_transaction_finished(true);
+                return Err(err);
+            }
+        }
 
-        Err(KafkaError::Io(io::Error::other(
-            "Phase 0: requires rdkafka integration",
-        )))
+        #[cfg(not(feature = "kafka"))]
+        {
+            self.producer.mark_transaction_finished(false);
+            self.finished = true;
+        }
+
+        Ok(())
     }
 }
 
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
-        if !self.committed {
-            // In production, this should log a warning about uncommitted transaction
-            // The broker will abort it after transaction.timeout.ms expires
+        if !self.finished {
+            self.producer.mark_transaction_dropped();
         }
     }
 }
@@ -1052,6 +1424,11 @@ mod tests {
     use std::sync::Arc;
     #[cfg(feature = "kafka")]
     use std::task::{Context, Wake, Waker};
+
+    #[cfg(not(feature = "kafka"))]
+    fn reset_stub_broker() {
+        reset_stub_broker_for_tests();
+    }
 
     #[cfg(feature = "kafka")]
     struct NoopWaker;
@@ -1427,6 +1804,107 @@ mod tests {
         assert_eq!(producer.config().transaction_id, "tx-4");
     }
 
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn transactional_fallback_commit_applies_staged_offsets_on_commit() {
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            reset_stub_broker();
+            let topic = "transactional-fallback-commit-applies";
+            let producer = TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "tx-commit-applies".to_string(),
+            ))
+            .unwrap();
+
+            let tx = producer.begin_transaction(&cx).await.unwrap();
+            tx.send(&cx, topic, Some(b"k1"), b"one").await.unwrap();
+            tx.send(&cx, topic, Some(b"k2"), b"two").await.unwrap();
+            tx.commit(&cx).await.unwrap();
+
+            let plain = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let metadata = plain
+                .send(&cx, topic, None, b"after", Some(0))
+                .await
+                .unwrap();
+            assert_eq!(metadata.offset, 2);
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn transactional_fallback_abort_discards_staged_offsets() {
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            reset_stub_broker();
+            let topic = "transactional-fallback-abort-discards";
+            let producer = TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "tx-abort-discards".to_string(),
+            ))
+            .unwrap();
+
+            let tx = producer.begin_transaction(&cx).await.unwrap();
+            tx.send(&cx, topic, None, b"one").await.unwrap();
+            tx.send(&cx, topic, None, b"two").await.unwrap();
+            tx.abort(&cx).await.unwrap();
+
+            let plain = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let metadata = plain
+                .send(&cx, topic, None, b"after", Some(0))
+                .await
+                .unwrap();
+            assert_eq!(metadata.offset, 0);
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn transactional_fallback_rejects_concurrent_begin() {
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            reset_stub_broker();
+            let producer = TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "tx-active-check".to_string(),
+            ))
+            .unwrap();
+
+            let tx = producer.begin_transaction(&cx).await.unwrap();
+            let err = producer.begin_transaction(&cx).await.unwrap_err();
+            assert!(matches!(err, KafkaError::Transaction(msg) if msg.contains("already active")));
+            tx.abort(&cx).await.unwrap();
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn transactional_fallback_drop_requires_recovery_before_next_begin() {
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            reset_stub_broker();
+            let topic = "transactional-fallback-drop-recovery";
+            let producer = TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "tx-drop-recovery".to_string(),
+            ))
+            .unwrap();
+
+            let tx = producer.begin_transaction(&cx).await.unwrap();
+            tx.send(&cx, topic, None, b"staged-then-dropped")
+                .await
+                .unwrap();
+            drop(tx);
+
+            let next = producer.begin_transaction(&cx).await.unwrap();
+            next.send(&cx, topic, None, b"committed").await.unwrap();
+            next.commit(&cx).await.unwrap();
+
+            let plain = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let metadata = plain
+                .send(&cx, topic, None, b"after", Some(0))
+                .await
+                .unwrap();
+            assert_eq!(metadata.offset, 1);
+        });
+    }
+
     #[test]
     fn compression_debug_clone_copy_default_eq() {
         let c = Compression::default();
@@ -1455,6 +1933,7 @@ mod tests {
     #[test]
     fn producer_send_returns_deterministic_delivery_metadata() {
         crate::test_utils::run_test_with_cx(|cx| async move {
+            reset_stub_broker();
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
 
             // Use unique topic name to avoid cross-test contamination via the
@@ -1495,6 +1974,7 @@ mod tests {
     #[test]
     fn producer_rejects_blank_topic_name() {
         crate::test_utils::run_test_with_cx(|cx| async move {
+            reset_stub_broker();
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let err = producer
                 .send(&cx, "   ", None, b"x", None)
@@ -1508,6 +1988,7 @@ mod tests {
     #[test]
     fn producer_close_is_idempotent_and_blocks_new_operations() {
         crate::test_utils::run_test_with_cx(|cx| async move {
+            reset_stub_broker();
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             producer
                 .send(&cx, "orders", None, b"before-close", None)
