@@ -400,6 +400,7 @@ where
         max_pending: u32,
         stats: Arc<HedgeStats>,
         slot_held: bool,
+        delay_elapsed: bool,
         primary_error: Option<Box<S::Error>>,
         hedge_error: Option<Box<S::Error>>,
     },
@@ -446,6 +447,7 @@ where
                 max_pending: config.max_pending,
                 stats,
                 slot_held: false,
+                delay_elapsed: false,
                 primary_error: None,
                 hedge_error: None,
             },
@@ -501,6 +503,7 @@ where
                     max_pending,
                     stats,
                     slot_held,
+                    delay_elapsed,
                     primary_error,
                     hedge_error,
                 } => {
@@ -570,14 +573,20 @@ where
                     }
 
                     if hedge_service.is_some() && (primary.is_some() || *slot_held) {
-                        let delay_elapsed = if sleep.poll_with_time(time_getter()).is_ready() {
-                            true
-                        } else {
-                            let _ = Pin::new(sleep).poll(cx);
-                            false
-                        };
+                        // Track whether the hedge delay has elapsed. Once
+                        // the sleep fires we must never re-poll it (Sleep
+                        // asserts on poll-after-completion). The flag is
+                        // independent of slot acquisition so it survives
+                        // across re-polls when slot acquisition fails.
+                        if !*delay_elapsed {
+                            if sleep.poll_with_time(time_getter()).is_ready() {
+                                *delay_elapsed = true;
+                            } else {
+                                let _ = Pin::new(sleep).poll(cx);
+                            }
+                        }
 
-                        if delay_elapsed {
+                        if *delay_elapsed {
                             if !*slot_held {
                                 if stats.try_acquire_pending_slot(*max_pending) {
                                     *slot_held = true;
@@ -1288,6 +1297,101 @@ mod tests {
         );
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("HedgeFuture"));
+    }
+
+    /// Regression: hedge delay elapses, slot acquired, but service.poll_ready
+    /// returns Pending. On next poll, the completed Sleep must NOT be
+    /// re-polled (which would panic).
+    #[test]
+    fn hedge_does_not_repoll_completed_sleep_when_slot_held() {
+        // Use a dedicated time source to avoid races with other tests
+        // that share the module-level TEST_NOW static.
+        static LOCAL_NOW: AtomicU64 = AtomicU64::new(0);
+        fn local_time() -> Time {
+            Time::from_nanos(LOCAL_NOW.load(Ordering::SeqCst))
+        }
+
+        // A service that returns Pending from poll_ready on the first calls,
+        // then Ready(Ok(())) once the countdown reaches zero.
+        #[derive(Clone, Debug)]
+        struct DelayedReadyService {
+            ready_countdown: Arc<AtomicUsize>,
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl Service<u32> for DelayedReadyService {
+            type Response = u32;
+            type Error = &'static str;
+            type Future = TimedFuture;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                let prev = self.ready_countdown.fetch_sub(1, Ordering::SeqCst);
+                if prev > 0 {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+
+            fn call(&mut self, _req: u32) -> Self::Future {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                TimedFuture {
+                    ready_at: 0,
+                    result: Some(Ok(99)),
+                }
+            }
+        }
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        LOCAL_NOW.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = DelayedReadyService {
+            // Pending twice: once on the first try after slot acquire
+            // (within the same poll's progress loop), then again on the
+            // next external poll which re-enters with slot_held=true.
+            ready_countdown: Arc::new(AtomicUsize::new(2)),
+            calls: Arc::clone(&calls),
+        };
+        let stats = Arc::new(HedgeStats {
+            total: AtomicU64::new(0),
+            hedged: AtomicU64::new(0),
+            hedge_wins: AtomicU64::new(0),
+            pending: AtomicU64::new(0),
+        });
+
+        // Primary future that never completes (stays Pending).
+        let primary = TimedFuture {
+            ready_at: u64::MAX,
+            result: Some(Ok(0)),
+        };
+
+        // Use a large delay so other tests' TEST_NOW values cannot
+        // accidentally elapse it.
+        let config = HedgeConfig::new(Duration::from_millis(1))
+            .with_time_getter(local_time)
+            .max_pending(5);
+        let mut fut = HedgeFuture::new(primary, Some(svc), 42_u32, &config, stats);
+
+        // Poll 1: timer not elapsed yet, both primary and hedge pending.
+        let p1 = Pin::new(&mut fut).poll(&mut cx);
+        assert!(p1.is_pending());
+
+        // Advance time past the delay.
+        LOCAL_NOW.store(2_000_000, Ordering::SeqCst);
+
+        // Poll 2: timer elapses, slot acquired, poll_ready returns Pending
+        // twice (once in progress loop, once after re-enter). Returns Pending
+        // because the service is not yet ready.
+        let p2 = Pin::new(&mut fut).poll(&mut cx);
+        assert!(p2.is_pending());
+
+        // Poll 3: this used to panic ("Sleep polled after completion") before
+        // the fix. Now it should skip the sleep (slot_held=true), re-poll
+        // poll_ready which returns Ready, dispatch the hedge, and the hedge
+        // future completes immediately.
+        let p3 = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(p3, Poll::Ready(Ok(99))));
     }
 
     #[test]
