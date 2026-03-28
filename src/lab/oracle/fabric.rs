@@ -926,27 +926,35 @@ mod tests {
             .expect("fabric publish evidence entry should exist");
         assert!(!evidence_entry.passed);
 
-        let events = events.lock();
-        let fabric_publish_event = events.iter().find(|event| {
-            event.fields.get("event").map(String::as_str) == Some("oracle_check")
-                && event.fields.get("invariant").map(String::as_str) == Some("fabric_publish")
-        });
-        let fabric_publish_event =
-            fabric_publish_event.expect("fabric publish oracle_check should be emitted");
+        // Tracing event assertions require the tracing-integration feature.
+        // Without it, crate::tracing_compat::info! is a no-op.
+        #[cfg(feature = "tracing-integration")]
+        {
+            let events = events.lock();
+            let fabric_publish_event = events.iter().find(|event| {
+                event.fields.get("event").map(String::as_str) == Some("oracle_check")
+                    && event.fields.get("invariant").map(String::as_str) == Some("fabric_publish")
+            });
+            let fabric_publish_event =
+                fabric_publish_event.expect("fabric publish oracle_check should be emitted");
 
-        assert_eq!(
-            fabric_publish_event
-                .fields
-                .get("passed")
-                .map(String::as_str),
-            Some("false")
-        );
-        assert!(
-            fabric_publish_event
-                .fields
-                .get("details")
-                .is_some_and(|details| details.contains("missed 1 subscriber")),
-            "fabric publish oracle_check should preserve violation details",
-        );
+            assert_eq!(
+                fabric_publish_event
+                    .fields
+                    .get("passed")
+                    .map(String::as_str),
+                Some("false")
+            );
+            assert!(
+                fabric_publish_event
+                    .fields
+                    .get("details")
+                    .is_some_and(|details| details.contains("missed 1 subscriber")),
+                "fabric publish oracle_check should preserve violation details",
+            );
+        }
+        // Suppress unused-variable warning when tracing-integration is off.
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = events;
     }
 }

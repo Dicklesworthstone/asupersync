@@ -1654,10 +1654,7 @@ mod tests {
     ) -> Vec<u8> {
         let (query_name, question_end, qtype) = parse_fake_dns_question(request);
         let question = &request[12..question_end];
-        let records = zone
-            .get(&(query_name.clone(), qtype))
-            .cloned()
-            .unwrap_or_default();
+        let records = zone.get(&(query_name, qtype)).cloned().unwrap_or_default();
         let mut response = Vec::new();
         response.extend_from_slice(&request[..2]);
         let flags = if truncate {

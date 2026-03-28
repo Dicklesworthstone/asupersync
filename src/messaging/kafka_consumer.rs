@@ -759,7 +759,7 @@ impl KafkaConsumer {
     }
 
     /// Poll for the next record.
-    #[allow(unused_variables)]
+    #[allow(unused_variables, clippy::too_many_lines)]
     pub async fn poll(
         &self,
         cx: &Cx,

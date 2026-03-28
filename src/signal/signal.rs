@@ -418,7 +418,7 @@ pub fn signal(kind: SignalKind) -> io::Result<Signal> {
 }
 
 #[cfg(test)]
-pub(crate) fn inject_test_signal(kind: SignalKind) -> io::Result<()> {
+pub fn inject_test_signal(kind: SignalKind) -> io::Result<()> {
     #[cfg(any(unix, windows))]
     {
         dispatcher_for(kind)
