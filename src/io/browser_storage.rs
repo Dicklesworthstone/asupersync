@@ -1349,12 +1349,16 @@ fn indexed_db_error_message(value: &JsValue) -> String {
 async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
     let request = request.clone();
     let promise = Promise::new(&mut move |resolve, reject| {
+        let callbacks = std::rc::Rc::new(std::cell::RefCell::new(None));
+
         let success_request = request.clone();
         let success_cleanup = request.clone();
         let resolve_success = resolve.clone();
         let reject_success = reject.clone();
-        let on_success = Closure::once_into_js(move |_event: Event| {
+        let success_callbacks = callbacks.clone();
+        let on_success = Closure::new(move |_event: Event| {
             clear_idb_request_handlers(&success_cleanup);
+            let _ = success_callbacks.borrow_mut().take();
             match success_request.result() {
                 Ok(value) => {
                     let _ = resolve_success.call1(&JsValue::UNDEFINED, &value);
@@ -1364,20 +1368,25 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
                 }
             }
         });
-        request.set_onsuccess(Some(on_success.unchecked_ref()));
 
         let error_request = request.clone();
         let error_cleanup = request.clone();
         let reject_error = reject.clone();
-        let on_error = Closure::once_into_js(move |_event: Event| {
+        let error_callbacks = callbacks.clone();
+        let on_error = Closure::new(move |_event: Event| {
             clear_idb_request_handlers(&error_cleanup);
+            let _ = error_callbacks.borrow_mut().take();
             let error = error_request
                 .error()
                 .map(JsValue::from)
                 .unwrap_or_else(|_| JsValue::from_str("IndexedDB request failed"));
             let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
         });
-        request.set_onerror(Some(on_error.unchecked_ref()));
+
+        request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
+        request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+
+        *callbacks.borrow_mut() = Some((on_success, on_error));
     });
 
     JsFuture::from(promise)
@@ -1389,12 +1398,16 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
 async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, String> {
     let request = request.clone();
     let promise = Promise::new(&mut move |resolve, reject| {
+        let callbacks = std::rc::Rc::new(std::cell::RefCell::new(None));
+
         let success_request = request.clone();
         let success_cleanup = request.clone();
         let resolve_success = resolve.clone();
         let reject_success = reject.clone();
-        let on_success = Closure::once_into_js(move |_event: Event| {
+        let success_callbacks = callbacks.clone();
+        let on_success = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&success_cleanup);
+            let _ = success_callbacks.borrow_mut().take();
             match success_request.result() {
                 Ok(value) => {
                     let _ = resolve_success.call1(&JsValue::UNDEFINED, &value);
@@ -1404,31 +1417,38 @@ async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, Strin
                 }
             }
         });
-        request.set_onsuccess(Some(on_success.unchecked_ref()));
 
         let error_request = request.clone();
         let error_cleanup = request.clone();
         let reject_error = reject.clone();
-        let on_error = Closure::once_into_js(move |_event: Event| {
+        let error_callbacks = callbacks.clone();
+        let on_error = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&error_cleanup);
+            let _ = error_callbacks.borrow_mut().take();
             let error = error_request
                 .error()
                 .map(JsValue::from)
                 .unwrap_or_else(|_| JsValue::from_str("IndexedDB open failed"));
             let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
         });
-        request.set_onerror(Some(on_error.unchecked_ref()));
 
         let blocked_cleanup = request.clone();
         let reject_blocked = reject.clone();
-        let on_blocked = Closure::once_into_js(move |_event: Event| {
+        let blocked_callbacks = callbacks.clone();
+        let on_blocked = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&blocked_cleanup);
+            let _ = blocked_callbacks.borrow_mut().take();
             let _ = reject_blocked.call1(
                 &JsValue::UNDEFINED,
                 &JsValue::from_str("IndexedDB open blocked by another connection"),
             );
         });
-        request.set_onblocked(Some(on_blocked.unchecked_ref()));
+
+        request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
+        request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        request.set_onblocked(Some(on_blocked.as_ref().unchecked_ref()));
+
+        *callbacks.borrow_mut() = Some((on_success, on_error, on_blocked));
     });
 
     JsFuture::from(promise)
@@ -1440,35 +1460,46 @@ async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, Strin
 async fn await_transaction(transaction: &IdbTransaction) -> Result<(), String> {
     let transaction = transaction.clone();
     let promise = Promise::new(&mut move |resolve, reject| {
+        let callbacks = std::rc::Rc::new(std::cell::RefCell::new(None));
+
         let complete_cleanup = transaction.clone();
         let resolve_complete = resolve.clone();
-        let on_complete = Closure::once_into_js(move |_event: Event| {
+        let complete_callbacks = callbacks.clone();
+        let on_complete = Closure::new(move |_event: Event| {
             clear_idb_transaction_handlers(&complete_cleanup);
+            let _ = complete_callbacks.borrow_mut().take();
             let _ = resolve_complete.call0(&JsValue::UNDEFINED);
         });
-        transaction.set_oncomplete(Some(on_complete.unchecked_ref()));
 
         let error_cleanup = transaction.clone();
         let reject_error = reject.clone();
-        let on_error = Closure::once_into_js(move |_event: Event| {
+        let error_callbacks = callbacks.clone();
+        let on_error = Closure::new(move |_event: Event| {
             clear_idb_transaction_handlers(&error_cleanup);
+            let _ = error_callbacks.borrow_mut().take();
             let _ = reject_error.call1(
                 &JsValue::UNDEFINED,
                 &JsValue::from_str("IndexedDB transaction failed"),
             );
         });
-        transaction.set_onerror(Some(on_error.unchecked_ref()));
 
         let abort_cleanup = transaction.clone();
         let reject_abort = reject.clone();
-        let on_abort = Closure::once_into_js(move |_event: Event| {
+        let abort_callbacks = callbacks.clone();
+        let on_abort = Closure::new(move |_event: Event| {
             clear_idb_transaction_handlers(&abort_cleanup);
+            let _ = abort_callbacks.borrow_mut().take();
             let _ = reject_abort.call1(
                 &JsValue::UNDEFINED,
                 &JsValue::from_str("IndexedDB transaction aborted"),
             );
         });
-        transaction.set_onabort(Some(on_abort.unchecked_ref()));
+
+        transaction.set_oncomplete(Some(on_complete.as_ref().unchecked_ref()));
+        transaction.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        transaction.set_onabort(Some(on_abort.as_ref().unchecked_ref()));
+
+        *callbacks.borrow_mut() = Some((on_complete, on_error, on_abort));
     });
 
     JsFuture::from(promise)
