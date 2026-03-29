@@ -385,7 +385,14 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
             this.staged_symbols.push_back(symbol);
             match Pin::new(&mut *this).poll_flush(cx) {
                 Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(_)) => {
+                    // The symbol was accepted into the local buffer (staged or
+                    // moved to buffer during flush). Return Ok so callers do
+                    // not retry and cause duplicate delivery. The underlying
+                    // error will surface on the next poll_flush, poll_send, or
+                    // poll_ready call via poll_inner_terminal_error.
+                    return Poll::Ready(Ok(()));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
