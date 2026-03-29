@@ -2198,9 +2198,13 @@ impl RuntimeState {
 
             match finalizer {
                 Finalizer::Sync(f) => {
-                    // Run synchronously
-                    f();
-                    // Trace event would be recorded here in full implementation
+                    // Run synchronously, catching panics to ensure remaining
+                    // finalizers still execute and the region is not permanently
+                    // stuck in Finalizing state.
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+                        // Log but continue — a panicking finalizer must not
+                        // block region close or skip sibling finalizers.
+                    }
                 }
                 Finalizer::Async(_) => {
                     // Stop and return the async barrier

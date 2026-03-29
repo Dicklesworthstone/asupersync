@@ -64,9 +64,9 @@ impl AuthenticatedSymbol {
         self.verified
     }
 
-    /// Marks the symbol as verified (internal use).
-    pub(crate) fn mark_verified(&mut self) {
-        self.verified = true;
+    /// Sets the verification status (internal use).
+    pub(crate) fn set_verified(&mut self, verified: bool) {
+        self.verified = verified;
     }
 
     /// Consumes the wrapper and returns the inner symbol.
@@ -131,5 +131,19 @@ mod tests {
         assert!(dbg.contains("AuthenticatedSymbol"), "{dbg}");
         let cloned = auth.clone();
         assert_eq!(auth, cloned);
+    }
+
+    #[test]
+    fn set_verified_updates_flag() {
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+        let tag = AuthenticationTag::zero();
+        let mut auth = AuthenticatedSymbol::new_verified(symbol, tag);
+
+        auth.set_verified(false);
+        assert!(!auth.is_verified());
+
+        auth.set_verified(true);
+        assert!(auth.is_verified());
     }
 }

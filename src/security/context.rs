@@ -82,9 +82,9 @@ impl SecurityContext {
     /// The behavior depends on the configured `AuthMode`:
     /// - `Strict`: Returns `Err` on failure.
     /// - `Permissive`: Returns `Ok` on failure (but `verified` flag remains false).
-    /// - `Disabled`: Returns `Ok` without checking (but `verified` flag remains false).
+    /// - `Disabled`: Returns `Ok` without checking and leaves the current `verified` flag intact.
     ///
-    /// If verification succeeds, the `verified` flag on the symbol is set to true.
+    /// If verification runs, the `verified` flag is updated to match the current result.
     pub fn verify_authenticated_symbol(
         &self,
         auth: &mut AuthenticatedSymbol,
@@ -95,9 +95,9 @@ impl SecurityContext {
         }
 
         let is_valid = auth.tag().verify(&self.key, auth.symbol());
+        auth.set_verified(is_valid);
 
         if is_valid {
-            auth.mark_verified();
             self.stats.verified_ok.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
@@ -211,6 +211,59 @@ mod tests {
         assert!(!auth.is_verified());
         assert_eq!(ctx.stats().verified_fail.load(Ordering::Relaxed), 1);
         assert_eq!(ctx.stats().failures_allowed.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn strict_mode_clears_preverified_flag_on_failure() {
+        let signing_ctx = SecurityContext::for_testing(123);
+        let verifying_ctx = SecurityContext::for_testing(456).with_mode(AuthMode::Strict);
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+
+        let mut auth = signing_ctx.sign_symbol(&symbol);
+        assert!(auth.is_verified());
+
+        let result = verifying_ctx.verify_authenticated_symbol(&mut auth);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_invalid_tag());
+        assert!(
+            !auth.is_verified(),
+            "failed re-verification must clear any stale trusted state"
+        );
+        assert_eq!(
+            verifying_ctx.stats().verified_fail.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(verifying_ctx.stats().verified_ok.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn permissive_mode_clears_preverified_flag_on_failure() {
+        let signing_ctx = SecurityContext::for_testing(123);
+        let verifying_ctx = SecurityContext::for_testing(456).with_mode(AuthMode::Permissive);
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+
+        let mut auth = signing_ctx.sign_symbol(&symbol);
+        assert!(auth.is_verified());
+
+        let result = verifying_ctx.verify_authenticated_symbol(&mut auth);
+        assert!(result.is_ok());
+        assert!(
+            !auth.is_verified(),
+            "permissive mode may allow the symbol through, but it must not preserve a stale verified flag"
+        );
+        assert_eq!(
+            verifying_ctx.stats().verified_fail.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            verifying_ctx
+                .stats()
+                .failures_allowed
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]

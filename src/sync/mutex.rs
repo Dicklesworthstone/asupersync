@@ -221,6 +221,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
     type Output = Result<MutexGuard<'a, T>, LockError>;
 
     #[inline]
+    #[allow(clippy::if_not_else, clippy::option_if_let_else)]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(LockError::PolledAfterCompletion));
@@ -230,14 +231,19 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         if let Err(_e) = self.cx.checkpoint() {
             self.completed = true;
             if let Some(waiter_id) = self.waiter_id.take() {
-                let mut state = self.mutex.state.lock();
-                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                    state.waiters.remove(pos);
-                }
-                if !state.locked {
-                    if let Some(next) = state.waiters.front() {
-                        next.waker.wake_by_ref();
+                let waker_to_wake = {
+                    let mut state = self.mutex.state.lock();
+                    if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                        state.waiters.remove(pos);
                     }
+                    if !state.locked {
+                        state.waiters.front().map(|next| next.waker.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(waker) = waker_to_wake {
+                    waker.wake();
                 }
             }
             return Poll::Ready(Err(LockError::Cancelled));
@@ -247,15 +253,21 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
         if self.mutex.is_poisoned() {
             self.completed = true;
-            if let Some(waiter_id) = self.waiter_id.take() {
+            let waker_to_wake = if let Some(waiter_id) = self.waiter_id.take() {
                 if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
                     state.waiters.remove(pos);
                 }
                 if !state.locked {
-                    if let Some(next) = state.waiters.front() {
-                        next.waker.wake_by_ref();
-                    }
+                    state.waiters.front().map(|next| next.waker.clone())
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            drop(state);
+            if let Some(waker) = waker_to_wake {
+                waker.wake();
             }
             return Poll::Ready(Err(LockError::Poisoned));
         }

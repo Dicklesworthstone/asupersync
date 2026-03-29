@@ -408,10 +408,15 @@ impl CircuitBreaker {
         // caller policy by allowing zero or overflowing values.
         policy.half_open_max_probes = normalize_half_open_max_probes(policy.half_open_max_probes);
 
-        // Clamp success_threshold to 0xFFFF (16 bits) because it is packed into 16 bits
-        // in State::HalfOpen. If it exceeds 0xFFFF, it would wrap around and trap the
-        // breaker in HalfOpen permanently.
-        policy.success_threshold = policy.success_threshold.min(0xFFFF);
+        // Clamp success_threshold to [1, 0xFFFF]. The upper bound is because the value
+        // is packed into 16 bits in State::HalfOpen (overflow would trap in HalfOpen).
+        // The lower bound prevents 0 from behaving identically to 1 (would close on
+        // the first probe regardless, confusing callers who expect "no probes needed").
+        policy.success_threshold = policy.success_threshold.clamp(1, 0xFFFF);
+
+        // Clamp failure_threshold to at least 1 so that 0 does not silently behave
+        // like 1 (opening the circuit on the very first failure).
+        policy.failure_threshold = policy.failure_threshold.max(1);
 
         let sliding_window = policy
             .sliding_window
