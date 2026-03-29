@@ -21,6 +21,7 @@
 //! ```
 
 use crate::console::Console;
+use crate::cx::Cx;
 use crate::record::task::{TaskPhase, TaskRecord, TaskState};
 use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
@@ -487,10 +488,10 @@ impl TaskInspector {
     /// clock checkpoints. The inspector therefore has to consult the task's own
     /// `Cx` handle instead of the runtime-global timer driver to avoid mixing
     /// clock domains after late driver attachment.
-    fn current_checkpoint_time_for_task(&self, task: &TaskRecord) -> Option<Time> {
+    fn current_checkpoint_time_for_task(task: &TaskRecord) -> Option<Time> {
         task.cx
             .as_ref()
-            .and_then(|cx| cx.timer_driver())
+            .and_then(Cx::timer_driver)
             .map(|driver| driver.now())
     }
 
@@ -515,7 +516,7 @@ impl TaskInspector {
             Vec::new()
         };
 
-        let time_since_last_poll = self.current_checkpoint_time_for_task(task).and_then(|now| {
+        let time_since_last_poll = Self::current_checkpoint_time_for_task(task).and_then(|now| {
             task.cx_inner.as_ref().and_then(|inner| {
                 inner
                     .read()
@@ -1364,9 +1365,13 @@ mod tests {
         let (task_id, _handle) = state
             .create_task(root, Budget::INFINITE, async {})
             .expect("create task");
-        let task = state.task_mut(task_id).expect("task record");
-        task.state = TaskState::Running;
-        task.increment_polls();
+        let cx = {
+            let task = state.task_mut(task_id).expect("task record");
+            task.state = TaskState::Running;
+            task.increment_polls();
+            task.cx.as_ref().expect("task cx").clone()
+        };
+        cx.checkpoint().expect("checkpoint");
         clock.advance_to(Time::from_secs(8));
 
         let inspector = TaskInspector::with_config(
@@ -1418,9 +1423,13 @@ mod tests {
         let (task_id, _handle) = state
             .create_task(root, Budget::INFINITE, async {})
             .expect("create task");
-        let task = state.task_mut(task_id).expect("task record");
-        task.state = TaskState::Running;
-        task.increment_polls();
+        let cx = {
+            let task = state.task_mut(task_id).expect("task record");
+            task.state = TaskState::Running;
+            task.increment_polls();
+            task.cx.as_ref().expect("task cx").clone()
+        };
+        cx.checkpoint().expect("checkpoint");
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
             VirtualClock::starting_at(Time::from_secs(60)),
         )));
