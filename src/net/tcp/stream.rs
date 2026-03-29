@@ -282,8 +282,20 @@ impl TcpStream {
             ));
         }
 
+        let deadline = time_getter() + timeout_duration;
         let mut last_err = None;
+
         for addr in addrs {
+            let now = time_getter();
+            if now >= deadline {
+                last_err = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "tcp connect timeout",
+                ));
+                break;
+            }
+            let remaining = std::time::Duration::from_nanos(deadline.duration_since(now));
+
             let domain = if addr.is_ipv4() {
                 Domain::IPV4
             } else {
@@ -299,7 +311,7 @@ impl TcpStream {
             };
 
             let connect_future = Box::pin(Self::connect_from_socket(socket, addr));
-            match future_with_timeout(connect_future, timeout_duration, time_getter).await {
+            match future_with_timeout(connect_future, remaining, time_getter).await {
                 Ok(Ok(stream)) => return Ok(stream),
                 Ok(Err(err)) => last_err = Some(err),
                 Err(_) => {
@@ -307,6 +319,7 @@ impl TcpStream {
                         io::ErrorKind::TimedOut,
                         "tcp connect timeout",
                     ));
+                    break; // Timed out waiting, so no time left for subsequent attempts
                 }
             }
         }
@@ -1181,6 +1194,27 @@ mod tests {
             Future::poll(future.as_mut(), &mut cx),
             Poll::Ready(Ok(Ok(7)))
         ));
+    }
+
+    #[test]
+    fn connect_timeout_with_time_getter_times_out_before_first_attempt() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            let now = TEST_NOW.load(Ordering::SeqCst);
+            TEST_NOW.store(50, Ordering::SeqCst);
+            Time::from_nanos(now)
+        }
+
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let err = future::block_on(TcpStream::connect_timeout_with_time_getter(
+            "127.0.0.1:1".parse::<SocketAddr>().expect("socket addr"),
+            Duration::from_nanos(10),
+            test_time,
+        ))
+        .expect_err("deadline should expire before the first socket attempt");
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]

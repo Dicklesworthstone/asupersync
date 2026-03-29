@@ -194,10 +194,36 @@ impl PooledConnectionMeta {
         self.last_used = now;
     }
 
+    /// Marks the connection as connected only if it is still connecting.
+    ///
+    /// Returns true when the transition was applied.
+    #[must_use]
+    pub fn mark_connected(&mut self, now: Time) -> bool {
+        if self.state == PooledConnectionState::Connecting {
+            self.mark_idle(now);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Marks the connection as in use.
     pub fn mark_in_use(&mut self) {
         self.state = PooledConnectionState::InUse;
         self.requests_served += 1;
+    }
+
+    /// Returns the connection to idle only if it is currently checked out.
+    ///
+    /// Returns true when the transition was applied.
+    #[must_use]
+    pub fn release(&mut self, now: Time) -> bool {
+        if self.state == PooledConnectionState::InUse {
+            self.mark_idle(now);
+            true
+        } else {
+            false
+        }
     }
 
     /// Marks the connection as unhealthy.
@@ -430,7 +456,7 @@ impl Pool {
     pub fn mark_connected(&mut self, key: &PoolKey, id: u64, now: Time) {
         if let Some(host_pool) = self.hosts.get_mut(key) {
             if let Some(conn) = host_pool.connections.get_mut(&id) {
-                conn.mark_idle(now);
+                let _ = conn.mark_connected(now);
             }
         }
     }
@@ -439,7 +465,7 @@ impl Pool {
     pub fn release(&mut self, key: &PoolKey, id: u64, now: Time) {
         if let Some(host_pool) = self.hosts.get_mut(key) {
             if let Some(conn) = host_pool.connections.get_mut(&id) {
-                conn.mark_idle(now);
+                let _ = conn.release(now);
             }
         }
     }
@@ -741,6 +767,50 @@ mod tests {
         let mut pool = Pool::new();
         let key = PoolKey::https("example.com", None);
         pool.mark_connected(&key, 999, make_time(0));
+    }
+
+    #[test]
+    fn release_connecting_connection_is_noop() {
+        let mut pool = Pool::new();
+        let key = PoolKey::https("example.com", None);
+        let id = pool.register_connecting(key.clone(), make_time(0), 2);
+
+        pool.release(&key, id, make_time(50));
+
+        let meta = pool
+            .get_connection_meta(&key, id)
+            .expect("connecting connection should remain present");
+        assert_eq!(meta.state, PooledConnectionState::Connecting);
+        assert_eq!(meta.last_used, make_time(0));
+    }
+
+    #[test]
+    fn mark_connected_in_use_connection_is_noop() {
+        let mut pool = Pool::new();
+        let key = PoolKey::https("example.com", None);
+        let id = pool.register_connecting(key.clone(), make_time(0), 2);
+        pool.mark_connected(&key, id, make_time(10));
+        assert_eq!(pool.try_acquire(&key, make_time(20)), Some(id));
+
+        pool.mark_connected(&key, id, make_time(50));
+
+        let meta = pool
+            .get_connection_meta(&key, id)
+            .expect("in-use connection should remain present");
+        assert_eq!(meta.state, PooledConnectionState::InUse);
+        assert_eq!(meta.last_used, make_time(10));
+        assert_eq!(meta.requests_served, 1);
+    }
+
+    #[test]
+    fn release_unhealthy_connection_is_noop() {
+        let mut meta = PooledConnectionMeta::new(1, make_time(0), 2);
+        assert!(meta.mark_connected(make_time(10)));
+        meta.mark_unhealthy();
+
+        assert!(!meta.release(make_time(50)));
+        assert_eq!(meta.state, PooledConnectionState::Unhealthy);
+        assert_eq!(meta.last_used, make_time(10));
     }
 
     #[test]

@@ -9,11 +9,13 @@
 //! - `happy_eyeballs_connect`: Cancel-safe, connection attempts are cancelled on drop.
 //! - Cache updates are atomic and don't block on cancellation.
 //!
-//! # Phase 0 Implementation
+//! # Implementation Notes
 //!
-//! In Phase 0, DNS resolution uses `std::net::ToSocketAddrs` which performs
-//! synchronous resolution. The async API is maintained for forward compatibility
-//! with future async DNS implementations.
+//! `lookup_ip` keeps the system-resolver fast path for the default
+//! configuration so search-domain behavior stays aligned with the host.
+//! When explicit nameservers are configured, or when record-specific lookups
+//! (MX, SRV, TXT) are requested, the resolver uses its own DNS transport over
+//! UDP/TCP on the blocking pool.
 //!
 //! # Example
 //!

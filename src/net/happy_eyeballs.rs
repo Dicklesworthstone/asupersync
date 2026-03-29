@@ -359,6 +359,13 @@ impl RaceConnections {
         Poll::Ready(output)
     }
 
+    fn finish_overall_timeout(&mut self) -> Poll<io::Result<TcpStream>> {
+        self.finish(Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            OVERALL_CONNECTION_TIMEOUT_MSG,
+        )))
+    }
+
     fn poll_with_time(&mut self, now: Time, cx: &mut Context<'_>) -> Poll<io::Result<TcpStream>> {
         if self.completed {
             return Poll::Ready(Err(Self::poll_after_completion_error()));
@@ -366,10 +373,7 @@ impl RaceConnections {
 
         // Check overall timeout first
         if self.timeout_sleep.poll_with_time(now).is_ready() {
-            let err = self.last_error.take().unwrap_or_else(|| {
-                io::Error::new(io::ErrorKind::TimedOut, OVERALL_CONNECTION_TIMEOUT_MSG)
-            });
-            return self.finish(Err(err));
+            return self.finish_overall_timeout();
         }
 
         // Poll all active futures, collecting results to avoid borrow conflicts
@@ -439,10 +443,7 @@ impl Future for RaceConnections {
             // we must return the timeout now, otherwise we will lose the wakeup
             // because Sleep::poll does not register a waker when it returns Ready.
             if Pin::new(&mut this.timeout_sleep).poll(cx).is_ready() {
-                let err = this.last_error.take().unwrap_or_else(|| {
-                    io::Error::new(io::ErrorKind::TimedOut, OVERALL_CONNECTION_TIMEOUT_MSG)
-                });
-                return this.finish(Err(err));
+                return this.finish_overall_timeout();
             }
         }
         poll
@@ -1099,6 +1100,44 @@ mod tests {
         assert!(matches!(result, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::TimedOut));
         assert_post_completion_error(race.poll_with_time(test_time(), &mut cx));
         crate::test_complete!("race_connections_timeout_honors_custom_clock");
+    }
+
+    #[test]
+    fn race_connections_timeout_overrides_prior_connect_error() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("race_connections_timeout_overrides_prior_connect_error");
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let fail_fut: ConnectFuture = Box::pin(async {
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "early failure",
+            ))
+        });
+        let pending_fut: ConnectFuture =
+            Box::pin(async { pending::<io::Result<TcpStream>>().await });
+        let deadline = Time::from_nanos(1_500);
+        let mut race = RaceConnections::new(vec![fail_fut, pending_fut], deadline, test_time);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(race.poll_with_time(test_time(), &mut cx).is_pending());
+
+        TEST_NOW.store(2_000, Ordering::SeqCst);
+        let result = race.poll_with_time(test_time(), &mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(err))
+                if err.kind() == io::ErrorKind::TimedOut
+                    && err.to_string() == OVERALL_CONNECTION_TIMEOUT_MSG
+        ));
+        assert_post_completion_error(race.poll_with_time(test_time(), &mut cx));
+        crate::test_complete!("race_connections_timeout_overrides_prior_connect_error");
     }
 
     #[test]
