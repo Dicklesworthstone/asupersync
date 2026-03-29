@@ -5,10 +5,16 @@ use std::collections::BTreeSet;
 
 const MAP_JSON: &str =
     include_str!("../formal/lean/coverage/proof_guided_performance_opportunity_map.json");
-const BEADS_JSONL: &str = include_str!("../.beads/issues.jsonl");
+
+fn beads_issues_jsonl() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::Path::new(manifest_dir).join(".beads/issues.jsonl");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
 
 fn bead_ids() -> BTreeSet<String> {
-    BEADS_JSONL
+    beads_issues_jsonl()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .fold(BTreeSet::new(), |mut ids, entry| {

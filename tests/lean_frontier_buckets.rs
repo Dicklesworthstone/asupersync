@@ -5,8 +5,14 @@ use std::collections::BTreeSet;
 
 const FRONTIER_JSON: &str = include_str!("../formal/lean/coverage/lean_frontier_buckets_v1.json");
 const GAP_PLAN_JSON: &str = include_str!("../formal/lean/coverage/gap_risk_sequencing_plan.json");
-const BEADS_JSONL: &str = include_str!("../.beads/issues.jsonl");
 const ASUPERSYNC_LEAN: &str = include_str!("../formal/lean/Asupersync.lean");
+
+fn beads_issues_jsonl() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::Path::new(manifest_dir).join(".beads/issues.jsonl");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
 
 #[test]
 fn frontier_report_has_valid_schema_and_sorted_buckets() {
@@ -114,7 +120,7 @@ fn frontier_buckets_link_to_known_failure_modes_and_beads() {
         })
         .collect::<BTreeSet<_>>();
 
-    let bead_ids = BEADS_JSONL
+    let bead_ids = beads_issues_jsonl()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|entry| {

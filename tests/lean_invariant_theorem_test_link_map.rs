@@ -13,7 +13,13 @@ const TRACEABILITY_JSON: &str =
     include_str!("../formal/lean/coverage/theorem_rule_traceability_ledger.json");
 const RUNTIME_MAP_JSON: &str =
     include_str!("../formal/lean/coverage/runtime_state_refinement_map.json");
-const BEADS_JSONL: &str = include_str!("../.beads/issues.jsonl");
+
+fn beads_issues_jsonl() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::Path::new(manifest_dir).join(".beads/issues.jsonl");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
 
 #[derive(Debug)]
 struct InvariantExpectations {
@@ -39,7 +45,7 @@ fn parse_json(input: &str, label: &str) -> Value {
 }
 
 fn bead_ids() -> BTreeSet<String> {
-    BEADS_JSONL
+    beads_issues_jsonl()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .flat_map(|entry: serde_json::Value| {

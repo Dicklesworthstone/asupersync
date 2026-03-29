@@ -15,7 +15,13 @@ const TESTING_MATRIX_DIFF_JSON: &str =
 const NO_MOCK_INVENTORY_JSON: &str =
     include_str!("../formal/lean/coverage/no_mock_inventory_v1.json");
 const NO_MOCK_POLICY_JSON: &str = include_str!("../.github/no_mock_policy.json");
-const BEADS_JSONL: &str = include_str!("../.beads/issues.jsonl");
+
+fn beads_issues_jsonl() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::Path::new(manifest_dir).join(".beads/issues.jsonl");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
 
 #[test]
 fn baseline_report_core_counts_match_sources() {
@@ -186,7 +192,7 @@ fn baseline_report_gap_priority_matches_gap_plan() {
 #[test]
 fn baseline_report_references_existing_beads_and_has_cadence() {
     let baseline: Value = serde_json::from_str(BASELINE_JSON).expect("baseline report must parse");
-    let bead_ids = BEADS_JSONL
+    let bead_ids = beads_issues_jsonl()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .fold(BTreeSet::new(), |mut ids, entry| {
@@ -454,7 +460,7 @@ fn baseline_report_track2_burndown_and_closure_gate_are_well_formed() {
         "stability requirement must require no regression"
     );
 
-    let bead_ids = BEADS_JSONL
+    let bead_ids = beads_issues_jsonl()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .fold(BTreeSet::new(), |mut ids, entry| {
