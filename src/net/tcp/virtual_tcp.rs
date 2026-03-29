@@ -45,6 +45,8 @@ const VIRTUAL_TCP_ACCEPT_QUEUE_CAPACITY: usize = 16;
 struct ChannelHalf {
     buf: VecDeque<u8>,
     waker: Option<Waker>,
+    /// Waker for the writer, woken when the reader drains and frees capacity.
+    write_waker: Option<Waker>,
     closed: bool,
     read_shutdown: bool,
 }
@@ -54,9 +56,14 @@ impl ChannelHalf {
         Self {
             buf: VecDeque::with_capacity(VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES),
             waker: None,
+            write_waker: None,
             closed: false,
             read_shutdown: false,
         }
+    }
+
+    fn take_wakers(&mut self) -> (Option<Waker>, Option<Waker>) {
+        (self.waker.take(), self.write_waker.take())
     }
 }
 
@@ -160,8 +167,13 @@ impl AsyncRead for VirtualTcpStream {
             unfilled[front_copy..to_read].copy_from_slice(&back[..to_read - front_copy]);
         }
         half.buf.drain(..to_read);
+        // Wake the writer if it was blocked on a full buffer.
+        let write_wake = half.write_waker.take();
         drop(half);
         buf.advance(to_read);
+        if let Some(waker) = write_wake {
+            waker.wake();
+        }
         Poll::Ready(Ok(()))
     }
 }
@@ -169,7 +181,7 @@ impl AsyncRead for VirtualTcpStream {
 impl AsyncWrite for VirtualTcpStream {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
@@ -189,18 +201,40 @@ impl AsyncWrite for VirtualTcpStream {
         }
 
         if half.read_shutdown {
-            // Peer shut down their read side; accept data but discard it.
-            return Poll::Ready(Ok(buf.len()));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "peer shut down read half",
+            )));
         }
 
-        half.buf.reserve(buf.len());
-        half.buf.extend(buf);
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        // Enforce backpressure: if the buffer is at capacity, register a
+        // waker and return Pending so flow-control bugs surface under
+        // virtual TCP just as they would with real sockets.
+        if half.buf.len() >= VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES {
+            if !half
+                .write_waker
+                .as_ref()
+                .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                half.write_waker = Some(cx.waker().clone());
+            }
+            return Poll::Pending;
+        }
+
+        // Accept up to the remaining capacity, matching real TCP partial-write semantics.
+        let available = VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES.saturating_sub(half.buf.len());
+        let to_write = buf.len().min(available);
+        half.buf.extend(&buf[..to_write]);
         let wake = half.waker.take();
         drop(half);
         if let Some(waker) = wake {
             waker.wake();
         }
-        Poll::Ready(Ok(buf.len()))
+        Poll::Ready(Ok(to_write))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -233,18 +267,24 @@ impl Drop for VirtualTcpStream {
             let mut half = self.read_half.lock();
             half.read_shutdown = true;
             half.buf.clear();
-            half.waker.take()
+            half.take_wakers()
         };
-        if let Some(waker) = read_wake {
+        if let Some(waker) = read_wake.0 {
+            waker.wake();
+        }
+        if let Some(waker) = read_wake.1 {
             waker.wake();
         }
 
         let write_wake = {
             let mut half = self.write_half.lock();
             half.closed = true;
-            half.waker.take()
+            half.take_wakers()
         };
-        if let Some(waker) = write_wake {
+        if let Some(waker) = write_wake.0 {
+            waker.wake();
+        }
+        if let Some(waker) = write_wake.1 {
             waker.wake();
         }
     }
@@ -277,9 +317,12 @@ impl TcpStreamApi for VirtualTcpStream {
                 let mut half = self.read_half.lock();
                 half.read_shutdown = true;
                 half.buf.clear();
-                let wake = half.waker.take();
+                let wake = half.take_wakers();
                 drop(half);
-                if let Some(waker) = wake {
+                if let Some(waker) = wake.0 {
+                    waker.wake();
+                }
+                if let Some(waker) = wake.1 {
                     waker.wake();
                 }
             }
@@ -290,9 +333,12 @@ impl TcpStreamApi for VirtualTcpStream {
                 self.write_shutdown.store(true, Ordering::Relaxed);
                 let mut half = self.write_half.lock();
                 half.closed = true;
-                let wake = half.waker.take();
+                let wake = half.take_wakers();
                 drop(half);
-                if let Some(waker) = wake {
+                if let Some(waker) = wake.0 {
+                    waker.wake();
+                }
+                if let Some(waker) = wake.1 {
                     waker.wake();
                 }
             }
@@ -553,6 +599,23 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct CountWaker(std::sync::atomic::AtomicUsize);
+
+    impl Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn count_waker() -> (Arc<CountWaker>, Waker) {
+        let inner = Arc::new(CountWaker(std::sync::atomic::AtomicUsize::new(0)));
+        (Arc::clone(&inner), Waker::from(inner))
     }
 
     fn addr(s: &str) -> SocketAddr {
@@ -845,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_stream_shutdown_read_allows_peer_write() {
+    fn virtual_stream_shutdown_read_rejects_peer_write() {
         let (mut a, mut b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
 
         a.shutdown(Shutdown::Read).unwrap();
@@ -853,9 +916,12 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Peer write should succeed but be discarded.
+        // Peer write should fail once the other side stops accepting data.
         let result = Pin::new(&mut b).poll_write(&mut cx, b"discarded");
-        assert!(matches!(result, Poll::Ready(Ok(9))));
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::BrokenPipe
+        ));
 
         // Reader sees EOF immediately.
         let mut buf = [0u8; 8];
@@ -863,6 +929,81 @@ mod tests {
         let result = Pin::new(&mut a).poll_read(&mut cx, &mut read_buf);
         assert!(matches!(result, Poll::Ready(Ok(()))));
         assert_eq!(read_buf.filled().len(), 0);
+    }
+
+    #[test]
+    fn virtual_stream_shutdown_read_wakes_blocked_writer() {
+        let (mut a, b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
+
+        let full = vec![7u8; VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES];
+        let (wake_counter, waker) = count_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, &full),
+            Poll::Ready(Ok(VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES))
+        ));
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, b"x"),
+            Poll::Pending
+        ));
+
+        b.shutdown(Shutdown::Read).unwrap();
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 1);
+
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, b"x"),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::BrokenPipe
+        ));
+    }
+
+    #[test]
+    fn virtual_stream_zero_len_write_on_full_buffer_is_ready() {
+        let (mut a, _b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
+
+        let full = vec![5u8; VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES];
+        let (wake_counter, waker) = count_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, &full),
+            Poll::Ready(Ok(VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES))
+        ));
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, b""),
+            Poll::Ready(Ok(0))
+        ));
+        assert_eq!(
+            wake_counter.0.load(Ordering::Relaxed),
+            0,
+            "zero-length writes must not register a blocked-writer wake"
+        );
+    }
+
+    #[test]
+    fn virtual_stream_drop_wakes_blocked_writer() {
+        let (mut a, b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
+
+        let full = vec![9u8; VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES];
+        let (wake_counter, waker) = count_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, &full),
+            Poll::Ready(Ok(VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES))
+        ));
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, b"y"),
+            Poll::Pending
+        ));
+
+        drop(b);
+        assert_eq!(wake_counter.0.load(Ordering::Relaxed), 1);
+
+        assert!(matches!(
+            Pin::new(&mut a).poll_write(&mut cx, b"y"),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::BrokenPipe
+        ));
     }
 
     #[test]

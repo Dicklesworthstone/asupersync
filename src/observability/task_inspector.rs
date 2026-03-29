@@ -21,7 +21,7 @@
 //! ```
 
 use crate::console::Console;
-use crate::record::task::{TaskPhase, TaskState};
+use crate::record::task::{TaskPhase, TaskRecord, TaskState};
 use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
@@ -105,7 +105,7 @@ pub struct TaskDetails {
     pub created_at: Time,
     /// Time since creation.
     pub age: Duration,
-    /// Time since last poll (if applicable).
+    /// Time since the last explicit progress checkpoint / idle-time sample.
     pub time_since_last_poll: Option<Duration>,
     /// Whether a wake is pending.
     pub wake_pending: bool,
@@ -141,10 +141,11 @@ impl TaskDetails {
 
     /// Returns true if the task matches the inspector's stuck-task heuristic.
     ///
-    /// Prefer explicit last-poll idle time when it is available. When the
-    /// runtime cannot provide wall-clock last-poll metadata yet, only classify
-    /// old tasks that have never been polled as potentially stuck so
-    /// long-lived waiting tasks are not misreported just because they are old.
+    /// Prefer explicit idle-time metadata when it is available. Today the
+    /// inspector derives this from task progress checkpoints. When no explicit
+    /// idle-time sample exists yet, only classify old tasks that have never
+    /// been polled as potentially stuck so long-lived waiting tasks are not
+    /// misreported just because they are old.
     #[must_use]
     pub fn is_potentially_stuck(&self, age_threshold: Duration) -> bool {
         if self.is_terminal() || self.wake_pending {
@@ -477,6 +478,22 @@ impl TaskInspector {
             .map_or(self.state.now, TimerDriverHandle::now)
     }
 
+    /// Get the current checkpoint time when it shares the task's checkpoint clock.
+    ///
+    /// `Cx::checkpoint()` records time using the task-local timer driver handle
+    /// captured in the `Cx`. If a task was created before the runtime attached a
+    /// timer driver, later switching `RuntimeState` to timer-driver time does
+    /// not retroactively update that `Cx`; the task will keep recording wall
+    /// clock checkpoints. The inspector therefore has to consult the task's own
+    /// `Cx` handle instead of the runtime-global timer driver to avoid mixing
+    /// clock domains after late driver attachment.
+    fn current_checkpoint_time_for_task(&self, task: &TaskRecord) -> Option<Time> {
+        task.cx
+            .as_ref()
+            .and_then(|cx| cx.timer_driver())
+            .map(|driver| driver.now())
+    }
+
     /// Get detailed information about a specific task.
     #[must_use]
     pub fn inspect_task(&self, task_id: TaskId) -> Option<TaskDetails> {
@@ -498,6 +515,18 @@ impl TaskInspector {
             Vec::new()
         };
 
+        let time_since_last_poll = self.current_checkpoint_time_for_task(task).and_then(|now| {
+            task.cx_inner.as_ref().and_then(|inner| {
+                inner
+                    .read()
+                    .checkpoint_state
+                    .last_checkpoint
+                    .map(|last_checkpoint| {
+                        Duration::from_nanos(now.duration_since(last_checkpoint))
+                    })
+            })
+        });
+
         Some(TaskDetails {
             id: task.id,
             region_id: task.owner,
@@ -507,7 +536,7 @@ impl TaskInspector {
             polls_remaining: task.polls_remaining,
             created_at: task.created_at,
             age,
-            time_since_last_poll: None, // Would need wall-clock tracking
+            time_since_last_poll,
             wake_pending: task.wake_state.is_notified(),
             obligations,
             waiters: task.waiters.to_vec(),
@@ -553,10 +582,10 @@ impl TaskInspector {
             .collect()
     }
 
-    /// Find tasks that haven't been polled recently (potentially stuck).
+    /// Find tasks that haven't reported progress recently (potentially stuck).
     ///
-    /// Note: This is heuristic-based because wall-clock last-poll tracking is
-    /// not always available. When explicit idle time is unavailable, the
+    /// Note: This is heuristic-based because explicit idle-time metadata is not
+    /// always available. When no checkpoint-derived idle time exists yet, the
     /// inspector only flags aged tasks that have never been polled, avoiding
     /// false positives for long-lived waiting tasks.
     #[must_use]
@@ -1323,6 +1352,83 @@ mod tests {
 
         let wire = inspector.wire_snapshot();
         assert_eq!(wire.generated_at, Time::from_secs(8));
+    }
+
+    #[test]
+    fn inspector_reports_checkpoint_idle_time_from_timer_driver() {
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(3)));
+        state.now = Time::from_secs(3);
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let task = state.task_mut(task_id).expect("task record");
+        task.state = TaskState::Running;
+        task.increment_polls();
+        clock.advance_to(Time::from_secs(8));
+
+        let inspector = TaskInspector::with_config(
+            Arc::new(state),
+            None,
+            TaskInspectorConfig::default().with_stuck_threshold(Duration::from_secs(4)),
+        );
+        let details = inspector.inspect_task(task_id).expect("task exists");
+        assert_eq!(details.time_since_last_poll, Some(Duration::from_secs(5)));
+        assert!(details.is_potentially_stuck(Duration::from_secs(4)));
+        assert_eq!(inspector.summary().stuck_count, 1);
+        assert_eq!(
+            inspector.wire_snapshot().tasks[0].time_since_last_poll_nanos,
+            Some(duration_to_nanos(Duration::from_secs(5)))
+        );
+    }
+
+    #[test]
+    fn inspector_does_not_mix_wall_clock_checkpoint_idle_without_timer_driver() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let task = state.task_mut(task_id).expect("task record");
+        task.state = TaskState::Running;
+        task.increment_polls();
+        if let Some(inner) = &task.cx_inner {
+            inner.write().checkpoint_state.record_at(Time::from_secs(3));
+        }
+        state.now = Time::from_secs(5);
+
+        let inspector = TaskInspector::new(Arc::new(state), None);
+        let details = inspector.inspect_task(task_id).expect("task exists");
+        assert_eq!(details.age, Duration::from_secs(5));
+        assert_eq!(details.time_since_last_poll, None);
+        assert!(!details.is_potentially_stuck(Duration::from_secs(30)));
+        assert_eq!(inspector.summary().stuck_count, 0);
+        assert_eq!(
+            inspector.wire_snapshot().tasks[0].time_since_last_poll_nanos,
+            None
+        );
+    }
+
+    #[test]
+    fn inspector_does_not_mix_checkpoint_time_after_late_timer_driver_attachment() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let task = state.task_mut(task_id).expect("task record");
+        task.state = TaskState::Running;
+        task.increment_polls();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
+            VirtualClock::starting_at(Time::from_secs(60)),
+        )));
+
+        let inspector = TaskInspector::new(Arc::new(state), None);
+        let details = inspector.inspect_task(task_id).expect("task exists");
+        assert_eq!(details.time_since_last_poll, None);
+        assert_eq!(inspector.summary().stuck_count, 0);
     }
 
     #[test]
