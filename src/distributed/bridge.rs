@@ -65,6 +65,10 @@ impl RegionMode {
     /// Creates a distributed mode with quorum consistency.
     #[must_use]
     pub fn distributed(replication_factor: u32) -> Self {
+        assert!(
+            replication_factor > 0,
+            "distributed region mode requires at least one replica"
+        );
         Self::Distributed {
             replication_factor,
             consistency: ConsistencyLevel::Quorum,
@@ -74,9 +78,39 @@ impl RegionMode {
     /// Creates a hybrid mode with async replication.
     #[must_use]
     pub fn hybrid(replication_factor: u32) -> Self {
+        assert!(
+            replication_factor > 0,
+            "hybrid region mode requires at least one replica"
+        );
         Self::Hybrid {
             replication_factor,
             max_lag: Duration::from_secs(5),
+        }
+    }
+
+    fn assert_valid(self) {
+        match self {
+            Self::Local => {}
+            Self::Distributed {
+                replication_factor, ..
+            } => assert!(
+                replication_factor > 0,
+                "distributed region mode requires at least one replica"
+            ),
+            Self::Hybrid {
+                replication_factor, ..
+            } => assert!(
+                replication_factor > 0,
+                "hybrid region mode requires at least one replica"
+            ),
+        }
+    }
+
+    const fn min_quorum(replication_factor: u32, consistency: ConsistencyLevel) -> u32 {
+        match consistency {
+            ConsistencyLevel::One | ConsistencyLevel::Local => 1,
+            ConsistencyLevel::Quorum => replication_factor / 2 + 1,
+            ConsistencyLevel::All => replication_factor,
         }
     }
 
@@ -475,6 +509,7 @@ impl RegionBridge {
         budget: Budget,
         mode: RegionMode,
     ) -> Self {
+        mode.assert_valid();
         match mode {
             RegionMode::Local | RegionMode::Hybrid { .. } => Self {
                 local: RegionRecord::new(id, parent, budget),
@@ -489,6 +524,7 @@ impl RegionBridge {
                 consistency,
             } => {
                 let config = DistributedRegionConfig {
+                    min_quorum: RegionMode::min_quorum(replication_factor, consistency),
                     replication_factor,
                     write_consistency: consistency,
                     ..Default::default()
@@ -842,6 +878,8 @@ impl RegionBridge {
                 .with_message("can only upgrade open regions"));
         }
 
+        config.validate()?;
+
         let snapshot = self.create_snapshot();
         let snapshot_sequence = snapshot.sequence;
 
@@ -905,6 +943,18 @@ mod tests {
         assert!(mode.is_replicated());
         assert!(!mode.is_distributed());
         assert_eq!(mode.replication_factor(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "distributed region mode requires at least one replica")]
+    fn mode_distributed_rejects_zero_replication() {
+        let _ = RegionMode::distributed(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "hybrid region mode requires at least one replica")]
+    fn mode_hybrid_rejects_zero_replication() {
+        let _ = RegionMode::hybrid(0);
     }
 
     #[test]
@@ -1115,6 +1165,38 @@ mod tests {
 
         assert!(bridge.mode().is_distributed());
         assert!(bridge.distributed().is_some());
+    }
+
+    #[test]
+    fn bridge_with_mode_distributed_single_replica_derives_valid_quorum() {
+        let bridge = RegionBridge::with_mode(
+            RegionId::new_for_test(1, 0),
+            None,
+            Budget::default(),
+            RegionMode::distributed(1),
+        );
+
+        let distributed = bridge.distributed().expect("distributed mode");
+        assert_eq!(distributed.config.replication_factor, 1);
+        assert_eq!(distributed.config.min_quorum, 1);
+        assert_eq!(
+            distributed.config.write_consistency,
+            ConsistencyLevel::Quorum
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "distributed region mode requires at least one replica")]
+    fn bridge_with_mode_distributed_rejects_zero_replication_literal() {
+        let _ = RegionBridge::with_mode(
+            RegionId::new_for_test(1, 0),
+            None,
+            Budget::default(),
+            RegionMode::Distributed {
+                replication_factor: 0,
+                consistency: ConsistencyLevel::Quorum,
+            },
+        );
     }
 
     // =====================================================================
@@ -1633,6 +1715,65 @@ mod tests {
         assert!(bridge.mode().is_replicated());
         assert!(!bridge.mode().is_distributed());
         // Hybrid mode doesn't create distributed record in with_mode.
+        assert!(bridge.distributed().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "hybrid region mode requires at least one replica")]
+    fn bridge_with_mode_hybrid_rejects_zero_replication_literal() {
+        let _ = RegionBridge::with_mode(
+            RegionId::new_for_test(1, 0),
+            None,
+            Budget::default(),
+            RegionMode::Hybrid {
+                replication_factor: 0,
+                max_lag: Duration::from_secs(1),
+            },
+        );
+    }
+
+    #[test]
+    fn upgrade_to_distributed_rejects_zero_replication_without_panicking() {
+        let mut bridge = create_local_bridge();
+        let config = DistributedRegionConfig {
+            min_quorum: 1,
+            replication_factor: 0,
+            ..Default::default()
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.upgrade_to_distributed(config, &[])
+        }))
+        .expect("invalid config should return Err rather than panic");
+        let err = result.expect_err("zero-replica config must be rejected");
+
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert!(err.to_string().contains("replication_factor >= 1"));
+        assert_eq!(bridge.mode(), RegionMode::Local);
+        assert!(bridge.distributed().is_none());
+    }
+
+    #[test]
+    fn upgrade_to_distributed_rejects_invalid_quorum_without_panicking() {
+        let mut bridge = create_local_bridge();
+        let config = DistributedRegionConfig {
+            min_quorum: 3,
+            replication_factor: 2,
+            ..Default::default()
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.upgrade_to_distributed(config, &[])
+        }))
+        .expect("invalid config should return Err rather than panic");
+        let err = result.expect_err("out-of-range quorum must be rejected");
+
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert!(
+            err.to_string()
+                .contains("min_quorum in 1..=replication_factor")
+        );
+        assert_eq!(bridge.mode(), RegionMode::Local);
         assert!(bridge.distributed().is_none());
     }
 

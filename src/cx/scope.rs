@@ -1269,10 +1269,14 @@ impl<P: Policy> Scope<'_, P> {
             }
         }
 
-        loser_panic.map_or_else(
-            || winner_result.map(|val| (val, winner_idx)),
-            |p| Err(JoinError::Panicked(p)),
-        )
+        let winner_result = winner_result.map(|val| (val, winner_idx));
+        if matches!(&winner_result, Err(JoinError::Panicked(_))) {
+            return winner_result;
+        }
+
+        loser_panic.map_or(winner_result, |panic_payload| {
+            Err(JoinError::Panicked(panic_payload))
+        })
     }
 
     /// Joins multiple tasks, waiting for all to complete.
@@ -2350,6 +2354,43 @@ mod tests {
             matches!(result, Err(JoinError::Panicked(_))),
             "simultaneous loser panic must dominate race_all result, got {result:?}"
         );
+    }
+
+    #[test]
+    fn race_all_preserves_winner_panic_over_loser_panic() {
+        use std::task::Poll;
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (h1, _t1) = scope
+            .spawn(&mut state, &cx, |_| async {
+                std::panic::panic_any("winner panic");
+            })
+            .unwrap();
+        let (h2, _t2) = scope
+            .spawn(&mut state, &cx, |_| {
+                let mut first_poll = true;
+                std::future::poll_fn(move |poll_cx| {
+                    if first_poll {
+                        first_poll = false;
+                        poll_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        std::panic::panic_any("loser panic");
+                    }
+                })
+            })
+            .unwrap();
+        let result = block_on(scope.race_all(&cx, vec![h1, h2]));
+        match result {
+            Err(JoinError::Panicked(payload)) => {
+                assert_eq!(payload.message(), "winner panic");
+            }
+            other => unreachable!("winner panic must dominate race_all result, got {other:?}"),
+        }
     }
 
     #[test]

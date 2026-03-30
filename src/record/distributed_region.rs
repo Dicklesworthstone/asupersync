@@ -263,6 +263,26 @@ impl Default for DistributedRegionConfig {
     }
 }
 
+impl DistributedRegionConfig {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        if self.replication_factor == 0 {
+            return Err(Error::new(ErrorKind::ConfigError)
+                .with_message("distributed region config requires replication_factor >= 1"));
+        }
+        if self.min_quorum == 0 || self.min_quorum > self.replication_factor {
+            return Err(Error::new(ErrorKind::ConfigError).with_message(
+                "distributed region config requires min_quorum in 1..=replication_factor",
+            ));
+        }
+        Ok(())
+    }
+
+    fn assert_valid(&self) {
+        self.validate()
+            .expect("distributed region config must satisfy replication/quorum invariants");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ReplicaInfo
 // ---------------------------------------------------------------------------
@@ -343,6 +363,7 @@ impl DistributedRegionRecord {
         parent: Option<RegionId>,
         budget: Budget,
     ) -> Self {
+        config.assert_valid();
         Self {
             id,
             state: DistributedRegionState::Initializing,
@@ -1205,6 +1226,57 @@ mod tests {
         assert!(config.allow_degraded);
         assert_eq!(config.read_consistency, ConsistencyLevel::One);
         assert_eq!(config.write_consistency, ConsistencyLevel::Quorum);
+    }
+
+    #[test]
+    #[should_panic(expected = "replication_factor >= 1")]
+    fn distributed_region_new_rejects_zero_replication_factor() {
+        let config = DistributedRegionConfig {
+            min_quorum: 1,
+            replication_factor: 0,
+            ..Default::default()
+        };
+
+        let _ = DistributedRegionRecord::new(
+            RegionId::new_ephemeral(),
+            config,
+            None,
+            Budget::default(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "min_quorum in 1..=replication_factor")]
+    fn distributed_region_new_rejects_zero_quorum() {
+        let config = DistributedRegionConfig {
+            min_quorum: 0,
+            replication_factor: 1,
+            ..Default::default()
+        };
+
+        let _ = DistributedRegionRecord::new(
+            RegionId::new_ephemeral(),
+            config,
+            None,
+            Budget::default(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "min_quorum in 1..=replication_factor")]
+    fn distributed_region_new_rejects_quorum_above_replication_factor() {
+        let config = DistributedRegionConfig {
+            min_quorum: 3,
+            replication_factor: 2,
+            ..Default::default()
+        };
+
+        let _ = DistributedRegionRecord::new(
+            RegionId::new_ephemeral(),
+            config,
+            None,
+            Budget::default(),
+        );
     }
 
     // =========================================================================
