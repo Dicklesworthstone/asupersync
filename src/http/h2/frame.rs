@@ -146,12 +146,12 @@ impl FrameHeader {
     ///
     /// # Panics
     ///
-    /// Panics in debug mode if `length` exceeds `MAX_FRAME_SIZE` (24-bit limit).
+    /// Panics if `length` exceeds `MAX_FRAME_SIZE` (24-bit limit).
     #[inline]
     pub fn write(&self, dst: &mut BytesMut) {
-        debug_assert!(
+        assert!(
             self.length <= MAX_FRAME_SIZE,
-            "frame length {} exceeds 24-bit max {}",
+            "frame length {0} exceeds 24-bit max {1}",
             self.length,
             MAX_FRAME_SIZE,
         );
@@ -176,16 +176,21 @@ impl FrameHeader {
     }
 }
 
-/// Safely cast a payload length to the 24-bit H2 frame length field.
+/// Cast a payload length to the 24-bit H2 frame length field.
 ///
-/// Clamps to `MAX_FRAME_SIZE` to prevent silent truncation in the wire
-/// encoding. Callers that need to reject oversized payloads should check
-/// before calling this.
+/// # Panics
+///
+/// Panics if `len` exceeds `MAX_FRAME_SIZE`, preventing encoders from
+/// emitting a header length that disagrees with the bytes written.
 #[inline]
 fn frame_length(len: usize) -> u32 {
+    assert!(
+        len <= MAX_FRAME_SIZE as usize,
+        "payload length {len} exceeds 24-bit max {MAX_FRAME_SIZE}"
+    );
     #[allow(clippy::cast_possible_truncation)]
-    let clamped = len.min(MAX_FRAME_SIZE as usize) as u32;
-    clamped
+    let len = len as u32;
+    len
 }
 
 /// HTTP/2 frame.
@@ -1875,6 +1880,12 @@ mod tests {
 
         let parsed = FrameHeader::parse(&mut buf).unwrap();
         assert_eq!(parsed.length, MAX_FRAME_SIZE);
+    }
+
+    #[test]
+    #[should_panic(expected = "payload length")]
+    fn test_frame_length_panics_above_max() {
+        let _ = frame_length(MAX_FRAME_SIZE as usize + 1);
     }
 
     #[test]

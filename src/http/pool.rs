@@ -453,21 +453,27 @@ impl Pool {
     }
 
     /// Marks a connection as successfully established and idle.
-    pub fn mark_connected(&mut self, key: &PoolKey, id: u64, now: Time) {
+    ///
+    /// Returns true when the transition was applied.
+    pub fn mark_connected(&mut self, key: &PoolKey, id: u64, now: Time) -> bool {
         if let Some(host_pool) = self.hosts.get_mut(key) {
             if let Some(conn) = host_pool.connections.get_mut(&id) {
-                let _ = conn.mark_connected(now);
+                return conn.mark_connected(now);
             }
         }
+        false
     }
 
     /// Returns a connection to the pool (makes it idle).
-    pub fn release(&mut self, key: &PoolKey, id: u64, now: Time) {
+    ///
+    /// Returns true when the transition was applied.
+    pub fn release(&mut self, key: &PoolKey, id: u64, now: Time) -> bool {
         if let Some(host_pool) = self.hosts.get_mut(key) {
             if let Some(conn) = host_pool.connections.get_mut(&id) {
-                let _ = conn.release(now);
+                return conn.release(now);
             }
         }
+        false
     }
 
     /// Removes a connection from the pool.
@@ -588,7 +594,7 @@ mod tests {
         assert!(pool.try_acquire(&key, now).is_none());
 
         // Mark as connected
-        pool.mark_connected(&key, id, now);
+        assert!(pool.mark_connected(&key, id, now));
 
         // Now we can acquire it
         let acquired = pool.try_acquire(&key, now);
@@ -598,7 +604,7 @@ mod tests {
         assert!(pool.try_acquire(&key, now).is_none());
 
         // Release it
-        pool.release(&key, id, now);
+        assert!(pool.release(&key, id, now));
 
         // Can acquire again
         let acquired = pool.try_acquire(&key, now);
@@ -647,7 +653,7 @@ mod tests {
 
         // Create a connection at time 0
         let id = pool.register_connecting(key.clone(), make_time(0), 2);
-        pool.mark_connected(&key, id, make_time(0));
+        assert!(pool.mark_connected(&key, id, make_time(0)));
 
         // Not expired at time 50
         let removed = pool.cleanup_expired(make_time(50));
@@ -669,9 +675,9 @@ mod tests {
         let key = PoolKey::https("example.com", None);
 
         let expired_id = pool.register_connecting(key.clone(), make_time(0), 2);
-        pool.mark_connected(&key, expired_id, make_time(0));
+        assert!(pool.mark_connected(&key, expired_id, make_time(0)));
         let live_id = pool.register_connecting(key.clone(), make_time(80), 2);
-        pool.mark_connected(&key, live_id, make_time(80));
+        assert!(pool.mark_connected(&key, live_id, make_time(80)));
 
         let removed = pool.cleanup_expired_entries(make_time(150));
         assert_eq!(removed, vec![(key.clone(), expired_id)]);
@@ -690,7 +696,7 @@ mod tests {
         let key = PoolKey::https("example.com", None);
 
         let id = pool.register_connecting(key.clone(), make_time(0), 2);
-        pool.mark_connected(&key, id, make_time(0));
+        assert!(pool.mark_connected(&key, id, make_time(0)));
 
         assert!(
             pool.can_create_connection(&key, make_time(150)),
@@ -713,8 +719,8 @@ mod tests {
         assert_eq!(stats.idle_connections, 0);
         assert_eq!(stats.connections_created, 2);
 
-        pool.mark_connected(&key, id1, now);
-        pool.mark_connected(&key, id2, now);
+        assert!(pool.mark_connected(&key, id1, now));
+        assert!(pool.mark_connected(&key, id2, now));
 
         let stats = pool.stats();
         assert_eq!(stats.idle_connections, 2);
@@ -759,14 +765,14 @@ mod tests {
         let mut pool = Pool::new();
         let key = PoolKey::https("example.com", None);
         // Releasing a nonexistent connection should not panic
-        pool.release(&key, 999, make_time(0));
+        assert!(!pool.release(&key, 999, make_time(0)));
     }
 
     #[test]
     fn mark_connected_nonexistent_is_noop() {
         let mut pool = Pool::new();
         let key = PoolKey::https("example.com", None);
-        pool.mark_connected(&key, 999, make_time(0));
+        assert!(!pool.mark_connected(&key, 999, make_time(0)));
     }
 
     #[test]
@@ -775,7 +781,7 @@ mod tests {
         let key = PoolKey::https("example.com", None);
         let id = pool.register_connecting(key.clone(), make_time(0), 2);
 
-        pool.release(&key, id, make_time(50));
+        assert!(!pool.release(&key, id, make_time(50)));
 
         let meta = pool
             .get_connection_meta(&key, id)
@@ -789,10 +795,10 @@ mod tests {
         let mut pool = Pool::new();
         let key = PoolKey::https("example.com", None);
         let id = pool.register_connecting(key.clone(), make_time(0), 2);
-        pool.mark_connected(&key, id, make_time(10));
+        assert!(pool.mark_connected(&key, id, make_time(10)));
         assert_eq!(pool.try_acquire(&key, make_time(20)), Some(id));
 
-        pool.mark_connected(&key, id, make_time(50));
+        assert!(!pool.mark_connected(&key, id, make_time(50)));
 
         let meta = pool
             .get_connection_meta(&key, id)
@@ -832,9 +838,9 @@ mod tests {
 
         // Create two connections at time 0
         let id1 = pool.register_connecting(key.clone(), make_time(0), 2);
-        pool.mark_connected(&key, id1, make_time(0));
+        assert!(pool.mark_connected(&key, id1, make_time(0)));
         let id2 = pool.register_connecting(key.clone(), make_time(50), 2);
-        pool.mark_connected(&key, id2, make_time(50));
+        assert!(pool.mark_connected(&key, id2, make_time(50)));
 
         // At time 120: id1 is expired (idle 120ms), id2 is not (idle 70ms)
         let acquired = pool.try_acquire(&key, make_time(120));
@@ -851,9 +857,9 @@ mod tests {
         let id2 = pool.register_connecting(key.clone(), now, 2);
         let id3 = pool.register_connecting(key.clone(), now, 2);
 
-        pool.mark_connected(&key, id1, now);
-        pool.mark_connected(&key, id2, now);
-        pool.mark_connected(&key, id3, now);
+        assert!(pool.mark_connected(&key, id1, now));
+        assert!(pool.mark_connected(&key, id2, now));
+        assert!(pool.mark_connected(&key, id3, now));
 
         let acquired = pool.try_acquire(&key, now);
         assert_eq!(acquired, Some(id1));

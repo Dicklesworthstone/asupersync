@@ -838,11 +838,14 @@ impl StreamStore {
     }
 
     /// Get all active stream IDs.
+    ///
+    /// Uses the same `is_active()` predicate as [`active_count`] so
+    /// `active_stream_ids().len() == active_count()` always holds.
     #[must_use]
     pub fn active_stream_ids(&self) -> Vec<u32> {
         self.streams
             .iter()
-            .filter(|(_, s)| !s.state.is_closed())
+            .filter(|(_, s)| s.state.is_active())
             .map(|(&id, _)| id)
             .collect()
     }

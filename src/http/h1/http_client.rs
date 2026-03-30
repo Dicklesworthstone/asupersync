@@ -1455,12 +1455,17 @@ impl HttpClient {
     fn release_connection(&self, key: &PoolKey, pool_id: Option<u64>, fresh: bool, io: ClientIo) {
         if let Some(id) = pool_id {
             let now = self.pool_now();
-            if fresh {
-                self.pool.lock().mark_connected(key, id, now);
+            let returned_to_pool = if fresh {
+                self.pool.lock().mark_connected(key, id, now)
             } else {
-                self.pool.lock().release(key, id, now);
+                self.pool.lock().release(key, id, now)
+            };
+
+            if returned_to_pool {
+                self.store_idle_connection(key.clone(), id, io);
+            } else {
+                self.drop_connection(key, Some(id));
             }
-            self.store_idle_connection(key.clone(), id, io);
         }
     }
 
@@ -2781,7 +2786,7 @@ mod tests {
         let id = {
             let mut pool = client.pool.lock();
             let id = pool.register_connecting(key.clone(), Time::from_nanos(10), 1);
-            pool.mark_connected(&key, id, Time::from_nanos(20));
+            assert!(pool.mark_connected(&key, id, Time::from_nanos(20)));
             let acquired = pool
                 .try_acquire(&key, Time::from_nanos(30))
                 .expect("acquire pooled connection");
@@ -2811,6 +2816,57 @@ mod tests {
         assert_eq!(last_used, Time::from_nanos(456));
         assert_eq!(state, crate::http::pool::PooledConnectionState::Idle);
         assert_eq!(requests_served, 1);
+    }
+
+    #[test]
+    fn release_connection_drops_fresh_io_when_mark_connected_is_rejected() {
+        let client = HttpClient::builder()
+            .with_time_getter(http_client_test_time)
+            .build();
+        let key = PoolKey::http("example.com", None);
+        let id = {
+            let mut pool = client.pool.lock();
+            let id = pool.register_connecting(key.clone(), Time::from_nanos(10), 1);
+            assert!(pool.mark_connected(&key, id, Time::from_nanos(20)));
+            drop(pool);
+            id
+        };
+
+        set_http_client_test_time(30);
+        client.release_connection(&key, Some(id), true, loopback_client_io());
+
+        assert!(
+            client.pool.lock().get_connection_meta(&key, id).is_none(),
+            "invalid fresh release must retire pool metadata instead of storing idle IO"
+        );
+        assert!(
+            client.idle_connections.lock().get(&key).is_none(),
+            "invalid fresh release must not leave idle IO behind"
+        );
+    }
+
+    #[test]
+    fn release_connection_drops_reused_io_when_release_is_rejected() {
+        let client = HttpClient::builder()
+            .with_time_getter(http_client_test_time)
+            .build();
+        let key = PoolKey::http("example.com", None);
+        let id = client
+            .pool
+            .lock()
+            .register_connecting(key.clone(), Time::from_nanos(10), 1);
+
+        set_http_client_test_time(30);
+        client.release_connection(&key, Some(id), false, loopback_client_io());
+
+        assert!(
+            client.pool.lock().get_connection_meta(&key, id).is_none(),
+            "invalid reused release must retire pool metadata instead of storing idle IO"
+        );
+        assert!(
+            client.idle_connections.lock().get(&key).is_none(),
+            "invalid reused release must not leave idle IO behind"
+        );
     }
 
     #[test]
