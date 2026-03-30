@@ -40,7 +40,7 @@ impl AsRawFd for FdSource {
 }
 
 fn bind_ephemeral() -> std::io::Result<TcpListener> {
-    let mut listener = TcpListener::bind("127.0.0.1:0")?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     Ok(listener)
 }

@@ -237,11 +237,11 @@ mod tests {
         let pool = DbPool::new(MockManager::new(), DbPoolConfig::with_max_size(1));
 
         let held = pool.get().unwrap();
-        assert!(matches!(pool.try_get(), Ok(None)));
+        assert!(matches!(pool.try_get(), None));
 
         drop(held);
         let got = pool.try_get();
-        assert!(matches!(got, Ok(Some(_))));
+        assert!(matches!(got, Some(_)));
         asupersync::test_complete!("pool_try_get_nonblocking");
     }
 

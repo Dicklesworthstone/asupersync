@@ -394,7 +394,7 @@ mod pool_integration {
 
         // Third acquire should fail (pool is full, no idle connections)
         let result = pool.try_get();
-        assert!(matches!(result, Ok(None)), "pool should be at capacity");
+        assert!(matches!(result, None), "pool should be at capacity");
 
         let stats = pool.stats();
         assert_eq!(stats.total, 2);

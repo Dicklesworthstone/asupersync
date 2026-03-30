@@ -214,7 +214,7 @@ fn e2e_dp_02_pool_exhaustion_backpressure() {
 
     test_section!("Attempt acquire when full → should get Full error");
     let result = pool.try_get();
-    assert!(matches!(result, Ok(None)), "pool should be full");
+    assert!(matches!(result, None), "pool should be full");
     tracing::info!(correlation_id = %cid, "correctly rejected: pool full");
 
     test_section!("Return one → acquire succeeds");
@@ -1228,7 +1228,7 @@ fn e2e_dp_20_full_data_path_warmup_fault_recovery() {
     // First, exhaust all idle connections by marking them unhealthy
     // We'll discard the warm connections and force new creates
     let mut to_discard = Vec::new();
-    while let Ok(Some(c)) = pool.try_get() {
+    while let Some(c) = pool.try_get() {
         c.get().mark_unhealthy();
         to_discard.push(c);
     }

@@ -3,7 +3,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::database::pool::{AsyncConnectionManager, AsyncDbPool, DbPoolConfig};
-use asupersync::runtime::Runtime;
+use asupersync::runtime::{Runtime, RuntimeConfig};
 use asupersync::time::{sleep, timeout, wall_now};
 use asupersync::types::Outcome;
 use std::time::Duration;
@@ -28,10 +28,10 @@ impl AsyncConnectionManager for LeakManager {
 
 #[test]
 fn test_pool_leak() {
-    let runtime = Runtime::new().unwrap();
+    let runtime = Runtime::with_config(RuntimeConfig::default()).unwrap();
     runtime.block_on(async {
         let pool = AsyncDbPool::new(LeakManager, DbPoolConfig::with_max_size(1));
-        let cx = Cx::background();
+        let cx = Cx::current().expect("runtime task context");
 
         let fut = pool.get(&cx);
         // Let it run until the await point
