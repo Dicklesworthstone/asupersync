@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(body.size_hint().exact(), Some(5));
 
         let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
-            panic!("expected data frame")
+            panic!("expected data frame") // ubs:ignore - test logic
         };
         let data = frame.into_data().expect("expected data frame");
         assert_eq!(data.chunk(), b"hello");

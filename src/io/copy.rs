@@ -194,8 +194,9 @@ where
     fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
         let data = this.get_ref().as_ref();
-        let pos = std::cmp::min(this.position() as usize, data.len());
-        Poll::Ready(Ok(&data[pos..]))
+        let pos = usize::try_from(this.position()).unwrap_or(usize::MAX);
+        let start = std::cmp::min(pos, data.len());
+        Poll::Ready(Ok(&data[start..]))
     }
 
     fn consume(self: Pin<&mut Self>, amt: usize) {

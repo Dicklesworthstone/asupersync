@@ -1646,7 +1646,7 @@ enum PgStream {
     Plain(TcpStream),
     /// TLS-encrypted TCP connection.
     #[cfg(feature = "tls")]
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl PgStream {
@@ -1997,7 +1997,7 @@ impl PgConnection {
                     .connect(&options.host, tcp)
                     .await
                     .map_err(|e| PgError::Tls(e.to_string()))?;
-                Ok(PgStream::Tls(tls_stream))
+                Ok(PgStream::Tls(Box::new(tls_stream)))
             }
             b'N' => {
                 // Server refuses TLS.
@@ -3603,7 +3603,7 @@ fn build_bind_msg(
     buf.write_i16(1);
     buf.write_i16(result_format as i16);
 
-    Ok(buf.build_message(FrontendMessage::Bind as u8)?)
+    buf.build_message(FrontendMessage::Bind as u8)
 }
 
 /// Build a Describe message.

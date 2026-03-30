@@ -1086,7 +1086,7 @@ fn dual_policy() -> &'static DualKernelPolicy {
 }
 
 fn parse_profile_pack_request(raw: &str) -> Option<ProfilePackRequest> {
-    match raw {
+    match raw.trim() {
         "auto" => Some(ProfilePackRequest::Auto),
         "scalar-conservative-v1" | "scalar" => Some(ProfilePackRequest::ScalarConservativeV1),
         "x86-avx2-balanced-v1" | "x86-avx2" => Some(ProfilePackRequest::X86Avx2BalancedV1),
@@ -4871,6 +4871,10 @@ mod tests {
             Some(ProfilePackRequest::Auto)
         );
         assert_eq!(
+            parse_profile_pack_request(" auto "),
+            Some(ProfilePackRequest::Auto)
+        );
+        assert_eq!(
             parse_profile_pack_request("scalar-conservative-v1"),
             Some(ProfilePackRequest::ScalarConservativeV1)
         );
@@ -4879,10 +4883,19 @@ mod tests {
             Some(ProfilePackRequest::X86Avx2BalancedV1)
         );
         assert_eq!(
+            parse_profile_pack_request(" x86-avx2-balanced-v1 "),
+            Some(ProfilePackRequest::X86Avx2BalancedV1)
+        );
+        assert_eq!(
             parse_profile_pack_request("aarch64-neon-balanced-v1"),
             Some(ProfilePackRequest::Aarch64NeonBalancedV1)
         );
+        assert_eq!(
+            parse_profile_pack_request("\naarch64-neon\n"),
+            Some(ProfilePackRequest::Aarch64NeonBalancedV1)
+        );
         assert_eq!(parse_profile_pack_request("unknown-pack"), None);
+        assert_eq!(parse_profile_pack_request("   "), None);
     }
 
     #[test]

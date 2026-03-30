@@ -378,6 +378,7 @@ impl<R, S> Drop for Chan<R, S> {
             // In a production build, this logs rather than panics.
             #[cfg(debug_assertions)]
             panic!(
+                // ubs:ignore - intentional panic on leak in debug build
                 "SESSION LEAKED: channel {} ({}) dropped without reaching End state",
                 self.channel_id, self.obligation_kind,
             );

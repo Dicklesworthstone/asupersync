@@ -79,7 +79,7 @@ pub enum ScoreError {
 impl OpportunityScore {
     /// Creates a new score, validating inputs.
     pub fn new(impact: f64, confidence: f64, effort: f64) -> Result<Self, ScoreError> {
-        if effort.abs() < f64::EPSILON {
+        if effort == 0.0 {
             return Err(ScoreError::ZeroEffort);
         }
         if !(1.0..=5.0).contains(&impact) {
@@ -369,6 +369,18 @@ mod tests {
         assert_eq!(
             OpportunityScore::new(3.0, 0.5, 0.0),
             Err(ScoreError::ZeroEffort)
+        );
+    }
+
+    #[test]
+    fn rejects_tiny_nonzero_effort_as_out_of_range() {
+        assert_eq!(
+            OpportunityScore::new(3.0, 0.5, f64::EPSILON / 2.0),
+            Err(ScoreError::EffortOutOfRange)
+        );
+        assert_eq!(
+            OpportunityScore::new(3.0, 0.5, -f64::EPSILON / 2.0),
+            Err(ScoreError::EffortOutOfRange)
         );
     }
 

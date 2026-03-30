@@ -787,14 +787,16 @@ impl<'a> PacketReader<'a> {
 
     /// Read length-encoded string.
     fn read_lenenc_str(&mut self) -> Result<&'a str, MySqlError> {
-        let len = self.read_lenenc_int()? as usize;
+        let len = usize::try_from(self.read_lenenc_int()?)
+            .map_err(|_| MySqlError::Protocol("length too large".to_string()))?;
         let bytes = self.read_bytes(len)?;
         std::str::from_utf8(bytes).map_err(|e| MySqlError::Protocol(format!("invalid UTF-8: {e}")))
     }
 
     /// Read length-encoded bytes.
     fn read_lenenc_bytes(&mut self) -> Result<&'a [u8], MySqlError> {
-        let len = self.read_lenenc_int()? as usize;
+        let len = usize::try_from(self.read_lenenc_int()?)
+            .map_err(|_| MySqlError::Protocol("length too large".to_string()))?;
         self.read_bytes(len)
     }
 }

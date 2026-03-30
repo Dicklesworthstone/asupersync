@@ -472,7 +472,7 @@ fn write_optional_string(buf: &mut Vec<u8>, value: Option<&str>) {
             let bytes = s.as_bytes();
             write_u32(
                 buf,
-                u32::try_from(bytes.len()).expect("string exceeds u32::MAX"),
+                u32::try_from(bytes.len()).expect("string exceeds u32::MAX"), // ubs:ignore - infallible in practice
             );
             buf.extend_from_slice(bytes);
         }

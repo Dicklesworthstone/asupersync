@@ -1179,11 +1179,11 @@ impl HttpClient {
                 {
                     let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
                     let tls = self.tls_connect_stream(domain, tunnel).await?;
-                    return Ok(ProxyConnection {
+                    Ok(ProxyConnection {
                         io: ClientIo::TlsTunnel(Box::new(tls)),
                         use_absolute_form: false,
                         proxy_authorization: None,
-                    });
+                    })
                 }
                 #[cfg(not(feature = "tls"))]
                 {
@@ -1206,11 +1206,11 @@ impl HttpClient {
                 {
                     let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
                     let tls = self.tls_connect_stream(domain, tcp).await?;
-                    return Ok(ProxyConnection {
+                    Ok(ProxyConnection {
                         io: ClientIo::Tls(tls),
                         use_absolute_form: false,
                         proxy_authorization: None,
-                    });
+                    })
                 }
                 #[cfg(not(feature = "tls"))]
                 {
