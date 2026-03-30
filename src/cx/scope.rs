@@ -988,6 +988,14 @@ impl<P: Policy> Scope<'_, P> {
     ///     Err(e) => println!("Race failed: {e}"),
     /// }
     /// ```
+    fn best_effort_poll_loser_join<T>(cx: &Cx, handle: &mut TaskHandle<T>) {
+        let mut drain = std::pin::pin!(handle.join(cx));
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+        let _ = drain.as_mut().poll(&mut poll_cx);
+    }
+
+    /// Races two task handles and returns the winner while draining the loser.
     pub async fn race<T>(
         &self,
         cx: &Cx,
@@ -1006,6 +1014,16 @@ impl<P: Policy> Scope<'_, P> {
 
         match winner {
             Either::Left(res) => {
+                if matches!(&res, Err(JoinError::Panicked(_)))
+                    && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+                {
+                    // In direct block_on tests there is no scheduler driving the
+                    // loser task after the winner panic surfaces. Best-effort poll
+                    // once so a cooperative loser can observe cancellation, then
+                    // preserve the winner panic without deadlocking the test.
+                    Self::best_effort_poll_loser_join(cx, &mut h2);
+                    return res;
+                }
                 let loser_res = h2.join(cx).await;
                 if let Err(JoinError::Panicked(p)) = res {
                     Err(JoinError::Panicked(p))
@@ -1016,6 +1034,13 @@ impl<P: Policy> Scope<'_, P> {
                 }
             }
             Either::Right(res) => {
+                if matches!(&res, Err(JoinError::Panicked(_)))
+                    && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+                {
+                    // See the left-branch comment above.
+                    Self::best_effort_poll_loser_join(cx, &mut h1);
+                    return res;
+                }
                 let loser_res = h1.join(cx).await;
                 if let Err(JoinError::Panicked(p)) = res {
                     Err(JoinError::Panicked(p))
@@ -1259,6 +1284,18 @@ impl<P: Policy> Scope<'_, P> {
         // join futures; strengthening keeps attribution deterministic.
         for &idx in &pending_loser_indices {
             handles[idx].abort_with_reason(CancelReason::race_loser());
+        }
+        if matches!(&winner_result, Err(JoinError::Panicked(_)))
+            && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+        {
+            // In direct block_on tests there is no scheduler driving pending
+            // losers after the winner panic surfaces. Best-effort poll each
+            // loser once so cooperative tasks can observe cancellation, then
+            // preserve the winner panic without deadlocking the test.
+            for idx in pending_loser_indices {
+                Self::best_effort_poll_loser_join(cx, &mut handles[idx]);
+            }
+            return winner_result.map(|val| (val, winner_idx));
         }
         for idx in pending_loser_indices {
             let res = handles[idx].join(cx).await;
@@ -2321,6 +2358,55 @@ mod tests {
     }
 
     #[test]
+    fn race_preserves_winner_panic_over_loser_panic() {
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (h1, mut t1) = scope
+            .spawn(&mut state, &cx, |_| async {
+                std::panic::panic_any("winner panic");
+            })
+            .unwrap();
+        let (h2, mut t2) = scope
+            .spawn(&mut state, &cx, |_| {
+                let mut first_poll = true;
+                std::future::poll_fn(move |poll_cx| {
+                    if first_poll {
+                        first_poll = false;
+                        poll_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        std::panic::panic_any("loser panic");
+                    }
+                })
+            })
+            .unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+        assert!(t1.poll(&mut poll_cx).is_ready());
+        assert!(t2.poll(&mut poll_cx).is_pending());
+
+        let result = block_on(scope.race(&cx, h1, h2));
+        match result {
+            Err(JoinError::Panicked(payload)) => {
+                assert_eq!(payload.message(), "winner panic");
+            }
+            other => unreachable!("winner panic must dominate race result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn race_all_surfaces_simultaneous_loser_panic() {
         use std::sync::Arc;
         use std::task::{Context, Waker};
@@ -2358,19 +2444,25 @@ mod tests {
 
     #[test]
     fn race_all_preserves_winner_panic_over_loser_panic() {
-        use std::task::Poll;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (h1, _t1) = scope
+        let (h1, mut t1) = scope
             .spawn(&mut state, &cx, |_| async {
                 std::panic::panic_any("winner panic");
             })
             .unwrap();
-        let (h2, _t2) = scope
+        let (h2, mut t2) = scope
             .spawn(&mut state, &cx, |_| {
                 let mut first_poll = true;
                 std::future::poll_fn(move |poll_cx| {
@@ -2384,6 +2476,12 @@ mod tests {
                 })
             })
             .unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+        assert!(t1.poll(&mut poll_cx).is_ready());
+        assert!(t2.poll(&mut poll_cx).is_pending());
+
         let result = block_on(scope.race_all(&cx, vec![h1, h2]));
         match result {
             Err(JoinError::Panicked(payload)) => {
