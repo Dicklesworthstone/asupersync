@@ -173,7 +173,10 @@ fn response_body_kind(
 
         let max_body_size = u64::try_from(max_body_size_limit).unwrap_or(u64::MAX);
         if content_length > max_body_size {
-            return Err(HttpError::BodyTooLarge);
+            return Err(HttpError::BodyTooLargeDetailed {
+                actual: content_length,
+                limit: max_body_size,
+            });
         }
 
         return Ok(ClientBodyKind::ContentLength {
@@ -634,8 +637,23 @@ impl Http1Client {
     /// - `Transfer-Encoding: chunked` (including trailers)
     /// - EOF-delimited bodies (no length headers)
     pub async fn request_streaming<T>(
+        io: T,
+        req: Request,
+    ) -> Result<ClientStreamingResponse<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        Self::request_streaming_with_max_body_size(io, req, DEFAULT_MAX_BODY_SIZE).await
+    }
+
+    /// Like [`request_streaming`](Self::request_streaming) but with an explicit
+    /// maximum body size limit.
+    ///
+    /// Use this when downloading large files that exceed the default 16 MiB limit.
+    pub async fn request_streaming_with_max_body_size<T>(
         mut io: T,
         req: Request,
+        max_body_size: usize,
     ) -> Result<ClientStreamingResponse<T>, HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin,
@@ -686,7 +704,7 @@ impl Http1Client {
                 }
 
                 let kind =
-                    response_body_kind(&headers, status, &request_method, DEFAULT_MAX_BODY_SIZE)?;
+                    response_body_kind(&headers, status, &request_method, max_body_size)?;
 
                 let head = crate::http::h1::stream::ResponseHead {
                     version,
@@ -700,7 +718,7 @@ impl Http1Client {
                 // the upgraded stream.
                 let body_buf = read_buf;
 
-                let body = ClientIncomingBody::new(io, kind, body_buf);
+                let body = ClientIncomingBody::with_max_body_size(io, kind, body_buf, max_body_size);
                 return Ok(ClientStreamingResponse { head, body });
             }
 
@@ -783,6 +801,15 @@ impl<T> ClientIncomingBody<T> {
     const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
 
     fn new(io: T, kind: ClientBodyKind, buffer: BytesMut) -> Self {
+        Self::with_max_body_size(io, kind, buffer, DEFAULT_MAX_BODY_SIZE)
+    }
+
+    fn with_max_body_size(
+        io: T,
+        kind: ClientBodyKind,
+        buffer: BytesMut,
+        max_body_size: usize,
+    ) -> Self {
         let size_hint = match &kind {
             ClientBodyKind::Empty => SizeHint::with_exact(0),
             ClientBodyKind::ContentLength { remaining } => SizeHint::with_exact(*remaining),
@@ -797,7 +824,7 @@ impl<T> ClientIncomingBody<T> {
             received: 0,
             size_hint,
             max_chunk_size: Self::DEFAULT_MAX_CHUNK_SIZE,
-            max_body_size: u64::try_from(DEFAULT_MAX_BODY_SIZE).unwrap_or(u64::MAX),
+            max_body_size: u64::try_from(max_body_size).unwrap_or(u64::MAX),
             max_trailers_size: Self::DEFAULT_MAX_TRAILERS_SIZE,
             max_buffered_bytes: Self::DEFAULT_MAX_BUFFERED_BYTES,
         }

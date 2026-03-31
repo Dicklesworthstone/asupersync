@@ -534,6 +534,24 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Sets the maximum response body size in bytes.
+    ///
+    /// By default, the HTTP/1.1 codec limits responses to 16 MiB. Use this
+    /// to raise the limit when downloading large files.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let client = HttpClient::builder()
+    ///     .max_body_size(500 * 1024 * 1024) // 500 MB
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn max_body_size(mut self, size: usize) -> Self {
+        self.config.max_body_size = Some(size);
+        self
+    }
+
     /// Routes requests through a proxy endpoint.
     ///
     /// Supported URL schemes: `http://`, `https://`, and `socks5://`.
@@ -577,6 +595,11 @@ pub struct HttpClientConfig {
     pub cookie_store: bool,
     /// Optional proxy URL used for outbound requests.
     pub proxy_url: Option<String>,
+    /// Maximum response body size in bytes.
+    ///
+    /// Defaults to `None`, which uses the per-codec default (16 MiB).
+    /// Set this to a larger value when downloading large files.
+    pub max_body_size: Option<usize>,
     /// Time source used for pool bookkeeping.
     time_getter: fn() -> Time,
 }
@@ -589,6 +612,7 @@ impl Default for HttpClientConfig {
             user_agent: Some("asupersync/0.1".into()),
             cookie_store: false,
             proxy_url: None,
+            max_body_size: None,
             time_getter: wall_clock_now,
         }
     }
@@ -1066,7 +1090,11 @@ impl HttpClient {
 
         let stream = self.connect_io(cx, parsed).await?;
         check_cx(cx)?;
-        let resp = Http1Client::request_streaming(stream, req).await?;
+        let resp = if let Some(max_body_size) = self.config.max_body_size {
+            Http1Client::request_streaming_with_max_body_size(stream, req, max_body_size).await?
+        } else {
+            Http1Client::request_streaming(stream, req).await?
+        };
         self.store_response_cookies(&parsed.host, &resp.head.headers);
         Ok(resp)
     }
@@ -1128,7 +1156,12 @@ impl HttpClient {
             request_target,
             proxy_conn.proxy_authorization.as_deref(),
         );
-        let resp = Http1Client::request_streaming(proxy_conn.io, req).await?;
+        let resp = if let Some(max_body_size) = self.config.max_body_size {
+            Http1Client::request_streaming_with_max_body_size(proxy_conn.io, req, max_body_size)
+                .await?
+        } else {
+            Http1Client::request_streaming(proxy_conn.io, req).await?
+        };
         self.store_response_cookies(&parsed.host, &resp.head.headers);
         Ok(resp)
     }

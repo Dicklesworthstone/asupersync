@@ -58,6 +58,13 @@ pub enum HttpError {
     BadChunkedEncoding,
     /// Body exceeds the configured limit.
     BodyTooLarge,
+    /// Body exceeds the configured limit (with size details).
+    BodyTooLargeDetailed {
+        /// Actual body size (Content-Length or bytes received so far).
+        actual: u64,
+        /// Configured maximum body size.
+        limit: u64,
+    },
     /// Body stream was cancelled.
     BodyCancelled,
     /// Body channel closed unexpectedly.
@@ -91,6 +98,14 @@ impl fmt::Display for HttpError {
             Self::RequestLineTooLong => write!(f, "request line too long"),
             Self::BadChunkedEncoding => write!(f, "malformed chunked encoding"),
             Self::BodyTooLarge => write!(f, "body exceeds size limit"),
+            Self::BodyTooLargeDetailed { actual, limit } => {
+                write!(
+                    f,
+                    "body size ({actual} bytes, {actual_mb:.1} MB) exceeds limit ({limit} bytes, {limit_mb:.1} MB)",
+                    actual_mb = *actual as f64 / 1_048_576.0,
+                    limit_mb = *limit as f64 / 1_048_576.0,
+                )
+            }
             Self::BodyCancelled => write!(f, "body stream cancelled"),
             Self::BodyChannelClosed => write!(f, "body stream closed"),
             Self::AmbiguousBodyLength => {
