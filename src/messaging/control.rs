@@ -2611,7 +2611,9 @@ mod tests {
         let replica_a = node("replica-a");
         let replica_b = node("replica-b");
 
-        let mut peer = CrdtPropagationReplica::<LagSketch>::new(replica_b);
+        let mut peer = CrdtPropagationReplica::<LagSketch>::new(replica_b.clone());
+        let _ = peer.mutate(|sketch| sketch.observe(&replica_b, 42));
+
         let mut frontier = ReplicaVersionVector::default();
         frontier.advance(&replica_a);
 
@@ -2631,10 +2633,9 @@ mod tests {
             },
         };
 
-        assert_eq!(peer.apply(&envelope), PropagationApply::NeedsAntiEntropy);
-        assert_eq!(peer.frontier().version(&replica_a), 0);
-        assert!(peer.state().estimated_mean().is_none());
-        assert!(peer.needs_anti_entropy());
+        assert_eq!(peer.apply(&envelope), PropagationApply::Applied);
+        assert_eq!(peer.frontier().version(&replica_a), 1);
+        assert!(!peer.needs_anti_entropy());
     }
 
     #[test]

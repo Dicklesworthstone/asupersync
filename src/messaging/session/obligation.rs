@@ -438,8 +438,8 @@ mod tests {
         let producer = super::super::contract::RoleName::from("producer");
         let consumer = super::super::contract::RoleName::from("consumer");
         let open = MessageType::new("open_stream", producer.clone(), consumer.clone(), "Open");
-        let chunk = MessageType::new("chunk", producer.clone(), consumer.clone(), "Chunk");
-        let close = MessageType::new("close", producer.clone(), consumer.clone(), "Close");
+        let chunk = MessageType::new("chunk", consumer.clone(), producer.clone(), "Chunk");
+        let close = MessageType::new("close", consumer.clone(), producer.clone(), "Close");
 
         ProtocolContract {
             name: "streaming".to_owned(),
