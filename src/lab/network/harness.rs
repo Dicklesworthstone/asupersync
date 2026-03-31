@@ -212,7 +212,7 @@ impl SimNode {
             app_outbox: Arc::new(Mutex::new(VecDeque::new())),
             running_tasks: BTreeMap::new(),
             pending_results: Arc::new(Mutex::new(BTreeMap::new())),
-            dedup: IdempotencyStore::new(Duration::from_secs(5 * 60)),
+            dedup: IdempotencyStore::new(Duration::from_secs(300)),
             crashed: false,
             event_log: Vec::new(),
         }
@@ -443,7 +443,7 @@ impl SimNode {
     /// Simulates a node restart: clears crash flag, starts fresh.
     pub fn restart(&mut self) {
         self.crashed = false;
-        self.dedup = IdempotencyStore::new(Duration::from_secs(5 * 60));
+        self.dedup = IdempotencyStore::new(Duration::from_secs(300));
         self.event_log.push(NodeEvent::Restarted);
     }
 

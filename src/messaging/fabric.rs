@@ -888,10 +888,10 @@ impl FabricDecisionKind {
     fn retention(self) -> RetentionPolicy {
         match self {
             Self::Routing | Self::Retry => RetentionPolicy::RetainFor {
-                duration: Duration::from_secs(5 * 60),
+                duration: Duration::from_secs(300),
             },
             Self::Capability | Self::DeliveryClassEscalation => RetentionPolicy::RetainFor {
-                duration: Duration::from_secs(15 * 60),
+                duration: Duration::from_secs(900),
             },
         }
     }

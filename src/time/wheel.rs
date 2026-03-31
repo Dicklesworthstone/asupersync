@@ -83,8 +83,8 @@ pub struct TimerWheelConfig {
 impl Default for TimerWheelConfig {
     fn default() -> Self {
         Self {
-            max_wheel_duration: Duration::from_secs(24 * 3600), // 24 hours
-            max_timer_duration: Duration::from_secs(168 * 3600), // 7 days
+            max_wheel_duration: Duration::from_secs(86_400), // 24 hours
+            max_timer_duration: Duration::from_secs(604_800), // 7 days
         }
     }
 }
@@ -1056,18 +1056,18 @@ mod tests {
     #[test]
     fn timer_wheel_config_debug_clone_default() {
         let def = TimerWheelConfig::default();
-        assert_eq!(def.max_wheel_duration, Duration::from_secs(24 * 3600));
-        assert_eq!(def.max_timer_duration, Duration::from_secs(168 * 3600));
+        assert_eq!(def.max_wheel_duration, Duration::from_secs(86_400));
+        assert_eq!(def.max_timer_duration, Duration::from_secs(604_800));
         let cloned = def.clone();
         assert_eq!(cloned.max_wheel_duration, def.max_wheel_duration);
         let dbg = format!("{def:?}");
         assert!(dbg.contains("TimerWheelConfig"));
         // Builder
         let custom = TimerWheelConfig::new()
-            .max_wheel_duration(Duration::from_secs(12 * 3600))
-            .max_timer_duration(Duration::from_secs(48 * 3600));
-        assert_eq!(custom.max_wheel_duration, Duration::from_secs(12 * 3600));
-        assert_eq!(custom.max_timer_duration, Duration::from_secs(48 * 3600));
+            .max_wheel_duration(Duration::from_secs(43_200))
+            .max_timer_duration(Duration::from_secs(172_800));
+        assert_eq!(custom.max_wheel_duration, Duration::from_secs(43_200));
+        assert_eq!(custom.max_timer_duration, Duration::from_secs(172_800));
     }
 
     #[test]
@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn timer_duration_exceeded_debug_clone_display() {
         let err = TimerDurationExceeded {
-            duration: Duration::from_secs(2 * 3600),
+            duration: Duration::from_secs(7200),
             max: Duration::from_secs(3600),
         };
         let cloned = err.clone();
@@ -1797,16 +1797,16 @@ mod tests {
 
         // Test TimerWheelConfig builder
         let wheel_config = TimerWheelConfig::new()
-            .max_wheel_duration(Duration::from_secs(24 * 3600))
-            .max_timer_duration(Duration::from_secs(168 * 3600));
+            .max_wheel_duration(Duration::from_secs(86_400))
+            .max_timer_duration(Duration::from_secs(604_800));
         crate::assert_with_log!(
-            wheel_config.max_wheel_duration == Duration::from_secs(24 * 3600),
+            wheel_config.max_wheel_duration == Duration::from_secs(86_400),
             "wheel duration",
             86400,
             wheel_config.max_wheel_duration.as_secs()
         );
         crate::assert_with_log!(
-            wheel_config.max_timer_duration == Duration::from_secs(168 * 3600),
+            wheel_config.max_timer_duration == Duration::from_secs(604_800),
             "timer duration",
             604_800,
             wheel_config.max_timer_duration.as_secs()

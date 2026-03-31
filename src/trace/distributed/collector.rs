@@ -454,7 +454,7 @@ mod tests {
     fn collector_builder_methods() {
         let collector = SymbolTraceCollector::new(RegionTag::new("us-west"))
             .with_max_traces(100)
-            .with_max_age(Duration::from_secs(2 * 60))
+            .with_max_age(Duration::from_secs(120))
             .with_clock_skew_tolerance(Duration::from_millis(50));
 
         assert_eq!(collector.local_region(), &RegionTag::new("us-west"));

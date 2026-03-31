@@ -131,7 +131,7 @@ impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
             min_symbols: 0,
-            recovery_timeout: Duration::from_secs(1 * 60),
+            recovery_timeout: Duration::from_secs(60),
             replica_timeout: Duration::from_secs(5),
             max_concurrent_requests: 10,
             collection_consistency: CollectionConsistency::Quorum,
@@ -2071,7 +2071,7 @@ mod tests {
     fn recovery_config_default_values() {
         let config = RecoveryConfig::default();
         assert_eq!(config.min_symbols, 0);
-        assert_eq!(config.recovery_timeout, Duration::from_secs(1 * 60));
+        assert_eq!(config.recovery_timeout, Duration::from_secs(60));
         assert_eq!(config.replica_timeout, Duration::from_secs(5));
         assert_eq!(config.max_concurrent_requests, 10);
         assert_eq!(config.collection_consistency, CollectionConsistency::Quorum);

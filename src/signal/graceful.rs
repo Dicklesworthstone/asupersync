@@ -621,14 +621,14 @@ mod tests {
         let receiver = controller.subscribe();
 
         let builder = GracefulBuilder::new(receiver)
-            .grace_period(Duration::from_secs(1 * 60))
+            .grace_period(Duration::from_secs(60))
             .logging(false);
 
         let grace_period = builder.config().grace_period;
         crate::assert_with_log!(
-            grace_period == Duration::from_secs(1 * 60),
+            grace_period == Duration::from_secs(60),
             "grace_period",
-            Duration::from_secs(1 * 60),
+            Duration::from_secs(60),
             grace_period
         );
         let log_events = builder.config().log_events;
@@ -859,7 +859,7 @@ mod tests {
 
     #[test]
     fn grace_period_guard_debug() {
-        let guard = GracePeriodGuard::new(Duration::from_secs(1 * 60));
+        let guard = GracePeriodGuard::new(Duration::from_secs(60));
         let dbg = format!("{guard:?}");
         assert!(dbg.contains("GracePeriodGuard"));
         assert!(dbg.contains("duration"));

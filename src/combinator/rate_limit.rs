@@ -1426,7 +1426,7 @@ mod tests {
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(1 * 60),
+            period: Duration::from_secs(60),
             ..Default::default()
         });
         let now = Time::from_millis(0);
@@ -1644,7 +1644,7 @@ mod tests {
     fn check_entry_timeout() {
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
-            period: Duration::from_secs(1 * 60), // Very slow refill
+            period: Duration::from_secs(60), // Very slow refill
             burst: 1,
             wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(100)),
             ..Default::default()
@@ -1688,7 +1688,7 @@ mod tests {
     fn cancel_entry_triggers_cancelled_error() {
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
-            period: Duration::from_secs(1 * 60),
+            period: Duration::from_secs(60),
             burst: 1,
             wait_strategy: WaitStrategy::Block,
             ..Default::default()

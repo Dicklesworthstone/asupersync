@@ -999,14 +999,14 @@ mod tests {
     #[test]
     fn very_large_period() {
         init_test("very_large_period");
-        let mut interval = Interval::new(Time::ZERO, Duration::from_secs(8760 * 3600)); // 1 year
+        let mut interval = Interval::new(Time::ZERO, Duration::from_secs(31_536_000)); // 1 year
         let first = interval.tick(Time::ZERO);
         crate::assert_with_log!(first == Time::ZERO, "first tick", Time::ZERO, first);
         let period = interval.period();
         crate::assert_with_log!(
-            period == Duration::from_secs(8760 * 3600),
+            period == Duration::from_secs(31_536_000),
             "period",
-            Duration::from_secs(8760 * 3600),
+            Duration::from_secs(31_536_000),
             period
         );
         crate::test_complete!("very_large_period");

@@ -323,7 +323,7 @@ mod tests {
         init_test("lookup_ip_accessors");
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
 
         let len = lookup.len();
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn lookup_ip_empty() {
         init_test("lookup_ip_empty");
-        let lookup = LookupIp::new(vec![], Duration::from_secs(1 * 60));
+        let lookup = LookupIp::new(vec![], Duration::from_secs(60));
         assert!(lookup.is_empty());
         assert_eq!(lookup.len(), 0);
         assert!(lookup.first().is_none());
@@ -370,7 +370,7 @@ mod tests {
         init_test("lookup_ip_first");
         let lookup = LookupIp::new(
             vec!["1.2.3.4".parse().unwrap(), "5.6.7.8".parse().unwrap()],
-            Duration::from_secs(1 * 60),
+            Duration::from_secs(60),
         );
         assert_eq!(lookup.first(), Some("1.2.3.4".parse().unwrap()));
         crate::test_complete!("lookup_ip_first");
@@ -413,7 +413,7 @@ mod tests {
                 "::1".parse().unwrap(),
                 "10.0.0.2".parse().unwrap(),
             ],
-            Duration::from_secs(1 * 60),
+            Duration::from_secs(60),
         );
         let v4: Vec<_> = lookup.ipv4_addrs().collect();
         assert_eq!(v4.len(), 2);
@@ -426,7 +426,7 @@ mod tests {
         init_test("lookup_ip_ipv6_only");
         let lookup = LookupIp::new(
             vec!["10.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
-            Duration::from_secs(1 * 60),
+            Duration::from_secs(60),
         );
         assert_eq!(lookup.ipv6_addrs().count(), 1);
         crate::test_complete!("lookup_ip_ipv6_only");
@@ -447,7 +447,7 @@ mod tests {
         init_test("happy_eyeballs_from_lookup");
         let lookup = LookupIp::new(
             vec!["10.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
-            Duration::from_secs(1 * 60),
+            Duration::from_secs(60),
         );
         let he = HappyEyeballs::from_lookup(&lookup);
         assert!(!he.is_empty());

@@ -37,8 +37,8 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_entries: 10_000,
-            min_ttl: Duration::from_secs(1 * 60),
-            max_ttl: Duration::from_secs(24 * 3600), // 24 hours
+            min_ttl: Duration::from_secs(60),
+            max_ttl: Duration::from_secs(86_400), // 24 hours
             negative_ttl: Duration::from_secs(30),
         }
     }
@@ -386,7 +386,7 @@ mod tests {
     fn cache_config_debug_clone_default() {
         let def = CacheConfig::default();
         assert_eq!(def.max_entries, 10_000);
-        assert_eq!(def.min_ttl, Duration::from_secs(1 * 60));
+        assert_eq!(def.min_ttl, Duration::from_secs(60));
         assert_eq!(def.negative_ttl, Duration::from_secs(30));
         let dbg = format!("{def:?}");
         assert!(dbg.contains("CacheConfig"), "{dbg}");
@@ -441,7 +441,7 @@ mod tests {
         // Insert
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         cache.put_ip("example.com", &lookup);
 
@@ -459,7 +459,7 @@ mod tests {
         let cache = DnsCache::new();
         let lookup = LookupIp::new(
             vec!["192.0.2.10".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
 
         cache.put_ip("Example.COM", &lookup);
@@ -481,11 +481,11 @@ mod tests {
         let cache = DnsCache::new();
         let dotted = LookupIp::new(
             vec!["192.0.2.20".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         let plain = LookupIp::new(
             vec!["192.0.2.21".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         let expected_dotted: IpAddr = "192.0.2.20".parse().unwrap();
         let expected_plain: IpAddr = "192.0.2.21".parse().unwrap();
@@ -663,7 +663,7 @@ mod tests {
 
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         cache.put_ip("example.com", &lookup);
         let size = cache.stats().size;
@@ -679,8 +679,8 @@ mod tests {
     fn cache_ttl_clamping() {
         init_test("cache_ttl_clamping");
         let config = CacheConfig {
-            min_ttl: Duration::from_secs(1 * 60),
-            max_ttl: Duration::from_secs(1 * 3600),
+            min_ttl: Duration::from_secs(60),
+            max_ttl: Duration::from_secs(3600),
             ..Default::default()
         };
         let cache = DnsCache::with_config(config);
@@ -731,7 +731,7 @@ mod tests {
 
         let cached = LookupIp::new(
             vec!["192.0.2.10".parse::<IpAddr>().expect("ip parse")],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         cache.put_ip("replace.example", &cached);
         crate::assert_with_log!(
@@ -797,7 +797,7 @@ mod tests {
 
         let cached = LookupIp::new(
             vec!["192.0.2.88".parse::<IpAddr>().expect("ip parse")],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         cache.put_ip("replace.example", &cached);
         crate::assert_with_log!(
@@ -879,7 +879,7 @@ mod tests {
 
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         cache.put_ip("example.com", &lookup);
 
@@ -901,15 +901,15 @@ mod tests {
 
         let a1 = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().expect("ip parse")],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         let b1 = LookupIp::new(
             vec!["192.0.2.2".parse::<IpAddr>().expect("ip parse")],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
         let b2 = LookupIp::new(
             vec!["192.0.2.20".parse::<IpAddr>().expect("ip parse")],
-            Duration::from_secs(5 * 60),
+            Duration::from_secs(300),
         );
 
         cache.put_ip("a.example", &a1);
@@ -949,7 +949,7 @@ mod tests {
         };
         let cache = DnsCache::with_config(config);
         let inserted_at = Time::from_nanos(42);
-        let ttl = Duration::from_secs(5 * 60);
+        let ttl = Duration::from_secs(300);
 
         let alpha = LookupIp::new(vec!["192.0.2.1".parse::<IpAddr>().expect("ip parse")], ttl);
         let zeta = LookupIp::new(vec!["192.0.2.2".parse::<IpAddr>().expect("ip parse")], ttl);

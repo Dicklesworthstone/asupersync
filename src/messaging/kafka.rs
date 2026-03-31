@@ -1059,7 +1059,7 @@ impl TransactionalConfig {
         Self {
             producer,
             transaction_id,
-            transaction_timeout: Duration::from_secs(1 * 60),
+            transaction_timeout: Duration::from_secs(60),
         }
     }
 
@@ -1512,10 +1512,10 @@ mod tests {
     fn test_transactional_config() {
         let config =
             TransactionalConfig::new(ProducerConfig::default(), "my-transaction-id".to_string())
-                .transaction_timeout(Duration::from_secs(2 * 60));
+                .transaction_timeout(Duration::from_secs(120));
 
         assert_eq!(config.transaction_id, "my-transaction-id");
-        assert_eq!(config.transaction_timeout, Duration::from_secs(2 * 60));
+        assert_eq!(config.transaction_timeout, Duration::from_secs(120));
     }
 
     #[test]
@@ -1800,7 +1800,7 @@ mod tests {
     #[test]
     fn transactional_config_default_timeout() {
         let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-2".into());
-        assert_eq!(tc.transaction_timeout, Duration::from_secs(1 * 60));
+        assert_eq!(tc.transaction_timeout, Duration::from_secs(60));
     }
 
     #[test]

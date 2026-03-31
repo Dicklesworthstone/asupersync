@@ -229,10 +229,10 @@ mod tests {
             Err(err) => err.duration(),
         };
         crate::assert_with_log!(
-            diff <= Duration::from_secs(1 * 60),
+            diff <= Duration::from_secs(60),
             "modified within 60s",
             true,
-            diff <= Duration::from_secs(1 * 60)
+            diff <= Duration::from_secs(60)
         );
         crate::test_complete!("test_metadata_modified_time");
     }

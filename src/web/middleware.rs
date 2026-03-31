@@ -101,7 +101,7 @@ impl Default for CorsPolicy {
             ],
             allow_headers: vec!["*".to_string()],
             expose_headers: Vec::new(),
-            max_age: Some(Duration::from_secs(10 * 60)),
+            max_age: Some(Duration::from_secs(600)),
             allow_credentials: false,
         }
     }
@@ -1833,7 +1833,7 @@ mod tests {
         let policy = RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(1 * 60),
+            period: Duration::from_secs(60),
             ..Default::default()
         };
         let mw = RateLimitMiddleware::new(FnHandler::new(ok_handler), policy);
@@ -1859,7 +1859,7 @@ mod tests {
         let policy = RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(1 * 60),
+            period: Duration::from_secs(60),
             ..Default::default()
         };
         let mw = RateLimitMiddleware::new(handler, policy);
@@ -1875,7 +1875,7 @@ mod tests {
         let limiter = Arc::new(RateLimiter::new(RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(1 * 60),
+            period: Duration::from_secs(60),
             ..Default::default()
         }));
         let panic_mw = RateLimitMiddleware::shared(PanicHandler, Arc::clone(&limiter));
@@ -1901,7 +1901,7 @@ mod tests {
         let policy = RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(1 * 60),
+            period: Duration::from_secs(60),
             ..Default::default()
         };
         let mw = RateLimitMiddleware::with_time_getter(

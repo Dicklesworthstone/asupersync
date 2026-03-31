@@ -1455,7 +1455,7 @@ mod tests {
         let cb = CircuitBreaker::new(CircuitBreakerPolicy {
             failure_threshold: 1000, // High count threshold
             sliding_window: Some(SlidingWindowConfig {
-                window_duration: Duration::from_secs(1 * 60),
+                window_duration: Duration::from_secs(60),
                 minimum_calls: 10,
                 failure_rate_threshold: 0.5,
             }),
@@ -1483,7 +1483,7 @@ mod tests {
         let cb = CircuitBreaker::new(CircuitBreakerPolicy {
             failure_threshold: 1000,
             sliding_window: Some(SlidingWindowConfig {
-                window_duration: Duration::from_secs(1 * 60),
+                window_duration: Duration::from_secs(60),
                 minimum_calls: 10,
                 failure_rate_threshold: 0.5,
             }),
@@ -1534,7 +1534,7 @@ mod tests {
     fn metrics_track_rejections() {
         let cb = CircuitBreaker::new(CircuitBreakerPolicy {
             failure_threshold: 1,
-            open_duration: Duration::from_secs(1 * 60),
+            open_duration: Duration::from_secs(60),
             ..Default::default()
         });
 
@@ -1676,7 +1676,7 @@ mod tests {
     fn call_rejects_when_open() {
         let cb = CircuitBreaker::new(CircuitBreakerPolicy {
             failure_threshold: 1,
-            open_duration: Duration::from_secs(1 * 60),
+            open_duration: Duration::from_secs(60),
             ..Default::default()
         });
         let now = Time::from_millis(0);
@@ -1705,14 +1705,14 @@ mod tests {
             .name("test")
             .failure_threshold(10)
             .success_threshold(3)
-            .open_duration(Duration::from_secs(1 * 60))
+            .open_duration(Duration::from_secs(60))
             .half_open_max_probes(2)
             .build();
 
         assert_eq!(policy.name, "test");
         assert_eq!(policy.failure_threshold, 10);
         assert_eq!(policy.success_threshold, 3);
-        assert_eq!(policy.open_duration, Duration::from_secs(1 * 60));
+        assert_eq!(policy.open_duration, Duration::from_secs(60));
         assert_eq!(policy.half_open_max_probes, 2);
     }
 
@@ -1978,7 +1978,7 @@ mod tests {
             success_threshold: 2,
             open_duration: Duration::from_millis(100),
             sliding_window: Some(SlidingWindowConfig {
-                window_duration: Duration::from_secs(1 * 60),
+                window_duration: Duration::from_secs(60),
                 minimum_calls: 2,
                 failure_rate_threshold: 0.5,
             }),
@@ -2050,7 +2050,7 @@ mod tests {
             success_threshold: 1,
             open_duration: Duration::from_millis(100),
             sliding_window: Some(SlidingWindowConfig {
-                window_duration: Duration::from_secs(1 * 60),
+                window_duration: Duration::from_secs(60),
                 minimum_calls: 3,
                 failure_rate_threshold: 0.5,
             }),

@@ -1488,8 +1488,8 @@ mod tests {
 
     #[test]
     fn consumer_config_session_timeout_builder() {
-        let cfg = ConsumerConfig::default().session_timeout(Duration::from_secs(1 * 60));
-        assert_eq!(cfg.session_timeout, Duration::from_secs(1 * 60));
+        let cfg = ConsumerConfig::default().session_timeout(Duration::from_secs(60));
+        assert_eq!(cfg.session_timeout, Duration::from_secs(60));
     }
 
     #[test]
