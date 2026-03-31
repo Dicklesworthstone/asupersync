@@ -326,47 +326,68 @@ impl<M: ConnectionManager> DbPool<M> {
     /// Returns a `PooledConnection` that automatically returns the connection
     /// to the pool when dropped.
     pub fn get(&self) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
-        let mut inner = self.inner.lock();
+        loop {
+            let conn_to_validate = {
+                let mut inner = self.inner.lock();
 
-        if inner.closed {
-            return Err(DbPoolError::Closed);
-        }
+                if inner.closed {
+                    return Err(DbPoolError::Closed);
+                }
 
-        // Try to get a valid idle connection.
-        while let Some(idle) = inner.idle.pop_front() {
-            // Evict expired or stale connections.
-            if idle.is_expired(&self.config) || idle.is_idle_too_long(&self.config) {
-                inner.total = inner.total.saturating_sub(1);
-                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                self.manager.disconnect(idle.conn);
-                continue;
-            }
+                let mut popped = None;
+                while let Some(idle) = inner.idle.pop_front() {
+                    if idle.is_expired(&self.config) || idle.is_idle_too_long(&self.config) {
+                        inner.total = inner.total.saturating_sub(1);
+                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                        popped = Some((idle.conn, false, idle.created_at));
+                        break;
+                    } else {
+                        popped = Some((idle.conn, true, idle.created_at));
+                        break;
+                    }
+                }
 
-            // Validate if configured.
-            if self.config.validate_on_checkout && !self.manager.is_valid(&idle.conn) {
-                inner.total = inner.total.saturating_sub(1);
+                if popped.is_none() {
+                    // No valid idle connection; create new if under capacity.
+                    if inner.total < self.config.max_size {
+                        inner.total += 1;
+                        // Release lock during creation.
+                    } else {
+                        return Err(DbPoolError::Full);
+                    }
+                }
+                popped
+            };
+
+            if let Some((conn, needs_validation, created_at)) = conn_to_validate {
+                if !needs_validation {
+                    self.manager.disconnect(conn);
+                    continue;
+                }
+
+                // Validate if configured.
+                if self.config.validate_on_checkout && !self.manager.is_valid(&conn) {
+                    {
+                        let mut inner = self.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                    self.stats
+                        .total_validation_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    self.manager.disconnect(conn);
+                    continue;
+                }
+
                 self.stats
-                    .total_validation_failures
+                    .total_acquisitions
                     .fetch_add(1, Ordering::Relaxed);
-                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                self.manager.disconnect(idle.conn);
-                continue;
+                return Ok(PooledConnection {
+                    conn: Some(conn),
+                    pool: self,
+                    created_at,
+                });
             }
-
-            self.stats
-                .total_acquisitions
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(PooledConnection {
-                conn: Some(idle.conn),
-                pool: self,
-                created_at: idle.created_at,
-            });
-        }
-
-        // No valid idle connection; create new if under capacity.
-        if inner.total < self.config.max_size {
-            inner.total += 1;
-            drop(inner); // Release lock during creation.
 
             match self.manager.connect() {
                 Ok(conn) => {
@@ -374,21 +395,19 @@ impl<M: ConnectionManager> DbPool<M> {
                     self.stats
                         .total_acquisitions
                         .fetch_add(1, Ordering::Relaxed);
-                    Ok(PooledConnection {
+                    return Ok(PooledConnection {
                         conn: Some(conn),
                         pool: self,
                         created_at: Instant::now(),
-                    })
+                    });
                 }
                 Err(e) => {
                     // Roll back total count on failure.
                     let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
-                    Err(DbPoolError::Connect(e))
+                    return Err(DbPoolError::Connect(e));
                 }
             }
-        } else {
-            Err(DbPoolError::Full)
         }
     }
 
