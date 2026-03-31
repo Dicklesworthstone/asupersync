@@ -155,7 +155,7 @@ impl ServerConfig {
                     .max_headers_size(32 * 1024)
                     .max_body_size(8 * 1024 * 1024)
                     .max_requests(Some(10_000))
-                    .idle_timeout(Some(Duration::from_mins(2))),
+                    .idle_timeout(Some(Duration::from_secs(2 * 60))),
                 listener: Http1ListenerConfig::default()
                     .max_connections(Some(50_000))
                     .drain_timeout(Duration::from_secs(30)),
@@ -1107,11 +1107,11 @@ mod tests {
         fn server_config_builder() {
             let config = ServerConfig::default()
                 .bind_addr(SocketAddr::from(([127, 0, 0, 1], 9090)))
-                .shutdown_timeout(Duration::from_mins(1))
+                .shutdown_timeout(Duration::from_secs(1 * 60))
                 .worker_threads(Some(4));
 
             assert_eq!(config.bind_addr.port(), 9090);
-            assert_eq!(config.shutdown_timeout, Duration::from_mins(1));
+            assert_eq!(config.shutdown_timeout, Duration::from_secs(1 * 60));
             assert_eq!(config.worker_threads, Some(4));
             assert!(config.validate().is_ok());
         }

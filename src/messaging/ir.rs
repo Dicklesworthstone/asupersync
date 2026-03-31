@@ -2467,7 +2467,7 @@ mod tests {
                     attachment: BranchAttachment::AuditedAnalyst,
                     mutation_mode: BranchMutationMode::ReadOnly,
                     retention: RetentionPolicy::RetainFor {
-                        duration: Duration::from_mins(1),
+                        duration: Duration::from_secs(1 * 60),
                     },
                 },
             }],
@@ -2478,7 +2478,7 @@ mod tests {
                 ack_kind: AckKind::Recoverable,
                 max_pending: 512,
                 max_deliver: 8,
-                replay_window: Some(Duration::from_mins(5)),
+                replay_window: Some(Duration::from_secs(5 * 60)),
             }],
             privacy_policies: vec![PrivacyPolicy {
                 name: "tenant-safe".to_owned(),
@@ -2498,7 +2498,7 @@ mod tests {
                 attachment: BranchAttachment::AuditedAnalyst,
                 mutation_mode: BranchMutationMode::ReadOnly,
                 retention: RetentionPolicy::RetainFor {
-                    duration: Duration::from_mins(1),
+                    duration: Duration::from_secs(1 * 60),
                 },
             }],
             obligation_contracts: vec![QuantitativeObligationContract {

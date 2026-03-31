@@ -610,8 +610,8 @@ mod tests {
     #[test]
     fn dns_config_poll_interval() {
         let config =
-            DnsDiscoveryConfig::new("example.com", 80).poll_interval(Duration::from_mins(1));
-        assert_eq!(config.poll_interval, Duration::from_mins(1));
+            DnsDiscoveryConfig::new("example.com", 80).poll_interval(Duration::from_secs(1 * 60));
+        assert_eq!(config.poll_interval, Duration::from_secs(1 * 60));
     }
 
     #[test]
@@ -664,7 +664,7 @@ mod tests {
         let addrs = socket_set(&["127.0.0.1:80"]);
         let discovery = DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
-                .poll_interval(Duration::from_mins(5))
+                .poll_interval(Duration::from_secs(5 * 60))
                 .with_resolver(move |hostname, port| {
                     assert_eq!(hostname, "service.test");
                     assert_eq!(port, 80);
@@ -689,7 +689,7 @@ mod tests {
         ]);
         let discovery = DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
-                .poll_interval(Duration::from_mins(5))
+                .poll_interval(Duration::from_secs(5 * 60))
                 .with_resolver(resolver),
         );
 
@@ -1044,7 +1044,7 @@ mod tests {
         init_test("dns_discovery_failed_resolution_respects_poll_interval");
         let discovery = DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
-                .poll_interval(Duration::from_mins(5))
+                .poll_interval(Duration::from_secs(5 * 60))
                 .with_resolver(|_, _| Err(std::io::Error::other("resolver failed"))),
         );
 
@@ -1123,7 +1123,7 @@ mod tests {
         init_test("dns_discovery_invalidate_forces_retry_after_failed_resolution");
         let discovery = DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
-                .poll_interval(Duration::from_mins(5))
+                .poll_interval(Duration::from_secs(5 * 60))
                 .with_resolver(|_, _| Err(std::io::Error::other("resolver failed"))),
         );
 

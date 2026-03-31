@@ -2460,12 +2460,12 @@ mod tests {
     #[test]
     fn remote_cap_builder() {
         let cap = RemoteCap::new()
-            .with_default_lease(Duration::from_mins(1))
+            .with_default_lease(Duration::from_secs(1 * 60))
             .with_remote_budget(Budget::INFINITE)
             .with_local_node(NodeId::new("origin-a"))
             .with_phase0_failure(Phase0RemoteFailure::NodeDown)
             .with_phase0_timeout(Duration::from_secs(2));
-        assert_eq!(cap.default_lease(), Duration::from_mins(1));
+        assert_eq!(cap.default_lease(), Duration::from_secs(1 * 60));
         assert!(cap.remote_budget().is_some());
         assert_eq!(cap.local_node().as_str(), "origin-a");
         assert_eq!(
@@ -2938,7 +2938,7 @@ mod tests {
 
     #[test]
     fn remote_cap_custom_lease_propagates() {
-        let cap = fast_phase0_cap().with_default_lease(Duration::from_mins(2));
+        let cap = fast_phase0_cap().with_default_lease(Duration::from_secs(2 * 60));
         let cx: Cx = Cx::for_testing_with_remote(cap);
 
         let handle = spawn_remote(
@@ -2949,7 +2949,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(handle.lease(), Duration::from_mins(2));
+        assert_eq!(handle.lease(), Duration::from_secs(2 * 60));
     }
 
     // -----------------------------------------------------------------------
@@ -2982,7 +2982,7 @@ mod tests {
             remote_task_id: RemoteTaskId::next(),
             computation: ComputationName::new("encode_block"),
             input: RemoteInput::new(vec![1, 2, 3]),
-            lease: Duration::from_mins(1),
+            lease: Duration::from_secs(1 * 60),
             idempotency_key: IdempotencyKey::generate(&cx),
             budget: None,
             origin_node: NodeId::new("origin-1"),
@@ -2992,7 +2992,7 @@ mod tests {
 
         assert_eq!(req.computation.as_str(), "encode_block");
         assert_eq!(req.input.len(), 3);
-        assert_eq!(req.lease, Duration::from_mins(1));
+        assert_eq!(req.lease, Duration::from_secs(1 * 60));
         assert_eq!(req.origin_node.as_str(), "origin-1");
     }
 
@@ -3526,7 +3526,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_new_request() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(5));
+        let mut store = IdempotencyStore::new(Duration::from_secs(5 * 60));
         assert!(store.is_empty());
 
         let key = IdempotencyKey::from_raw(1);
@@ -3545,7 +3545,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_duplicate_detection() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(5));
+        let mut store = IdempotencyStore::new(Duration::from_secs(5 * 60));
         let key = IdempotencyKey::from_raw(42);
         let comp = ComputationName::new("encode");
 
@@ -3563,7 +3563,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_conflict_detection() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(5));
+        let mut store = IdempotencyStore::new(Duration::from_secs(5 * 60));
         let key = IdempotencyKey::from_raw(42);
 
         store.record(
@@ -3580,7 +3580,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_complete_outcome() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(5));
+        let mut store = IdempotencyStore::new(Duration::from_secs(5 * 60));
         let key = IdempotencyKey::from_raw(99);
 
         store.record(
@@ -3605,7 +3605,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_complete_unknown_key() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(5));
+        let mut store = IdempotencyStore::new(Duration::from_secs(5 * 60));
         let key = IdempotencyKey::from_raw(999);
 
         // Complete on unknown key returns false
@@ -3615,7 +3615,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_eviction() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(1));
+        let mut store = IdempotencyStore::new(Duration::from_secs(1 * 60));
 
         // Insert at t=10 (expires at t=70)
         store.record(
@@ -3658,7 +3658,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_check_treats_expired_records_as_new() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(1));
+        let mut store = IdempotencyStore::new(Duration::from_secs(1 * 60));
         let key = IdempotencyKey::from_raw(3);
         store.record(
             key,
@@ -3677,7 +3677,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_debug() {
-        let store = IdempotencyStore::new(Duration::from_mins(1));
+        let store = IdempotencyStore::new(Duration::from_secs(1 * 60));
         let debug = format!("{store:?}");
         assert!(debug.contains("IdempotencyStore"));
         assert!(debug.contains("entries"));
@@ -4042,7 +4042,7 @@ mod tests {
     /// Completion status does not exempt an entry from TTL-based eviction.
     #[test]
     fn idempotency_store_evicts_completed_entries_on_ttl() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(1));
+        let mut store = IdempotencyStore::new(Duration::from_secs(1 * 60));
         let key = IdempotencyKey::from_raw(1);
         let comp = ComputationName::new("work");
 
@@ -4066,7 +4066,7 @@ mod tests {
     /// Duplicate (not New), and the cached outcome is available.
     #[test]
     fn idempotency_store_check_after_failed_returns_duplicate_with_outcome() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(5));
+        let mut store = IdempotencyStore::new(Duration::from_secs(5 * 60));
         let key = IdempotencyKey::from_raw(77);
         let comp = ComputationName::new("fragile_op");
 
@@ -4094,7 +4094,7 @@ mod tests {
     /// The last `complete()` call wins.
     #[test]
     fn idempotency_store_complete_overwrites_outcome() {
-        let mut store = IdempotencyStore::new(Duration::from_mins(5));
+        let mut store = IdempotencyStore::new(Duration::from_secs(5 * 60));
         let key = IdempotencyKey::from_raw(88);
         let comp = ComputationName::new("retry_op");
 

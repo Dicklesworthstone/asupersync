@@ -381,7 +381,7 @@ mod tests {
         init_test("debounce_does_not_emit_early_when_timer_future_is_ready");
         set_test_time(0);
         let mut stream =
-            Debounce::with_time_getter(PendingStream, Duration::from_mins(1), test_time);
+            Debounce::with_time_getter(PendingStream, Duration::from_secs(1 * 60), test_time);
         stream.pending = Some((7, Time::from_nanos(0)));
         stream.timer = Some(Box::pin(Sleep::new(Time::from_nanos(0))));
 
@@ -398,7 +398,7 @@ mod tests {
             "timer should be re-armed for the remaining period so there is a wake source"
         );
 
-        set_test_time(Duration::from_mins(1).as_nanos().min(u128::from(u64::MAX)) as u64);
+        set_test_time(Duration::from_secs(1 * 60).as_nanos().min(u128::from(u64::MAX)) as u64);
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),
             Poll::Ready(Some(7))

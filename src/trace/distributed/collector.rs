@@ -77,7 +77,7 @@ impl SymbolTraceCollector {
         Self {
             traces: RwLock::new(HashMap::new()),
             max_traces: 10_000,
-            max_age: Duration::from_hours(1),
+            max_age: Duration::from_secs(3600),
             clock_skew_tolerance: Duration::from_millis(100),
             local_region,
         }
@@ -454,7 +454,7 @@ mod tests {
     fn collector_builder_methods() {
         let collector = SymbolTraceCollector::new(RegionTag::new("us-west"))
             .with_max_traces(100)
-            .with_max_age(Duration::from_mins(2))
+            .with_max_age(Duration::from_secs(2 * 60))
             .with_clock_skew_tolerance(Duration::from_millis(50));
 
         assert_eq!(collector.local_region(), &RegionTag::new("us-west"));

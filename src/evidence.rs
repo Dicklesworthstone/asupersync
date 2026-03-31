@@ -837,7 +837,7 @@ mod tests {
             verdict: Verdict::Stop,
             detail: EvidenceDetail::Supervision(SupervisionDetail::WindowExhausted {
                 max_restarts: 3,
-                window: Duration::from_mins(1),
+                window: Duration::from_secs(1 * 60),
             }),
         };
 
@@ -1153,7 +1153,7 @@ mod tests {
                 } else {
                     SupervisionDetail::WindowExhausted {
                         max_restarts: 3,
-                        window: Duration::from_mins(1),
+                        window: Duration::from_secs(1 * 60),
                     }
                 }),
             });

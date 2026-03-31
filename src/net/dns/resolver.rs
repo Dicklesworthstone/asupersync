@@ -297,7 +297,7 @@ impl Resolver {
         }
 
         // Default TTL since std::net doesn't provide it
-        let ttl = Duration::from_mins(5);
+        let ttl = Duration::from_secs(5 * 60);
 
         Ok(LookupIp::new(addrs, ttl))
     }
@@ -2138,7 +2138,7 @@ mod tests {
 
         resolver1.cache.put_ip(
             "test.example",
-            &LookupIp::new(vec!["192.0.2.1".parse().unwrap()], Duration::from_mins(5)),
+            &LookupIp::new(vec!["192.0.2.1".parse().unwrap()], Duration::from_secs(5 * 60)),
         );
 
         // Should be visible on resolver2 (shared cache)
@@ -2157,7 +2157,7 @@ mod tests {
 
         resolver.cache.put_ip(
             "search-sensitive.example",
-            &LookupIp::new(vec!["192.0.2.44".parse().unwrap()], Duration::from_mins(5)),
+            &LookupIp::new(vec!["192.0.2.44".parse().unwrap()], Duration::from_secs(5 * 60)),
         );
 
         let result =
@@ -2459,7 +2459,7 @@ mod tests {
                     "2001:db8::1".parse().unwrap(),
                     "198.51.100.1".parse().unwrap(),
                 ],
-                Duration::from_mins(5),
+                Duration::from_secs(5 * 60),
             ),
         );
 

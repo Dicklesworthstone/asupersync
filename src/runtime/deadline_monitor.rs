@@ -594,7 +594,7 @@ mod tests {
         TEST_NOW_BASE
             .get_or_init(|| {
                 Instant::now()
-                    .checked_add(Duration::from_hours(1))
+                    .checked_add(Duration::from_secs(3600))
                     .unwrap_or_else(Instant::now)
             })
             .checked_add(Duration::from_nanos(
@@ -915,7 +915,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::from_secs(1),
             warning_threshold_fraction: 0.2,
-            checkpoint_timeout: Duration::from_hours(1),
+            checkpoint_timeout: Duration::from_secs(3600),
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
@@ -1066,7 +1066,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
-            checkpoint_timeout: Duration::from_mins(1),
+            checkpoint_timeout: Duration::from_secs(1 * 60),
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
@@ -1147,7 +1147,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::from_millis(10),
             warning_threshold_fraction: 0.0,
-            checkpoint_timeout: Duration::from_mins(1),
+            checkpoint_timeout: Duration::from_secs(1 * 60),
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
@@ -1289,7 +1289,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
-            checkpoint_timeout: Duration::from_mins(1),
+            checkpoint_timeout: Duration::from_secs(1 * 60),
             adaptive: AdaptiveDeadlineConfig {
                 adaptive_enabled: true,
                 warning_percentile: 0.5,
@@ -1360,7 +1360,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
-            checkpoint_timeout: Duration::from_mins(1),
+            checkpoint_timeout: Duration::from_secs(1 * 60),
             adaptive: AdaptiveDeadlineConfig {
                 adaptive_enabled: true,
                 warning_percentile: 0.9,
@@ -1466,7 +1466,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
-            checkpoint_timeout: Duration::from_mins(1),
+            checkpoint_timeout: Duration::from_secs(1 * 60),
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
@@ -1518,14 +1518,14 @@ mod tests {
             warning_percentile: 0.95,
             min_samples: 20,
             max_history: 500,
-            fallback_threshold: Duration::from_mins(1),
+            fallback_threshold: Duration::from_secs(1 * 60),
         };
         let cfg2 = cfg;
         assert!(cfg2.adaptive_enabled);
         assert!((cfg2.warning_percentile - 0.95).abs() < f64::EPSILON);
         assert_eq!(cfg2.min_samples, 20);
         assert_eq!(cfg2.max_history, 500);
-        assert_eq!(cfg2.fallback_threshold, Duration::from_mins(1));
+        assert_eq!(cfg2.fallback_threshold, Duration::from_secs(1 * 60));
         crate::test_complete!("adaptive_deadline_config_clone");
     }
 

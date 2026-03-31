@@ -270,8 +270,8 @@ mod tests {
 
     #[test]
     fn builder_idle_timeout() {
-        let config = QuicConfig::new().idle_timeout(Duration::from_mins(1));
-        assert_eq!(config.idle_timeout, Duration::from_mins(1));
+        let config = QuicConfig::new().idle_timeout(Duration::from_secs(1 * 60));
+        assert_eq!(config.idle_timeout, Duration::from_secs(1 * 60));
     }
 
     #[test]
@@ -377,7 +377,7 @@ mod tests {
             .max_bi_streams(50)
             .max_uni_streams(25)
             .keep_alive(Some(Duration::from_secs(10)))
-            .idle_timeout(Duration::from_mins(1))
+            .idle_timeout(Duration::from_secs(1 * 60))
             .flow_control(2048, 8192);
 
         let _transport = config.to_transport_config();

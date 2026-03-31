@@ -572,12 +572,12 @@ mod tests {
         let config = PoolConfig::builder()
             .max_connections_per_host(10)
             .max_total_connections(200)
-            .idle_timeout(Duration::from_mins(1))
+            .idle_timeout(Duration::from_secs(1 * 60))
             .build();
 
         assert_eq!(config.max_connections_per_host, 10);
         assert_eq!(config.max_total_connections, 200);
-        assert_eq!(config.idle_timeout, Duration::from_mins(1));
+        assert_eq!(config.idle_timeout, Duration::from_secs(1 * 60));
     }
 
     #[test]

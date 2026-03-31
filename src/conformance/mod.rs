@@ -737,12 +737,12 @@ mod tests {
     #[test]
     fn test_config_builder() {
         let config = TestConfig::new()
-            .with_timeout(Duration::from_mins(1))
+            .with_timeout(Duration::from_secs(1 * 60))
             .with_seed(42)
             .with_tracing(true)
             .with_max_steps(1000);
 
-        assert_eq!(config.timeout, Duration::from_mins(1));
+        assert_eq!(config.timeout, Duration::from_secs(1 * 60));
         assert_eq!(config.rng_seed, Some(42));
         assert!(config.tracing_enabled);
         assert_eq!(config.max_steps, Some(1000));
@@ -819,8 +819,8 @@ mod tests {
 
     #[test]
     fn test_config_with_timeout() {
-        let cfg = TestConfig::new().with_timeout(Duration::from_mins(1));
-        assert_eq!(cfg.timeout, Duration::from_mins(1));
+        let cfg = TestConfig::new().with_timeout(Duration::from_secs(1 * 60));
+        assert_eq!(cfg.timeout, Duration::from_secs(1 * 60));
     }
 
     #[test]

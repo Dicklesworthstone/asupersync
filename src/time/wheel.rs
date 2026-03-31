@@ -83,8 +83,8 @@ pub struct TimerWheelConfig {
 impl Default for TimerWheelConfig {
     fn default() -> Self {
         Self {
-            max_wheel_duration: Duration::from_hours(24), // 24 hours
-            max_timer_duration: Duration::from_hours(168), // 7 days
+            max_wheel_duration: Duration::from_secs(24 * 3600), // 24 hours
+            max_timer_duration: Duration::from_secs(168 * 3600), // 7 days
         }
     }
 }
@@ -1056,18 +1056,18 @@ mod tests {
     #[test]
     fn timer_wheel_config_debug_clone_default() {
         let def = TimerWheelConfig::default();
-        assert_eq!(def.max_wheel_duration, Duration::from_hours(24));
-        assert_eq!(def.max_timer_duration, Duration::from_hours(168));
+        assert_eq!(def.max_wheel_duration, Duration::from_secs(24 * 3600));
+        assert_eq!(def.max_timer_duration, Duration::from_secs(168 * 3600));
         let cloned = def.clone();
         assert_eq!(cloned.max_wheel_duration, def.max_wheel_duration);
         let dbg = format!("{def:?}");
         assert!(dbg.contains("TimerWheelConfig"));
         // Builder
         let custom = TimerWheelConfig::new()
-            .max_wheel_duration(Duration::from_hours(12))
-            .max_timer_duration(Duration::from_hours(48));
-        assert_eq!(custom.max_wheel_duration, Duration::from_hours(12));
-        assert_eq!(custom.max_timer_duration, Duration::from_hours(48));
+            .max_wheel_duration(Duration::from_secs(12 * 3600))
+            .max_timer_duration(Duration::from_secs(48 * 3600));
+        assert_eq!(custom.max_wheel_duration, Duration::from_secs(12 * 3600));
+        assert_eq!(custom.max_timer_duration, Duration::from_secs(48 * 3600));
     }
 
     #[test]
@@ -1089,8 +1089,8 @@ mod tests {
     #[test]
     fn timer_duration_exceeded_debug_clone_display() {
         let err = TimerDurationExceeded {
-            duration: Duration::from_hours(2),
-            max: Duration::from_hours(1),
+            duration: Duration::from_secs(2 * 3600),
+            max: Duration::from_secs(3600),
         };
         let cloned = err.clone();
         assert_eq!(cloned.duration, err.duration);
@@ -1397,7 +1397,7 @@ mod tests {
     #[test]
     fn timer_at_exactly_max_duration() {
         init_test("timer_at_exactly_max_duration");
-        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_hours(1)); // 1 hour max
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
         let waker = counter_waker(counter);
@@ -1421,7 +1421,7 @@ mod tests {
     #[test]
     fn timer_beyond_max_duration_rejected() {
         init_test("timer_beyond_max_duration_rejected");
-        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_hours(1)); // 1 hour max
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
         let waker = counter_waker(counter);
@@ -1438,7 +1438,7 @@ mod tests {
 
         let err = result.unwrap_err();
         crate::assert_with_log!(
-            err.max == Duration::from_hours(1),
+            err.max == Duration::from_secs(3600),
             "error contains max",
             3600,
             err.max.as_secs()
@@ -1797,16 +1797,16 @@ mod tests {
 
         // Test TimerWheelConfig builder
         let wheel_config = TimerWheelConfig::new()
-            .max_wheel_duration(Duration::from_hours(24))
-            .max_timer_duration(Duration::from_hours(168));
+            .max_wheel_duration(Duration::from_secs(24 * 3600))
+            .max_timer_duration(Duration::from_secs(168 * 3600));
         crate::assert_with_log!(
-            wheel_config.max_wheel_duration == Duration::from_hours(24),
+            wheel_config.max_wheel_duration == Duration::from_secs(24 * 3600),
             "wheel duration",
             86400,
             wheel_config.max_wheel_duration.as_secs()
         );
         crate::assert_with_log!(
-            wheel_config.max_timer_duration == Duration::from_hours(168),
+            wheel_config.max_timer_duration == Duration::from_secs(168 * 3600),
             "timer duration",
             604_800,
             wheel_config.max_timer_duration.as_secs()

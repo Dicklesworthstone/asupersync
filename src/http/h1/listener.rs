@@ -593,12 +593,12 @@ mod tests {
         set_http1_listener_test_time(Time::from_nanos(77));
         let config = Http1ListenerConfig::default()
             .max_connections(Some(5000))
-            .drain_timeout(Duration::from_mins(1))
+            .drain_timeout(Duration::from_secs(1 * 60))
             .http_config(Http1Config::default().keep_alive(false))
             .time_getter(http1_listener_test_time);
 
         assert_eq!(config.max_connections, Some(5000));
-        assert_eq!(config.drain_timeout, Duration::from_mins(1));
+        assert_eq!(config.drain_timeout, Duration::from_secs(1 * 60));
         assert!(!config.http_config.keep_alive);
         assert_eq!((config.time_getter)().as_nanos(), 77);
     }

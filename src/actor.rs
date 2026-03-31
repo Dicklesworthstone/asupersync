@@ -1632,7 +1632,7 @@ mod tests {
         let rc = restart_count.clone();
 
         let strategy = crate::supervision::SupervisionStrategy::Restart(
-            crate::supervision::RestartConfig::new(3, std::time::Duration::from_mins(1)),
+            crate::supervision::RestartConfig::new(3, std::time::Duration::from_secs(1 * 60)),
         );
 
         let (handle, stored) = scope

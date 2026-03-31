@@ -1493,18 +1493,18 @@ mod tests {
             .storage(StorageType::Memory)
             .max_messages(1000)
             .max_bytes(1_000_000)
-            .max_age(Duration::from_hours(1))
+            .max_age(Duration::from_secs(3600))
             .replicas(3)
-            .duplicate_window(Duration::from_mins(2));
+            .duplicate_window(Duration::from_secs(2 * 60));
 
         assert_eq!(cfg.subjects.len(), 2);
         assert_eq!(cfg.retention, RetentionPolicy::WorkQueue);
         assert_eq!(cfg.storage, StorageType::Memory);
         assert_eq!(cfg.max_msgs, Some(1000));
         assert_eq!(cfg.max_bytes, Some(1_000_000));
-        assert_eq!(cfg.max_age, Some(Duration::from_hours(1)));
+        assert_eq!(cfg.max_age, Some(Duration::from_secs(3600)));
         assert_eq!(cfg.replicas, 3);
-        assert_eq!(cfg.duplicate_window, Some(Duration::from_mins(2)));
+        assert_eq!(cfg.duplicate_window, Some(Duration::from_secs(2 * 60)));
     }
 
     #[test]
@@ -1542,13 +1542,13 @@ mod tests {
         let cfg = ConsumerConfig::new("c1")
             .deliver_policy(DeliverPolicy::New)
             .ack_policy(AckPolicy::All)
-            .ack_wait(Duration::from_mins(1))
+            .ack_wait(Duration::from_secs(1 * 60))
             .max_deliver(5)
             .filter_subject("orders.new");
 
         assert_eq!(cfg.deliver_policy, DeliverPolicy::New);
         assert_eq!(cfg.ack_policy, AckPolicy::All);
-        assert_eq!(cfg.ack_wait, Duration::from_mins(1));
+        assert_eq!(cfg.ack_wait, Duration::from_secs(1 * 60));
         assert_eq!(cfg.max_deliver, 5);
         assert_eq!(cfg.filter_subject, Some("orders.new".into()));
     }
