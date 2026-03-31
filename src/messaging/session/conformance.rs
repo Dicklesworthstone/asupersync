@@ -355,7 +355,7 @@ fn observe_branch_step(
     let expectation =
         kind.expectation(branches.iter().map(|branch| branch.label.clone()).collect());
     let aggregate_evidence =
-        || aggregate_branch_evidence(request.contract_name, request.role, &branches);
+        || aggregate_branch_evidence(request.contract_name, request.role, branches);
     if request.message.is_some() {
         return Err(request.unexpected(expectation, aggregate_evidence()));
     }

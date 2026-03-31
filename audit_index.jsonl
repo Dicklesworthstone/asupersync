@@ -1923,3 +1923,36 @@
 {"file":"src/lab/oracle/rref_access.rs","lines":361,"batch":1,"date":"2026-03-29","agent":"GeminiCLI","verdict":"SOUND","bugs":0,"notes":"Verified RRef heap access and cross-region ownership tracking oracle."}
 {"file":"src/net/dns/error.rs","lines":93,"batch":1,"date":"2026-03-29","agent":"GeminiCLI","verdict":"SOUND","bugs":0,"notes":"Verified DNS error mappings."}
 {"file":"src/net/mod.rs","lines":65,"batch":1,"date":"2026-03-29","agent":"GeminiCLI","verdict":"SOUND","bugs":0,"notes":"Verified module exports and legacy QUIC compat feature gates."}
+{"file":"src/http/h1/codec.rs","lines":1455,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"clippy cast_precision_loss: moved allow from match arm to fmt method"}
+{"file":"src/net/websocket/close.rs","lines":820,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"CRITICAL: Frame::close panics on RFC 6455 unassigned codes (1016-2999); fixed assertion to use is_valid_received_code"}
+{"file":"src/net/websocket/frame.rs","lines":940,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"Frame::close assertion used is_valid_code instead of is_valid_received_code; unassigned but receivable codes caused panic"}
+{"file":"src/messaging/control.rs","lines":2700,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"MEDIUM: test name contradicted behavior; frontier advances on mismatched delta (intentional to break retry loop); renamed test"}
+{"file":"src/distributed/snapshot.rs","lines":1067,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"LOW: size_estimate always used worst-case for budget/cancel_reason/parent even when None"}
+{"file":"src/http/h2/stream.rs","lines":1800,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"stream activation fix correct, evidence ledger count update correct"}
+{"file":"src/http/body.rs","lines":900,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Limited body cumulative size enforcement correct, cancel-safe"}
+{"file":"src/obligation/session_types.rs","lines":1476,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"session type duality, linearity, drop bomb all correct"}
+{"file":"src/database/mysql.rs","lines":2910,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PacketBuffer::build_packet infallible refactor correct, wire protocol sound"}
+{"file":"src/http/h1/client.rs","lines":1647,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"pool transition guard, frame length assertions, active stream filter all correct"}
+{"file":"src/sync/pool.rs","lines":4255,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"cancel-safe pool, FIFO wakeup sound (recalculates available after each return), no slot leaks"}
+{"file":"src/lab/runtime.rs","lines":4462,"batch":490,"date":"2026-03-30","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"AutoAdvanceTermination enum, VirtualTimeReport termination field, stuck bailout logic all correct"}
+{"file":"src/messaging/session/conformance.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"needless_borrow clippy lint on line 358"}
+{"file":"src/database/mysql.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: build_packet infallible refactor"}
+{"file":"src/http/h1/client.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: max_body_size plumbing"}
+{"file":"src/http/h1/codec.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: BodyTooLargeDetailed variant"}
+{"file":"src/http/h1/http_client.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: max_body_size config"}
+{"file":"src/http/h2/stream.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: test fix for active stream activation"}
+{"file":"src/lab/runtime.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: AutoAdvanceTermination enum"}
+{"file":"src/messaging/control.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: CRDT propagation test fix"}
+{"file":"src/messaging/session/obligation.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: streaming protocol direction fix"}
+{"file":"src/net/websocket/close.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: unassigned close code acceptance per RFC 6455"}
+{"file":"src/runtime/builder.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: multi-element browser worker guidance"}
+{"file":"src/runtime/state.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: finalizer lifecycle tracking infrastructure"}
+{"file":"src/http/pool.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: guarded pool state transitions"}
+{"file":"src/net/tcp/stream.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: multi-address connect with per-attempt deadline"}
+{"file":"src/observability/task_inspector.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: checkpoint-derived idle time, clock domain safety"}
+{"file":"src/distributed/bridge.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: zero-replication guards, quorum derivation, config validation"}
+{"file":"src/sync/mutex.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: wake outside lock, OwnedMutexGuard ManuallyDrop simplification"}
+{"file":"src/combinator/circuit_breaker.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: threshold clamping to sane minimums"}
+{"file":"src/stream/watch_stream.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: cancel check before initial snapshot"}
+{"file":"src/lab/oracle/cancellation_protocol.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: cancel-ack poll bound derived from MAX_MASK_DEPTH"}
+{"file":"src/lab/opportunity.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"verified: SapphireElk zero-effort fix, test green"}
