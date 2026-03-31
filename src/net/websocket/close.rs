@@ -521,11 +521,12 @@ mod tests {
     }
 
     #[test]
-    fn close_reason_parse_invalid_unassigned_code() {
-        // 1016 is unassigned — 1012-1014 are now IANA-registered and valid.
+    fn close_reason_parse_unassigned_code_accepted() {
+        // 1016 is unassigned — RFC 6455 §7.4.2 requires endpoints to accept them
         let payload = 1016u16.to_be_bytes();
-        let result = CloseReason::parse(&payload);
-        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+        let result = CloseReason::parse(&payload).unwrap();
+        assert_eq!(result.code, None);
+        assert_eq!(result.raw_code, Some(1016));
     }
 
     #[test]
