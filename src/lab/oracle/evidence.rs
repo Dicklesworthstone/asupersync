@@ -1080,6 +1080,10 @@ mod tests {
         let report = suite.report(crate::types::Time::ZERO);
         let ledger = EvidenceLedger::from_report(&report);
 
+        // 17 core oracles; 4 more with messaging-fabric feature.
+        #[cfg(not(feature = "messaging-fabric"))]
+        assert_eq!(ledger.entries.len(), 17);
+        #[cfg(feature = "messaging-fabric")]
         assert_eq!(ledger.entries.len(), 21);
         assert_eq!(ledger.summary.violations_detected, 0);
         // All should show evidence against violation.

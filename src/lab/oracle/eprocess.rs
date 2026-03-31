@@ -227,7 +227,7 @@ impl EProcess {
         let factor = factor.max(1e-15);
 
         // Guard against NaN propagation — if current or factor became NaN
-        // (e.g., from corrupt config), clamp to 1.0 rather than silently
+        // (e.g., from corrupt config), clamp to max_evalue rather than silently
         // disabling rejection detection.
         let product = self.current * factor;
         self.current = if product.is_finite() {

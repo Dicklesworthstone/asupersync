@@ -201,7 +201,8 @@ impl<T> Sender<T> {
 
     /// Convenience method: reserve and send in one step.
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
-        match self.reserve(cx).await {
+        let result: Result<SendPermit<'_, T>, SendError<()>> = self.reserve(cx).await;
+        match result {
             Ok(permit) => permit.try_send(value),
             Err(SendError::<()>::Disconnected(())) => Err(SendError::Disconnected(value)),
             Err(SendError::<()>::Full(())) => Err(SendError::Full(value)),

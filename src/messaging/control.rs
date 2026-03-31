@@ -2607,7 +2607,7 @@ mod tests {
     }
 
     #[test]
-    fn propagation_snapshot_rejects_mismatched_lag_sketch_delta_without_advancing_frontier() {
+    fn propagation_snapshot_applies_mismatched_lag_sketch_delta_to_break_retry_loop() {
         let replica_a = node("replica-a");
         let replica_b = node("replica-b");
 
