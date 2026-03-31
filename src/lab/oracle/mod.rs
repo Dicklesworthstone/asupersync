@@ -881,9 +881,11 @@ impl OracleReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "tracing-integration")]
     use parking_lot::Mutex;
     #[cfg(feature = "tracing-integration")]
     use std::collections::BTreeMap;
+    #[cfg(feature = "tracing-integration")]
     use std::sync::Arc;
     #[cfg(feature = "tracing-integration")]
     use tracing::Subscriber;
@@ -1057,6 +1059,7 @@ mod tests {
         assert!(text.contains("PASS"));
     }
 
+    #[cfg(feature = "tracing-integration")]
     #[test]
     #[allow(clippy::significant_drop_tightening)]
     fn oracle_report_emits_structured_oracle_check_events() {
