@@ -231,7 +231,7 @@ fn schedule_leaf_partition(
         let bridge = Arc::clone(&bridge);
         let partitioned = Arc::clone(&partitioned);
         let routed = Arc::clone(&routed);
-        let summary = Arc::clone(&summary);
+        let summary = Arc::clone(summary);
         let (task_id, _handle) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
@@ -414,7 +414,7 @@ fn schedule_capability_revocation(
         let parent = Arc::clone(&parent);
         let child = Arc::clone(&child);
         let state = Arc::clone(&state);
-        let summary = Arc::clone(&summary);
+        let summary = Arc::clone(summary);
         let (task_id, _handle) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
@@ -556,7 +556,7 @@ fn schedule_ack_race(runtime: &mut LabRuntime, summary: &Arc<Mutex<Option<AckRac
         let consumer = Arc::clone(&consumer);
         let acked = Arc::clone(&acked);
         let counts = Arc::clone(&counts);
-        let summary = Arc::clone(&summary);
+        let summary = Arc::clone(summary);
         let (task_id, _handle) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
@@ -650,7 +650,7 @@ fn schedule_replication_reorder(
         let stream = Arc::clone(&stream);
         let ready = Arc::clone(&ready);
         let removed = Arc::clone(&removed);
-        let summary = Arc::clone(&summary);
+        let summary = Arc::clone(summary);
         let (task_id, _handle) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
@@ -802,7 +802,7 @@ fn schedule_advisory_storm(
         let ready = Arc::clone(&ready);
         let interests_done = Arc::clone(&interests_done);
         let advisories_done = Arc::clone(&advisories_done);
-        let summary = Arc::clone(&summary);
+        let summary = Arc::clone(summary);
         let (task_id, _handle) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {

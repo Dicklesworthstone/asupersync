@@ -13,6 +13,15 @@
     ],
     "readiness_rule": "all required_beads must be closed before final sign-off"
   },
+  "go_no_go_decision": {
+    "current_verdict": "no_go_pending_dependency_closure",
+    "decision_owner_bead_id": "asupersync-p8o9m",
+    "packet_curator_bead_id": "asupersync-2f71w",
+    "blocking_dependency_ids": [
+      "asupersync-2cyx5"
+    ],
+    "finalization_rule": "Track-H sign-off owner records the final go/no-go decision only after all required_beads are closed and the H2 packet remains synchronized with the active closure evidence."
+  },
   "command_policy": {
     "cargo_heavy_commands_must_use_rch": true,
     "required_prefix": "rch exec --"

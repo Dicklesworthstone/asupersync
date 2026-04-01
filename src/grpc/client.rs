@@ -711,7 +711,11 @@ impl<T> ResponseStreamState<T> {
     }
 
     fn register_waiter(&mut self, waker: &Waker) {
-        if !self.waiters.iter().any(|existing| existing.will_wake(waker)) {
+        if !self
+            .waiters
+            .iter()
+            .any(|existing| existing.will_wake(waker))
+        {
             self.waiters.push(waker.clone());
         }
     }
@@ -1601,7 +1605,9 @@ mod tests {
         assert!(poll_stream(&mut first_reader, &first_waker).is_pending());
         assert!(poll_stream(&mut second_reader, &second_waker).is_pending());
 
-        stream.push(Ok(7)).expect("push should wake pending readers");
+        stream
+            .push(Ok(7))
+            .expect("push should wake pending readers");
         assert_eq!(
             first_wakes.load(Ordering::SeqCst),
             1,

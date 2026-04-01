@@ -94,6 +94,17 @@ not closure-ready until `TRACK_G` is still the sole blocker and
 it names who curates the packet while H2 remains draft-blocked and who is
 responsible for the final go/no-go publication once Track-G closes.
 
+Blocked-state ownership is explicit and stable:
+
+1. `track_signoff_owner` -> `asupersync-p8o9m`
+2. `packet_curator` -> `asupersync-2f71w`
+
+`go_no_go_decision` is also a top-level packet record. In the current
+`draft_blocked` state it must mirror the packet-state verdict, carry the same
+blocking dependency set, and name both the decision owner bead and the packet
+curator bead so downstream Track-G/H consumers do not have to infer ownership
+from prose.
+
 ## Radical Lever Coverage Requirement
 
 The packet explicitly covers radical runtime levers with conservative
