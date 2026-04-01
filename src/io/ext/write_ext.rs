@@ -839,7 +839,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let val = match fut.as_mut().poll(&mut cx) {
             Poll::Ready(Ok(v)) => v,
-            other => panic!("unexpected poll result: {other:?}"),
+            other => panic!("unexpected poll result: {other:?}"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(val == expected, "roundtrip u32", expected, val);
         crate::test_complete!("write_read_roundtrip_u32");

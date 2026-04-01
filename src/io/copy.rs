@@ -1204,7 +1204,7 @@ mod tests {
                 let ok = msg.contains("polled after completion");
                 crate::assert_with_log!(ok, "error message", "polled after completion", msg);
             }
-            other => panic!("expected Ready(Err), got {other:?}"),
+            other => panic!("expected Ready(Err), got {other:?}"), // ubs:ignore - test logic
         }
         crate::test_complete!("copy_repoll_after_completion_fails_closed");
     }
@@ -1229,7 +1229,7 @@ mod tests {
                 let ok = msg.contains("polled after completion");
                 crate::assert_with_log!(ok, "error message", "polled after completion", msg);
             }
-            other => panic!("expected Ready(Err), got {other:?}"),
+            other => panic!("expected Ready(Err), got {other:?}"), // ubs:ignore - test logic
         }
         crate::test_complete!("copy_buf_repoll_after_completion_fails_closed");
     }
@@ -1254,7 +1254,7 @@ mod tests {
                 let ok = msg.contains("polled after completion");
                 crate::assert_with_log!(ok, "error message", "polled after completion", msg);
             }
-            other => panic!("expected Ready(Err), got {other:?}"),
+            other => panic!("expected Ready(Err), got {other:?}"), // ubs:ignore - test logic
         }
         crate::test_complete!("copy_with_progress_repoll_after_completion_fails_closed");
     }
@@ -1279,7 +1279,7 @@ mod tests {
                 let ok = msg.contains("polled after completion");
                 crate::assert_with_log!(ok, "error message", "polled after completion", msg);
             }
-            other => panic!("expected Ready(Err), got {other:?}"),
+            other => panic!("expected Ready(Err), got {other:?}"), // ubs:ignore - test logic
         }
         crate::test_complete!("copy_bidirectional_repoll_after_completion_fails_closed");
     }

@@ -3096,7 +3096,7 @@ mod tests {
         let err = MySqlConnectOptions::parse("mysql://user@[::1:3306/db").unwrap_err();
         match err {
             MySqlError::InvalidUrl(msg) => assert!(msg.contains("bracket"), "{msg}"),
-            other => panic!("expected InvalidUrl, got {other:?}"),
+            other => panic!("expected InvalidUrl, got {other:?}"), // ubs:ignore - test logic
         }
     }
 }

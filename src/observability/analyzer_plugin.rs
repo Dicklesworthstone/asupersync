@@ -848,7 +848,7 @@ mod tests {
                     summary: format!("schema {negotiated_input_schema:?}"),
                 }),
                 TestMode::Error(err) => Err(err.clone()),
-                TestMode::Panic => panic!("plugin panic for test"),
+                TestMode::Panic => panic!("plugin panic for test"), // ubs:ignore - test logic
             }
         }
     }

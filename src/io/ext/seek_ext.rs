@@ -141,7 +141,7 @@ mod tests {
         let result = Pin::new(&mut fut).poll(&mut cx);
         let pos = match result {
             Poll::Ready(Ok(p)) => p,
-            other => panic!("unexpected: {other:?}"),
+            other => panic!("unexpected: {other:?}"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(pos == 42, "seek start", 42u64, pos);
         crate::test_complete!("seek_start");
@@ -158,7 +158,7 @@ mod tests {
         let result = Pin::new(&mut fut).poll(&mut cx);
         let pos = match result {
             Poll::Ready(Ok(p)) => p,
-            other => panic!("unexpected: {other:?}"),
+            other => panic!("unexpected: {other:?}"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(pos == 90, "seek end", 90u64, pos);
         crate::test_complete!("seek_end");
@@ -176,7 +176,7 @@ mod tests {
         let result = Pin::new(&mut fut).poll(&mut cx);
         let pos = match result {
             Poll::Ready(Ok(p)) => p,
-            other => panic!("unexpected: {other:?}"),
+            other => panic!("unexpected: {other:?}"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(pos == 0, "rewind", 0u64, pos);
         crate::test_complete!("rewind_goes_to_zero");
@@ -194,7 +194,7 @@ mod tests {
         let result = Pin::new(&mut fut).poll(&mut cx);
         let pos = match result {
             Poll::Ready(Ok(p)) => p,
-            other => panic!("unexpected: {other:?}"),
+            other => panic!("unexpected: {other:?}"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(pos == 75, "stream_position", 75u64, pos);
         crate::test_complete!("stream_position_returns_current");

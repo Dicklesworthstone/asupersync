@@ -336,7 +336,7 @@ mod tests {
         let poll = Pin::new(&mut reader).poll_fill_buf(&mut cx);
         let filled = match poll {
             Poll::Ready(Ok(bytes)) => bytes.to_vec(),
-            other => panic!("expected Poll::Ready(Ok(_)), got {other:?}"),
+            other => panic!("expected Poll::Ready(Ok(_)), got {other:?}"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(filled == b"x", "filled", b"x", filled);
         crate::test_complete!("buf_reader_zero_capacity_fill_buf_progresses");

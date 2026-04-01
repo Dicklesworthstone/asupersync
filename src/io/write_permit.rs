@@ -147,7 +147,7 @@ mod tests {
                 return output;
             }
         }
-        panic!("future did not resolve");
+        panic!("future did not resolve"); // ubs:ignore - test logic
     }
 
     fn init_test(name: &str) {
