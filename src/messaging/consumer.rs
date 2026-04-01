@@ -2110,10 +2110,14 @@ impl FabricConsumer {
         let next_unacked = self.state.ack_floor.saturating_add(1).max(1);
         let resolve = match request.demand_class {
             ConsumerDemandClass::Tail => {
-                let start = available_tail
-                    .saturating_sub(batch.saturating_sub(1))
-                    .max(1);
-                Some((start, available_tail))
+                if next_unacked > available_tail {
+                    None
+                } else {
+                    let start = available_tail
+                        .saturating_sub(batch.saturating_sub(1))
+                        .max(next_unacked);
+                    Some((start, available_tail))
+                }
             }
             ConsumerDemandClass::CatchUp => {
                 if next_unacked > available_tail {
@@ -4640,6 +4644,72 @@ mod tests {
             return;
         };
         assert_eq!(tail.window, SequenceWindow::new(11, 12).expect("window"));
+    }
+
+    #[test]
+    fn fabric_consumer_tail_waits_when_fully_caught_up() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 10).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(10, ConsumerDemandClass::CatchUp).expect("req"))
+            .expect("queue catchup");
+        let catchup = match consumer.dispatch_next_pull(10, &capsule, None).expect("dispatch") {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("catchup request should schedule"),
+        };
+        consumer
+            .acknowledge_delivery(&catchup.attempt)
+            .expect("ack catchup");
+        assert_eq!(consumer.state().ack_floor, 10);
+
+        consumer
+            .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::Tail).expect("tail"))
+            .expect("queue tail");
+        let outcome = consumer
+            .dispatch_next_pull(10, &capsule, None)
+            .expect("tail should wait for fresh data");
+        assert!(matches!(outcome, PullDispatchOutcome::Waiting(_)));
+        assert_eq!(consumer.waiting_pull_request_count(), 1);
+    }
+
+    #[test]
+    fn fabric_consumer_tail_clamps_to_unacked_suffix() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 10).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(9, ConsumerDemandClass::CatchUp).expect("req"))
+            .expect("queue catchup");
+        let catchup = match consumer.dispatch_next_pull(10, &capsule, None).expect("dispatch") {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("catchup request should schedule"),
+        };
+        consumer
+            .acknowledge_delivery(&catchup.attempt)
+            .expect("ack catchup");
+        assert_eq!(consumer.state().ack_floor, 9);
+
+        consumer
+            .queue_pull_request(PullRequest::new(3, ConsumerDemandClass::Tail).expect("tail"))
+            .expect("queue tail");
+        let tail = match consumer.dispatch_next_pull(10, &capsule, None).expect("dispatch tail") {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("tail should schedule newest unacked suffix"),
+        };
+        assert_eq!(tail.window, SequenceWindow::new(10, 10).expect("suffix"));
     }
 
     #[test]
