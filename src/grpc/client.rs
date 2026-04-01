@@ -1597,42 +1597,42 @@ mod tests {
         let mut stream = ResponseStream::<u32>::open();
         let mut first_reader = stream.clone();
         let mut second_reader = stream.clone();
-        let first_wakes = Arc::new(AtomicUsize::new(0));
-        let second_wakes = Arc::new(AtomicUsize::new(0));
-        let first_waker = counting_waker(&first_wakes);
-        let second_waker = counting_waker(&second_wakes);
+        let first_wake_count = Arc::new(AtomicUsize::new(0));
+        let second_wake_count = Arc::new(AtomicUsize::new(0));
+        let first_reader_waker = counting_waker(&first_wake_count);
+        let second_reader_waker = counting_waker(&second_wake_count);
 
-        assert!(poll_stream(&mut first_reader, &first_waker).is_pending());
-        assert!(poll_stream(&mut second_reader, &second_waker).is_pending());
+        assert!(poll_stream(&mut first_reader, &first_reader_waker).is_pending());
+        assert!(poll_stream(&mut second_reader, &second_reader_waker).is_pending());
 
         stream
             .push(Ok(7))
             .expect("push should wake pending readers");
         assert_eq!(
-            first_wakes.load(Ordering::SeqCst),
+            first_wake_count.load(Ordering::SeqCst),
             1,
             "first cloned reader lost its wakeup",
         );
         assert_eq!(
-            second_wakes.load(Ordering::SeqCst),
+            second_wake_count.load(Ordering::SeqCst),
             1,
             "second cloned reader should also be notified",
         );
 
         assert!(matches!(
-            poll_stream(&mut first_reader, &first_waker),
+            poll_stream(&mut first_reader, &first_reader_waker),
             Poll::Ready(Some(Ok(7)))
         ));
-        assert!(poll_stream(&mut second_reader, &second_waker).is_pending());
+        assert!(poll_stream(&mut second_reader, &second_reader_waker).is_pending());
 
         stream.close();
         assert_eq!(
-            second_wakes.load(Ordering::SeqCst),
+            second_wake_count.load(Ordering::SeqCst),
             2,
             "close should wake the still-pending cloned reader",
         );
         assert!(matches!(
-            poll_stream(&mut second_reader, &second_waker),
+            poll_stream(&mut second_reader, &second_reader_waker),
             Poll::Ready(None)
         ));
     }

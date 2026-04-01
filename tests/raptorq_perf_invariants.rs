@@ -4484,6 +4484,56 @@ fn h2_closure_packet_schema_and_lever_coverage() {
             "draft_blocked H2 packet must list Track-G as the sole blocker"
         );
     }
+    let packet_go_no_go = artifact["packet_state"]["go_no_go_decision"]
+        .as_str()
+        .expect("packet_state.go_no_go_decision must be present");
+    let go_no_go_decision = artifact["go_no_go_decision"]
+        .as_object()
+        .expect("H2 packet must expose go_no_go_decision as a top-level object");
+    assert_eq!(
+        go_no_go_decision
+            .get("current_verdict")
+            .and_then(serde_json::Value::as_str),
+        Some(packet_go_no_go),
+        "top-level go_no_go_decision must mirror packet_state.go_no_go_decision"
+    );
+    assert_eq!(
+        go_no_go_decision
+            .get("decision_owner_bead_id")
+            .and_then(serde_json::Value::as_str),
+        Some("asupersync-p8o9m"),
+        "H2 go/no-go decision must name Track-H as the decision owner"
+    );
+    assert_eq!(
+        go_no_go_decision
+            .get("packet_curator_bead_id")
+            .and_then(serde_json::Value::as_str),
+        Some("asupersync-2f71w"),
+        "H2 go/no-go decision must name the H2 packet curator"
+    );
+    let go_no_go_blockers = go_no_go_decision
+        .get("blocking_dependency_ids")
+        .and_then(serde_json::Value::as_array)
+        .expect("H2 go/no-go decision must include blocking_dependency_ids")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("go/no-go blocking dependency entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        go_no_go_blockers, blocking_dependencies,
+        "go_no_go_decision.blocking_dependency_ids must match packet_state.blocking_dependencies"
+    );
+    assert!(
+        go_no_go_decision
+            .get("finalization_rule")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty()),
+        "H2 go/no-go decision must include a non-empty finalization_rule"
+    );
 
     let required_beads = artifact["signoff_dependency_matrix"]["required_beads"]
         .as_array()
@@ -4882,20 +4932,54 @@ fn h2_closure_packet_dependency_status_alignment() {
         !follow_up_ownership.is_empty(),
         "follow_up_ownership must include at least one explicit owner"
     );
+    let mut follow_up_roles = BTreeMap::new();
     for owner in follow_up_ownership {
+        let bead_id = owner["bead_id"]
+            .as_str()
+            .expect("each follow_up_ownership entry must include bead_id");
+        let role = owner["role"]
+            .as_str()
+            .expect("each follow_up_ownership entry must include role");
         assert!(
-            owner["bead_id"].as_str().is_some(),
-            "each follow_up_ownership entry must include bead_id"
+            !bead_id.is_empty(),
+            "follow_up_ownership bead_id must not be empty"
         );
         assert!(
-            owner["role"].as_str().is_some(),
-            "each follow_up_ownership entry must include role"
+            !role.is_empty(),
+            "follow_up_ownership role must not be empty"
         );
         assert!(
-            owner["handoff_expectation"].as_str().is_some(),
+            owner["handoff_expectation"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
             "each follow_up_ownership entry must include handoff_expectation"
         );
+        follow_up_roles.insert(role.to_string(), bead_id.to_string());
     }
+    assert_eq!(
+        follow_up_roles.get("track_signoff_owner").map(String::as_str),
+        Some("asupersync-p8o9m"),
+        "follow_up_ownership must name Track-H as track_signoff_owner"
+    );
+    assert_eq!(
+        follow_up_roles.get("packet_curator").map(String::as_str),
+        Some("asupersync-2f71w"),
+        "follow_up_ownership must name the H2 packet curator bead"
+    );
+    assert_eq!(
+        go_no_go_decision
+            .get("decision_owner_bead_id")
+            .and_then(serde_json::Value::as_str),
+        follow_up_roles.get("track_signoff_owner").map(String::as_str),
+        "go_no_go_decision owner must match follow_up_ownership.track_signoff_owner"
+    );
+    assert_eq!(
+        go_no_go_decision
+            .get("packet_curator_bead_id")
+            .and_then(serde_json::Value::as_str),
+        follow_up_roles.get("packet_curator").map(String::as_str),
+        "go_no_go_decision packet curator must match follow_up_ownership.packet_curator"
+    );
 }
 
 /// Validate H2 closure packet docs cross-link to canonical artifacts.
@@ -4915,7 +4999,10 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
         "artifacts/raptorq_replay_catalog_v1.json",
         "follow_up_ownership",
+        "track_signoff_owner",
+        "packet_curator",
         "residual_risk_register",
+        "go_no_go_decision",
         "E4",
         "F8",
         "rch exec --",
