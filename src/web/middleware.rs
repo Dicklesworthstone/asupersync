@@ -936,14 +936,14 @@ impl<H: Handler> RequestTraceMiddleware<H> {
 
 impl<H: Handler> Handler for RequestTraceMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let _method = req.method.clone();
-        let _path = req.path.clone();
+        let method = req.method.clone();
+        let path = req.path.clone();
         let trace_id = Self::resolve_trace_id(&req);
         let start = (self.time_getter)();
 
         debug!(
-            method = %_method,
-            path = %_path,
+            method = %method,
+            path = %path,
             trace_id = ?trace_id,
             "http request start"
         );
@@ -968,8 +968,8 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
 
         if status_code >= 500 {
             warn!(
-                method = %_method,
-                path = %_path,
+                method = %method,
+                path = %path,
                 status = status_code,
                 duration_ms = duration_ms,
                 trace_id = ?trace_id,
@@ -977,8 +977,8 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
             );
         } else {
             debug!(
-                method = %_method,
-                path = %_path,
+                method = %method,
+                path = %path,
                 status = status_code,
                 duration_ms = duration_ms,
                 trace_id = ?trace_id,
