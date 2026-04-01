@@ -2777,7 +2777,7 @@ mod tests {
 
         let mut lease = match outcome {
             NameCollisionOutcome::Registered { lease } => lease,
-            other => panic!("expected Registered, got {other:?}"),
+            other => panic!("expected Registered, got {other:?}"), // ubs:ignore - test logic
         };
         assert_eq!(reg.whereis("fresh"), Some(tid(1)));
 
@@ -2812,7 +2812,7 @@ mod tests {
                 assert_eq!(displaced_region, rid(0));
                 lease
             }
-            other => panic!("expected Replaced, got {other:?}"),
+            other => panic!("expected Replaced, got {other:?}"), // ubs:ignore - test logic
         };
 
         // New holder is visible.
@@ -2843,7 +2843,7 @@ mod tests {
 
         let mut lease = match outcome {
             NameCollisionOutcome::Registered { lease } => lease,
-            other => panic!("expected Registered, got {other:?}"),
+            other => panic!("expected Registered, got {other:?}"), // ubs:ignore - test logic
         };
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
 
@@ -3233,7 +3233,7 @@ mod tests {
                 assert_eq!(displaced_holder, tid(1));
                 lease
             }
-            other => panic!("expected Replaced, got {other:?}"),
+            other => panic!("expected Replaced, got {other:?}"), // ubs:ignore - test logic
         };
 
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
@@ -3258,7 +3258,7 @@ mod tests {
             .unwrap();
         let mut lease = match outcome {
             NameCollisionOutcome::Registered { lease } => lease,
-            other => panic!("expected Registered, got {other:?}"),
+            other => panic!("expected Registered, got {other:?}"), // ubs:ignore - test logic
         };
 
         // Try again — should fail identically to register().
@@ -3304,7 +3304,7 @@ mod tests {
 
         let mut new_lease = match outcome {
             NameCollisionOutcome::Replaced { lease, .. } => lease,
-            other => panic!("expected Replaced, got {other:?}"),
+            other => panic!("expected Replaced, got {other:?}"), // ubs:ignore - test logic
         };
 
         // New lease metadata is correct.

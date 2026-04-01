@@ -8,35 +8,39 @@ mod demo {
     use std::pin::Pin;
     use std::time::Duration;
 
+    type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+    type NamedFuture<T> = (&'static str, BoxFuture<T>);
+
     #[derive(Clone, Copy)]
     struct RaceCx;
 
     impl RaceCx {
-        async fn race<T>(&self, mut futures: Vec<Pin<Box<dyn Future<Output = T>>>>) -> T {
+        async fn race<T>(&self, mut futures: Vec<BoxFuture<T>>) -> T
+        where
+            T: Send + 'static,
+        {
             futures.remove(0).await
         }
 
-        async fn race_named<T>(
-            &self,
-            mut futures: Vec<(&'static str, Pin<Box<dyn Future<Output = T>>>)>,
-        ) -> T {
+        async fn race_named<T>(&self, mut futures: Vec<NamedFuture<T>>) -> T
+        where
+            T: Send + 'static,
+        {
             let (_, fut) = futures.remove(0);
             fut.await
         }
 
-        async fn race_timeout<T>(
-            &self,
-            _timeout: Duration,
-            futures: Vec<Pin<Box<dyn Future<Output = T>>>>,
-        ) -> T {
+        async fn race_timeout<T>(&self, _timeout: Duration, futures: Vec<BoxFuture<T>>) -> T
+        where
+            T: Send + 'static,
+        {
             self.race(futures).await
         }
 
-        async fn race_timeout_named<T>(
-            &self,
-            _timeout: Duration,
-            futures: Vec<(&'static str, Pin<Box<dyn Future<Output = T>>>)>,
-        ) -> T {
+        async fn race_timeout_named<T>(&self, _timeout: Duration, futures: Vec<NamedFuture<T>>) -> T
+        where
+            T: Send + 'static,
+        {
             self.race_named(futures).await
         }
     }

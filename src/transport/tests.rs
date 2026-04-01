@@ -930,6 +930,7 @@ mod tests {
                             }
                             Poll::Ready(Some(Err(err))) => {
                                 panic!(
+                                    // ubs:ignore - test logic
                                     "TW-FAIRNESS unexpected stream error on endpoint {}: {err:?}",
                                     index + 1
                                 );
@@ -1551,7 +1552,7 @@ mod tests {
                     match stream.next_with_cancel(&cx).await {
                         Ok(Some(_)) => collected += 1,
                         Ok(None) | Err(StreamError::Cancelled) => break,
-                        Err(e) => panic!("unexpected error: {e:?}"),
+                        Err(e) => panic!("unexpected error: {e:?}"), // ubs:ignore - test logic
                     }
                 }
 

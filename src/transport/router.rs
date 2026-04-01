@@ -2266,7 +2266,7 @@ mod tests {
             } else if id == EndpointId::new(2) {
                 counts[2] += 1;
             } else {
-                panic!("selected unhealthy endpoint: {id:?}");
+                panic!("selected unhealthy endpoint: {id:?}"); // ubs:ignore - test logic
             }
         }
 

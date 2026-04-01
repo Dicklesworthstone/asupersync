@@ -1337,7 +1337,7 @@ mod tests {
         });
 
         let Poll::Ready(Some(Err(err))) = poll_body(&mut body) else {
-            panic!("expected error frame")
+            panic!("expected error frame") // ubs:ignore - test logic
         };
         assert_eq!(err, "boom");
         assert!(!body.is_end_stream());
@@ -1452,7 +1452,7 @@ mod tests {
                 return Poll::Ready(Some(Ok(Frame::data(data))));
             }
 
-            panic!("Limited polled inner body after terminal length-limit violation");
+            panic!("Limited polled inner body after terminal length-limit violation"); // ubs:ignore - contract violation
         }
     }
 
@@ -1498,7 +1498,7 @@ mod tests {
                 return Poll::Ready(Some(Err(std::io::Error::other("boom"))));
             }
 
-            panic!("Limited polled inner body after terminal inner error");
+            panic!("Limited polled inner body after terminal inner error"); // ubs:ignore - contract violation
         }
     }
 
@@ -1544,7 +1544,7 @@ mod tests {
                 return Poll::Ready(None);
             }
 
-            panic!("Limited polled inner body after terminal completion");
+            panic!("Limited polled inner body after terminal completion"); // ubs:ignore - contract violation
         }
     }
 

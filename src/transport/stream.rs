@@ -2134,7 +2134,7 @@ mod tests {
         let first = Pin::new(&mut merged).poll_next(&mut cx);
         let esi = match &first {
             Poll::Ready(Some(Ok(sym))) => sym.symbol().id().esi(),
-            _ => panic!("expected Ready(Some(Ok))"),
+            _ => panic!("expected Ready(Some(Ok))"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(esi == 20, "B dispatched first", 20u32, esi);
 
@@ -2142,7 +2142,7 @@ mod tests {
         let second = Pin::new(&mut merged).poll_next(&mut cx);
         let esi2 = match &second {
             Poll::Ready(Some(Ok(sym))) => sym.symbol().id().esi(),
-            _ => panic!("expected Ready(Some(Ok))"),
+            _ => panic!("expected Ready(Some(Ok))"), // ubs:ignore - test logic
         };
         crate::assert_with_log!(esi2 == 10, "A dispatched after removal", 10u32, esi2);
 
