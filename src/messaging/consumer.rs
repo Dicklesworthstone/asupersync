@@ -2058,8 +2058,7 @@ impl FabricConsumer {
 
         let incoming_rank = request.demand_class.priority_rank();
         let evicted = self.waiting_pull_requests[worst_index].clone();
-        let replaced = self.config.adaptive_kernel == AdaptiveConsumerKernel::AuditBacked
-            && self.config.overflow_policy == ConsumerOverflowPolicy::ReplaceLowestPriority
+        let replaced = self.config.overflow_policy == ConsumerOverflowPolicy::ReplaceLowestPriority
             && incoming_rank < evicted.request.demand_class.priority_rank();
         if replaced {
             self.waiting_pull_requests.remove(worst_index);
@@ -4316,7 +4315,7 @@ mod tests {
     }
 
     #[test]
-    fn fabric_consumer_stable_kernel_rejects_priority_overflow_without_audit_log() {
+    fn fabric_consumer_stable_kernel_replaces_priority_overflow_without_audit_log() {
         let cell = test_cell();
         let mut consumer = FabricConsumer::new(
             &cell,
@@ -4333,12 +4332,29 @@ mod tests {
             .queue_pull_request(PullRequest::new(1, ConsumerDemandClass::Replay).expect("replay"))
             .expect("queue replay");
 
-        assert_eq!(
-            consumer.queue_pull_request(
-                PullRequest::new(1, ConsumerDemandClass::Tail).expect("tail request")
-            ),
-            Err(FabricConsumerError::MaxWaitingExceeded { limit: 1 })
+        consumer
+            .queue_pull_request(PullRequest::new(1, ConsumerDemandClass::Tail).expect("tail"))
+            .expect("replace replay with tail");
+
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 20).expect("window"),
         );
+        let delivery = match consumer
+            .dispatch_next_pull(20, &capsule, None)
+            .expect("dispatch tail")
+        {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("tail request should dispatch"),
+        };
+
+        assert!(matches!(
+            delivery.request,
+            ScheduledConsumerRequest::Pull(PullRequest {
+                demand_class: ConsumerDemandClass::Tail,
+                ..
+            })
+        ));
         assert!(consumer.decision_log().is_empty());
     }
 

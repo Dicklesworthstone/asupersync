@@ -2306,6 +2306,56 @@ pub enum ServiceBoundaryError {
         /// Request id carried by the obligation being transferred.
         obligation_request_id: String,
     },
+    /// The admission certificate was issued for a different boundary subject.
+    #[error(
+        "service admission subject `{admission_subject}` does not match boundary subject `{boundary_subject}`"
+    )]
+    AdmissionSubjectMismatch {
+        /// Subject recorded on the admission certificate.
+        admission_subject: String,
+        /// Request subject owned by this boundary.
+        boundary_subject: String,
+    },
+    /// The admission certificate was issued for a different service surface.
+    #[error(
+        "service admission class `{admission_service}` does not match boundary service `{boundary_service}`"
+    )]
+    AdmissionServiceMismatch {
+        /// Service name recorded on the admission certificate.
+        admission_service: String,
+        /// Service name registered on the boundary.
+        boundary_service: String,
+    },
+    /// The admission certificate belongs to a different caller.
+    #[error(
+        "service admission caller `{admission_caller}` does not match obligation caller `{obligation_caller}`"
+    )]
+    AdmissionCallerMismatch {
+        /// Caller recorded on the admission certificate.
+        admission_caller: String,
+        /// Caller recorded on the obligation being transferred.
+        obligation_caller: String,
+    },
+    /// The admission certificate and obligation disagree on delivery class.
+    #[error(
+        "service admission delivery class `{admission_class}` does not match obligation delivery class `{obligation_class}`"
+    )]
+    AdmissionDeliveryClassMismatch {
+        /// Delivery class recorded on the admission certificate.
+        admission_class: DeliveryClass,
+        /// Delivery class recorded on the obligation.
+        obligation_class: DeliveryClass,
+    },
+    /// The admission certificate and obligation disagree on timeout budget.
+    #[error(
+        "service admission timeout {admission_timeout:?} does not match obligation timeout {obligation_timeout:?}"
+    )]
+    AdmissionTimeoutMismatch {
+        /// Timeout recorded on the admission certificate.
+        admission_timeout: Option<Duration>,
+        /// Timeout recorded on the obligation.
+        obligation_timeout: Option<Duration>,
+    },
     /// The obligation is no longer positioned at this boundary's request subject.
     #[error(
         "service obligation subject `{subject}` is not currently owned by boundary subject `{boundary_subject}`"
@@ -2618,6 +2668,41 @@ impl FabricServiceBoundary {
             return Err(ServiceBoundaryError::AdmissionRequestMismatch {
                 admission_request_id: admission.certificate.request_id.clone(),
                 obligation_request_id: obligation.request_id.clone(),
+            });
+        }
+
+        if admission.certificate.subject != self.request_subject.as_str() {
+            return Err(ServiceBoundaryError::AdmissionSubjectMismatch {
+                admission_subject: admission.certificate.subject.clone(),
+                boundary_subject: self.request_subject.as_str().to_owned(),
+            });
+        }
+
+        if admission.certificate.service_class != self.registration.service_name {
+            return Err(ServiceBoundaryError::AdmissionServiceMismatch {
+                admission_service: admission.certificate.service_class.clone(),
+                boundary_service: self.registration.service_name.clone(),
+            });
+        }
+
+        if admission.certificate.caller != obligation.caller {
+            return Err(ServiceBoundaryError::AdmissionCallerMismatch {
+                admission_caller: admission.certificate.caller.clone(),
+                obligation_caller: obligation.caller.clone(),
+            });
+        }
+
+        if admission.certificate.delivery_class != obligation.delivery_class {
+            return Err(ServiceBoundaryError::AdmissionDeliveryClassMismatch {
+                admission_class: admission.certificate.delivery_class,
+                obligation_class: obligation.delivery_class,
+            });
+        }
+
+        if admission.certificate.timeout != obligation.timeout {
+            return Err(ServiceBoundaryError::AdmissionTimeoutMismatch {
+                admission_timeout: admission.certificate.timeout,
+                obligation_timeout: obligation.timeout,
             });
         }
 
@@ -3656,6 +3741,32 @@ mod tests {
             .expect("valid service boundary")
     }
 
+    fn service_boundary_with_name(service_name: &str) -> FabricServiceBoundary {
+        let registration = ServiceRegistration::new(
+            service_name,
+            contract(),
+            provider_terms_with_mobility(MobilityConstraint::Unrestricted),
+        )
+        .expect("valid");
+        FabricServiceBoundary::new(namespace(), service_subject(), registration)
+            .expect("valid service boundary")
+    }
+
+    fn inventory_service_boundary() -> FabricServiceBoundary {
+        let registration = ServiceRegistration::new(
+            "fabric.inventory",
+            contract(),
+            provider_terms_with_mobility(MobilityConstraint::Unrestricted),
+        )
+        .expect("valid");
+        FabricServiceBoundary::new(
+            NamespaceKernel::new("acme", "inventory").expect("namespace kernel"),
+            Subject::new("tenant.acme.service.inventory.lookup"),
+            registration,
+        )
+        .expect("valid service boundary")
+    }
+
     fn authoritative_import_morphism() -> Morphism {
         Morphism {
             source_language: SubjectPattern::new("tenant.acme.service.orders.lookup"),
@@ -4105,6 +4216,316 @@ mod tests {
             }
         );
         assert!(obligation.lineage.is_empty());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_admission_subject_mismatch() {
+        let boundary = transferable_service_boundary();
+        let other_boundary = inventory_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = other_boundary
+            .admit_request(
+                "req-transfer-subject",
+                "caller-a",
+                &caller,
+                ReplySpaceRule::CallerInbox,
+                15,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-subject",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.certificate.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.certificate.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
+                &authoritative_import_morphism(),
+            )
+            .expect_err("admission from another boundary should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::AdmissionSubjectMismatch {
+                admission_subject: "tenant.acme.service.inventory.lookup".to_owned(),
+                boundary_subject: "tenant.acme.service.orders.lookup".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_admission_service_mismatch() {
+        let boundary = transferable_service_boundary();
+        let other_boundary = service_boundary_with_name("fabric.inventory");
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = other_boundary
+            .admit_request(
+                "req-transfer-service",
+                "caller-a",
+                &caller,
+                ReplySpaceRule::CallerInbox,
+                16,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-service",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.certificate.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.certificate.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
+                &authoritative_import_morphism(),
+            )
+            .expect_err("admission from another service should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::AdmissionServiceMismatch {
+                admission_service: "fabric.inventory".to_owned(),
+                boundary_service: "fabric.echo".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_admission_caller_mismatch() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-transfer-caller",
+                "caller-b",
+                &caller,
+                ReplySpaceRule::CallerInbox,
+                17,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-caller",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.certificate.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.certificate.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
+                &authoritative_import_morphism(),
+            )
+            .expect_err("caller mismatch should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::AdmissionCallerMismatch {
+                admission_caller: "caller-b".to_owned(),
+                obligation_caller: "caller-a".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_admission_delivery_class_mismatch() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let default_admission = boundary
+            .admit_request(
+                "req-transfer-class",
+                "caller-a",
+                &CallerOptions::default(),
+                ReplySpaceRule::CallerInbox,
+                18,
+                Time::from_nanos(1),
+            )
+            .expect("default admission");
+        let admission = boundary
+            .admit_request(
+                "req-transfer-class",
+                "caller-a",
+                &CallerOptions {
+                    requested_class: Some(DeliveryClass::MobilitySafe),
+                    ..CallerOptions::default()
+                },
+                ReplySpaceRule::CallerInbox,
+                19,
+                Time::from_nanos(2),
+            )
+            .expect("mobility-safe admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-class",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            default_admission.certificate.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(3),
+            default_admission.certificate.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(4),
+                ),
+                &authoritative_import_morphism(),
+            )
+            .expect_err("delivery-class mismatch should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::AdmissionDeliveryClassMismatch {
+                admission_class: DeliveryClass::MobilitySafe,
+                obligation_class: DeliveryClass::ObligationBacked,
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_admission_timeout_mismatch() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let default_admission = boundary
+            .admit_request(
+                "req-transfer-timeout",
+                "caller-a",
+                &CallerOptions::default(),
+                ReplySpaceRule::CallerInbox,
+                20,
+                Time::from_nanos(1),
+            )
+            .expect("default admission");
+        let admission = boundary
+            .admit_request(
+                "req-transfer-timeout",
+                "caller-a",
+                &CallerOptions {
+                    timeout_override: Some(Duration::from_secs(5)),
+                    ..CallerOptions::default()
+                },
+                ReplySpaceRule::CallerInbox,
+                21,
+                Time::from_nanos(2),
+            )
+            .expect("timed admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-timeout",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            default_admission.certificate.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(3),
+            default_admission.certificate.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(4),
+                ),
+                &authoritative_import_morphism(),
+            )
+            .expect_err("timeout mismatch should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::AdmissionTimeoutMismatch {
+                admission_timeout: Some(Duration::from_secs(5)),
+                obligation_timeout: Some(Duration::from_secs(30)),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
     }
 
     #[test]
