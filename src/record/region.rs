@@ -1047,15 +1047,16 @@ impl RegionRecord {
     ) {
         let prev_state = self.state.load();
 
-        // Update atomic state
-        self.state.store(state);
-
-        // Update inner protected state
+        // Update inner protected state FIRST, then atomic state, so concurrent
+        // readers never see new state with old inner data (torn read).
         let mut inner = self.inner.write();
         inner.budget = budget;
         inner.children = children;
         inner.tasks = tasks;
         inner.cancel_reason = cancel_reason;
+        // Publish state change while still holding the write lock — readers
+        // acquiring the lock after this point see both new state and new data.
+        self.state.store(state);
         drop(inner);
 
         // Ensure heap is reclaimed if the snapshot forces the region closed

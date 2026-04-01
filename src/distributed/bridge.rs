@@ -758,7 +758,7 @@ impl RegionBridge {
 
     /// Creates a snapshot of current region state.
     #[must_use]
-    pub fn create_snapshot(&mut self) -> RegionSnapshot {
+    pub fn create_snapshot(&mut self, now: Time) -> RegionSnapshot {
         self.sequence += 1;
 
         let tasks: Vec<TaskSnapshot> = self
