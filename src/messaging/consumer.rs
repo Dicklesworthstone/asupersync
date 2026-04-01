@@ -5070,7 +5070,7 @@ mod tests {
             .expect("queue");
         let d1 = match consumer.dispatch_next_pull(20, &capsule, None).expect("d") {
             PullDispatchOutcome::Scheduled(d) => *d,
-            other => panic!("expected Scheduled, got {other:?}"),
+            other => panic!("expected Scheduled, got {other:?}"), // ubs:ignore - test logic
         };
         consumer.acknowledge_delivery(&d1.attempt).expect("ack");
         assert_eq!(consumer.state().ack_floor, 5);
@@ -5081,7 +5081,7 @@ mod tests {
             .expect("queue");
         let d2 = match consumer.dispatch_next_pull(20, &capsule, None).expect("d") {
             PullDispatchOutcome::Scheduled(d) => *d,
-            other => panic!("expected Scheduled, got {other:?}"),
+            other => panic!("expected Scheduled, got {other:?}"), // ubs:ignore - test logic
         };
         assert_eq!(d2.window, SequenceWindow::new(6, 10).expect("w"));
 
@@ -5094,7 +5094,7 @@ mod tests {
             .expect("queue");
         let d3 = match consumer.dispatch_next_pull(20, &capsule, None).expect("d") {
             PullDispatchOutcome::Scheduled(d) => *d,
-            other => panic!("expected Scheduled, got {other:?}"),
+            other => panic!("expected Scheduled, got {other:?}"), // ubs:ignore - test logic
         };
         consumer.acknowledge_delivery(&d3.attempt).expect("ack d3");
 

@@ -219,6 +219,30 @@ impl Default for PoolStatCounters {
     }
 }
 
+impl fmt::Debug for PoolStatCounters {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PoolStatCounters")
+            .field(
+                "total_acquisitions",
+                &self.total_acquisitions.load(Ordering::Relaxed),
+            )
+            .field("total_creates", &self.total_creates.load(Ordering::Relaxed))
+            .field(
+                "total_discards",
+                &self.total_discards.load(Ordering::Relaxed),
+            )
+            .field(
+                "total_timeouts",
+                &self.total_timeouts.load(Ordering::Relaxed),
+            )
+            .field(
+                "total_validation_failures",
+                &self.total_validation_failures.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
 /// Statistics for a database connection pool.
 #[derive(Debug, Clone, Default)]
 pub struct DbPoolStats {
@@ -1340,7 +1364,7 @@ mod tests {
         let config = DbPoolConfig::default();
         let dbg = format!("{config:?}");
         assert!(dbg.contains("DbPoolConfig"));
-        let cloned = config.clone();
+        let cloned = config;
         assert_eq!(cloned.max_size, 10);
     }
 
@@ -1417,6 +1441,17 @@ mod tests {
         let dbg = format!("{pool:?}");
         assert!(dbg.contains("DbPool"));
         assert!(dbg.contains("max_size"));
+        assert!(dbg.contains("stats"));
+        assert!(dbg.contains("total_acquisitions: 0"));
+    }
+
+    #[test]
+    fn async_pool_debug() {
+        let pool = AsyncDbPool::new(AsyncTestManager::new(), DbPoolConfig::default());
+        let dbg = format!("{pool:?}");
+        assert!(dbg.contains("AsyncDbPool"));
+        assert!(dbg.contains("stats"));
+        assert!(dbg.contains("total_acquisitions: 0"));
     }
 
     // ================================================================
@@ -1819,5 +1854,18 @@ mod tests {
         assert!(dbg.contains("DbPoolStats"));
         let cloned = stats.clone();
         assert_eq!(cloned.total, 0);
+    }
+
+    #[test]
+    fn pool_debug_reports_live_counter_values() {
+        init_test("pool_debug_reports_live_counter_values");
+        let pool = DbPool::new(TestManager::new(), DbPoolConfig::default());
+        let _conn = pool.get().unwrap();
+
+        let dbg = format!("{pool:?}");
+        assert!(dbg.contains("total_acquisitions: 1"));
+        assert!(dbg.contains("total_creates: 1"));
+        assert!(dbg.contains("total_discards: 0"));
+        crate::test_complete!("pool_debug_reports_live_counter_values");
     }
 }
