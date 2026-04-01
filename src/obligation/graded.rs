@@ -330,13 +330,18 @@ impl GradedScope {
                 total_resolved: self.resolved,
             })
         } else {
-            // Leave self.closed = false so Drop::drop fires the leak panic.
-            Err(ScopeLeakError {
+            let err = ScopeLeakError {
                 label: self.label.clone(),
                 outstanding,
                 reserved: self.reserved,
                 resolved: self.resolved,
-            })
+            };
+            // Mark closed so Drop doesn't panic — the caller explicitly
+            // called close() and received the error, so they are aware of
+            // the leak. Drop panics are reserved for implicit drops where
+            // close() was never called.
+            self.closed = true;
+            Err(err)
         }
     }
 
@@ -1363,12 +1368,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SCOPE LEAKED")]
-    fn close_err_drop_panics_on_outstanding_obligations() {
+    fn close_err_does_not_panic_when_caller_handles_error() {
         let mut scope = GradedScope::open("leak-test");
         scope.on_reserve();
         // close() returns Err because 1 obligation is outstanding.
-        // The scope is consumed by close(), and Drop must panic.
-        let _err = scope.close();
+        // The caller explicitly called close() and received the error,
+        // so Drop should NOT panic — the leak is acknowledged.
+        let err = scope.close().expect_err("should return leak error");
+        assert_eq!(err.outstanding, 1);
     }
 }

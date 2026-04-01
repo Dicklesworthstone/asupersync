@@ -15,7 +15,7 @@ use crate::bytes::Bytes;
 
 use super::codec::{Codec, FramedCodec, IdentityCodec};
 use super::status::{GrpcError, Status};
-use super::streaming::{Metadata, Request, Response, Streaming};
+use super::streaming::{MAX_STREAM_BUFFERED, Metadata, Request, Response, Streaming};
 
 /// Supported gRPC message compression encodings for channel negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -747,6 +747,11 @@ impl<T> ResponseStream<T> {
             if state.closed {
                 return Err(Status::failed_precondition(
                     "cannot push to a closed response stream",
+                ));
+            }
+            if state.items.len() >= MAX_STREAM_BUFFERED {
+                return Err(Status::resource_exhausted(
+                    "response stream buffer full — apply backpressure",
                 ));
             }
             state.items.push_back(item);
@@ -1527,6 +1532,29 @@ mod tests {
             Streaming::poll_next(Pin::new(&mut stream), cx)
         }));
         assert!(second.is_none());
+    }
+
+    #[test]
+    fn response_stream_push_rejects_when_buffer_full_and_recovers_after_drain() {
+        init_test("response_stream_push_rejects_when_buffer_full_and_recovers_after_drain");
+        let mut stream = ResponseStream::<u32>::open();
+        for i in 0..MAX_STREAM_BUFFERED as u32 {
+            stream.push(Ok(i)).expect("push before saturation succeeds");
+        }
+
+        let err = stream
+            .push(Ok(MAX_STREAM_BUFFERED as u32))
+            .expect_err("push past cap must fail");
+        assert_eq!(err.code(), crate::grpc::Code::ResourceExhausted);
+
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(matches!(first, Some(Ok(0))));
+
+        stream
+            .push(Ok(MAX_STREAM_BUFFERED as u32))
+            .expect("push should succeed after draining one slot");
     }
 
     #[test]

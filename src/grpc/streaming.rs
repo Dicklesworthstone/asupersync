@@ -235,6 +235,10 @@ pub trait Streaming: Send {
     ) -> Poll<Option<Result<Self::Message, Status>>>;
 }
 
+/// Maximum items buffered in a streaming request or response before
+/// backpressure is applied to the sender.
+pub(crate) const MAX_STREAM_BUFFERED: usize = 1024;
+
 /// A streaming request body.
 #[derive(Debug)]
 pub struct StreamingRequest<T> {
@@ -281,6 +285,12 @@ impl<T> StreamingRequest<T> {
         if self.closed {
             return Err(Status::failed_precondition(
                 "cannot push to a closed streaming request",
+            ));
+        }
+        // Cap buffer size to prevent unbounded growth from a flooding client.
+        if self.items.len() >= MAX_STREAM_BUFFERED {
+            return Err(Status::resource_exhausted(
+                "streaming request buffer full — apply backpressure",
             ));
         }
         self.items.push_back(item);
@@ -477,6 +487,12 @@ impl<T> ResponseStream<T> {
                 "cannot push to a closed response stream",
             ));
         }
+        // Cap buffer size to prevent unbounded growth from a flooding sender.
+        if self.items.len() >= MAX_STREAM_BUFFERED {
+            return Err(Status::resource_exhausted(
+                "response stream buffer full — apply backpressure",
+            ));
+        }
         self.items.push_back(item);
         if let Some(waiter) = self.waiter.take() {
             waiter.wake();
@@ -573,6 +589,7 @@ impl<T> Default for RequestSink<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grpc::Code;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -867,6 +884,74 @@ mod tests {
             Poll::Ready(None)
         ));
         crate::test_complete!("response_stream_push_and_close");
+    }
+
+    #[test]
+    fn streaming_request_push_rejects_when_buffer_full_and_recovers_after_drain() {
+        init_test("streaming_request_push_rejects_when_buffer_full_and_recovers_after_drain");
+        let mut stream = StreamingRequest::<u32>::open();
+        for i in 0..MAX_STREAM_BUFFERED as u32 {
+            stream.push(i).expect("push before saturation succeeds");
+        }
+
+        let err = stream
+            .push(MAX_STREAM_BUFFERED as u32)
+            .expect_err("push past cap must fail");
+        crate::assert_with_log!(
+            err.code() == Code::ResourceExhausted,
+            "resource exhausted when full",
+            Code::ResourceExhausted,
+            err.code()
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(0)))
+        ));
+
+        stream
+            .push(MAX_STREAM_BUFFERED as u32)
+            .expect("push should succeed after draining one slot");
+        crate::test_complete!(
+            "streaming_request_push_rejects_when_buffer_full_and_recovers_after_drain"
+        );
+    }
+
+    #[test]
+    fn response_stream_push_rejects_when_buffer_full_and_recovers_after_drain() {
+        init_test("response_stream_push_rejects_when_buffer_full_and_recovers_after_drain");
+        let mut stream = ResponseStream::<u32>::open();
+        for i in 0..MAX_STREAM_BUFFERED as u32 {
+            stream.push(Ok(i)).expect("push before saturation succeeds");
+        }
+
+        let err = stream
+            .push(Ok(MAX_STREAM_BUFFERED as u32))
+            .expect_err("push past cap must fail");
+        crate::assert_with_log!(
+            err.code() == Code::ResourceExhausted,
+            "resource exhausted when full",
+            Code::ResourceExhausted,
+            err.code()
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(0)))
+        ));
+
+        stream
+            .push(Ok(MAX_STREAM_BUFFERED as u32))
+            .expect("push should succeed after draining one slot");
+        crate::test_complete!(
+            "response_stream_push_rejects_when_buffer_full_and_recovers_after_drain"
+        );
     }
 
     #[test]
