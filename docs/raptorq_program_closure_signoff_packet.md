@@ -1,10 +1,12 @@
-# RaptorQ Program Closure Review and Sign-off Packet (H2 / bd-23cxf)
+# RaptorQ Program Closure Review and Sign-off Packet (H2 blocked-state refresh / bd-2finy)
 
-This document defines the H2 closure packet for:
+This document defines the current blocked-state refresh for the canonical H2
+closure packet:
 
-- Bead: `asupersync-2f71w`
-- Parent track: `asupersync-p8o9m`
-- External ref: `bd-23cxf`
+- Refresh bead: `asupersync-3bsp5.4`
+- Active validator owner: `asupersync-3bsp5`
+- External ref: `bd-2finy`
+- Historical H2 lineage: `asupersync-2f71w` under `asupersync-p8o9m`
 - Canonical artifact: `artifacts/raptorq_program_closure_signoff_packet_v1.json`
 
 ## Current State
@@ -17,9 +19,11 @@ This document defines the H2 closure packet for:
 This packet is intentionally execution-ready but not final until dependency
 closure conditions are satisfied.
 
-Track-G is the sole remaining blocker. Track-H is already closed, and the
-unresolved upstream convergence now sits in Track-E, especially `asupersync-36m6p`,
-which is consumed through the still-open Track-G governance path.
+Track-G is the sole remaining blocker. The historical Track-H/H2 packet lineage
+is already closed, but the live blocked-state refresh is now owned by
+`asupersync-3bsp5` with `asupersync-3bsp5.4` curating the packet until the
+remaining Track-E convergence, especially `asupersync-36m6p`, settles through
+the still-open Track-G governance path.
 
 ## Claim Boundaries
 
@@ -94,16 +98,18 @@ not closure-ready until `TRACK_G` is still the sole blocker and
 it names who curates the packet while H2 remains draft-blocked and who is
 responsible for the final go/no-go publication once Track-G closes.
 
-Blocked-state ownership is explicit and stable:
+Blocked-state ownership is explicit and stable while the packet stays
+`draft_blocked`:
 
-1. `track_signoff_owner` -> `asupersync-p8o9m`
-2. `packet_curator` -> `asupersync-2f71w`
+1. `track_signoff_owner` -> `asupersync-3bsp5`
+2. `packet_curator` -> `asupersync-3bsp5.4`
 
 `go_no_go_decision` is also a top-level packet record. In the current
 `draft_blocked` state it must mirror the packet-state verdict, carry the same
 blocking dependency set, and name both the decision owner bead and the packet
-curator bead so downstream Track-G/H consumers do not have to infer ownership
-from prose.
+curator bead so downstream Track-G/E3 consumers do not have to infer ownership
+from prose while still preserving the historical H2/Track-H lineage in the
+track matrix.
 
 ## Radical Lever Coverage Requirement
 
@@ -157,4 +163,5 @@ H2 may only transition to final sign-off after:
 1. All required beads in the artifact dependency matrix are closed.
 2. Unit + deterministic E2E evidence and replay commands are validated.
 3. Residual-risk ownership and follow-up assignments are explicit.
-4. Track-H sign-off (`asupersync-p8o9m`) records final go/no-go decision.
+4. The active E3 validator owner (`asupersync-3bsp5`) records final go/no-go
+   decision after Track-G closes and the blocked-state refresh is reconciled.

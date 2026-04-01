@@ -1,10 +1,10 @@
 {
   "artifact_id": "raptorq-program-closure-signoff-packet-v1",
   "schema_version": "raptorq-h2-program-closure-signoff-packet-v1",
-  "track_bead_id": "asupersync-2f71w",
-  "parent_track_bead_id": "asupersync-p8o9m",
-  "external_ref": "bd-23cxf",
-  "generated_at_utc": "2026-03-23T08:25:00Z",
+  "track_bead_id": "asupersync-3bsp5.4",
+  "parent_track_bead_id": "asupersync-3bsp5",
+  "external_ref": "bd-2finy",
+  "generated_at_utc": "2026-04-01T19:05:00Z",
   "packet_state": {
     "status": "draft_blocked",
     "go_no_go_decision": "no_go_pending_dependency_closure",
@@ -15,12 +15,12 @@
   },
   "go_no_go_decision": {
     "current_verdict": "no_go_pending_dependency_closure",
-    "decision_owner_bead_id": "asupersync-p8o9m",
-    "packet_curator_bead_id": "asupersync-2f71w",
+    "decision_owner_bead_id": "asupersync-3bsp5",
+    "packet_curator_bead_id": "asupersync-3bsp5.4",
     "blocking_dependency_ids": [
       "asupersync-2cyx5"
     ],
-    "finalization_rule": "Track-H sign-off owner records the final go/no-go decision only after all required_beads are closed and the H2 packet remains synchronized with the active closure evidence."
+    "finalization_rule": "The active E3 validator owner records the final go/no-go decision only after all required_beads are closed, Track-G is no longer blocked, and the H2 packet remains synchronized with the active Track-E closure evidence."
   },
   "command_policy": {
     "cargo_heavy_commands_must_use_rch": true,
@@ -142,7 +142,7 @@
       "track_bead_id": "asupersync-p8o9m",
       "required_status": "closed",
       "current_status": "closed",
-      "status_reason": "Track-H finalization/sign-off completed; Track-G is the sole remaining blocker before final sign-off publication.",
+      "status_reason": "Historical Track-H finalization/sign-off is closed; the live blocked-state refresh is carried by the active E3 validator lane while Track-G remains the sole remaining blocker before final sign-off publication.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "docs/raptorq_program_closure_signoff_packet.md",
@@ -454,14 +454,14 @@
   ],
   "follow_up_ownership": [
     {
-      "bead_id": "asupersync-p8o9m",
+      "bead_id": "asupersync-3bsp5",
       "role": "track_signoff_owner",
-      "handoff_expectation": "Finalize go/no-go decision and publish closure communication."
+      "handoff_expectation": "Record the final go/no-go decision once Track-G closes and the remaining Track-E evidence bundle is reconciled."
     },
     {
-      "bead_id": "asupersync-2f71w",
+      "bead_id": "asupersync-3bsp5.4",
       "role": "packet_curator",
-      "handoff_expectation": "Keep evidence pointers and replay commands synchronized until closure."
+      "handoff_expectation": "Keep the blocked-state metadata, evidence pointers, and replay commands synchronized while Track-E/E5 remains active."
     }
   ]
 }
