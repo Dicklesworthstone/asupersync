@@ -201,7 +201,7 @@ impl DynamicTable {
         // Only insert if it fits
         if entry_size <= self.max_size {
             self.entries.push_front(header);
-            self.size += entry_size;
+            self.size = self.size.saturating_add(entry_size);
         }
     }
 
