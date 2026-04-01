@@ -686,7 +686,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct ResponseStreamState<T> {
     items: VecDeque<Result<T, Status>>,
     closed: bool,
-    waiter: Option<Waker>,
+    waiters: Vec<Waker>,
 }
 
 impl<T> ResponseStreamState<T> {
@@ -694,7 +694,7 @@ impl<T> ResponseStreamState<T> {
         Self {
             items: VecDeque::new(),
             closed: true,
-            waiter: None,
+            waiters: Vec::new(),
         }
     }
 
@@ -702,7 +702,17 @@ impl<T> ResponseStreamState<T> {
         Self {
             items: VecDeque::new(),
             closed: false,
-            waiter: None,
+            waiters: Vec::new(),
+        }
+    }
+
+    fn take_waiters(&mut self) -> Vec<Waker> {
+        std::mem::take(&mut self.waiters)
+    }
+
+    fn register_waiter(&mut self, waker: &Waker) {
+        if !self.waiters.iter().any(|existing| existing.will_wake(waker)) {
+            self.waiters.push(waker.clone());
         }
     }
 }
@@ -742,7 +752,7 @@ impl<T> ResponseStream<T> {
     ///
     /// Returns an error if the stream has already been closed.
     pub fn push(&mut self, item: Result<T, Status>) -> Result<(), Status> {
-        let waiter = {
+        let waiters = {
             let mut state = lock_unpoisoned(&self.state);
             if state.closed {
                 return Err(Status::failed_precondition(
@@ -755,9 +765,9 @@ impl<T> ResponseStream<T> {
                 ));
             }
             state.items.push_back(item);
-            state.waiter.take()
+            state.take_waiters()
         };
-        if let Some(waker) = waiter {
+        for waker in waiters {
             waker.wake();
         }
         Ok(())
@@ -765,12 +775,12 @@ impl<T> ResponseStream<T> {
 
     /// Close the stream.
     pub fn close(&self) {
-        let waiter = {
+        let waiters = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
-            state.waiter.take()
+            state.take_waiters()
         };
-        if let Some(waker) = waiter {
+        for waker in waiters {
             waker.wake();
         }
     }
@@ -796,13 +806,7 @@ impl<T: Send> Streaming for ResponseStream<T> {
         if state.closed {
             return Poll::Ready(None);
         }
-        if !state
-            .waiter
-            .as_ref()
-            .is_some_and(|w| w.will_wake(cx.waker()))
-        {
-            state.waiter = Some(cx.waker().clone());
-        }
+        state.register_waiter(cx.waker());
         Poll::Pending
     }
 }
@@ -1109,6 +1113,33 @@ impl ClientInterceptor for MetadataInterceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct CountWaker(Arc<AtomicUsize>);
+
+    impl Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker(counter: &Arc<AtomicUsize>) -> Waker {
+        Waker::from(Arc::new(CountWaker(Arc::clone(counter))))
+    }
+
+    fn poll_stream<T: Send>(
+        stream: &mut ResponseStream<T>,
+        waker: &Waker,
+    ) -> Poll<Option<Result<T, Status>>> {
+        let mut cx = Context::from_waker(waker);
+        Streaming::poll_next(Pin::new(stream), &mut cx)
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1555,6 +1586,49 @@ mod tests {
         stream
             .push(Ok(MAX_STREAM_BUFFERED as u32))
             .expect("push should succeed after draining one slot");
+    }
+
+    #[test]
+    fn response_stream_clones_keep_all_pending_readers_wakeable() {
+        let mut stream = ResponseStream::<u32>::open();
+        let mut first_reader = stream.clone();
+        let mut second_reader = stream.clone();
+        let first_wakes = Arc::new(AtomicUsize::new(0));
+        let second_wakes = Arc::new(AtomicUsize::new(0));
+        let first_waker = counting_waker(&first_wakes);
+        let second_waker = counting_waker(&second_wakes);
+
+        assert!(poll_stream(&mut first_reader, &first_waker).is_pending());
+        assert!(poll_stream(&mut second_reader, &second_waker).is_pending());
+
+        stream.push(Ok(7)).expect("push should wake pending readers");
+        assert_eq!(
+            first_wakes.load(Ordering::SeqCst),
+            1,
+            "first cloned reader lost its wakeup",
+        );
+        assert_eq!(
+            second_wakes.load(Ordering::SeqCst),
+            1,
+            "second cloned reader should also be notified",
+        );
+
+        assert!(matches!(
+            poll_stream(&mut first_reader, &first_waker),
+            Poll::Ready(Some(Ok(7)))
+        ));
+        assert!(poll_stream(&mut second_reader, &second_waker).is_pending());
+
+        stream.close();
+        assert_eq!(
+            second_wakes.load(Ordering::SeqCst),
+            2,
+            "close should wake the still-pending cloned reader",
+        );
+        assert!(matches!(
+            poll_stream(&mut second_reader, &second_waker),
+            Poll::Ready(None)
+        ));
     }
 
     #[test]
