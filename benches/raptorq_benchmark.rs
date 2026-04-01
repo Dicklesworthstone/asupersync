@@ -14,8 +14,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    DualKernelDecisionDetail, Gf256, Gf256ProfileFallbackReason, Gf256ProfilePackId,
-    Gf256ProfilePackManifestSnapshot, dual_addmul_kernel_decision_detail,
+    DualKernelDecisionDetail, DualKernelModeFallbackReason, Gf256, Gf256ProfileFallbackReason,
+    Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot, dual_addmul_kernel_decision_detail,
     dual_mul_kernel_decision_detail, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice,
     gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
 };
@@ -25,8 +25,8 @@ use asupersync::raptorq::systematic::SystematicEncoder;
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
 const TRACK_E_REPRO_CMD: &str =
     "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
-const TRACK_E_POLICY_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-v5";
-const TRACK_E_POLICY_PROBE_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-probe-v5";
+const TRACK_E_POLICY_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-v6";
+const TRACK_E_POLICY_PROBE_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-probe-v6";
 const TRACK_E_POLICY_PROBE_REPRO_CMD: &str =
     "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy";
 const TRACK_E_CRITERION_SAMPLE_SIZE: usize = 10;
@@ -116,6 +116,10 @@ fn track_e_policy_payload(ctx: TrackEPolicyPayloadContext<'_>) -> serde_json::Va
         "profile_fallback_reason": policy
             .fallback_reason
             .map_or("none", Gf256ProfileFallbackReason::as_str),
+        "mode_fallback_reason": policy.mode_fallback_reason.map_or(
+            "none",
+            DualKernelModeFallbackReason::as_str,
+        ),
         "rejected_profile_packs": csv_profile_pack_ids(policy.rejected_candidates),
         "profile_catalog_count": manifest.profile_pack_catalog.len(),
         "tuning_candidate_catalog_count": manifest.tuning_candidate_catalog.len(),
@@ -145,6 +149,7 @@ fn track_e_policy_payload(ctx: TrackEPolicyPayloadContext<'_>) -> serde_json::Va
         "selected_targeted_addmul_average_delta_pct":
             active_profile.selected_targeted_addmul_average_delta_pct,
         "mode": format!("{:?}", policy.mode),
+        "dual_policy_env_requested": policy.override_mask.dual_policy_env_requested(),
         "profile_pack_env_requested": policy.override_mask.profile_pack_env_requested(),
         "mul_min_total_env_override": policy.override_mask.mul_min_total_env_override(),
         "mul_max_total_env_override": policy.override_mask.mul_max_total_env_override(),

@@ -593,6 +593,7 @@ impl<M: ConnectionManager> fmt::Debug for DbPool<M> {
             .field("total", &inner.total)
             .field("max_size", &self.config.max_size)
             .field("closed", &inner.closed)
+            .field("stats", &self.stats)
             .finish()
     }
 }
@@ -610,7 +611,7 @@ pub struct PooledConnection<'a, M: ConnectionManager> {
     created_at: Instant,
 }
 
-impl<'a, M: ConnectionManager> PooledConnection<'a, M> {
+impl<M: ConnectionManager> PooledConnection<'_, M> {
     /// Access the underlying connection.
     #[must_use]
     pub fn get(&self) -> &M::Connection {
@@ -1076,6 +1077,7 @@ impl<M: AsyncConnectionManager> fmt::Debug for AsyncDbPool<M> {
             .field("total", &inner.total)
             .field("max_size", &self.config.max_size)
             .field("closed", &inner.closed)
+            .field("stats", &self.stats)
             .finish()
     }
 }
