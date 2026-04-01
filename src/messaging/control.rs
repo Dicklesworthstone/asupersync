@@ -1649,37 +1649,82 @@ impl ControlAdvisory {
     /// Serialize the advisory payload to JSON bytes for publication.
     #[must_use]
     pub fn to_json_payload(&self) -> Vec<u8> {
-        // Build a structured payload with all provenance fields.
+        // Keep the payload deterministic, but preserve typed values and
+        // variant-specific details instead of flattening everything into
+        // string fields.
         let mut payload = BTreeMap::new();
-        payload.insert("family", self.family.name().to_owned());
-        payload.insert("subject", self.subject.as_str().to_owned());
-        payload.insert("trace_id", format!("{}", self.trace_id));
-        payload.insert("decision_id", format!("{}", self.decision_id));
-        payload.insert("ts_unix_ms", self.ts_unix_ms.to_string());
+        payload.insert(
+            "decision_id",
+            serde_json::Value::String(format!("{}", self.decision_id)),
+        );
+        payload.insert(
+            "family",
+            serde_json::Value::String(self.family.name().to_owned()),
+        );
         payload.insert(
             "has_decision_provenance",
-            self.has_decision_provenance().to_string(),
+            serde_json::Value::Bool(self.has_decision_provenance()),
         );
-        payload.insert("type", self.advisory_type.kind().to_owned());
+        payload.insert(
+            "subject",
+            serde_json::Value::String(self.subject.as_str().to_owned()),
+        );
+        payload.insert(
+            "trace_id",
+            serde_json::Value::String(format!("{}", self.trace_id)),
+        );
+        payload.insert("ts_unix_ms", serde_json::Value::from(self.ts_unix_ms));
+        payload.insert(
+            "type",
+            serde_json::Value::String(self.advisory_type.kind().to_owned()),
+        );
         if let Some(evidence_id) = self.evidence_id() {
-            payload.insert("evidence_id", evidence_id);
+            payload.insert("evidence_id", serde_json::Value::String(evidence_id));
         }
 
         match &self.advisory_type {
-            ControlAdvisoryType::CapabilityGraphChange { description, .. } => {
-                payload.insert("description", description.clone());
+            ControlAdvisoryType::CapabilityGraphChange {
+                affected_subjects,
+                description,
+            } => {
+                payload.insert(
+                    "affected_subjects",
+                    serde_json::Value::Array(
+                        affected_subjects
+                            .iter()
+                            .map(|pattern| serde_json::Value::String(pattern.as_str().to_owned()))
+                            .collect(),
+                    ),
+                );
+                payload.insert(
+                    "description",
+                    serde_json::Value::String(description.clone()),
+                );
             }
-            ControlAdvisoryType::ObligationTransfer { action, .. } => {
-                payload.insert("action", action.to_string());
+            ControlAdvisoryType::ObligationTransfer { action, subject } => {
+                payload.insert("action", serde_json::Value::String(action.to_string()));
+                payload.insert(
+                    "obligation_subject",
+                    serde_json::Value::String(subject.as_str().to_owned()),
+                );
             }
             ControlAdvisoryType::PolicyDecision {
                 policy_name,
                 action_chosen,
                 justification,
             } => {
-                payload.insert("policy_name", policy_name.clone());
-                payload.insert("action_chosen", action_chosen.clone());
-                payload.insert("justification", justification.clone());
+                payload.insert(
+                    "policy_name",
+                    serde_json::Value::String(policy_name.clone()),
+                );
+                payload.insert(
+                    "action_chosen",
+                    serde_json::Value::String(action_chosen.clone()),
+                );
+                payload.insert(
+                    "justification",
+                    serde_json::Value::String(justification.clone()),
+                );
             }
             ControlAdvisoryType::EvidenceRecord {
                 component,
@@ -1687,12 +1732,12 @@ impl ControlAdvisory {
                 summary,
                 ..
             } => {
-                payload.insert("component", component.clone());
-                payload.insert("action", action.clone());
-                payload.insert("summary", summary.clone());
+                payload.insert("component", serde_json::Value::String(component.clone()));
+                payload.insert("action", serde_json::Value::String(action.clone()));
+                payload.insert("summary", serde_json::Value::String(summary.clone()));
             }
             ControlAdvisoryType::BreakGlassActivation { reason } => {
-                payload.insert("reason", reason.clone());
+                payload.insert("reason", serde_json::Value::String(reason.clone()));
             }
         }
 
@@ -3352,12 +3397,35 @@ mod tests {
 
         let payload = advisory.to_json_payload();
         assert!(!payload.is_empty());
-        let parsed: BTreeMap<String, String> =
-            serde_json::from_slice(&payload).expect("valid JSON");
-        assert_eq!(parsed.get("type").unwrap(), "obligation_transfer");
-        assert_eq!(parsed.get("action").unwrap(), "aborted");
-        assert_eq!(parsed.get("family").unwrap(), "CONSUMER");
-        assert_eq!(parsed.get("has_decision_provenance").unwrap(), "false");
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("valid JSON");
+        assert_eq!(
+            parsed.get("type").and_then(serde_json::Value::as_str),
+            Some("obligation_transfer")
+        );
+        assert_eq!(
+            parsed.get("action").and_then(serde_json::Value::as_str),
+            Some("aborted")
+        );
+        assert_eq!(
+            parsed.get("family").and_then(serde_json::Value::as_str),
+            Some("CONSUMER")
+        );
+        assert_eq!(
+            parsed
+                .get("obligation_subject")
+                .and_then(serde_json::Value::as_str),
+            Some("$SYS.FABRIC.CONSUMER.lease.expired")
+        );
+        assert_eq!(
+            parsed
+                .get("has_decision_provenance")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            parsed.get("ts_unix_ms").and_then(serde_json::Value::as_u64),
+            Some(1_700_000_000_000)
+        );
     }
 
     #[test]
@@ -3384,12 +3452,29 @@ mod tests {
         );
 
         let payload = advisory.to_json_payload();
-        let parsed: BTreeMap<String, String> =
-            serde_json::from_slice(&payload).expect("valid JSON");
-        assert_eq!(parsed.get("type").unwrap(), "policy_decision");
-        assert_eq!(parsed.get("policy_name").unwrap(), "load_shed");
-        assert_eq!(parsed.get("action_chosen").unwrap(), "reject_new");
-        assert_eq!(parsed.get("has_decision_provenance").unwrap(), "true");
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("valid JSON");
+        assert_eq!(
+            parsed.get("type").and_then(serde_json::Value::as_str),
+            Some("policy_decision")
+        );
+        assert_eq!(
+            parsed
+                .get("policy_name")
+                .and_then(serde_json::Value::as_str),
+            Some("load_shed")
+        );
+        assert_eq!(
+            parsed
+                .get("action_chosen")
+                .and_then(serde_json::Value::as_str),
+            Some("reject_new")
+        );
+        assert_eq!(
+            parsed
+                .get("has_decision_provenance")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
     }
 
     #[test]
@@ -3412,20 +3497,29 @@ mod tests {
         );
 
         let payload = advisory.to_json_payload();
-        let parsed: BTreeMap<String, String> =
-            serde_json::from_slice(&payload).expect("valid JSON");
-        assert_eq!(parsed.get("type").unwrap(), "evidence_record");
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("valid JSON");
+        assert_eq!(
+            parsed.get("type").and_then(serde_json::Value::as_str),
+            Some("evidence_record")
+        );
         assert!(
             parsed
                 .get("evidence_id")
-                .unwrap()
+                .and_then(serde_json::Value::as_str)
+                .expect("string evidence_id")
                 .starts_with("control:drain:")
         );
-        assert_eq!(parsed.get("component").unwrap(), "drain_policy");
-        assert_eq!(parsed.get("action").unwrap(), "failover");
         assert_eq!(
-            parsed.get("summary").unwrap(),
-            "bounded drain failover evidence"
+            parsed.get("component").and_then(serde_json::Value::as_str),
+            Some("drain_policy")
+        );
+        assert_eq!(
+            parsed.get("action").and_then(serde_json::Value::as_str),
+            Some("failover")
+        );
+        assert_eq!(
+            parsed.get("summary").and_then(serde_json::Value::as_str),
+            Some("bounded drain failover evidence")
         );
     }
 
@@ -3442,10 +3536,59 @@ mod tests {
         );
 
         let payload = advisory.to_json_payload();
-        let parsed: BTreeMap<String, String> =
-            serde_json::from_slice(&payload).expect("valid JSON");
-        assert_eq!(parsed.get("type").unwrap(), "break_glass_activation");
-        assert_eq!(parsed.get("reason").unwrap(), "network partition detected");
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("valid JSON");
+        assert_eq!(
+            parsed.get("type").and_then(serde_json::Value::as_str),
+            Some("break_glass_activation")
+        );
+        assert_eq!(
+            parsed.get("reason").and_then(serde_json::Value::as_str),
+            Some("network partition detected")
+        );
+    }
+
+    #[test]
+    fn capability_graph_change_payload_preserves_affected_subjects() {
+        let advisory = ControlAdvisory::notification(
+            ControlAdvisoryType::CapabilityGraphChange {
+                affected_subjects: vec![
+                    SubjectPattern::new("tenant.acme.service.orders.>"),
+                    SubjectPattern::new("tenant.acme.service.inventory.lookup"),
+                ],
+                description: "added bounded import edge".to_owned(),
+            },
+            SystemSubjectFamily::Route,
+            Subject::new("$SYS.FABRIC.ROUTE.capability_change"),
+            TraceId::from_raw(401),
+            1_700_000_000_100,
+        );
+
+        let payload = advisory.to_json_payload();
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("valid JSON");
+        let affected_subjects = parsed
+            .get("affected_subjects")
+            .and_then(serde_json::Value::as_array)
+            .expect("affected_subjects array");
+
+        assert_eq!(
+            parsed.get("type").and_then(serde_json::Value::as_str),
+            Some("capability_graph_change")
+        );
+        assert_eq!(
+            parsed
+                .get("description")
+                .and_then(serde_json::Value::as_str),
+            Some("added bounded import edge")
+        );
+        assert_eq!(affected_subjects.len(), 2);
+        assert_eq!(
+            affected_subjects[0].as_str(),
+            Some("tenant.acme.service.orders.>")
+        );
+        assert_eq!(
+            affected_subjects[1].as_str(),
+            Some("tenant.acme.service.inventory.lookup")
+        );
     }
 
     #[test]
@@ -3754,12 +3897,12 @@ mod tests {
                 1_700_000_000_000,
             );
             let payload = advisory.to_json_payload();
-            let parsed: Result<BTreeMap<String, String>, _> = serde_json::from_slice(&payload);
+            let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&payload);
             assert!(parsed.is_ok(), "advisory payload must be valid JSON");
             let map = parsed.unwrap();
-            assert!(map.contains_key("type"), "payload must contain 'type' key");
+            assert!(map.get("type").is_some(), "payload must contain 'type' key");
             assert!(
-                map.contains_key("family"),
+                map.get("family").is_some(),
                 "payload must contain 'family' key"
             );
         }

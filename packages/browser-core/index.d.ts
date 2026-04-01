@@ -52,6 +52,12 @@ export interface HandleRef {
   generation: number;
 }
 
+export type RuntimeHandleRef = HandleRef & { kind: "runtime" };
+export type RegionHandleRef = HandleRef & { kind: "region" };
+export type TaskHandleRef = HandleRef & { kind: "task" };
+export type CancellationTokenHandleRef = HandleRef & { kind: "cancel_token" };
+export type FetchHandleRef = HandleRef & { kind: "fetch_request" };
+
 export interface AbiFailure {
   code: ErrorCode;
   recoverability: Recoverability;
@@ -69,12 +75,19 @@ export interface AbiCancellation {
 }
 
 export type HandleLike =
-  | HandleRef
-  | RuntimeHandle
-  | RegionHandle
-  | TaskHandle
+  | RuntimeHandleLike
+  | RegionHandleLike
+  | TaskHandleLike
+  | CancellationTokenLike
+  | FetchHandleLike;
+
+export type RuntimeHandleLike = RuntimeHandle | RuntimeHandleRef;
+export type RegionHandleLike = RegionHandle | RegionHandleRef;
+export type TaskHandleLike = TaskHandle | TaskHandleRef;
+export type CancellationTokenLike =
   | CancellationToken
-  | FetchHandle;
+  | CancellationTokenHandleRef;
+export type FetchHandleLike = FetchHandle | FetchHandleRef;
 
 export type WasmValue =
   | undefined
@@ -91,77 +104,77 @@ export type Outcome<T = WasmValue, E = AbiFailure> =
   | { outcome: "panicked"; message: string };
 
 export interface ScopeEnterRequest {
-  parent: RuntimeHandle | RegionHandle | HandleRef;
+  parent: RuntimeHandleLike | RegionHandleLike;
   label?: string;
 }
 
 export interface TaskSpawnRequest {
-  scope: RegionHandle | HandleRef;
+  scope: RegionHandleLike;
   label?: string;
   cancel_kind?: string;
 }
 
 export interface TaskCancelRequest {
-  task: TaskHandle | HandleRef;
+  task: TaskHandleLike;
   kind: string;
   message?: string;
 }
 
 export interface FetchRequest {
-  scope: RegionHandle | HandleRef;
+  scope: RegionHandleLike;
   url: string;
   method: string;
   body?: Uint8Array | ArrayBuffer | ArrayBufferView | number[];
 }
 
 export interface WebSocketOpenRequest {
-  scope: RegionHandle | HandleRef;
+  scope: RegionHandleLike;
   url: string;
   protocols?: string[];
 }
 
 export interface WebSocketSendRequest {
-  socket: TaskHandle | HandleRef;
+  socket: TaskHandleLike;
   value: WasmValue;
 }
 
 export interface WebSocketRecvRequest {
-  socket: TaskHandle | HandleRef;
+  socket: TaskHandleLike;
 }
 
 export interface WebSocketCloseRequest {
-  socket: TaskHandle | HandleRef;
+  socket: TaskHandleLike;
   reason?: string;
 }
 
 export interface WebSocketCancelRequest {
-  socket: TaskHandle | HandleRef;
+  socket: TaskHandleLike;
   kind: string;
   message?: string;
 }
 
 export interface WebTransportOpenRequest {
-  scope: RegionHandle | HandleRef;
+  scope: RegionHandleLike;
   url: string;
   options?: Record<string, unknown>;
 }
 
 export interface WebTransportSendRequest {
-  session: TaskHandle | HandleRef;
+  session: TaskHandleLike;
   value: string | Uint8Array | ArrayBuffer | ArrayBufferView | number[];
 }
 
 export interface WebTransportRecvRequest {
-  session: TaskHandle | HandleRef;
+  session: TaskHandleLike;
 }
 
 export interface WebTransportCloseRequest {
-  session: TaskHandle | HandleRef;
+  session: TaskHandleLike;
   reason?: string;
 }
 
 export interface WebTransportCancelRequest {
-  session: TaskHandle | HandleRef;
+  session: TaskHandleLike;
   kind: string;
   message?: string;
 }
@@ -175,13 +188,13 @@ export declare class BaseHandle {
 }
 
 export declare class RuntimeHandle extends BaseHandle {
-  constructor(rawHandle: HandleRef);
+  constructor(rawHandle: RuntimeHandleRef);
   close(consumerVersion?: AbiVersion | null): Outcome<void>;
   enterScope(label?: string, consumerVersion?: AbiVersion | null): Outcome<RegionHandle>;
 }
 
 export declare class RegionHandle extends BaseHandle {
-  constructor(rawHandle: HandleRef);
+  constructor(rawHandle: RegionHandleRef);
   close(consumerVersion?: AbiVersion | null): Outcome<void>;
   enterScope(label?: string, consumerVersion?: AbiVersion | null): Outcome<RegionHandle>;
   spawnTask(
@@ -205,7 +218,7 @@ export declare class RegionHandle extends BaseHandle {
 }
 
 export declare class TaskHandle extends BaseHandle {
-  constructor(rawHandle: HandleRef);
+  constructor(rawHandle: TaskHandleRef);
   join(outcome: Outcome, consumerVersion?: AbiVersion | null): Outcome<WasmValue>;
   cancel(
     kind: string,
@@ -215,11 +228,11 @@ export declare class TaskHandle extends BaseHandle {
 }
 
 export declare class CancellationToken extends BaseHandle {
-  constructor(rawHandle: HandleRef);
+  constructor(rawHandle: CancellationTokenHandleRef);
 }
 
 export declare class FetchHandle extends BaseHandle {
-  constructor(rawHandle: HandleRef);
+  constructor(rawHandle: FetchHandleRef);
 }
 
 export declare const BUDGET_BOUNDS: Readonly<{
@@ -249,7 +262,7 @@ export declare function runtime_create(
   consumerVersion?: AbiVersion | null,
 ): Outcome<RuntimeHandle>;
 export declare function runtime_close(
-  runtimeHandle: RuntimeHandle | HandleRef,
+  runtimeHandle: RuntimeHandleLike,
   consumerVersion?: AbiVersion | null,
 ): Outcome<void>;
 export declare function scope_enter(
@@ -257,7 +270,7 @@ export declare function scope_enter(
   consumerVersion?: AbiVersion | null,
 ): Outcome<RegionHandle>;
 export declare function scope_close(
-  regionHandle: RegionHandle | HandleRef,
+  regionHandle: RegionHandleLike,
   consumerVersion?: AbiVersion | null,
 ): Outcome<void>;
 export declare function task_spawn(
@@ -265,7 +278,7 @@ export declare function task_spawn(
   consumerVersion?: AbiVersion | null,
 ): Outcome<TaskHandle>;
 export declare function task_join(
-  taskHandle: TaskHandle | HandleRef,
+  taskHandle: TaskHandleLike,
   outcome: Outcome,
   consumerVersion?: AbiVersion | null,
 ): Outcome<WasmValue>;

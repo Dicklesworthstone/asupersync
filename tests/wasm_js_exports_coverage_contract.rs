@@ -861,6 +861,37 @@ fn browser_core_types_declare_webtransport_requests_and_exports() {
 }
 
 #[test]
+fn browser_core_types_pin_truthful_handle_kind_aliases_for_request_surfaces() {
+    let content = read_source("packages/browser-core/index.d.ts");
+    for marker in [
+        "export type RuntimeHandleRef = HandleRef & { kind: \"runtime\" };",
+        "export type RegionHandleRef = HandleRef & { kind: \"region\" };",
+        "export type TaskHandleRef = HandleRef & { kind: \"task\" };",
+        "export type CancellationTokenHandleRef = HandleRef & { kind: \"cancel_token\" };",
+        "export type FetchHandleRef = HandleRef & { kind: \"fetch_request\" };",
+        "export type RuntimeHandleLike = RuntimeHandle | RuntimeHandleRef;",
+        "export type RegionHandleLike = RegionHandle | RegionHandleRef;",
+        "export type TaskHandleLike = TaskHandle | TaskHandleRef;",
+        "parent: RuntimeHandleLike | RegionHandleLike;",
+        "scope: RegionHandleLike;",
+        "task: TaskHandleLike;",
+        "socket: TaskHandleLike;",
+        "session: TaskHandleLike;",
+        "constructor(rawHandle: RuntimeHandleRef);",
+        "constructor(rawHandle: RegionHandleRef);",
+        "constructor(rawHandle: TaskHandleRef);",
+        "runtimeHandle: RuntimeHandleLike,",
+        "regionHandle: RegionHandleLike,",
+        "taskHandle: TaskHandleLike,",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser-core types must preserve truthful handle-kind marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn react_src_index_exports_from_browser() {
     let path = repo_root().join("packages/react/src/index.ts");
     let content =

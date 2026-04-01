@@ -63,6 +63,51 @@ struct PacketPlaneOutcome {
     steps: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum ValidationStatus {
+    Valid,
+    Invalid,
+}
+
+impl ValidationStatus {
+    const fn is_valid(self) -> bool {
+        matches!(self, Self::Valid)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum PresenceStatus {
+    Present,
+    Missing,
+}
+
+impl PresenceStatus {
+    const fn is_present(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum LedgerStatus {
+    Clean,
+    Leaked,
+}
+
+impl LedgerStatus {
+    const fn is_clean(self) -> bool {
+        matches!(self, Self::Clean)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CertifiedRequestChecks {
+    request_certificate: ValidationStatus,
+    reply_certificate: ValidationStatus,
+    service_obligation: PresenceStatus,
+    delivery_receipt: PresenceStatus,
+    ledger: LedgerStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CertifiedRequestOutcome {
     reply_subject: String,
@@ -70,11 +115,7 @@ struct CertifiedRequestOutcome {
     reply_ack_kind: AckKind,
     reply_delivery_class: DeliveryClass,
     published_delivery_class: DeliveryClass,
-    request_certificate_valid: bool,
-    reply_certificate_valid: bool,
-    service_obligation_present: bool,
-    delivery_receipt_present: bool,
-    ledger_clean: bool,
+    checks: CertifiedRequestChecks,
     log: Vec<FabricLogEntry>,
     steps: u64,
 }
@@ -359,6 +400,7 @@ fn assert_runtime_clean(runtime: &mut LabRuntime, label: &str) {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_packet_plane(seed: u64) -> PacketPlaneOutcome {
     #[derive(Debug, Clone, Default)]
     struct PacketPlaneState {
@@ -377,7 +419,6 @@ fn run_packet_plane(seed: u64) -> PacketPlaneOutcome {
     let endpoint = unique_endpoint("fabric-e2e-packet", seed);
 
     {
-        let endpoint = endpoint.clone();
         let log = Arc::clone(&log);
         let seq = Arc::clone(&seq);
         let state = Arc::clone(&state);
@@ -481,6 +522,7 @@ fn run_packet_plane(seed: u64) -> PacketPlaneOutcome {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_certified_request(seed: u64) -> CertifiedRequestOutcome {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -490,7 +532,6 @@ fn run_certified_request(seed: u64) -> CertifiedRequestOutcome {
     let endpoint = unique_endpoint("fabric-e2e-certified", seed);
 
     {
-        let endpoint = endpoint.clone();
         let log = Arc::clone(&log);
         let seq = Arc::clone(&seq);
         let summary = Arc::clone(&summary);
@@ -544,14 +585,37 @@ fn run_certified_request(seed: u64) -> CertifiedRequestOutcome {
                     reply_ack_kind: certified.reply.ack_kind,
                     reply_delivery_class: certified.reply.delivery_class,
                     published_delivery_class: published.delivery_class,
-                    request_certificate_valid: certified.request_certificate.validate().is_ok(),
-                    reply_certificate_valid: certified.reply_certificate.validate().is_ok(),
-                    service_obligation_present: certified
-                        .reply_certificate
-                        .service_obligation_id
-                        .is_some(),
-                    delivery_receipt_present: certified.delivery_receipt.is_some(),
-                    ledger_clean: ledger.pending_count() == 0 && ledger.check_leaks().is_clean(),
+                    checks: CertifiedRequestChecks {
+                        request_certificate: if certified.request_certificate.validate().is_ok() {
+                            ValidationStatus::Valid
+                        } else {
+                            ValidationStatus::Invalid
+                        },
+                        reply_certificate: if certified.reply_certificate.validate().is_ok() {
+                            ValidationStatus::Valid
+                        } else {
+                            ValidationStatus::Invalid
+                        },
+                        service_obligation: if certified
+                            .reply_certificate
+                            .service_obligation_id
+                            .is_some()
+                        {
+                            PresenceStatus::Present
+                        } else {
+                            PresenceStatus::Missing
+                        },
+                        delivery_receipt: if certified.delivery_receipt.is_some() {
+                            PresenceStatus::Present
+                        } else {
+                            PresenceStatus::Missing
+                        },
+                        ledger: if ledger.pending_count() == 0 && ledger.check_leaks().is_clean() {
+                            LedgerStatus::Clean
+                        } else {
+                            LedgerStatus::Leaked
+                        },
+                    },
                     log: Vec::new(),
                     steps: 0,
                 });
@@ -583,7 +647,6 @@ fn run_stream_handle(seed: u64) -> StreamHandleOutcome {
     let endpoint = unique_endpoint("fabric-e2e-stream", seed);
 
     {
-        let endpoint = endpoint.clone();
         let log = Arc::clone(&log);
         let seq = Arc::clone(&seq);
         let summary = Arc::clone(&summary);
@@ -674,6 +737,7 @@ fn run_stream_handle(seed: u64) -> StreamHandleOutcome {
     summary
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_consumer_flow(seed: u64) -> ConsumerFlowOutcome {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -865,6 +929,7 @@ fn run_consumer_flow(seed: u64) -> ConsumerFlowOutcome {
     summary
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_mirror_source_drain(seed: u64) -> MirrorSourceDrainOutcome {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -991,9 +1056,13 @@ fn run_mirror_source_drain(seed: u64) -> MirrorSourceDrainOutcome {
                     "mirror and source should drain"
                 );
 
-                let mut stream = stream.lock().expect("stream lock");
-                let closed_after_drain = stream.close().is_ok();
-                let snapshot_state = stream.snapshot().expect("snapshot");
+                let (closed_after_drain, snapshot_state) = {
+                    let mut stream = stream.lock().expect("stream lock");
+                    let closed_after_drain = stream.close().is_ok();
+                    let snapshot_state = stream.snapshot().expect("snapshot");
+                    drop(stream);
+                    (closed_after_drain, snapshot_state)
+                };
                 push_log(
                     &log,
                     &seq,
@@ -1087,6 +1156,7 @@ fn run_mirror_source_drain(seed: u64) -> MirrorSourceDrainOutcome {
     summary
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_control_plane_advisory_flow(seed: u64) -> ControlPlaneAdvisoryOutcome {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -1286,6 +1356,7 @@ fn run_control_plane_advisory_flow(seed: u64) -> ControlPlaneAdvisoryOutcome {
     summary
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_brokerless_rebalance(seed: u64) -> BrokerlessRebalanceOutcome {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -1554,18 +1625,21 @@ fn certified_request_subtest(seed: u64) -> TestSummary {
     );
     harness.assert_true(
         "request certificate validates",
-        summary.request_certificate_valid,
+        summary.checks.request_certificate.is_valid(),
     );
     harness.assert_true(
         "reply certificate validates",
-        summary.reply_certificate_valid,
+        summary.checks.reply_certificate.is_valid(),
     );
     harness.assert_true(
         "service obligation id captured",
-        summary.service_obligation_present,
+        summary.checks.service_obligation.is_present(),
     );
-    harness.assert_true("delivery receipt present", summary.delivery_receipt_present);
-    harness.assert_true("ledger resolves cleanly", summary.ledger_clean);
+    harness.assert_true(
+        "delivery receipt present",
+        summary.checks.delivery_receipt.is_present(),
+    );
+    harness.assert_true("ledger resolves cleanly", summary.checks.ledger.is_clean());
     harness.collect_artifact(
         "certified_request_summary.json",
         &serde_json::to_string_pretty(&summary).expect("serialize certified summary"),
