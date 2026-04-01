@@ -2185,3 +2185,9 @@
 {"file":"src/net/dns/resolver.rs","lines":0,"batch":506,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: cap pre-allocation to 512 prevents malicious DoS"}
 {"file":"src/grpc/web.rs","lines":0,"batch":506,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: missing grpc-status defaults to INTERNAL not OK"}
 {"file":"src/runtime/waker.rs","lines":0,"batch":506,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: WakeSource::label() helper, unused var fix"}
+{"file":"src/gen_server.rs","lines":5778,"batch":494,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reply drop-bomb is intentional enforcement. Cast TOCTOU is inherent to actor model. All obligation paths verified correct."}
+{"file":"src/actor.rs","lines":2270,"batch":494,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Supervised restart backoff with active mailbox is by design. State/mailbox close ordering is correct."}
+{"file":"src/io/buf_reader.rs","lines":300,"batch":494,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"pos/cap invariant maintained by consume clamp. Fill only when empty."}
+{"file":"src/io/buf_writer.rs","lines":300,"batch":494,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Flush-before-write logic correct. Capacity boundary checks consistent."}
+{"file":"src/sync/pool.rs","lines":4255,"batch":494,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"No double-checkout, cancel cleanup via WaiterCleanup Drop, max_size enforced"}
+{"file":"src/sync/rwlock.rs","lines":1500,"batch":494,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Writer-preference fairness correct, read guards release on drop, no starvation"}
