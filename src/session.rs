@@ -224,6 +224,20 @@ pub fn channel<S: Session>() -> (Endpoint<S>, Endpoint<Dual<S>>) {
     (ep1, ep2)
 }
 
+fn map_send_error<T>(error: &crate::channel::mpsc::SendError<T>) -> SessionError {
+    match error {
+        crate::channel::mpsc::SendError::Disconnected(_) => SessionError::Disconnected,
+        crate::channel::mpsc::SendError::Cancelled(_) => SessionError::Cancelled,
+        crate::channel::mpsc::SendError::Full(_) => {
+            debug_assert!(
+                false,
+                "async session send unexpectedly returned SendError::Full"
+            );
+            SessionError::Disconnected
+        }
+    }
+}
+
 impl<T, Next> Endpoint<self::Send<T, Next>>
 where
     T: std::marker::Send + 'static,
@@ -238,7 +252,7 @@ where
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(value);
         tx.send(cx, boxed)
             .await
-            .map_err(|_| SessionError::Disconnected)?;
+            .map_err(|error| map_send_error(&error))?;
         Ok(Endpoint {
             _session: PhantomData,
             tx,
@@ -285,7 +299,7 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Left);
         tx.send(cx, boxed)
             .await
-            .map_err(|_| SessionError::Disconnected)?;
+            .map_err(|error| map_send_error(&error))?;
         Ok(Endpoint {
             _session: PhantomData,
             tx,
@@ -301,7 +315,7 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Right);
         tx.send(cx, boxed)
             .await
-            .map_err(|_| SessionError::Disconnected)?;
+            .map_err(|error| map_send_error(&error))?;
         Ok(Endpoint {
             _session: PhantomData,
             tx,
@@ -736,5 +750,47 @@ mod tests {
         // Clone
         let right2 = right;
         assert_eq!(right, right2);
+    }
+
+    #[test]
+    fn session_send_surfaces_cancellation() {
+        init_test("session_send_surfaces_cancellation");
+
+        let cx = crate::cx::Cx::for_testing();
+        cx.set_cancel_reason(crate::types::CancelReason::user("session send cancelled"));
+
+        let (client, _server) = channel::<Send<u64, End>>();
+        let result = futures_lite::future::block_on(client.send(&cx, 42));
+
+        assert!(
+            matches!(result, Err(SessionError::Cancelled)),
+            "cancelled send should surface SessionError::Cancelled"
+        );
+
+        crate::test_complete!("session_send_surfaces_cancellation");
+    }
+
+    #[test]
+    fn session_choice_surfaces_cancellation() {
+        init_test("session_choice_surfaces_cancellation");
+
+        let cx = crate::cx::Cx::for_testing();
+        cx.set_cancel_reason(crate::types::CancelReason::user("session choose cancelled"));
+
+        let (left_ep, _left_peer) = channel::<Choose<End, End>>();
+        let left_result = futures_lite::future::block_on(left_ep.choose_left(&cx));
+        assert!(
+            matches!(left_result, Err(SessionError::Cancelled)),
+            "cancelled choose_left should surface SessionError::Cancelled"
+        );
+
+        let (right_ep, _right_peer) = channel::<Choose<End, End>>();
+        let right_result = futures_lite::future::block_on(right_ep.choose_right(&cx));
+        assert!(
+            matches!(right_result, Err(SessionError::Cancelled)),
+            "cancelled choose_right should surface SessionError::Cancelled"
+        );
+
+        crate::test_complete!("session_choice_surfaces_cancellation");
     }
 }

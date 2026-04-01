@@ -2168,9 +2168,11 @@ impl MySqlTransaction<'_> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        self.finished = true;
         match self.conn.execute(cx, "COMMIT").await {
-            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Ok(_) => {
+                self.finished = true;
+                Outcome::Ok(())
+            }
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -2182,9 +2184,11 @@ impl MySqlTransaction<'_> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        self.finished = true;
         match self.conn.execute(cx, "ROLLBACK").await {
-            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Ok(_) => {
+                self.finished = true;
+                Outcome::Ok(())
+            }
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -2222,6 +2226,27 @@ impl Drop for MySqlTransaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Cx;
+    use crate::types::CancelKind;
+
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        futures_lite::future::block_on(future)
+    }
+
+    fn cancelled_cx() -> Cx {
+        let cx = Cx::for_testing();
+        cx.cancel_fast(CancelKind::User);
+        cx
+    }
+
+    fn assert_user_cancelled<T>(outcome: Outcome<T, MySqlError>) {
+        match outcome {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            Outcome::Err(err) => panic!("expected cancellation, got error: {err}"),
+            Outcome::Ok(_) => panic!("expected cancellation, got success"),
+            Outcome::Panicked(payload) => panic!("unexpected panic outcome: {payload:?}"),
+        }
+    }
 
     fn test_var_string_column(name: &str) -> MySqlColumn {
         MySqlColumn {
@@ -2236,6 +2261,28 @@ mod tests {
             column_type: column_type::MYSQL_TYPE_VAR_STRING,
             flags: 0,
             decimals: 0,
+        }
+    }
+
+    fn make_test_connection() -> MySqlConnection {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+        let _accepted = listener.accept().expect("accept");
+        let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
+        MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
         }
     }
 
@@ -2281,6 +2328,40 @@ mod tests {
 
         server.join().expect("join server");
         result
+    }
+
+    #[test]
+    fn cancelled_commit_marks_connection_for_rollback() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        let outcome = run(async {
+            let tx = MySqlTransaction {
+                conn: &mut conn,
+                finished: false,
+            };
+            tx.commit(&cx).await
+        });
+
+        assert_user_cancelled(outcome);
+        assert!(conn.inner.needs_rollback);
+    }
+
+    #[test]
+    fn cancelled_rollback_marks_connection_for_rollback() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        let outcome = run(async {
+            let tx = MySqlTransaction {
+                conn: &mut conn,
+                finished: false,
+            };
+            tx.rollback(&cx).await
+        });
+
+        assert_user_cancelled(outcome);
+        assert!(conn.inner.needs_rollback);
     }
 
     #[test]

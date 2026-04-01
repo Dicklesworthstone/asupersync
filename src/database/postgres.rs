@@ -3654,9 +3654,11 @@ impl PgTransaction<'_> {
         if self.finished {
             return Outcome::Err(PgError::TransactionFinished);
         }
-        self.finished = true;
         match self.conn.execute(cx, "COMMIT").await {
-            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Ok(_) => {
+                self.finished = true;
+                Outcome::Ok(())
+            }
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -3668,9 +3670,11 @@ impl PgTransaction<'_> {
         if self.finished {
             return Outcome::Err(PgError::TransactionFinished);
         }
-        self.finished = true;
         match self.conn.execute(cx, "ROLLBACK").await {
-            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Ok(_) => {
+                self.finished = true;
+                Outcome::Ok(())
+            }
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -3910,6 +3914,40 @@ mod tests {
             },
             peer_stream,
         )
+    }
+
+    #[test]
+    fn cancelled_commit_marks_connection_for_rollback() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        let outcome = run(async {
+            let tx = PgTransaction {
+                conn: &mut conn,
+                finished: false,
+            };
+            tx.commit(&cx).await
+        });
+
+        assert_user_cancelled(outcome);
+        assert!(conn.inner.needs_rollback);
+    }
+
+    #[test]
+    fn cancelled_rollback_marks_connection_for_rollback() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        let outcome = run(async {
+            let tx = PgTransaction {
+                conn: &mut conn,
+                finished: false,
+            };
+            tx.rollback(&cx).await
+        });
+
+        assert_user_cancelled(outcome);
+        assert!(conn.inner.needs_rollback);
     }
 
     #[test]

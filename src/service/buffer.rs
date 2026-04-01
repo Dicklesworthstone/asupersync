@@ -26,7 +26,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 /// Default buffer capacity.
 const DEFAULT_CAPACITY: usize = 16;
@@ -146,8 +146,15 @@ impl<S> Buffer<S> {
     }
 
     /// Close the buffer, rejecting new requests.
+    ///
+    /// Wakes all tasks currently parked in `poll_ready` so they observe the
+    /// closed state and return `BufferError::Closed`.
     pub fn close(&self) {
         *self.shared.closed.lock() = true;
+        let wakers: Vec<Waker> = self.shared.ready_wakers.lock().drain(..).collect();
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     /// Returns `true` if the buffer has been closed.
@@ -463,6 +470,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    struct TestWake(Arc<std::sync::atomic::AtomicBool>);
+
+    impl std::task::Wake for TestWake {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     // ================================================================
     // Test services
     // ================================================================
@@ -735,6 +750,33 @@ mod tests {
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
         crate::test_complete!("close_rejects_new_requests");
+    }
+
+    #[test]
+    fn close_wakes_parked_poll_ready_waiters() {
+        init_test("close_wakes_parked_poll_ready_waiters");
+        let mut svc = Buffer::new(EchoService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Fill the buffer to capacity
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let _future = svc.call(1);
+
+        // Park a waiter on a full buffer
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let woken_clone = Arc::clone(&woken);
+        let test_waker = Waker::from(Arc::new(TestWake(woken_clone)));
+        let mut test_cx = Context::from_waker(&test_waker);
+        assert!(matches!(svc.poll_ready(&mut test_cx), Poll::Pending));
+
+        // Close should wake the parked waiter
+        svc.close();
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Relaxed),
+            "close() must wake parked poll_ready waiters"
+        );
+        crate::test_complete!("close_wakes_parked_poll_ready_waiters");
     }
 
     #[test]
