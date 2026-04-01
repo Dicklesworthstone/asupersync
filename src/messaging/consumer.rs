@@ -4660,7 +4660,10 @@ mod tests {
         consumer
             .queue_pull_request(PullRequest::new(10, ConsumerDemandClass::CatchUp).expect("req"))
             .expect("queue catchup");
-        let catchup = match consumer.dispatch_next_pull(10, &capsule, None).expect("dispatch") {
+        let catchup = match consumer
+            .dispatch_next_pull(10, &capsule, None)
+            .expect("dispatch")
+        {
             PullDispatchOutcome::Scheduled(delivery) => *delivery,
             PullDispatchOutcome::Waiting(_) => panic!("catchup request should schedule"),
         };
@@ -4693,7 +4696,10 @@ mod tests {
         consumer
             .queue_pull_request(PullRequest::new(9, ConsumerDemandClass::CatchUp).expect("req"))
             .expect("queue catchup");
-        let catchup = match consumer.dispatch_next_pull(10, &capsule, None).expect("dispatch") {
+        let catchup = match consumer
+            .dispatch_next_pull(10, &capsule, None)
+            .expect("dispatch")
+        {
             PullDispatchOutcome::Scheduled(delivery) => *delivery,
             PullDispatchOutcome::Waiting(_) => panic!("catchup request should schedule"),
         };
@@ -4705,7 +4711,10 @@ mod tests {
         consumer
             .queue_pull_request(PullRequest::new(3, ConsumerDemandClass::Tail).expect("tail"))
             .expect("queue tail");
-        let tail = match consumer.dispatch_next_pull(10, &capsule, None).expect("dispatch tail") {
+        let tail = match consumer
+            .dispatch_next_pull(10, &capsule, None)
+            .expect("dispatch tail")
+        {
             PullDispatchOutcome::Scheduled(delivery) => *delivery,
             PullDispatchOutcome::Waiting(_) => panic!("tail should schedule newest unacked suffix"),
         };
