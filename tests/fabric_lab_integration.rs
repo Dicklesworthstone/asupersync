@@ -93,6 +93,7 @@ struct PacketPlaneScenarioSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 struct CertifiedRequestScenarioSummary {
     reply_subject: String,
     reply_payload_len: usize,
@@ -378,6 +379,7 @@ fn delegation_morphism() -> Morphism {
     morphism
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_capability_scenario(seed: u64) -> (CapabilityScenarioSummary, Vec<FabricLogEntry>, u64) {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -513,6 +515,7 @@ fn run_capability_scenario(seed: u64) -> (CapabilityScenarioSummary, Vec<FabricL
     (summary, log_entries, runtime.steps())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_compiler_scenario(seed: u64) -> (CompilerScenarioSummary, Vec<FabricLogEntry>, u64) {
     #[derive(Debug, Clone, Default)]
     struct CompilerState {
@@ -581,8 +584,11 @@ fn run_compiler_scenario(seed: u64) -> (CompilerScenarioSummary, Vec<FabricLogEn
                 {
                     let mut guard = state.lock().expect("state lock");
                     guard.export_fingerprint = Some(plan.certificate.fingerprint.clone());
-                    guard.export_capabilities = plan.attached_capabilities.clone();
-                    guard.export_reply_space = plan.selected_reply_space.clone();
+                    guard.export_capabilities
+                        .clone_from(&plan.attached_capabilities);
+                    guard
+                        .export_reply_space
+                        .clone_from(&plan.selected_reply_space);
                 }
                 push_log(
                     &log,
@@ -615,7 +621,9 @@ fn run_compiler_scenario(seed: u64) -> (CompilerScenarioSummary, Vec<FabricLogEn
                 {
                     let mut guard = state.lock().expect("state lock");
                     guard.import_fingerprint = Some(plan.certificate.fingerprint.clone());
-                    guard.import_reply_space = plan.selected_reply_space.clone();
+                    guard
+                        .import_reply_space
+                        .clone_from(&plan.selected_reply_space);
                 }
                 push_log(
                     &log,
@@ -787,6 +795,7 @@ fn run_rebalance_scenario(seed: u64, inputs: &[&str]) -> (Vec<RebalanceSnapshot>
     (snapshots, runtime.steps())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_packet_plane_scenario(seed: u64) -> (PacketPlaneScenarioSummary, Vec<FabricLogEntry>, u64) {
     #[derive(Debug, Clone, Default)]
     struct PacketPlaneState {
@@ -1037,6 +1046,7 @@ fn run_certified_request_scenario(
     (summary, log_entries, runtime.steps())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_sharded_routing_scenario(seed: u64) -> (ShardedRoutingSummary, Vec<FabricLogEntry>, u64) {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -1070,10 +1080,7 @@ fn run_sharded_routing_scenario(seed: u64) -> (ShardedRoutingSummary, Vec<Fabric
                     &seq,
                     "routing",
                     "subscribe",
-                    format!(
-                        "exact_shard={:?} wildcard_shard={:?}",
-                        exact_shard, wildcard_shard
-                    ),
+                    format!("exact_shard={exact_shard:?} wildcard_shard={wildcard_shard:?}"),
                 );
 
                 let mut first_four_queue_picks = Vec::new();

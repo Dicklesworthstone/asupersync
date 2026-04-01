@@ -40,7 +40,7 @@ fn arb_subject_string() -> impl Strategy<Value = String> {
 
 /// Generate a NodeId.
 fn arb_node_id() -> impl Strategy<Value = NodeId> {
-    "[a-z]{3,8}".prop_map(|s| NodeId::new(s))
+    "[a-z]{3,8}".prop_map(NodeId::new)
 }
 
 /// Generate a SubjectPattern string (may include wildcards).
@@ -333,7 +333,7 @@ proptest! {
         assert_crdt_laws(|seed| {
             let mut s = InterestSummary::default();
             for (i, p) in patterns.iter().enumerate() {
-                if (seed as usize + i) % 2 == 0 {
+                if (seed as usize + i).is_multiple_of(2) {
                     let replica = &replicas[i % replicas.len()];
                     s.subscribe(replica, SubjectPattern::new(p));
                 }
@@ -515,7 +515,7 @@ proptest! {
         };
 
         if transform.is_invertible() {
-            let mut tokens = vec![prefix_from.clone()];
+            let mut tokens = vec![prefix_from];
             tokens.extend(suffix);
             let forward = transform.apply_tokens(&tokens).unwrap();
             let inverse = transform.inverse().unwrap();
@@ -639,12 +639,12 @@ proptest! {
         };
 
         let compose = SubjectTransform::Compose {
-            steps: vec![step1.clone(), step2.clone()],
+            steps: vec![step1, step2],
         };
 
         if compose.is_invertible() {
             // Apply forward then inverse should be identity
-            let tokens = vec![prefix_a.clone()];
+            let tokens = vec![prefix_a];
             let forward = compose.apply_tokens(&tokens).unwrap();
             let inverse = compose.inverse().unwrap();
             let back = inverse.apply_tokens(&forward).unwrap();
@@ -869,10 +869,10 @@ proptest! {
         patterns in prop::collection::vec(arb_subject_string(), 1..=5),
     ) {
         let sl = Arc::new(Sublist::new());
-        let mut guards = Vec::new();
-        for p in &patterns {
-            guards.push(sl.subscribe(&SubjectPattern::new(p), None));
-        }
+        let _guards: Vec<_> = patterns
+            .iter()
+            .map(|p| sl.subscribe(&SubjectPattern::new(p), None))
+            .collect();
         prop_assert_eq!(sl.count(), patterns.len());
     }
 

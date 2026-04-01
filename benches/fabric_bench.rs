@@ -66,6 +66,11 @@ fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+fn total_symbols_with_repair_overhead(source_symbols: usize, repair_overhead: f64) -> usize {
+    (source_symbols as f64 * repair_overhead).ceil() as usize
+}
+
 fn fabric_capability_schema() -> CapabilityTokenSchema {
     CapabilityTokenSchema {
         name: "fabric.bench.publish".to_owned(),
@@ -208,7 +213,7 @@ fn bench_literal_lookup(c: &mut Criterion) {
     // Subscribe 100 literal patterns
     let guards: Vec<_> = (0..100)
         .map(|i| {
-            let pattern = SubjectPattern::new(&format!("orders.region{i}.created"));
+            let pattern = SubjectPattern::new(format!("orders.region{i}.created"));
             sl.subscribe(&pattern, None)
         })
         .collect();
@@ -608,7 +613,7 @@ fn bench_scaled_lookup(c: &mut Criterion) {
         let sl = Arc::new(Sublist::new());
         let guards: Vec<_> = (0..sub_count)
             .map(|i| {
-                let pattern = SubjectPattern::new(&format!("svc{i}.events.created"));
+                let pattern = SubjectPattern::new(format!("svc{i}.events.created"));
                 sl.subscribe(&pattern, None)
             })
             .collect();
@@ -816,7 +821,7 @@ fn bench_raptorq_data_capsule(c: &mut Criterion) {
         let symbol_size = usize::from(config.encoding.symbol_size);
         let source_symbols = size.div_ceil(symbol_size);
         let total_with_overhead =
-            (source_symbols as f64 * config.encoding.repair_overhead).ceil() as usize;
+            total_symbols_with_repair_overhead(source_symbols, config.encoding.repair_overhead);
         let transport_capacity = total_with_overhead + total_with_overhead / 4;
 
         group.throughput(Throughput::Bytes(size as u64));

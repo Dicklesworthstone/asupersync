@@ -86,7 +86,7 @@ impl QuicEndpoint {
             (Some(c), Some(k)) if config.is_valid_for_server() => (c, k),
             _ => {
                 return Err(QuicError::Config(
-                    "server requires cert_chain/private_key and client_auth_roots when client_auth is enabled".into(),
+                    "server requires cert_chain and private_key; client_auth_roots must also be provided if client_auth is enabled".into(),
                 ));
             }
         };
