@@ -2098,3 +2098,5 @@
 {"file":"src/database/pool.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: narrow mutex scope in return/discard connection"}
 {"file":"src/messaging/fabric.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: decision_records bounded to 10k entries"}
 {"file":"src/sync/mutex.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: mutex_deadlock_test rewrite without tokio dependency"}
+{"file":"src/security/authenticated.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: set_verified(bool) replaces mark_verified(), critical stale-flag fix"}
+{"file":"src/security/context.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: verify updates flag truthfully in all modes, tests cover strict+permissive clearing"}
