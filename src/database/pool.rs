@@ -999,7 +999,16 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             if self.config.validate_on_checkout {
                 {
                     let mut inner = self.inner.lock();
-                    inner.idle.push_front(idle);
+                    if inner.closed {
+                        // Pool was closed while we held the connection outside
+                        // the lock. Disconnect instead of orphaning it.
+                        inner.total = inner.total.saturating_sub(1);
+                        drop(inner);
+                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                        self.manager.disconnect(idle.conn);
+                    } else {
+                        inner.idle.push_front(idle);
+                    }
                 }
                 return None;
             }

@@ -329,8 +329,12 @@ where
                         let mut pending = shared.pending.lock();
                         *pending = pending.saturating_sub(1);
                         let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+                        let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
                         drop(pending);
                         for w in wakers {
+                            w.wake();
+                        }
+                        for w in inner_wakers {
                             w.wake();
                         }
 
@@ -451,8 +455,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::task::Waker;
 
     fn init_test(name: &str) {
@@ -574,6 +578,79 @@ mod tests {
 
         fn call(&mut self, _req: i32) -> Self::Future {
             std::future::pending()
+        }
+    }
+
+    #[derive(Default)]
+    struct SingleFlightState {
+        busy: bool,
+        complete_current: bool,
+        readiness_waker: Option<Waker>,
+    }
+
+    struct SingleFlightService {
+        state: Arc<Mutex<SingleFlightState>>,
+    }
+
+    impl SingleFlightService {
+        fn new() -> (Self, Arc<Mutex<SingleFlightState>>) {
+            let state = Arc::new(Mutex::new(SingleFlightState::default()));
+            (
+                Self {
+                    state: Arc::clone(&state),
+                },
+                state,
+            )
+        }
+    }
+
+    struct SingleFlightFuture {
+        state: Arc<Mutex<SingleFlightState>>,
+        response: i32,
+    }
+
+    impl Future for SingleFlightFuture {
+        type Output = Result<i32, std::convert::Infallible>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let response = self.response;
+            let waker = {
+                let mut state = self.state.lock();
+                if !state.complete_current {
+                    return Poll::Pending;
+                }
+                state.complete_current = false;
+                state.busy = false;
+                state.readiness_waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            Poll::Ready(Ok(response))
+        }
+    }
+
+    impl Service<i32> for SingleFlightService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = SingleFlightFuture;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            let mut state = self.state.lock();
+            if state.busy {
+                state.readiness_waker = Some(cx.waker().clone());
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            self.state.lock().busy = true;
+            SingleFlightFuture {
+                state: Arc::clone(&self.state),
+                response: req * 2,
+            }
         }
     }
 
@@ -806,6 +883,62 @@ mod tests {
         // Inner service is not ready, response not yet available.
         assert!(result.is_pending());
         crate::test_complete!("never_ready_inner_returns_pending_on_call");
+    }
+
+    #[test]
+    fn active_completion_wakes_all_inner_readiness_waiters() {
+        init_test("active_completion_wakes_all_inner_readiness_waiters");
+        let (single_flight, state) = SingleFlightService::new();
+        let mut svc = Buffer::new(single_flight, 3);
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+
+        assert!(matches!(svc.poll_ready(&mut noop_cx), Poll::Ready(Ok(()))));
+        let mut first = svc.call(10);
+        assert!(Pin::new(&mut first).poll(&mut noop_cx).is_pending());
+
+        assert!(matches!(svc.poll_ready(&mut noop_cx), Poll::Ready(Ok(()))));
+        let mut second = svc.call(20);
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_waker = Waker::from(Arc::new(TestWake(Arc::clone(&second_woken))));
+        let mut second_cx = Context::from_waker(&second_waker);
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+
+        assert!(matches!(svc.poll_ready(&mut noop_cx), Poll::Ready(Ok(()))));
+        let mut third = svc.call(30);
+        let third_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let third_waker = Waker::from(Arc::new(TestWake(Arc::clone(&third_woken))));
+        let mut third_cx = Context::from_waker(&third_waker);
+        assert!(Pin::new(&mut third).poll(&mut third_cx).is_pending());
+
+        state.lock().complete_current = true;
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut noop_cx),
+            Poll::Ready(Ok(20))
+        ));
+        assert!(
+            second_woken.load(std::sync::atomic::Ordering::Relaxed),
+            "completion must wake earlier inner readiness waiters, not just the last service waker"
+        );
+        assert!(
+            third_woken.load(std::sync::atomic::Ordering::Relaxed),
+            "completion should still wake the service-provided readiness waiter"
+        );
+
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+        state.lock().complete_current = true;
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_cx),
+            Poll::Ready(Ok(40))
+        ));
+
+        assert!(Pin::new(&mut third).poll(&mut third_cx).is_pending());
+        state.lock().complete_current = true;
+        assert!(matches!(
+            Pin::new(&mut third).poll(&mut third_cx),
+            Poll::Ready(Ok(60))
+        ));
+        crate::test_complete!("active_completion_wakes_all_inner_readiness_waiters");
     }
 
     // ================================================================
