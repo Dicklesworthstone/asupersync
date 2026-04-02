@@ -491,9 +491,10 @@ impl<T: TimeSource> TimerDriver<T> {
         let expired_wakers = self.collect_expired(now);
         let fired = expired_wakers.len();
 
-        // Wake them outside the lock
+        // Wake them outside the lock. Catch panics to ensure all
+        // wakers are attempted even if one panics.
         for waker in expired_wakers {
-            waker.wake();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
         }
 
         fired

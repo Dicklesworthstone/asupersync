@@ -857,7 +857,10 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
                             }
                         }
                         if !unretired {
-                            return true;
+                            // We can't un-retire (max_threads reached) but
+                            // a task is waiting. Force un-retire to prevent
+                            // task loss — temporarily exceed max_threads.
+                            inner.active_threads.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
