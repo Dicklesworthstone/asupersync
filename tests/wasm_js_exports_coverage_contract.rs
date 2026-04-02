@@ -1011,7 +1011,7 @@ fn wasm_docs_pin_authoritative_support_matrix_and_diagnostic_taxonomy() {
         "| Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported |",
         "| Dedicated Web Worker (`DedicatedWorkerGlobalScope`) | Direct-runtime supported |",
         "| Node / SSR / edge direct runtime via `@asupersync/browser` | Impossible for direct browser runtime; bridge-only or unsupported |",
-        "| Rust-authored `wasm32-unknown-unknown` consumer path | Direct-runtime feasible but not yet shipped |",
+        "| Rust-authored `wasm32-unknown-unknown` consumer path | Preview public lane |",
         "| Multi-worker / `SharedArrayBuffer` parallel execution | Guarded optional, not shipped |",
     ] {
         assert!(
