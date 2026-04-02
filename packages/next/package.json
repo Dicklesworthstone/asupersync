@@ -1,6 +1,6 @@
 {
   "name": "@asupersync/next",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Next.js adapter layer for the Asupersync Browser Edition.",
   "homepage": "https://github.com/Dicklesworthstone/asupersync#readme",
   "bugs": {
