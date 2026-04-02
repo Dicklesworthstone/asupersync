@@ -567,7 +567,7 @@ impl<P: Policy> Scope<'_, P> {
     /// |----------|-------|
     /// | Migration | Never (thread-pinned) |
     /// | Send bound | Not required |
-    /// | Borrowing | Can capture `&T` (same-thread) |
+    /// | Borrowing | Requires `'static` (no local `&T`) |
     /// | Use case | `!Send` types, borrowed data |
     ///
     /// # Arguments

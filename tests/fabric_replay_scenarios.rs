@@ -668,7 +668,7 @@ fn schedule_replication_reorder(
                     .add_task(TaskId::new_for_test(71, 0))
                     .expect("source task");
                 let transfer = federation
-                    .export_replication_transfer(&mut source)
+                    .export_replication_transfer(&mut source, Time::from_secs(1))
                     .expect("export transfer");
                 let catch_up = federation
                     .plan_replication_catch_up(transfer.sequence, 0)

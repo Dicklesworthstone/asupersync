@@ -455,8 +455,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
 
     fn init_test(name: &str) {
@@ -639,6 +639,7 @@ mod tests {
             let mut state = self.state.lock();
             if state.busy {
                 state.readiness_waker = Some(cx.waker().clone());
+                drop(state);
                 Poll::Pending
             } else {
                 Poll::Ready(Ok(()))

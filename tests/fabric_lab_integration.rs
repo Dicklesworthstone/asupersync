@@ -584,7 +584,8 @@ fn run_compiler_scenario(seed: u64) -> (CompilerScenarioSummary, Vec<FabricLogEn
                 {
                     let mut guard = state.lock().expect("state lock");
                     guard.export_fingerprint = Some(plan.certificate.fingerprint.clone());
-                    guard.export_capabilities
+                    guard
+                        .export_capabilities
                         .clone_from(&plan.attached_capabilities);
                     guard
                         .export_reply_space
