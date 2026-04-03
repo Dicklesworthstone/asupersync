@@ -767,7 +767,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         // Cancel local token if present
         let token = self.active_tokens.read().get(&msg.object_id()).cloned();
         if let Some(token) = token {
-            let reason = CancelReason::new(msg.kind());
+            let reason = CancelReason::new(msg.kind()).with_timestamp(msg.initiated_at());
             token.cancel(&reason, now);
         }
 

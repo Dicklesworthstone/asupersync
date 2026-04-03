@@ -190,8 +190,10 @@ impl<T: Clone> Sender<T> {
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
         let total_sent = {
-            let inner = self.channel.inner.lock();
-            self.channel.receiver_count.fetch_add(1, Ordering::Relaxed);
+            let mut inner = self.channel.inner.lock();
+            if self.channel.receiver_count.fetch_add(1, Ordering::Relaxed) == 0 {
+                inner.buffer.clear();
+            }
             inner.total_sent
         };
 

@@ -71,6 +71,24 @@ impl AsyncWrite for Vec<u8> {
         Poll::Ready(Ok(buf.len()))
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let mut total = 0;
+        for buf in bufs {
+            this.extend_from_slice(buf);
+            total += buf.len();
+        }
+        Poll::Ready(Ok(total))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }

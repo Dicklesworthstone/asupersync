@@ -1078,7 +1078,7 @@ impl<B: StorageBackend> Stream<B> {
     /// Simple non-cryptographic hash of a payload for dedup keying.
     fn payload_hash(payload: &[u8]) -> u64 {
         use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = crate::util::DetHasher::default();
         payload.hash(&mut hasher);
         hasher.finish()
     }

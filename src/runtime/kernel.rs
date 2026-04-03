@@ -595,7 +595,8 @@ impl ControllerRegistry {
         let id = ControllerId(self.next_id);
         self.next_id += 1;
 
-        let mode = if registration.initial_mode == ControllerMode::Active
+        let mode = if (registration.initial_mode == ControllerMode::Active
+            || registration.initial_mode == ControllerMode::Canary)
             && !registration
                 .max_version
                 .is_compatible_with(&SNAPSHOT_VERSION)

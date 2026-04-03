@@ -229,7 +229,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
     }
 
     fn is_write_vectored(&self) -> bool {
-        self.inner.is_write_vectored()
+        true
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
