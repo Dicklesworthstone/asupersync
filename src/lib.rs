@@ -51,8 +51,11 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
-// Phase 0 complete: dead code denied to prevent regressions
-#![deny(dead_code)]
+// Phase 0 complete: dead code denied to prevent regressions.
+// Downgraded to warn on Windows: several signal/process/io_uring items are
+// platform-gated and appear dead on non-Unix targets.
+#![cfg_attr(not(target_family = "windows"), deny(dead_code))]
+#![cfg_attr(target_family = "windows", warn(dead_code))]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_const_for_fn)]
