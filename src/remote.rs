@@ -223,6 +223,16 @@ pub trait RemoteRuntime: Send + Sync + fmt::Debug {
         tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
     );
 
+    /// Returns the last observed lifecycle state for the given remote task, if
+    /// the runtime tracks it.
+    fn observe_task_state(&self, _task_id: RemoteTaskId) -> Option<RemoteTaskState> {
+        None
+    }
+
+    /// Clears any runtime-tracked lifecycle state after a terminal result has
+    /// been consumed locally.
+    fn clear_task_state(&self, _task_id: RemoteTaskId) {}
+
     /// Unregisters a pending local task after spawn failure.
     ///
     /// Implementations that keep a pending-results map should remove the
@@ -465,7 +475,7 @@ impl Default for RemoteCap {
 // ---------------------------------------------------------------------------
 
 /// Lifecycle state of a remote task as observed from the local node.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteTaskState {
     /// Spawn request sent, waiting for acknowledgement from remote node.
     Pending,
@@ -509,6 +519,8 @@ pub enum RemoteError {
     NodeDown(String),
     /// The computation name is not registered on the remote node.
     UnknownComputation(String),
+    /// The remote node explicitly rejected the spawn request.
+    SpawnRejected(SpawnRejectReason),
     /// The lease expired before the task completed.
     LeaseExpired,
     /// The terminal remote result was already consumed.
@@ -532,6 +544,7 @@ impl fmt::Display for RemoteError {
             Self::UnknownComputation(name) => {
                 write!(f, "unknown computation: {name}")
             }
+            Self::SpawnRejected(reason) => write!(f, "remote spawn rejected: {reason}"),
             Self::LeaseExpired => write!(f, "remote task lease expired"),
             Self::PolledAfterCompletion => {
                 write!(f, "remote handle polled after completion")
@@ -582,6 +595,8 @@ pub struct RemoteHandle {
     computation: ComputationName,
     /// Region that owns this remote task.
     owner_region: RegionId,
+    /// Runtime tracking lifecycle updates for this remote task.
+    runtime: Option<Arc<dyn RemoteRuntime>>,
     /// Receiver for the remote result.
     receiver: oneshot::Receiver<Result<RemoteOutcome, RemoteError>>,
     /// Lease duration for this task.
@@ -600,6 +615,7 @@ impl fmt::Debug for RemoteHandle {
             .field("node", &self.node)
             .field("computation", &self.computation)
             .field("owner_region", &self.owner_region)
+            .field("runtime", &self.runtime.as_ref().map(|_| "attached"))
             .field("lease", &self.lease)
             .field("state", &self.state)
             .field("completed", &self.completed)
@@ -625,6 +641,13 @@ impl RemoteHandle {
     #[inline]
     fn closed_reason() -> CancelReason {
         CancelReason::user("remote handle channel closed")
+    }
+
+    #[inline]
+    fn clear_runtime_state(&self) {
+        if let Some(runtime) = &self.runtime {
+            runtime.clear_task_state(self.remote_task_id);
+        }
     }
 
     /// Returns the remote task ID.
@@ -665,14 +688,37 @@ impl RemoteHandle {
 
     /// Returns the current observed state of the remote task.
     #[must_use]
-    pub fn state(&self) -> &RemoteTaskState {
-        &self.state
+    pub fn state(&self) -> RemoteTaskState {
+        if self.completed {
+            self.state
+        } else if let Some(runtime) = &self.runtime {
+            runtime
+                .observe_task_state(self.remote_task_id)
+                .unwrap_or(self.state)
+        } else {
+            self.state
+        }
     }
 
     /// Returns true if the remote result is ready.
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
+    }
+
+    /// Requests cancellation and drains the remote lifecycle to a terminal state.
+    ///
+    /// This is the explicit close operation for a remote handle: it forwards a
+    /// best-effort cancellation request when a runtime is attached, then awaits
+    /// the terminal remote result so origin-side runtime state can be cleared.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same terminal error as [`join`](Self::join), including
+    /// `PolledAfterCompletion` if the terminal result was already consumed.
+    pub async fn close(&mut self, cx: &Cx) -> Result<RemoteOutcome, RemoteError> {
+        self.abort(cx);
+        self.join(cx).await
     }
 
     /// Waits for the remote task to complete and returns its result.
@@ -692,6 +738,7 @@ impl RemoteHandle {
             Ok(result) => {
                 self.completed = true;
                 self.state = Self::terminal_state_for_result(&result);
+                self.clear_runtime_state();
                 result
             }
             Err(oneshot::RecvError::Closed) => {
@@ -702,6 +749,7 @@ impl RemoteHandle {
                 ) {
                     self.state = RemoteTaskState::Cancelled;
                 }
+                self.clear_runtime_state();
                 Err(RemoteError::Cancelled(Self::closed_reason()))
             }
             Err(oneshot::RecvError::Cancelled) => {
@@ -732,6 +780,7 @@ impl RemoteHandle {
             Ok(result) => {
                 self.completed = true;
                 self.state = Self::terminal_state_for_result(&result);
+                self.clear_runtime_state();
                 Ok(Some(result?))
             }
             Err(oneshot::TryRecvError::Empty) => Ok(None),
@@ -743,6 +792,7 @@ impl RemoteHandle {
                 ) {
                     self.state = RemoteTaskState::Cancelled;
                 }
+                self.clear_runtime_state();
                 Err(RemoteError::Cancelled(Self::closed_reason()))
             }
         }
@@ -895,6 +945,7 @@ pub fn spawn_remote(
         node,
         computation,
         owner_region: region,
+        runtime: cap.runtime().cloned(),
         receiver: rx,
         lease,
         state: initial_state,
@@ -2421,6 +2472,7 @@ pub mod trace_events {
 mod tests {
     use super::*;
     use parking_lot::Mutex;
+    use std::collections::BTreeMap;
 
     #[test]
     fn node_id_basics() {
@@ -2536,6 +2588,82 @@ mod tests {
 
         fn unregister_task(&self, task_id: RemoteTaskId) {
             self.unregistered.lock().push(task_id);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct LifecycleRuntime {
+        sent: Mutex<Vec<(NodeId, MessageEnvelope<RemoteMessage>)>>,
+        pending: Mutex<BTreeMap<RemoteTaskId, oneshot::Sender<Result<RemoteOutcome, RemoteError>>>>,
+        states: Mutex<BTreeMap<RemoteTaskId, RemoteTaskState>>,
+    }
+
+    impl LifecycleRuntime {
+        fn mark_state(&self, task_id: RemoteTaskId, state: RemoteTaskState) {
+            self.states.lock().insert(task_id, state);
+        }
+
+        fn deliver(
+            &self,
+            cx: &Cx,
+            task_id: RemoteTaskId,
+            result: Result<RemoteOutcome, RemoteError>,
+        ) {
+            let state = match &result {
+                Ok(RemoteOutcome::Success(_)) => RemoteTaskState::Completed,
+                Ok(RemoteOutcome::Cancelled(_)) | Err(RemoteError::Cancelled(_)) => {
+                    RemoteTaskState::Cancelled
+                }
+                Err(RemoteError::LeaseExpired) => RemoteTaskState::LeaseExpired,
+                Ok(RemoteOutcome::Failed(_) | RemoteOutcome::Panicked(_)) | Err(_) => {
+                    RemoteTaskState::Failed
+                }
+            };
+            self.states.lock().insert(task_id, state);
+            let tx = self
+                .pending
+                .lock()
+                .remove(&task_id)
+                .expect("pending remote task");
+            tx.send(cx, result).expect("pending remote receiver");
+        }
+
+        fn sent_messages(&self) -> Vec<(NodeId, MessageEnvelope<RemoteMessage>)> {
+            self.sent.lock().clone()
+        }
+    }
+
+    impl RemoteRuntime for LifecycleRuntime {
+        fn send_message(
+            &self,
+            destination: &NodeId,
+            envelope: MessageEnvelope<RemoteMessage>,
+        ) -> Result<(), RemoteError> {
+            self.sent.lock().push((destination.clone(), envelope));
+            Ok(())
+        }
+
+        fn register_task(
+            &self,
+            task_id: RemoteTaskId,
+            tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+        ) {
+            self.pending.lock().insert(task_id, tx);
+            self.states.lock().insert(task_id, RemoteTaskState::Pending);
+        }
+
+        fn observe_task_state(&self, task_id: RemoteTaskId) -> Option<RemoteTaskState> {
+            self.states.lock().get(&task_id).copied()
+        }
+
+        fn clear_task_state(&self, task_id: RemoteTaskId) {
+            self.pending.lock().remove(&task_id);
+            self.states.lock().remove(&task_id);
+        }
+
+        fn unregister_task(&self, task_id: RemoteTaskId) {
+            self.pending.lock().remove(&task_id);
+            self.states.lock().remove(&task_id);
         }
     }
 
@@ -2702,7 +2830,7 @@ mod tests {
         let handle = result.unwrap();
         assert_eq!(handle.node().as_str(), "worker-1");
         assert_eq!(handle.computation().as_str(), "encode_block");
-        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
         assert!(handle.is_finished());
         assert_eq!(handle.lease(), Duration::from_secs(30));
         assert!(handle.local_task_id().is_none());
@@ -2737,7 +2865,7 @@ mod tests {
         .unwrap();
 
         assert!(handle.is_finished());
-        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
     }
 
     #[test]
@@ -2755,7 +2883,7 @@ mod tests {
             .try_join()
             .expect_err("phase-0 fallback should fail explicitly");
         assert!(matches!(err, RemoteError::NodeUnreachable(_)));
-        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
     }
 
     #[test]
@@ -2778,10 +2906,10 @@ mod tests {
         )
         .expect("spawn");
 
-        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
         let result = futures_lite::future::block_on(handle.join(&cx));
         assert!(matches!(result, Err(RemoteError::NodeDown(_))));
-        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
         assert!(handle.is_finished());
     }
 
@@ -2800,7 +2928,7 @@ mod tests {
             .try_join()
             .expect_err("phase-0 fallback should fail explicitly");
         assert!(matches!(err, RemoteError::NodeUnreachable(_)));
-        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
     }
 
     #[test]
@@ -2814,13 +2942,135 @@ mod tests {
         )
         .expect("spawn");
 
-        assert_eq!(*handle.state(), RemoteTaskState::Cancelled);
+        assert_eq!(handle.state(), RemoteTaskState::Cancelled);
         let result = futures_lite::future::block_on(handle.join(&cx));
         assert!(matches!(
             result,
             Err(RemoteError::Cancelled(reason)) if reason.kind == crate::types::CancelKind::Timeout
         ));
-        assert_eq!(*handle.state(), RemoteTaskState::Cancelled);
+        assert_eq!(handle.state(), RemoteTaskState::Cancelled);
+    }
+
+    #[test]
+    fn remote_handle_state_observes_runtime_lifecycle() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        assert_eq!(handle.state(), RemoteTaskState::Pending);
+
+        runtime.mark_state(handle.remote_task_id(), RemoteTaskState::Running);
+        assert_eq!(handle.state(), RemoteTaskState::Running);
+
+        runtime.deliver(
+            &cx,
+            handle.remote_task_id(),
+            Ok(RemoteOutcome::Success(vec![9, 9, 9])),
+        );
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
+
+        let outcome = handle.try_join().expect("result").expect("outcome");
+        assert!(matches!(outcome, RemoteOutcome::Success(_)));
+        assert!(
+            runtime
+                .observe_task_state(handle.remote_task_id())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn remote_handle_close_sends_cancel_and_drains_runtime_result() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        runtime.mark_state(handle.remote_task_id(), RemoteTaskState::Running);
+        runtime.deliver(
+            &cx,
+            handle.remote_task_id(),
+            Ok(RemoteOutcome::Cancelled(CancelReason::user(
+                "closed remotely",
+            ))),
+        );
+
+        let outcome = futures_lite::future::block_on(handle.close(&cx)).expect("close");
+        assert!(matches!(outcome, RemoteOutcome::Cancelled(_)));
+        assert_eq!(handle.state(), RemoteTaskState::Cancelled);
+        assert!(
+            runtime
+                .observe_task_state(handle.remote_task_id())
+                .is_none()
+        );
+
+        let sent = runtime.sent_messages();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].0.as_str(), "worker-1");
+        match &sent[1].1.payload {
+            RemoteMessage::CancelRequest(cancel) => {
+                assert_eq!(cancel.remote_task_id, handle.remote_task_id());
+                assert_eq!(cancel.origin_node.as_str(), "origin-a");
+            }
+            other => unreachable!("expected CancelRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_handle_runtime_rejection_fails_closed() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        runtime.deliver(
+            &cx,
+            handle.remote_task_id(),
+            Err(RemoteError::SpawnRejected(
+                SpawnRejectReason::CapacityExceeded,
+            )),
+        );
+
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
+        let err = handle
+            .try_join()
+            .expect_err("runtime rejection should surface as terminal error");
+        assert_eq!(
+            err,
+            RemoteError::SpawnRejected(SpawnRejectReason::CapacityExceeded)
+        );
+        assert!(
+            runtime
+                .observe_task_state(handle.remote_task_id())
+                .is_none()
+        );
     }
 
     #[test]
@@ -2841,6 +3091,7 @@ mod tests {
             node: NodeId::new("n1"),
             computation: ComputationName::new("compute"),
             owner_region: cx.region_id(),
+            runtime: None,
             receiver: rx,
             lease: Duration::from_secs(30),
             state: RemoteTaskState::Pending,
@@ -2849,7 +3100,7 @@ mod tests {
 
         let result = handle.try_join().expect("result").expect("outcome");
         assert!(matches!(result, RemoteOutcome::Cancelled(_)));
-        assert_eq!(*handle.state(), RemoteTaskState::Cancelled);
+        assert_eq!(handle.state(), RemoteTaskState::Cancelled);
     }
 
     #[test]
@@ -2865,6 +3116,7 @@ mod tests {
             node: NodeId::new("n1"),
             computation: ComputationName::new("compute"),
             owner_region: cx.region_id(),
+            runtime: None,
             receiver: rx,
             lease: Duration::from_secs(30),
             state: RemoteTaskState::Pending,
@@ -2873,7 +3125,7 @@ mod tests {
 
         let first = handle.try_join().expect("result").expect("outcome");
         assert!(matches!(first, RemoteOutcome::Success(_)));
-        assert_eq!(*handle.state(), RemoteTaskState::Completed);
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
 
         let second = handle.try_join();
         assert!(matches!(second, Err(RemoteError::PolledAfterCompletion)));
@@ -2892,6 +3144,7 @@ mod tests {
             node: NodeId::new("n1"),
             computation: ComputationName::new("compute"),
             owner_region: cx.region_id(),
+            runtime: None,
             receiver: rx,
             lease: Duration::from_secs(30),
             state: RemoteTaskState::Pending,
@@ -2900,7 +3153,7 @@ mod tests {
 
         let first = futures_lite::future::block_on(handle.join(&cx)).expect("first join");
         assert!(matches!(first, RemoteOutcome::Success(_)));
-        assert_eq!(*handle.state(), RemoteTaskState::Completed);
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
 
         let second = futures_lite::future::block_on(handle.join(&cx));
         assert!(matches!(second, Err(RemoteError::PolledAfterCompletion)));
@@ -2919,6 +3172,7 @@ mod tests {
             node: NodeId::new("n1"),
             computation: ComputationName::new("compute"),
             owner_region: cx.region_id(),
+            runtime: None,
             receiver: rx,
             lease: Duration::from_secs(30),
             state: RemoteTaskState::Running,
@@ -2930,7 +3184,7 @@ mod tests {
             result,
             Err(RemoteError::Cancelled(reason)) if reason == expected
         ));
-        assert_eq!(*handle.state(), RemoteTaskState::Running);
+        assert_eq!(handle.state(), RemoteTaskState::Running);
         assert!(matches!(handle.try_join(), Ok(None)));
     }
 
@@ -4269,6 +4523,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn remote_task_state_debug_clone_eq() {
         let s = RemoteTaskState::Pending;
         let s2 = s.clone();

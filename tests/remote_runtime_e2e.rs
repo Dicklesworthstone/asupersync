@@ -37,7 +37,7 @@ use asupersync::lab::network::{
 };
 use asupersync::remote::{
     ComputationName, DedupDecision, IdempotencyKey, IdempotencyStore, NodeId, RemoteError,
-    RemoteTaskId, Saga, SagaState, spawn_remote,
+    RemoteTaskId, RemoteTaskState, Saga, SagaState, spawn_remote,
 };
 use asupersync::types::Time;
 use common::*;
@@ -225,6 +225,42 @@ fn spawn_ack_sent_immediately() {
 
     // Ack was sent back to A.
     assert!(count_sent(&h, &b, &a, "SpawnAck") >= 1);
+}
+
+#[test]
+fn attached_remote_handle_observes_ack_before_result() {
+    let seed = 4302;
+    let conditions = NetworkConditions::local();
+    init_test(
+        "attached_remote_handle_observes_ack_before_result",
+        seed,
+        &conditions,
+    );
+
+    let (mut h, origin, worker) = harness_two(seed, conditions);
+    let cap = h.node(&origin).expect("origin node").create_cap();
+    let cx = Cx::for_testing().with_remote_cap(cap);
+    let mut handle = spawn_remote(
+        &cx,
+        worker,
+        ComputationName::new("test-computation"),
+        asupersync::remote::RemoteInput::empty(),
+    )
+    .expect("spawn_remote");
+
+    assert_eq!(handle.state(), RemoteTaskState::Pending);
+
+    h.run_for(Duration::from_millis(15));
+    assert_eq!(handle.state(), RemoteTaskState::Running);
+    assert!(matches!(handle.try_join(), Ok(None)));
+
+    h.run_for(Duration::from_millis(200));
+    let outcome = handle
+        .try_join()
+        .expect("result available")
+        .expect("outcome");
+    assert!(matches!(outcome, asupersync::remote::RemoteOutcome::Success(_)));
+    assert_eq!(handle.state(), RemoteTaskState::Completed);
 }
 
 #[test]
