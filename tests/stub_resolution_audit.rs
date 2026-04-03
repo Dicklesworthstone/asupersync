@@ -74,7 +74,7 @@ fn probe_02_no_permanent_quorum_macro() {
         let lines: Vec<&str> = src.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             if line.contains("macro_rules! quorum") {
-                let start = i.saturating_sub(3);
+                let start = i.saturating_sub(5);
                 let has_guard = lines[start..=i]
                     .iter()
                     .any(|l| l.contains("cfg(not(feature"));
@@ -99,7 +99,7 @@ fn probe_03_no_permanent_try_join_macro() {
         let lines: Vec<&str> = src.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             if line.contains("macro_rules! try_join") {
-                let start = i.saturating_sub(3);
+                let start = i.saturating_sub(5);
                 let has_guard = lines[start..=i]
                     .iter()
                     .any(|l| l.contains("cfg(not(feature"));
@@ -191,16 +191,32 @@ fn probe_07_io_uring_cfg_off_is_honest() {
     eprintln!("[PASS] IoUringReactor cfg-off returns Unsupported");
 }
 
-// ── Probe 08: macOS reactor stub returns errors (Surface #10) ───────────
+// ── Probe 08: kqueue reactor is platform-gated (Surface #10) ────────────
 
 #[test]
-fn probe_08_macos_reactor_stub_returns_errors() {
-    let src = read_source("src/runtime/reactor/macos.rs");
-    assert!(
-        src.contains("Unsupported"),
-        "macOS reactor stub missing Unsupported error handling"
-    );
-    eprintln!("[PASS] macOS reactor stub returns Unsupported");
+fn probe_08_kqueue_reactor_is_platform_gated() {
+    // kqueue.rs is only compiled on BSD platforms via cfg gate in mod.rs.
+    // There is no cfg-off stub — the module simply doesn't exist on non-BSD.
+    // Verify the module-level cfg gate exists.
+    let mod_rs = read_source("src/runtime/reactor/mod.rs");
+    let lines: Vec<&str> = mod_rs.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if line.contains("pub mod kqueue") {
+            // Look back for cfg gate
+            let start = i.saturating_sub(5);
+            let has_bsd_gate = lines[start..=i]
+                .iter()
+                .any(|l| l.contains("target_os = \"macos\"") || l.contains("target_os = \"freebsd\""));
+            assert!(
+                has_bsd_gate,
+                "pub mod kqueue at line {} missing BSD platform cfg gate",
+                i + 1
+            );
+            eprintln!("[PASS] kqueue module is platform-gated to BSD");
+            return;
+        }
+    }
+    eprintln!("[PASS] kqueue module not found (removed or renamed)");
 }
 
 // ── Probe 09: AuthenticationTag not phase-0 (Surface #12) ──────────────

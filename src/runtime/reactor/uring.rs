@@ -1,8 +1,11 @@
 //! Deprecated legacy naming shim — use [`IoUringReactor`](super::IoUringReactor) instead.
 //!
-//! This module preserves the historical `UringReactor` name as a deprecated type alias
-//! to [`IoUringReactor`](super::IoUringReactor). The standalone struct that always
-//! returned `Unsupported` has been retired.
+//! **Note**: This file is *not* part of the compiled module graph. `mod.rs` maps
+//! `mod uring` to `io_uring.rs` via `#[path = "io_uring.rs"]`. This file is
+//! retained as a historical reference only.
+//!
+//! The original standalone `UringReactor` struct that always returned `Unsupported`
+//! has been retired and replaced with a deprecated type alias below.
 //!
 //! # Platform Requirements (io_uring)
 //!
