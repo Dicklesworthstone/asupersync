@@ -100,6 +100,12 @@ struct SharedBuffer<S> {
     inner_wakers: Mutex<Vec<std::task::Waker>>,
 }
 
+fn push_waker_if_new(wakers: &mut Vec<Waker>, waker: &Waker) {
+    if wakers.iter().all(|existing| !existing.will_wake(waker)) {
+        wakers.push(waker.clone());
+    }
+}
+
 impl<S> Buffer<S> {
     /// Creates a new buffer service wrapping the given inner service.
     ///
@@ -316,9 +322,7 @@ where
                             drop(inner);
                             {
                                 let mut wakers = shared.inner_wakers.lock();
-                                if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
-                                    wakers.push(cx.waker().clone());
-                                }
+                                push_waker_if_new(&mut wakers, cx.waker());
                             }
                             return Poll::Pending;
                         }
@@ -424,9 +428,7 @@ where
         let pending = self.shared.pending.lock();
         if *pending >= self.shared.capacity {
             let mut wakers = self.shared.ready_wakers.lock();
-            if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
-                wakers.push(cx.waker().clone());
-            }
+            push_waker_if_new(&mut wakers, cx.waker());
             Poll::Pending
         } else {
             Poll::Ready(Ok(()))
@@ -1091,5 +1093,61 @@ mod tests {
         assert!(svc.poll_ready(&mut cx).is_pending());
         assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
         crate::test_complete!("poll_ready_deduplicates_waker_when_full");
+    }
+
+    #[test]
+    fn poll_ready_deduplicates_alternating_waiters_when_full() {
+        init_test("poll_ready_deduplicates_alternating_waiters_when_full");
+        let mut svc = Buffer::new(EchoService, 1);
+        *svc.shared.pending.lock() = 1;
+
+        let first_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_waker = Waker::from(Arc::new(TestWake(Arc::clone(&first_woken))));
+        let mut first_cx = Context::from_waker(&first_waker);
+
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_waker = Waker::from(Arc::new(TestWake(Arc::clone(&second_woken))));
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(svc.poll_ready(&mut first_cx).is_pending());
+        assert!(svc.poll_ready(&mut second_cx).is_pending());
+        assert!(svc.poll_ready(&mut first_cx).is_pending());
+        assert!(svc.poll_ready(&mut second_cx).is_pending());
+
+        assert_eq!(
+            svc.shared.ready_wakers.lock().len(),
+            2,
+            "alternating parked waiters should not accumulate duplicate readiness wakers"
+        );
+        crate::test_complete!("poll_ready_deduplicates_alternating_waiters_when_full");
+    }
+
+    #[test]
+    fn waiting_for_ready_deduplicates_alternating_inner_waiters() {
+        init_test("waiting_for_ready_deduplicates_alternating_inner_waiters");
+        let mut svc = Buffer::new(NeverReadyService, 3);
+
+        let mut first = svc.call(10);
+        let mut second = svc.call(20);
+
+        let first_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_waker = Waker::from(Arc::new(TestWake(Arc::clone(&first_woken))));
+        let mut first_cx = Context::from_waker(&first_waker);
+
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_waker = Waker::from(Arc::new(TestWake(Arc::clone(&second_woken))));
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(Pin::new(&mut first).poll(&mut first_cx).is_pending());
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+        assert!(Pin::new(&mut first).poll(&mut first_cx).is_pending());
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+
+        assert_eq!(
+            svc.shared.inner_wakers.lock().len(),
+            2,
+            "alternating inner waiters should not accumulate duplicate readiness wakers"
+        );
+        crate::test_complete!("waiting_for_ready_deduplicates_alternating_inner_waiters");
     }
 }

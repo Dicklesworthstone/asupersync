@@ -214,6 +214,8 @@ where
 /// need a way to obtain one. This trait abstracts over different strategies
 /// for Cx acquisition.
 ///
+/// This API is only available when the `tower` feature is enabled.
+///
 /// # Built-in Implementations
 ///
 /// - [`ThreadLocalCxProvider`]: Uses the thread-local Cx set by the runtime
@@ -233,7 +235,7 @@ where
 ///     }
 /// }
 /// ```
-#[allow(dead_code)] // Public API surface — scaffold for service Cx integration
+#[cfg(feature = "tower")]
 pub trait CxProvider: Send + Sync {
     /// Returns the current Cx, if one is available.
     ///
@@ -261,10 +263,11 @@ pub trait CxProvider: Send + Sync {
 /// let adapter = TowerAdapterWithProvider::new(my_service);
 /// // Uses ThreadLocalCxProvider by default
 /// ```
-#[allow(dead_code)] // Public API surface — scaffold for service Cx integration
+#[cfg(feature = "tower")]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ThreadLocalCxProvider;
 
+#[cfg(feature = "tower")]
 impl CxProvider for ThreadLocalCxProvider {
     fn current_cx(&self) -> Option<Cx> {
         Cx::current()
@@ -288,23 +291,22 @@ impl CxProvider for ThreadLocalCxProvider {
 ///
 /// // Can now use the adapter in tests without a runtime
 /// ```
-#[allow(dead_code)] // Public API surface — scaffold for service Cx integration
+#[cfg(feature = "tower")]
 #[derive(Clone, Debug)]
 pub struct FixedCxProvider {
     cx: Cx,
 }
 
+#[cfg(feature = "tower")]
 impl FixedCxProvider {
     /// Creates a new fixed Cx provider.
     #[must_use]
-    #[allow(dead_code)] // Service Cx integration API
     pub fn new(cx: Cx) -> Self {
         Self { cx }
     }
 
     /// Creates a provider with a test Cx.
     #[must_use]
-    #[allow(dead_code)] // Service Cx integration API
     pub fn for_testing() -> Self {
         Self {
             cx: Cx::for_testing(),
@@ -312,6 +314,7 @@ impl FixedCxProvider {
     }
 }
 
+#[cfg(feature = "tower")]
 impl CxProvider for FixedCxProvider {
     fn current_cx(&self) -> Option<Cx> {
         Some(self.cx.clone())
@@ -1349,49 +1352,52 @@ mod tests {
     }
 
     // ========================================================================
-    // Cx Provider Tests
+    // Cx Provider Tests (cfg(feature = "tower"))
     // ========================================================================
 
-    use super::{CxProvider, FixedCxProvider, ThreadLocalCxProvider};
-    use crate::Cx;
+    #[cfg(feature = "tower")]
+    mod cx_provider_tests {
+        use super::super::{CxProvider, FixedCxProvider, ThreadLocalCxProvider};
+        use crate::Cx;
 
-    #[test]
-    fn thread_local_provider_returns_none_when_not_set() {
-        let provider = ThreadLocalCxProvider;
-        // Outside of runtime context, should return None
-        assert!(provider.current_cx().is_none());
-    }
+        #[test]
+        fn thread_local_provider_returns_none_when_not_set() {
+            let provider = ThreadLocalCxProvider;
+            // Outside of runtime context, should return None
+            assert!(provider.current_cx().is_none());
+        }
 
-    #[test]
-    fn fixed_provider_returns_cx() {
-        let cx: Cx = Cx::for_testing();
-        let provider = FixedCxProvider::new(cx.clone());
+        #[test]
+        fn fixed_provider_returns_cx() {
+            let cx: Cx = Cx::for_testing();
+            let provider = FixedCxProvider::new(cx.clone());
 
-        let retrieved = provider.current_cx();
-        assert!(retrieved.is_some());
-        // Same task ID indicates it's the same (or equivalent) Cx
-        assert_eq!(retrieved.unwrap().task_id(), cx.task_id());
-    }
+            let retrieved = provider.current_cx();
+            assert!(retrieved.is_some());
+            // Same task ID indicates it's the same (or equivalent) Cx
+            assert_eq!(retrieved.unwrap().task_id(), cx.task_id());
+        }
 
-    #[test]
-    fn fixed_provider_for_testing_convenience() {
-        let provider = FixedCxProvider::for_testing();
-        assert!(provider.current_cx().is_some());
-    }
+        #[test]
+        fn fixed_provider_for_testing_convenience() {
+            let provider = FixedCxProvider::for_testing();
+            assert!(provider.current_cx().is_some());
+        }
 
-    #[test]
-    fn thread_local_provider_default() {
-        let provider = ThreadLocalCxProvider;
-        // Just verify it doesn't panic
-        let _ = provider.current_cx();
-    }
+        #[test]
+        fn thread_local_provider_default() {
+            let provider = ThreadLocalCxProvider;
+            // Just verify it doesn't panic
+            let _ = provider.current_cx();
+        }
 
-    #[test]
-    fn fixed_provider_is_cloneable() {
-        let provider = FixedCxProvider::for_testing();
-        let cloned = provider.clone();
-        assert!(provider.current_cx().is_some());
-        assert!(cloned.current_cx().is_some());
+        #[test]
+        fn fixed_provider_is_cloneable() {
+            let provider = FixedCxProvider::for_testing();
+            let cloned = provider.clone();
+            assert!(provider.current_cx().is_some());
+            assert!(cloned.current_cx().is_some());
+        }
     }
 
     // ========================================================================
