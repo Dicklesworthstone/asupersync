@@ -1163,6 +1163,7 @@ fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
+#[cfg(test)]
 fn base64_encode(data: &[u8]) -> String {
     // Simple base64 encoding
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

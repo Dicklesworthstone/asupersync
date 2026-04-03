@@ -182,6 +182,9 @@ impl<Fut> Drop for RegionRunner<'_, Fut> {
         if let Some(state) = self.state.take() {
             let reason = CancelReason::fail_fast().with_region(self.child_region);
             let _ = state.cancel_request(self.child_region, &reason, None);
+            if let Some(region) = state.region(self.child_region) {
+                region.begin_close(None);
+            }
             state.advance_region_state(self.child_region);
         }
     }
@@ -930,10 +933,16 @@ impl<P: Policy> Scope<'_, P> {
             }
             Outcome::Cancelled(reason) => {
                 let _ = state.cancel_request(child_region, reason, None);
+                if let Some(region) = state.region(child_region) {
+                    region.begin_close(None);
+                }
             }
             Outcome::Err(_) | Outcome::Panicked(_) => {
                 let reason = CancelReason::fail_fast().with_region(child_region);
                 let _ = state.cancel_request(child_region, &reason, None);
+                if let Some(region) = state.region(child_region) {
+                    region.begin_close(None);
+                }
             }
         }
 
@@ -1166,6 +1175,12 @@ impl<P: Policy> Scope<'_, P> {
 
                 match race_outcome {
                     Either::Left(res) => {
+                        if matches!(&res, Err(JoinError::Panicked(_)))
+                            && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+                        {
+                            Self::best_effort_poll_loser_join(cx, &mut h2);
+                            return res;
+                        }
                         let loser_res = h2.join(cx).await;
                         if let Err(JoinError::Panicked(p)) = res {
                             Err(JoinError::Panicked(p))
@@ -1176,6 +1191,12 @@ impl<P: Policy> Scope<'_, P> {
                         }
                     }
                     Either::Right(res) => {
+                        if matches!(&res, Err(JoinError::Panicked(_)))
+                            && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+                        {
+                            Self::best_effort_poll_loser_join(cx, &mut h1);
+                            return res;
+                        }
                         let loser_res = h1.join(cx).await;
                         if let Err(JoinError::Panicked(p)) = res {
                             Err(JoinError::Panicked(p))

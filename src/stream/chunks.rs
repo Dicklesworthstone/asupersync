@@ -220,16 +220,6 @@ mod tests {
         }
     }
 
-    fn collect_chunks<S: Stream + Unpin>(stream: &mut S) -> Vec<S::Item> {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let mut items = Vec::new();
-        while let Poll::Ready(Some(item)) = Pin::new(&mut *stream).poll_next(&mut cx) {
-            items.push(item);
-        }
-        items
-    }
-
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);

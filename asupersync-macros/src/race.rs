@@ -1,7 +1,10 @@
 //! Implementation of the `race!` macro.
 //!
-//! The race macro runs multiple futures concurrently and returns the result
-//! of the first to complete. Losers are automatically cancelled and drained.
+//! The race macro runs multiple inline futures via `Cx::race*` and returns the
+//! first result.
+//!
+//! Losing futures are dropped, which requests cancellation but does not await a
+//! full drain path. Use `Scope::race` when loser-drain semantics are required.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;

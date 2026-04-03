@@ -295,37 +295,34 @@ impl TokenSlab {
             return None;
         }
 
-        // Check if the entry is occupied with matching generation.
-        let entry = &self.entries[index];
-        let current_generation = entry.generation();
+        let current_generation = self.entries[index].generation();
 
         if current_generation != token.generation {
             return None;
         }
 
-        match entry {
-            Entry::Occupied { .. } => {
-                // Increment generation to invalidate stale tokens.
-                let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
+        if matches!(self.entries[index], Entry::Occupied { .. }) {
+            // Increment generation to invalidate stale tokens.
+            let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
 
-                // Take the waker and convert to vacant.
-                let old_entry = std::mem::replace(
-                    &mut self.entries[index],
-                    Entry::Vacant {
-                        next_free: self.free_head,
-                        generation: new_generation,
-                    },
-                );
+            // Take the waker and convert to vacant.
+            let old_entry = std::mem::replace(
+                &mut self.entries[index],
+                Entry::Vacant {
+                    next_free: self.free_head,
+                    generation: new_generation,
+                },
+            );
 
-                self.free_head = index as u32;
-                self.len -= 1;
+            self.free_head = index as u32;
+            self.len -= 1;
 
-                match old_entry {
-                    Entry::Occupied { waker, .. } => Some(waker),
-                    Entry::Vacant { .. } => None, // Unreachable given check above
-                }
+            match old_entry {
+                Entry::Occupied { waker, .. } => Some(waker),
+                Entry::Vacant { .. } => unreachable!(),
             }
-            Entry::Vacant { .. } => None,
+        } else {
+            None
         }
     }
 

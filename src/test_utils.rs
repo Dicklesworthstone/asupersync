@@ -41,6 +41,7 @@ use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 static INIT_LOGGING: Once = Once::new();
+#[allow(dead_code)] // Used by other modules' #[cfg(test)] blocks via test-internals feature
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Default seed used by test lab helpers.
@@ -72,6 +73,7 @@ pub fn init_test_logging_with_level(level: tracing::Level) {
 }
 
 /// Acquire the global environment lock for tests that mutate env vars.
+#[allow(dead_code)] // Used by other modules' #[cfg(test)] blocks
 pub(crate) fn env_lock() -> parking_lot::MutexGuard<'static, ()> {
     ENV_LOCK.lock()
 }

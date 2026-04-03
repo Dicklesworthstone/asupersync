@@ -1,10 +1,11 @@
 //! Kafka consumer with Cx integration for cancel-correct message consumption.
 //!
 //! This module defines the API surface for a Kafka consumer that integrates
-//! with the Asupersync `Cx` context. When the `kafka` feature is disabled,
-//! the consumer uses the same deterministic in-process broker as the fallback
-//! producer path so brokerless tests can exercise real subscribe/poll/seek/
-//! commit semantics.
+//! with the Asupersync `Cx` context. When the `kafka` feature is disabled, the
+//! consumer uses the same harness-only deterministic in-process broker as the
+//! fallback producer path so tests and contract validation can exercise
+//! subscribe/poll/seek/commit semantics without implying a real Kafka
+//! deployment.
 //!
 //! # Cancel-Correct Behavior
 //!
@@ -291,7 +292,7 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 #[cfg(feature = "kafka")]
 const MAX_BROKER_POLL_SLICE: Duration = Duration::from_millis(50);
 
-/// Kafka consumer with deterministic brokerless fallback.
+/// Kafka consumer with a harness-only deterministic brokerless fallback.
 pub struct KafkaConsumer {
     config: ConsumerConfig,
     state: Mutex<ConsumerState>,

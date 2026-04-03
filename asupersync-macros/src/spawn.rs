@@ -1,7 +1,10 @@
 //! Implementation of the `spawn!` macro.
 //!
-//! The spawn macro creates a task owned by the enclosing region.
-//! The task cannot orphan and will be cancelled when the region closes.
+//! The spawn macro expands to `Scope::spawn_registered(...)` on the enclosing
+//! region.
+//!
+//! It is only supported in contexts where `__cx` and `__state` are already in
+//! scope, typically via `scope!(..., state: ..., { ... })`.
 //!
 //! # Ambient Variables
 //!

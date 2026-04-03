@@ -552,10 +552,14 @@ pub fn join2_to_result<T1, T2, E>(
     }
 }
 
-/// Placeholder macro for builds without the `proc-macros` feature.
+/// Contract-enforcement placeholder for builds without the `proc-macros` feature.
 ///
-/// Enable the `proc-macros` feature to use the real `join!` proc macro from
-/// the crate root (`use asupersync::join;`).
+/// In `proc-macros` builds, the supported root macro DSL re-exports the real
+/// `join!` proc macro from the crate root (`use asupersync::join;`).
+///
+/// When `proc-macros` is disabled, the macro DSL is intentionally unavailable.
+/// This placeholder exists only to fail fast with a truthful error message
+/// instead of pretending a fallback macro exists.
 ///
 /// Without that feature, use the functional API instead:
 ///
@@ -582,8 +586,9 @@ pub fn join2_to_result<T1, T2, E>(
 macro_rules! join {
     ($($future:expr),+ $(,)?) => {
         compile_error!(
-            "join! macro is not yet implemented. Use Scope::join() for two futures \
-             or Scope::join_all() for N futures instead."
+            "join! is unavailable without the `proc-macros` feature. Re-enable \
+             `proc-macros`, or use Scope::join() for two futures / Scope::join_all() \
+             for N futures instead."
         );
     };
 }

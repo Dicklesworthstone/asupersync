@@ -860,8 +860,6 @@ pub trait CleanupHandler: Send + Sync {
 /// A set of symbols pending cleanup.
 #[derive(Clone)]
 struct PendingSymbolSet {
-    /// The object ID.
-    object_id: ObjectId,
     /// Accumulated symbols.
     symbols: Vec<Symbol>,
     /// Total bytes.
@@ -944,7 +942,6 @@ impl CleanupCoordinator {
         let set = pending
             .entry(object_id)
             .or_insert_with(|| PendingSymbolSet {
-                object_id,
                 symbols: Vec::new(),
                 total_bytes: 0,
                 _created_at: now,

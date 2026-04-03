@@ -9,7 +9,20 @@
 //! - [`scope!`] - Create a structured concurrency scope
 //! - [`spawn!`] - Spawn a task within the current scope
 //! - [`join!`] - Join multiple futures, waiting for all to complete
+//! - [`join_all!`] - Join multiple futures into an array
 //! - [`race!`] - Race multiple futures, returning the first to complete
+//! - [`session_protocol!`] - Generate typestate session protocols
+//! - [`conformance`] - Annotate conformance tests
+//!
+//! # Contract With `asupersync`
+//!
+//! The root `asupersync` crate re-exports only the supported runtime DSL:
+//! `scope!`, `spawn!`, `join!`, `join_all!`, and `race!`, and only when the
+//! `proc-macros` feature is enabled.
+//!
+//! This crate also defines `session_protocol!` and `#[conformance]`, but those
+//! remain explicit-path macros on `asupersync_macros`; they are not part of the
+//! default root macro contract.
 //!
 //! # Example
 //!
@@ -38,9 +51,12 @@ use proc_macro::TokenStream;
 
 /// Creates a structured concurrency scope.
 ///
-/// The `scope!` macro creates a region that owns spawned tasks and guarantees
-/// quiescence on exit. All tasks spawned within the scope are cancelled and
-/// drained before the scope completes.
+/// The `scope!` macro creates a [`Scope`](asupersync::Scope) binding for the
+/// current `Cx` region and makes it available as `scope` inside the body.
+///
+/// Today this is an ergonomic binding helper, not a fresh child-region
+/// boundary. For actual child-region ownership and quiescence, call
+/// [`Scope::region`](asupersync::Scope::region) explicitly.
 ///
 /// # Syntax
 ///
@@ -55,7 +71,7 @@ use proc_macro::TokenStream;
 ///
 /// # Arguments
 ///
-/// - `cx` - The capability context (`&mut Cx`)
+/// - `cx` - The capability context (`&Cx`)
 /// - `body` - A block containing the scope's work
 /// - `state` - Optional runtime state binding used by nested `spawn!` calls
 ///
@@ -79,8 +95,10 @@ pub fn scope(input: TokenStream) -> TokenStream {
 
 /// Spawns a task within the current scope.
 ///
-/// The `spawn!` macro spawns an async task that is owned by the enclosing region.
-/// The task cannot orphan - it will be cancelled and drained when the region closes.
+/// The `spawn!` macro expands to [`Scope::spawn_registered`], so it requires
+/// ambient `__state` and `__cx` bindings in addition to the target `Scope`.
+///
+/// The easiest supported path is to use it inside `scope!(..., state: ..., { ... })`.
 ///
 /// # Syntax
 ///
@@ -108,9 +126,10 @@ pub fn spawn(input: TokenStream) -> TokenStream {
 
 /// Joins multiple futures, waiting for all to complete.
 ///
-/// The `join!` macro runs multiple futures concurrently and waits for all of them
-/// to complete. If any future is cancelled or panics, the others continue running
-/// and the final outcome reflects the most severe result.
+/// The `join!` macro is a supported proc-macro convenience surface, but the
+/// current implementation still awaits branches sequentially. It preserves
+/// left-to-right evaluation and tuple ordering today; parallel polling remains
+/// future work.
 ///
 /// # Syntax
 ///
@@ -144,8 +163,9 @@ pub fn join(input: TokenStream) -> TokenStream {
 
 /// Joins multiple futures into an array, waiting for all to complete.
 ///
-/// The `join_all!` macro is like `join!` but returns an array instead of a tuple.
-/// All futures must return the same type.
+/// The `join_all!` macro is like `join!` but returns an array instead of a
+/// tuple. Like `join!`, the current implementation still awaits branches
+/// sequentially.
 ///
 /// # Syntax
 ///
@@ -177,9 +197,11 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 
 /// Races multiple futures, returning the first to complete.
 ///
-/// The `race!` macro runs multiple futures concurrently and returns when the first
-/// one completes. The losing futures are automatically cancelled and drained,
-/// ensuring no orphaned work.
+/// The `race!` macro expands to the inline [`Cx::race*`](asupersync::Cx::race)
+/// family. The losing futures are cancelled by drop, but they are not drained.
+///
+/// If you need the stronger "losers are drained" invariant, race spawned tasks
+/// with [`Scope::race`](asupersync::Scope::race) instead.
 ///
 /// # Syntax
 ///
@@ -195,11 +217,8 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 ///
 /// # Loser Cleanup
 ///
-/// All non-winning futures are cancelled via the cancellation protocol:
-/// 1. Cancel request sent
-/// 2. Futures drain to cleanup points
-/// 3. Finalizers run
-/// 4. Outcomes discarded
+/// All non-winning futures are dropped, which requests cancellation for inline
+/// futures but does not await their cleanup path.
 ///
 /// # Example
 ///

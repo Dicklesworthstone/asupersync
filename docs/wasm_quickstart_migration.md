@@ -81,7 +81,7 @@ than consuming the shipped JS/TS packages.
 | Goal | Status today | Recommended lane |
 |---|---|---|
 | Verify browser-safe cfg/feature closure for the semantic core | Supported | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` |
-| Maintain the wasm ABI/export boundary from Rust | Supported for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` |
+| Maintain the wasm ABI/export boundary from Rust | Supported for workspace contributors; `asupersync-browser-core` is the canonical owner and `asupersync-wasm` is retained scaffold | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; use the `asupersync-wasm` manifest only when you need to keep the scaffold honest |
 | Ship a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Preview public lane | Use `RuntimeBuilder::browser()` plus execution-ladder inspection for truthful lane negotiation and structured fail-closed diagnostics, while keeping the support claim narrower than the shipped JS/TS Browser Edition packages |
 
 Rules for migration guidance:
@@ -89,6 +89,9 @@ Rules for migration guidance:
 - Do not describe `asupersync-browser-core` or `asupersync-wasm` as the public
   end-user Browser Edition SDK for Rust consumers. They are binding/export
   crates that feed the JS/TS packages.
+- Treat `asupersync-browser-core` as the canonical shipped boundary owner and
+  `asupersync-wasm` as retained non-canonical scaffold rather than two equal
+  live owners.
 - Do not promise broad `RuntimeBuilder` parity or stable direct `Cx`/`Scope`
   browser bootstrapping beyond the current preview dispatcher-backed
   `RuntimeBuilder::browser()` lane.
@@ -105,7 +108,7 @@ Use this table to choose the correct lane before writing browser-facing Rust.
 |---|---|---|
 | You need a shipped browser SDK for application code today | Start from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next` | These are the public Browser Edition product surfaces; they own the supported runtime diagnostics and packaging story |
 | You need to prove the semantic core still closes under browser cfg/profile rules | Run the canonical `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` commands against `asupersync` | This validates wasm-safe semantic closure without implying stable parity for the preview Rust browser builder lane |
-| You maintain the wasm ABI/package boundary inside this repository | Work in `asupersync-browser-core` or `asupersync-wasm` | These crates are the Rust-side binding/export infrastructure for the JS/TS packages, not the end-user browser SDK |
+| You maintain the wasm ABI/package boundary inside this repository | Work in `asupersync-browser-core` first; touch `asupersync-wasm` only to keep its retained non-canonical scaffold role honest | These crates are the Rust-side binding/export infrastructure for the JS/TS packages, not the end-user browser SDK |
 | You need the maintained Rust-authored browser example that the tree actually proves | Use `tests/fixtures/rust-browser-consumer/` plus `scripts/validate_rust_browser_consumer.sh` | This is the truthful current Rust-authored browser workflow: an in-repo fixture with deterministic validation, not general external `RuntimeBuilder` parity |
 | You need service/shared workers, cross-origin-isolated `SharedArrayBuffer` parallelism, or native-only modules | Do not start from the Rust-authored browser lane | Those surfaces are deferred, guarded optional, bridge-only, or explicit non-goals today |
 

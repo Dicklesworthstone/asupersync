@@ -11,11 +11,12 @@
 //! 3. **No ambient keys**: Keys must be explicitly provided (capability security)
 //! 4. **Fail-safe defaults**: Invalid/missing auth fails closed
 //!
-//! # Phase 0 Status
+//! # Authentication Contract
 //!
-//! The current implementation uses a deterministic keyed hash that is NOT
-//! cryptographically secure. Production deployments MUST use a proper HMAC
-//! implementation (e.g., HMAC-SHA256).
+//! `AuthenticationTag` is a domain-separated HMAC-SHA256 over the symbol's
+//! object identity, block position, symbol kind, payload length, and payload
+//! bytes. The construction is deterministic, capability-explicit, and suitable
+//! for real integrity verification in production code.
 //!
 //! # Architecture
 //!

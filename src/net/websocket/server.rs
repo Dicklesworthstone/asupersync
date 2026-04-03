@@ -239,6 +239,7 @@ pub struct ServerWebSocket<IO> {
     /// Close handshake state.
     close_handshake: CloseHandshake,
     /// Configuration.
+    #[allow(dead_code)] // retained for potential config inspection
     config: WebSocketConfig,
     /// Message assembler for fragmented frames.
     assembler: MessageAssembler,

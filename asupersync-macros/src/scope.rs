@@ -1,7 +1,10 @@
 //! Implementation of the `scope!` macro.
 //!
-//! The scope macro creates a structured concurrency region that owns all
-//! spawned tasks and guarantees quiescence on exit.
+//! The scope macro creates a [`Scope`](asupersync::Scope) binding for the
+//! current `Cx` region.
+//!
+//! It is an ergonomic helper, not a fresh child-region boundary. Child-region
+//! ownership and quiescence still require explicit `Scope::region(...)`.
 //!
 //! # Syntax
 //!
@@ -201,16 +204,17 @@ impl Parse for ScopeInput {
 /// Generates the scope implementation.
 ///
 /// The macro expands to code that:
-/// 1. Creates a scope from the context
+/// 1. Creates a `Scope` from the current `Cx`
 /// 2. Makes the `scope` variable available in the body
-/// 3. Wraps the body in an async block
-/// 4. Awaits the result
+/// 3. Optionally binds `__state` for nested `spawn!` calls
+/// 4. Wraps the body in an async block
+/// 5. Awaits the result
 ///
 /// # Phase 0 Implementation
 ///
-/// In Phase 0 (single-threaded), the scope is created from the current
-/// context's region. Full child region creation with quiescence guarantees
-/// will be implemented in later phases.
+/// Today the scope is created from the current context's region. Full child
+/// region creation with a new quiescence boundary is still an explicit
+/// `Scope::region(...)` operation.
 pub fn scope_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ScopeInput);
 

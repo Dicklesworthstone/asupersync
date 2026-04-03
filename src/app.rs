@@ -123,6 +123,9 @@ impl CompiledApp {
             let mut regions = Self::collect_region_tree(state, root_region);
             regions.sort_by_key(|(_, depth)| std::cmp::Reverse(*depth));
             for (region_id, _) in regions {
+                if let Some(region) = state.region(region_id) {
+                    region.begin_close(None);
+                }
                 state.advance_region_state(region_id);
             }
         }
@@ -1800,6 +1803,7 @@ mod tests {
         /// Get the current message history.
         GetHistory,
         /// Get the number of messages.
+        #[allow(dead_code)]
         Count,
     }
 

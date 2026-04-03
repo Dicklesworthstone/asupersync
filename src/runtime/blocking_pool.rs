@@ -160,8 +160,6 @@ struct BlockingPoolInner {
 
 /// A task submitted to the blocking pool.
 struct BlockingTask {
-    /// Unique task identifier.
-    id: u64,
     /// The work to execute.
     work: Box<dyn FnOnce() + Send + 'static>,
     /// Priority (higher = more important, for future use).
@@ -404,7 +402,6 @@ impl BlockingPool {
         }
 
         let task = BlockingTask {
-            id: task_id,
             work: Box::new(f),
             priority,
             cancelled: Arc::clone(&cancelled),
@@ -552,7 +549,6 @@ impl BlockingPoolHandle {
         }
 
         let task = BlockingTask {
-            id: task_id,
             work: Box::new(f),
             priority,
             cancelled: Arc::clone(&cancelled),
@@ -1837,7 +1833,6 @@ mod tests {
             completion: Arc::clone(&completion),
         };
         let task = BlockingTask {
-            id: task_id,
             work: Box::new(move || {
                 ran_clone.fetch_add(1, Ordering::Relaxed);
             }),

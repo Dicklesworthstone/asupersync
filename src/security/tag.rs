@@ -1,14 +1,21 @@
 //! Authentication tags for symbol verification.
 //!
-//! Tags are fixed-size (32 byte) MACs (Message Authentication Codes) that guarantee
-//! integrity and authenticity of symbols.
+//! Tags are fixed-size 32-byte HMAC-SHA256 message authentication codes over a
+//! symbol's canonical identity and payload bytes.
 
-use crate::security::key::{AUTH_KEY_SIZE, AuthKey};
+use crate::security::key::AuthKey;
 use crate::types::{Symbol, SymbolKind};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::fmt;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Size of an authentication tag in bytes.
 pub const TAG_SIZE: usize = 32;
+
+/// Domain separator for symbol authentication tags.
+const AUTH_TAG_DOMAIN: &[u8] = b"asupersync::security::AuthenticationTag::v1";
 
 /// A cryptographic tag verifying a symbol.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -19,48 +26,30 @@ pub struct AuthenticationTag {
 impl AuthenticationTag {
     /// Computes an authentication tag for a symbol using the given key.
     ///
-    /// In Phase 0, this uses a non-cryptographic deterministic mix.
-    /// In Phase 1+, this will use HMAC-SHA256.
+    /// Construction:
+    /// `HMAC-SHA256(key, domain || object_id || sbn || esi || kind || len || payload)`.
     #[must_use]
     pub fn compute(key: &AuthKey, symbol: &Symbol) -> Self {
-        let mut tag = [0u8; TAG_SIZE];
-        let k = key.as_bytes();
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+        Self::update_mac(&mut mac, symbol);
+        let bytes: [u8; TAG_SIZE] = mac.finalize().into_bytes().into();
+        Self { bytes }
+    }
 
-        // Initialize tag with key
-        tag.copy_from_slice(k);
-
-        // Mix symbol ID
-        let id_bytes = symbol.id().object_id().as_u128().to_le_bytes();
-        for (i, &b) in id_bytes.iter().enumerate() {
-            tag[i % TAG_SIZE] ^= b;
-        }
-
-        // Mix symbol kind so source and repair symbols do not authenticate interchangeably.
-        tag[TAG_SIZE - 1] ^= match symbol.kind() {
+    fn update_mac(mac: &mut HmacSha256, symbol: &Symbol) {
+        mac.update(AUTH_TAG_DOMAIN);
+        mac.update(&symbol.id().object_id().as_u128().to_le_bytes());
+        mac.update(&[symbol.sbn()]);
+        mac.update(&symbol.esi().to_le_bytes());
+        mac.update(&[match symbol.kind() {
             SymbolKind::Source => 0x53,
             SymbolKind::Repair => 0xA7,
-        };
-
-        // Mix SBN and ESI
-        tag[0] ^= symbol.sbn();
-        let esi_bytes = symbol.esi().to_le_bytes();
-        for (i, &b) in esi_bytes.iter().enumerate() {
-            tag[(i + 1) % TAG_SIZE] ^= b;
+        }]);
+        mac.update(&(symbol.data().len() as u64).to_le_bytes());
+        if !symbol.data().is_empty() {
+            mac.update(symbol.data());
         }
-
-        // Mix data
-        for (i, &b) in symbol.data().iter().enumerate() {
-            tag[i % TAG_SIZE] =
-                tag[i % TAG_SIZE].wrapping_add(b).rotate_left(3) ^ k[(i + 5) % AUTH_KEY_SIZE];
-        }
-
-        // Final avalanche
-        for i in 0..TAG_SIZE {
-            tag[i] = tag[i].wrapping_add(tag[(i + 1) % TAG_SIZE]);
-            tag[i] ^= k[i % AUTH_KEY_SIZE];
-        }
-
-        Self { bytes: tag }
     }
 
     /// Verifies that this tag matches the computed tag for the symbol and key.
@@ -68,11 +57,16 @@ impl AuthenticationTag {
     /// This uses a constant-time comparison to prevent timing attacks.
     #[must_use]
     pub fn verify(&self, key: &AuthKey, symbol: &Symbol) -> bool {
-        let computed = Self::compute(key, symbol);
-        self.constant_time_eq(&computed)
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+        Self::update_mac(&mut mac, symbol);
+        mac.verify_slice(&self.bytes).is_ok()
     }
 
-    /// Returns a zeroed tag (for testing or placeholders).
+    /// Returns an all-zero invalid sentinel tag for negative tests and fixtures.
+    ///
+    /// This is never produced by [`Self::compute`] and should not be used as a
+    /// stand-in for a real authenticated symbol.
     #[must_use]
     pub const fn zero() -> Self {
         Self {
@@ -90,15 +84,6 @@ impl AuthenticationTag {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; TAG_SIZE] {
         &self.bytes
-    }
-
-    /// Constant-time comparison to prevent timing attacks.
-    fn constant_time_eq(&self, other: &Self) -> bool {
-        let mut diff = 0u8;
-        for i in 0..TAG_SIZE {
-            diff |= self.bytes[i] ^ other.bytes[i];
-        }
-        diff == 0
     }
 }
 
@@ -182,8 +167,8 @@ mod tests {
         assert!(!tag.verify(&key, &s2));
     }
 
-    /// Invariant: Phase 0 tag is data-dependent — different data must produce
-    /// different tags (not just a copy of the key).
+    /// Invariant: tags are data-dependent — different payloads must produce
+    /// different HMAC outputs.
     #[test]
     fn tag_is_data_dependent() {
         let key = AuthKey::from_seed(42);
@@ -248,5 +233,25 @@ mod tests {
             !tag_repair.verify(&key, &s_source),
             "a repair tag must not verify against a source symbol"
         );
+    }
+
+    #[test]
+    fn compute_matches_domain_separated_hmac_sha256_contract() {
+        let key = AuthKey::from_seed(7);
+        let id = SymbolId::new_for_test(0xABCD, 3, 99);
+        let symbol = Symbol::new(id, vec![0x10, 0x20, 0x30, 0x40], SymbolKind::Repair);
+
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(AUTH_TAG_DOMAIN);
+        mac.update(&symbol.id().object_id().as_u128().to_le_bytes());
+        mac.update(&[symbol.sbn()]);
+        mac.update(&symbol.esi().to_le_bytes());
+        mac.update(&[0xA7]);
+        mac.update(&(symbol.data().len() as u64).to_le_bytes());
+        mac.update(symbol.data());
+
+        let expected = AuthenticationTag::from_bytes(mac.finalize().into_bytes().into());
+        assert_eq!(AuthenticationTag::compute(&key, &symbol), expected);
     }
 }

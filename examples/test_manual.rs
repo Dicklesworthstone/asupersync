@@ -15,7 +15,9 @@ impl AsyncRead for SplitReader {
         _cx: &mut Context<'_>,
         _buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        unimplemented!()
+        // SplitReader only supports buffered reads via AsyncBufRead.
+        // Direct poll_read signals EOF so callers use the buffered path.
+        Poll::Ready(Ok(()))
     }
 }
 

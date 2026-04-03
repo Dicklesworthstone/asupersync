@@ -51,9 +51,9 @@ impl fmt::Display for SpanId {
 /// A span represents a logical unit of work.
 #[derive(Debug, Clone)]
 pub struct Span {
-    id: SpanId,
-    parent_id: Option<SpanId>,
-    name: String,
+    _id: SpanId,
+    _parent_id: Option<SpanId>,
+    _name: String,
 }
 
 /// A context carrying diagnostic information.

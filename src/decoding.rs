@@ -204,7 +204,6 @@ pub enum BlockStateKind {
 
 #[derive(Debug)]
 struct BlockDecoder {
-    sbn: u8,
     state: BlockDecodingState,
     decoded: Option<Vec<u8>>,
 }
@@ -347,7 +346,6 @@ impl DecodingPipeline {
 
         // Ensure block entry exists
         self.blocks.entry(sbn).or_insert_with(|| BlockDecoder {
-            sbn,
             state: BlockDecodingState::Collecting,
             decoded: None,
         });
@@ -587,15 +585,8 @@ impl DecodingPipeline {
 #[derive(Debug, Clone)]
 struct BlockPlan {
     sbn: u8,
-    start: usize,
     len: usize,
     k: usize,
-}
-
-impl BlockPlan {
-    fn end(&self) -> usize {
-        self.start + self.len
-    }
 }
 
 fn plan_blocks(
@@ -630,12 +621,7 @@ fn plan_blocks(
     while offset < object_size {
         let len = usize::min(max_block_size, object_size - offset);
         let k = len.div_ceil(symbol_size);
-        blocks.push(BlockPlan {
-            sbn,
-            start: offset,
-            len,
-            k,
-        });
+        blocks.push(BlockPlan { sbn, len, k });
         offset += len;
         sbn = sbn.wrapping_add(1);
     }

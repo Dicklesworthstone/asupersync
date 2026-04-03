@@ -159,8 +159,8 @@ impl TaskVectorClock {
 /// Minimal happens-before graph derived from a trace.
 #[derive(Debug, Clone)]
 pub struct HappensBeforeGraph {
-    events: Vec<TraceEvent>,
-    edges: Vec<Vec<usize>>,
+    _events: Vec<TraceEvent>,
+    _edges: Vec<Vec<usize>>,
     clocks: Vec<Option<TaskVectorClock>>,
 }
 
@@ -188,8 +188,8 @@ impl HappensBeforeGraph {
         }
 
         Self {
-            events: events.to_vec(),
-            edges,
+            _events: events.to_vec(),
+            _edges: edges,
             clocks,
         }
     }

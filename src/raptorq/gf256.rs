@@ -1369,6 +1369,7 @@ fn lane_ratio_within(len_a: usize, len_b: usize, max_ratio: usize) -> bool {
     lo > 0 && lo.saturating_mul(max_ratio) >= hi
 }
 
+#[cfg(test)]
 #[inline]
 fn in_window(total: usize, min_total: usize, max_total: usize) -> bool {
     min_total <= max_total && (min_total..=max_total).contains(&total)

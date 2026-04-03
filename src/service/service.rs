@@ -233,6 +233,7 @@ where
 ///     }
 /// }
 /// ```
+#[allow(dead_code)] // Public API surface — scaffold for service Cx integration
 pub trait CxProvider: Send + Sync {
     /// Returns the current Cx, if one is available.
     ///
@@ -260,6 +261,7 @@ pub trait CxProvider: Send + Sync {
 /// let adapter = TowerAdapterWithProvider::new(my_service);
 /// // Uses ThreadLocalCxProvider by default
 /// ```
+#[allow(dead_code)] // Public API surface — scaffold for service Cx integration
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ThreadLocalCxProvider;
 
@@ -286,6 +288,7 @@ impl CxProvider for ThreadLocalCxProvider {
 ///
 /// // Can now use the adapter in tests without a runtime
 /// ```
+#[allow(dead_code)] // Public API surface — scaffold for service Cx integration
 #[derive(Clone, Debug)]
 pub struct FixedCxProvider {
     cx: Cx,
@@ -294,12 +297,14 @@ pub struct FixedCxProvider {
 impl FixedCxProvider {
     /// Creates a new fixed Cx provider.
     #[must_use]
+    #[allow(dead_code)] // Service Cx integration API
     pub fn new(cx: Cx) -> Self {
         Self { cx }
     }
 
     /// Creates a provider with a test Cx.
     #[must_use]
+    #[allow(dead_code)] // Service Cx integration API
     pub fn for_testing() -> Self {
         Self {
             cx: Cx::for_testing(),

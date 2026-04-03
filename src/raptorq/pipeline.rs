@@ -311,6 +311,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 // Helpers
 // =========================================================================
 
+#[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 #[allow(clippy::cast_sign_loss)]
 fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> usize {

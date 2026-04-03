@@ -51,8 +51,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
-// Phase 0: Allow dead code and documentation lints for stubs
-#![allow(dead_code)]
+// Phase 0 complete: dead code denied to prevent regressions
+#![deny(dead_code)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_const_for_fn)]
@@ -282,19 +282,24 @@ pub use types::{
     wasm_boundary_state_for_cancel_phase,
 };
 
-// Re-export proc macros from the crate root when the proc-macros feature is
-// enabled. Default builds include this feature; the fallback compile_error!
-// macro_rules! placeholders in combinator/ are only exported by explicit
-// minimal builds that disable default features.
+// Re-export the supported structured-concurrency proc-macro DSL from the
+// crate root when the `proc-macros` feature is enabled. Default builds include
+// this feature.
+//
+// Minimal builds that disable `proc-macros` do not get a functional macro DSL
+// fallback: `join!` and `race!` intentionally resolve to compile-error
+// placeholders, while `scope!`, `spawn!`, and `join_all!` are unavailable until
+// `proc-macros` is re-enabled.
 #[cfg(feature = "proc-macros")]
 pub use asupersync_macros::{join, join_all, race, scope, spawn};
 
 // Proc macro versions available with explicit path when needed
 #[cfg(feature = "proc-macros")]
 pub mod proc_macros {
-    //! Proc macro versions of structured concurrency macros.
+    //! Proc-macro structured-concurrency DSL available when `proc-macros` is enabled.
     //!
-    //! These are provided for explicit access when the macro_rules! versions
-    //! are also in scope.
+    //! This module mirrors the supported root re-exports (`scope!`, `spawn!`,
+    //! `join!`, `join_all!`, `race!`) and also exposes advanced macros that
+    //! intentionally remain explicit-path-only, such as `session_protocol!`.
     pub use asupersync_macros::{join, join_all, race, scope, session_protocol, spawn};
 }

@@ -45,6 +45,7 @@ pub enum SymbolSpanKind {
 #[derive(Clone, Debug)]
 pub struct SymbolSpan {
     context: SymbolTraceContext,
+    #[allow(dead_code)] // retained for debug/tracing diagnostics
     name: String,
     kind: SymbolSpanKind,
     start_time: Time,

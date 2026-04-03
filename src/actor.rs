@@ -267,13 +267,6 @@ impl<A: Actor> ActorHandle<A> {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }
 
-    fn closed_reason(&self) -> crate::types::CancelReason {
-        self.inner
-            .upgrade()
-            .and_then(|inner| inner.read().cancel_reason.clone())
-            .unwrap_or_else(|| crate::types::CancelReason::user("join channel closed"))
-    }
-
     /// Wait for the actor to finish and return its final state.
     ///
     /// Blocks until the actor loop completes (mailbox closed or cancelled),
@@ -1597,7 +1590,6 @@ mod tests {
             count: u64,
             panic_on: u64,
             final_count: Arc<AtomicU64>,
-            restart_count: Arc<AtomicU32>,
         }
 
         impl Actor for PanickingCounter {
@@ -1645,7 +1637,6 @@ mod tests {
                         count: 0,
                         panic_on: 999,
                         final_count: fc.clone(),
-                        restart_count: rc.clone(),
                     }
                 },
                 strategy,

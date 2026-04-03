@@ -38,7 +38,6 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct Diagnostics {
     state: Arc<RuntimeState>,
-    console: Option<Console>,
     spectral_monitor: parking_lot::Mutex<SpectralHealthMonitor>,
 }
 
@@ -48,7 +47,6 @@ impl Diagnostics {
     pub fn new(state: Arc<RuntimeState>) -> Self {
         Self {
             state,
-            console: None,
             spectral_monitor: parking_lot::Mutex::new(SpectralHealthMonitor::new(
                 SpectralThresholds::default(),
             )),
@@ -57,10 +55,9 @@ impl Diagnostics {
 
     /// Create a diagnostics engine with console output (used for richer rendering).
     #[must_use]
-    pub fn with_console(state: Arc<RuntimeState>, console: Console) -> Self {
+    pub fn with_console(state: Arc<RuntimeState>, _console: Console) -> Self {
         Self {
             state,
-            console: Some(console),
             spectral_monitor: parking_lot::Mutex::new(SpectralHealthMonitor::new(
                 SpectralThresholds::default(),
             )),

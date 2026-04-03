@@ -288,6 +288,7 @@ struct ChildFailure {
     parent: ActorId,
     child: ActorId,
     time: Time,
+    #[allow(dead_code)] // retained for debug diagnostics
     reason: String,
 }
 
@@ -303,9 +304,9 @@ struct RestartEvent {
 #[derive(Debug, Clone)]
 struct EscalationEvent {
     from: ActorId,
-    to: ActorId,
+    _to: ActorId,
     time: Time,
-    reason: String,
+    _reason: String,
 }
 
 /// Configuration for a supervisor being tracked.
@@ -391,9 +392,9 @@ impl SupervisionOracle {
     pub fn on_escalation(&mut self, from: ActorId, to: ActorId, time: Time, reason: String) {
         self.escalations.push(EscalationEvent {
             from,
-            to,
+            _to: to,
             time,
-            reason,
+            _reason: reason,
         });
     }
 

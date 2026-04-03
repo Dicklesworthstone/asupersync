@@ -430,7 +430,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | Async I/O traits and extensions | `tokio::io`, `tokio-util::io` | `src/io/` | Built-in | Active | Mixed | Medium |
 | Codec/framing layer | `tokio-util::codec` | `src/codec/` | Built-in | Active | Mixed | Medium |
 | Byte buffers | `bytes` | `src/bytes/` | Built-in | Mature | N/A | Low |
-| Reactor backends | Tokio + Mio internals | `src/runtime/reactor/{epoll,kqueue,windows,lab}.rs` (+ `io_uring` feature on Linux) | Built-in | Active | Mixed | Medium |
+| Reactor backends | Tokio + Mio internals | `src/runtime/reactor/{epoll,kqueue,windows,browser,lab}.rs` (+ `io_uring` feature on Linux) | Built-in | Active | Mixed | Medium |
 | TCP/UDP/Unix sockets | `tokio::net` | `src/net/tcp/`, `src/net/udp.rs`, `src/net/unix/` | Built-in | Active | Mixed | Medium |
 | DNS resolution | `trust-dns`, `hickory`, custom stacks | `src/net/dns/` | Built-in | Active | Mixed | Medium |
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
@@ -451,6 +451,8 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | Tokio-locked third-party crates | crates that require Tokio runtime traits directly | boundary adapters via service/runtime integration points | Adapter needed | N/A | N/A | High |
 
 This map is about capability coverage, not API compatibility. Asupersync intentionally uses a different model centered on `Cx`, regions, explicit cancellation, and deterministic replay.
+
+The reactor export contract is narrower than the directory listing suggests: `runtime::reactor` exports `EpollReactor` on Linux, `IoUringReactor` on Linux only (real with `io-uring`, intentional `Unsupported` without it), `KqueueReactor` on BSD-family targets, `IocpReactor` on Windows, `BrowserReactor` on `wasm32`, and `LabReactor` for deterministic testing. Historical files such as `src/runtime/reactor/uring.rs` and `src/runtime/reactor/macos.rs` are not part of the live export graph.
 
 ---
 
@@ -914,26 +916,39 @@ For structural runtime risk, diagnostics also maintain a spectral health monitor
 `asupersync-macros/` provides proc macros for ergonomic structured concurrency:
 
 ```rust
-use asupersync::{join, race, scope, spawn};
+use asupersync::{join, race, scope, spawn, Cx};
+use asupersync::runtime::RuntimeState;
 
-scope!(cx, {
-    let a = spawn!(async { worker_a().await });
-    let b = spawn!(async { worker_b().await });
-    join!(a, b)
-});
+async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
+    scope!(cx, state: state, {
+        let a = spawn!(async { worker_a().await });
+        let b = spawn!(async { worker_b().await });
+        join!(a, b)
+    });
 
-let winner = race!(cx, {
-    task_a(),
-    task_b(),
-});
+    let winner = race!(cx, {
+        task_a(),
+        task_b(),
+    });
+    let _ = winner;
+}
 ```
 
 These macros are available in the default feature set. If you opt out of
 default features for a minimal core-only build, re-enable `proc-macros`
-explicitly. The macros expand to standard `Scope`/`Cx` calls with proper
-region ownership. Compile-fail tests (via `trybuild`) verify that incorrect
-usage produces clear error messages. See `docs/macro-dsl.md` for the full
-pattern catalog.
+explicitly.
+
+Current contract:
+
+- Supported root macros in `proc-macros` builds are `scope!`, `spawn!`, `join!`, `join_all!`, and `race!`.
+- `scope!` binds a `Scope` for the current region; it does not create a fresh child-region boundary. Use `Scope::region(...)` when you need quiescence on scope exit.
+- `spawn!` requires runtime state (`state: &mut RuntimeState` or ambient `__state`) in addition to `Cx`.
+- `join!` and `join_all!` are supported today, but they still await branches sequentially.
+- `race!` expands to `Cx::race*`; losers are cancelled by drop, not drained. Use `Scope::race` when loser-drain semantics matter.
+- Minimal builds without `proc-macros` do not have a usable macro DSL fallback: `join!` and `race!` intentionally fail with `compile_error!`, while `scope!`, `spawn!`, and `join_all!` are unavailable until `proc-macros` is re-enabled.
+
+Compile-fail tests (via `trybuild`) verify that incorrect usage produces clear
+error messages. See `docs/macro-dsl.md` for the full pattern catalog.
 
 ---
 
@@ -1112,7 +1127,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `test-internals` | Expose test-only helpers (not for production) | Yes |
 | `metrics` | OpenTelemetry metrics provider | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
-| `proc-macros` | `scope!`, `spawn!`, `join!`, `race!` proc macros | Yes |
+| `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!` proc macros | Yes |
 | `tower` | Tower `Service` adapter support | No |
 | `trace-compression` | LZ4 compression for trace files | No |
 | `debug-server` | Debug HTTP server for runtime inspection | No |

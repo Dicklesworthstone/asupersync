@@ -447,6 +447,7 @@ impl IntrusiveStack {
     /// This avoids per-item locality bookkeeping in hot steal-batch paths that
     /// have already proven the source queue contains no local tasks.
     #[inline]
+    #[allow(dead_code)] // reserved for future steal-batch optimization
     pub(crate) fn push_assume_non_local(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) {
         let Some(record) = arena.get(task_id.arena_index()) else {
             return;
@@ -633,6 +634,7 @@ impl IntrusiveStack {
     ///
     /// Caller must ensure `self.has_local_tasks() == false`.
     #[inline]
+    #[allow(dead_code)] // Work-stealing scheduler integration path
     pub(crate) fn steal_batch_into_non_local(
         &mut self,
         max_steal: usize,
@@ -864,6 +866,7 @@ impl IntrusiveStack {
     /// Caller must ensure `self.has_local_tasks() == false`.
     #[inline]
     #[must_use]
+    #[allow(dead_code)] // Work-stealing scheduler integration path
     pub(crate) fn steal_one_assume_non_local(
         &mut self,
         arena: &mut Arena<TaskRecord>,
@@ -909,6 +912,7 @@ impl IntrusiveStack {
     /// Steals one task from the bottom of the stack.
     #[inline]
     #[must_use]
+    #[allow(dead_code)] // Work-stealing scheduler integration path
     pub(crate) fn steal_one(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
         self.steal_one_with_locality(arena)
             .map(|(task_id, _)| task_id)

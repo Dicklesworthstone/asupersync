@@ -323,7 +323,7 @@ lane is narrower and should be treated as three separate workflows:
 | Goal | Supported today | Canonical command / artifact | Evidence |
 |---|---|---|---|
 | Verify browser-safe semantic-core closure | Yes | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
-| Maintain the Rust-side ABI/package boundary that feeds the JS/TS packages | Yes, for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/`, `asupersync-wasm/` |
+| Maintain the Rust-side ABI/package boundary that feeds the JS/TS packages | Yes, for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; touch `asupersync-wasm` only when you need to keep the retained scaffold honest | `asupersync-browser-core/` (canonical owner), `asupersync-wasm/` (retained non-canonical scaffold) |
 | Use the maintained browser-facing Rust example the repository proves end-to-end | Yes, as an in-repo fixture workflow | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `tests/wasm_rust_browser_example_contract.rs` |
 | Construct Browser Edition runtimes directly from external Rust consumer code | Preview public lane | `RuntimeBuilder::browser()` for truthful lane negotiation and structured fail-closed diagnostics | `src/runtime/builder.rs`, `tests/fixtures/rust-browser-consumer/`, `tests/wasm_browser_feasibility_matrix.rs` |
 
@@ -331,6 +331,9 @@ Rules:
 
 - Do not present `asupersync-browser-core` or `asupersync-wasm` as the public
   end-user Browser Edition SDK for Rust consumers.
+- Treat `asupersync-browser-core` as the canonical owner of the shipped
+  JS/WASM boundary and `asupersync-wasm` as retained non-canonical scaffold
+  rather than a second live boundary.
 - Do not imply external Rust `RuntimeBuilder` parity on `wasm32`; the public Rust browser lane is still a preview dispatcher-backed surface.
 - If you need a shipped application-facing browser product surface today, start
   from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next`.
@@ -1482,14 +1485,18 @@ The distributed API is in-progress. The intent is to provide region-scoped
 fault tolerance with explicit leases and idempotency. Today there are two
 entrypoints: `distributed` for region snapshot/replication/recovery, and
 `remote` for named computations with leases and idempotency. The `remote`
-surface is Phase 0 (handle-only; no network transport yet), and all remote
-operations require `RemoteCap` from `Cx` (no closure shipping).
+surface now has an explicit transport-agnostic contract in `src/remote.rs`:
+message schemas, origin/remote state machines, idempotency, lease handling,
+and capability gating are defined there. The core crate still separates
+transport from protocol, so callers must attach a `RemoteRuntime` /
+`RemoteTransport` implementation or use the deterministic no-runtime fallback.
+All remote operations require `RemoteCap` from `Cx` (no closure shipping).
 
 ---
 
 ### 6) Remote Protocol Spec (Named Computations)
 
-This section defines the Phase 1+ **remote structured concurrency protocol**.
+This section defines the current **remote structured concurrency protocol**.
 It is transport-agnostic and uses the message types defined in `src/remote.rs`
 (`RemoteMessage`, `SpawnRequest`, `SpawnAck`, `CancelRequest`, `ResultDelivery`,
 `LeaseRenewal`).
@@ -1731,10 +1738,9 @@ For JSON debug vectors, `input` / `output` byte fields are base64 strings.
 }
 ```
 
-#### 6.9 Stub Implementation Hooks
+#### 6.9 Current Integration Hooks
 
-The Phase 0 harness and runtime already include hook points for integrating
-the protocol:
+The runtime already includes hook points for integrating the protocol:
 
 - `src/remote.rs`: `RemoteTransport` trait (`send`, `try_recv`)
 - `src/remote.rs`: `MessageEnvelope` + `RemoteMessage` types

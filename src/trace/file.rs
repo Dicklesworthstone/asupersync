@@ -1208,6 +1208,7 @@ impl TraceReader {
 pub struct TraceEventIterator {
     reader: BufReader<File>,
     remaining: u64,
+    #[cfg_attr(not(feature = "trace-compression"), allow(dead_code))]
     compression: CompressionMode,
     /// Buffer for decompressed event data.
     #[cfg(feature = "trace-compression")]

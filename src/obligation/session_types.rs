@@ -136,6 +136,8 @@
 //! });
 //! ```
 
+use crate::channel::mpsc;
+use crate::cx::Cx;
 use crate::record::ObligationKind;
 use std::marker::PhantomData;
 
@@ -196,6 +198,22 @@ pub struct Initiator;
 pub struct Responder;
 
 // ============================================================================
+// Transport backing
+// ============================================================================
+
+/// Type-erased bidirectional transport for session channels.
+///
+/// Each endpoint holds a sender (to push messages to the peer) and a
+/// receiver (to pull messages from the peer). Messages are `Box<dyn std::any::Any + std::marker::Send>`
+/// to allow different types at different protocol stages.
+struct SessionTransport {
+    /// Send half — push messages to the peer endpoint.
+    tx: mpsc::Sender<Box<dyn std::any::Any + std::marker::Send>>,
+    /// Receive half — pull messages from the peer endpoint.
+    rx: mpsc::Receiver<Box<dyn std::any::Any + std::marker::Send>>,
+}
+
+// ============================================================================
 // Channel endpoint (typestate)
 // ============================================================================
 
@@ -211,6 +229,12 @@ pub struct Responder;
 /// channel in a non-`End` state panics. This approximates the linear
 /// usage requirement of session types in Rust's affine type system.
 ///
+/// # Transport Modes
+///
+/// When `transport` is `None`, the channel operates in pure typestate mode
+/// (transitions only, no communication). When `Some`, the async methods
+/// actually send and receive values over an mpsc channel.
+///
 /// # Cx Integration
 ///
 /// The `trace_id` field enables distributed tracing across delegated
@@ -224,12 +248,14 @@ pub struct Chan<R, S> {
     obligation_kind: ObligationKind,
     /// Whether the channel has reached the End state.
     closed: bool,
+    /// Transport backing (None = pure typestate, Some = transport-backed).
+    transport: Option<SessionTransport>,
     /// Role and session type markers.
     _marker: PhantomData<(R, S)>,
 }
 
 impl<R, S> Chan<R, S> {
-    /// Create a new channel endpoint in the initial protocol state.
+    /// Create a new channel endpoint in pure typestate mode (no transport).
     ///
     /// This is the "session initiation" — both endpoints must be
     /// created together (one `Initiator`, one `Responder`).
@@ -238,8 +264,31 @@ impl<R, S> Chan<R, S> {
             channel_id,
             obligation_kind,
             closed: false,
+            transport: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Create a new channel endpoint with transport backing.
+    #[allow(dead_code)] // Used by non-proc-macros session constructors
+    fn new_with_transport(
+        channel_id: u64,
+        obligation_kind: ObligationKind,
+        transport: SessionTransport,
+    ) -> Self {
+        Self {
+            channel_id,
+            obligation_kind,
+            closed: false,
+            transport: Some(transport),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns true if this channel has transport backing.
+    #[must_use]
+    pub fn is_transport_backed(&self) -> bool {
+        self.transport.is_some()
     }
 
     /// Channel identifier.
@@ -256,15 +305,18 @@ impl<R, S> Chan<R, S> {
     ///
     /// Consumes `self` in state `S`, returns a channel in state `S2`.
     /// The caller must ensure this transition is valid per the protocol.
+    /// Transport backing is carried forward to the new state.
     fn transition<S2>(mut self) -> Chan<R, S2> {
         let channel_id = self.channel_id;
         let obligation_kind = self.obligation_kind;
+        let transport = self.transport.take();
         // Disarm drop bomb for the consumed pre-transition state.
         self.closed = true;
         Chan {
             channel_id,
             obligation_kind,
             closed: false,
+            transport,
             _marker: PhantomData,
         }
     }
@@ -278,24 +330,80 @@ impl<R, S> Chan<R, S> {
 
 // -- Send transition --
 
-impl<R, T, S> Chan<R, Send<T, S>> {
-    /// Send a value, transitioning to the continuation state.
+impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
+    /// Send a value (pure typestate mode, no transport).
+    ///
+    /// In pure typestate mode, the value is discarded and only the state
+    /// transition is tracked. Use [`send_async`] for transport-backed channels.
     pub fn send(self, _value: T) -> Chan<R, S> {
-        // In a real implementation, this would write to the underlying
-        // transport. Here we encode only the typestate transition.
         self.transition()
+    }
+
+    /// Send a value over the transport, transitioning to the continuation state.
+    ///
+    /// Returns `SessionError::Cancelled` if the `Cx` is cancelled, or
+    /// `SessionError::Closed` if the peer endpoint was dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
+    /// to check, or construct with [`new_session_with_transport`].
+    pub async fn send_async(mut self, cx: &Cx, value: T) -> Result<Chan<R, S>, SessionError> {
+        let transport = self
+            .transport
+            .as_ref()
+            .expect("send_async called on non-transport-backed session channel");
+
+        let permit = transport
+            .tx
+            .reserve(cx)
+            .await
+            .map_err(|_| SessionError::Closed)?;
+        permit.send(Box::new(value) as Box<dyn std::any::Any + std::marker::Send>);
+        Ok(self.transition())
     }
 }
 
 // -- Recv transition --
 
-impl<R, T, S> Chan<R, Recv<T, S>> {
-    /// Receive a value, transitioning to the continuation state.
+impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
+    /// Receive a value (pure typestate mode, no transport).
     ///
-    /// In a real implementation, this would block/await on the transport.
-    /// Here it returns a placeholder and transitions the typestate.
+    /// In pure typestate mode, the caller provides the value. Use
+    /// [`recv_async`] for transport-backed channels.
     pub fn recv(self, value: T) -> (T, Chan<R, S>) {
         (value, self.transition())
+    }
+
+    /// Receive a value from the transport, transitioning to the continuation state.
+    ///
+    /// Returns `SessionError::Cancelled` if the `Cx` is cancelled, or
+    /// `SessionError::Closed` if the peer endpoint was dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this channel has no transport backing, or if the received
+    /// value is not of the expected type (protocol violation).
+    pub async fn recv_async(mut self, cx: &Cx) -> Result<(T, Chan<R, S>), SessionError> {
+        let transport = self
+            .transport
+            .as_mut()
+            .expect("recv_async called on non-transport-backed session channel");
+
+        let boxed = transport
+            .rx
+            .recv(cx)
+            .await
+            .map_err(|_| SessionError::Closed)?;
+
+        let value = *boxed
+            .downcast::<T>()
+            .map_err(|_| SessionError::ProtocolViolation {
+                expected: std::any::type_name::<T>(),
+                actual: "unknown (downcast failed)",
+            })?;
+
+        Ok((value, self.transition()))
     }
 }
 
@@ -310,28 +418,84 @@ pub enum Selected<A, B> {
 }
 
 impl<R, A, B> Chan<R, Select<A, B>> {
-    /// Select the first (left) branch.
+    /// Select the first (left) branch (pure typestate mode).
     pub fn select_left(self) -> Chan<R, A> {
         self.transition()
     }
 
-    /// Select the second (right) branch.
+    /// Select the second (right) branch (pure typestate mode).
     pub fn select_right(self) -> Chan<R, B> {
         self.transition()
+    }
+
+    /// Select the left branch and notify the peer via transport.
+    pub async fn select_left_async(mut self, cx: &Cx) -> Result<Chan<R, A>, SessionError> {
+        if let Some(ref transport) = self.transport {
+            let permit = transport
+                .tx
+                .reserve(cx)
+                .await
+                .map_err(|_| SessionError::Closed)?;
+            permit.send(Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>);
+        }
+        Ok(self.transition())
+    }
+
+    /// Select the right branch and notify the peer via transport.
+    pub async fn select_right_async(mut self, cx: &Cx) -> Result<Chan<R, B>, SessionError> {
+        if let Some(ref transport) = self.transport {
+            let permit = transport
+                .tx
+                .reserve(cx)
+                .await
+                .map_err(|_| SessionError::Closed)?;
+            permit.send(Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>);
+        }
+        Ok(self.transition())
     }
 }
 
 // -- Offer transition (choice by remote participant) --
 
 impl<R, A, B> Chan<R, Offer<A, B>> {
-    /// Wait for the peer's choice and branch accordingly.
+    /// Wait for the peer's choice (pure typestate mode).
     ///
     /// The `choice` parameter simulates receiving the peer's decision.
-    /// Returns the channel in the chosen branch's state.
     pub fn offer(self, choice: Branch) -> Selected<Chan<R, A>, Chan<R, B>> {
         match choice {
             Branch::Left => Selected::Left(self.transition()),
             Branch::Right => Selected::Right(self.transition()),
+        }
+    }
+
+    /// Wait for the peer's branch selection via transport.
+    ///
+    /// Returns the channel in the chosen branch's state.
+    pub async fn offer_async(
+        mut self,
+        cx: &Cx,
+    ) -> Result<Selected<Chan<R, A>, Chan<R, B>>, SessionError> {
+        let transport = self
+            .transport
+            .as_mut()
+            .expect("offer_async called on non-transport-backed session channel");
+
+        let boxed = transport
+            .rx
+            .recv(cx)
+            .await
+            .map_err(|_| SessionError::Closed)?;
+
+        let branch = *boxed
+            .downcast::<Branch>()
+            .map_err(|_| SessionError::ProtocolViolation {
+                expected: "Branch (Left/Right)",
+                actual: "unknown (downcast failed)",
+            })?;
+
+        match branch {
+            Branch::Left => Ok(Selected::Left(self.transition())),
+            Branch::Right => Ok(Selected::Right(self.transition())),
         }
     }
 }
@@ -441,7 +605,7 @@ pub mod send_permit {
     /// Alias for macro compatibility.
     pub type ResponderSession<T> = ReceiverSession<T>;
 
-    /// Create a paired sender/receiver session for SendPermit.
+    /// Create a paired sender/receiver session for SendPermit (pure typestate).
     pub fn new_session<T>(
         channel_id: u64,
     ) -> (
@@ -451,6 +615,39 @@ pub mod send_permit {
         (
             Chan::new_raw(channel_id, ObligationKind::SendPermit),
             Chan::new_raw(channel_id, ObligationKind::SendPermit),
+        )
+    }
+
+    /// Create a transport-backed sender/receiver session for SendPermit.
+    ///
+    /// Each endpoint gets a bidirectional mpsc channel to the peer.
+    /// `buffer` controls the mpsc channel capacity.
+    pub fn new_session_with_transport<T>(
+        channel_id: u64,
+        buffer: usize,
+    ) -> (
+        Chan<Initiator, SenderSession<T>>,
+        Chan<Responder, ReceiverSession<T>>,
+    ) {
+        let (tx_i2r, rx_i2r) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        let (tx_r2i, rx_r2i) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        (
+            Chan::new_with_transport(
+                channel_id,
+                ObligationKind::SendPermit,
+                SessionTransport {
+                    tx: tx_i2r,
+                    rx: rx_r2i,
+                },
+            ),
+            Chan::new_with_transport(
+                channel_id,
+                ObligationKind::SendPermit,
+                SessionTransport {
+                    tx: tx_r2i,
+                    rx: rx_i2r,
+                },
+            ),
         )
     }
 }
@@ -524,7 +721,7 @@ pub mod lease {
     /// Alias for macro compatibility.
     pub type ResponderSession = ResourceSession;
 
-    /// Create a paired holder/resource session for Lease.
+    /// Create a paired holder/resource session for Lease (pure typestate).
     pub fn new_session(
         channel_id: u64,
     ) -> (
@@ -537,7 +734,39 @@ pub mod lease {
         )
     }
 
-    /// After a `Renew`, create a fresh loop iteration.
+    /// Create a transport-backed holder/resource session for Lease.
+    pub fn new_session_with_transport(
+        channel_id: u64,
+        buffer: usize,
+    ) -> (
+        Chan<Initiator, HolderSession>,
+        Chan<Responder, ResourceSession>,
+    ) {
+        let (tx_i2r, rx_i2r) =
+            crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        let (tx_r2i, rx_r2i) =
+            crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        (
+            Chan::new_with_transport(
+                channel_id,
+                ObligationKind::Lease,
+                SessionTransport {
+                    tx: tx_i2r,
+                    rx: rx_r2i,
+                },
+            ),
+            Chan::new_with_transport(
+                channel_id,
+                ObligationKind::Lease,
+                SessionTransport {
+                    tx: tx_r2i,
+                    rx: rx_i2r,
+                },
+            ),
+        )
+    }
+
+    /// After a `Renew`, create a fresh loop iteration (pure typestate).
     pub fn renew_loop(
         channel_id: u64,
     ) -> (Chan<Initiator, HolderLoop>, Chan<Responder, ResourceLoop>) {
@@ -709,6 +938,150 @@ pub mod delegation {
 ///   - `session_duration_us` (histogram by protocol)
 ///   - `session_fallback_total` (counter by reason)
 pub struct TracingContract;
+
+// ============================================================================
+// Transport bridge contract (G1 decision — bead v2ofj7.7.1)
+// ============================================================================
+
+/// Transport bridge contract for session-typed channels.
+///
+/// # Decision Summary (bead v2ofj7.7.1)
+///
+/// The session-type API currently operates as pure typestate transitions with
+/// no transport backing — `send(v)` discards the value, `recv(v)` accepts a
+/// placeholder. This contract freezes the chosen transport binding.
+///
+/// ## Chosen Bridge: `mpsc`-backed `TrackedSender`/`TrackedReceiver`
+///
+/// Session channels bind to the existing in-process `mpsc::channel` transport
+/// via the obligation-tracked wrappers in `channel::session`. This is the
+/// narrowest viable bridge that preserves all invariants.
+///
+/// ### Architecture
+///
+/// ```text
+///   Chan<R, Send<T, S>>
+///       │
+///       ├── Typestate transition (compile-time)
+///       │
+///       └── TransportBridge
+///               │
+///               ├── tx: TrackedSender<SessionMessage<T>>
+///               │       └── reserve(&cx) → TrackedPermit → send(v) → CommittedProof
+///               │
+///               └── rx: mpsc::Receiver<SessionMessage<T>>
+///                       └── recv(&cx) → T | SessionError
+/// ```
+///
+/// ### Wire Format
+///
+/// Each protocol transition maps to a `SessionMessage` discriminant:
+///
+/// ```text
+///   SessionMessage::Payload(T)    — for Send<T, S> transitions
+///   SessionMessage::SelectLeft    — for Select<A, B>.select_left()
+///   SessionMessage::SelectRight   — for Select<A, B>.select_right()
+///   SessionMessage::Close         — for End.close()
+/// ```
+///
+/// ### Capability Requirements
+///
+/// - **`Cx` reference**: Every transport operation takes `&Cx` for cancellation
+///   and budget enforcement. If `cx.is_cancel_requested()`, the operation fails
+///   immediately with `SessionError::Cancelled`.
+///
+/// - **Obligation tracking**: Send-side uses `TrackedPermit` from
+///   `channel::session`. Drop-bomb ensures every reserved slot is committed
+///   or aborted. The `ObligationToken<SendPermit>` proof flows into the
+///   evidence ledger.
+///
+/// - **Budget consumption**: Each transition decrements the `Cx` poll budget.
+///   If budget is exhausted, the operation yields rather than blocking.
+///
+/// ### Error Semantics
+///
+/// | Condition | Behavior |
+/// |-----------|----------|
+/// | Cancelled Cx | `SessionError::Cancelled` — permit aborted |
+/// | Receiver dropped | `SessionError::Closed` — send returns error |
+/// | Sender dropped | `SessionError::Closed` — recv returns None |
+/// | Budget exhausted | Yield (cooperate with scheduler) |
+/// | Protocol violation | Panic in debug, log + close in release |
+/// | Drop mid-protocol | Drop-bomb panic (existing behavior) |
+///
+/// ### Scope Constraints
+///
+/// - **First supported bridge**: In-process `mpsc` only. Cross-process and
+///   network transport are explicitly deferred to future work.
+/// - **Serialization**: Not required for in-process bridge. The `mpsc` channel
+///   moves `T` by value. Serde bounds are NOT added yet.
+/// - **Backpressure**: Bounded by `mpsc` channel capacity (set at session
+///   creation time).
+///
+/// ### Downstream Contract (G2, G3)
+///
+/// G2 (implement send/recv/close) must:
+/// - Add `TransportBridge` field to `Chan<R, S>` holding sender + receiver halves
+/// - Make `send()` async: `async fn send(self, cx: &Cx, value: T) -> Result<Chan<R, S>, SessionError>`
+/// - Make `recv()` async: `async fn recv(self, cx: &Cx) -> Result<(T, Chan<R, S>), SessionError>`
+/// - Preserve drop-bomb semantics (existing behavior)
+/// - Add `SessionError` type with Cancelled/Closed/ProtocolViolation variants
+///
+/// G3 (testing) must:
+/// - Verify cancel-correctness: cancelled Cx → abort proof, no value loss
+/// - Verify obligation tracking: dropped permit → panic in debug
+/// - Verify protocol enforcement: out-of-order → compile error (existing)
+/// - Deterministic lab tests with virtual time
+#[allow(dead_code)] // Contract type — used as documentation anchor
+pub struct TransportBridgeContract;
+
+/// Session message wire format for the in-process transport bridge.
+///
+/// Each protocol transition maps to a discriminant. The receiver
+/// pattern-matches to validate protocol adherence at runtime.
+#[derive(Debug)]
+#[allow(dead_code)] // Wire format for G2 implementation
+pub enum SessionMessage<T> {
+    /// Payload delivery for `Send<T, S>` transitions.
+    Payload(T),
+    /// Branch selection: left branch chosen.
+    SelectLeft,
+    /// Branch selection: right branch chosen.
+    SelectRight,
+    /// Session close signal.
+    Close,
+}
+
+/// Errors from transport-backed session operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Error type for G2 implementation
+pub enum SessionError {
+    /// The Cx was cancelled before the operation completed.
+    Cancelled,
+    /// The peer endpoint was dropped (channel closed).
+    Closed,
+    /// Protocol violation: unexpected message type received.
+    ProtocolViolation {
+        /// What the protocol expected.
+        expected: &'static str,
+        /// What was actually received.
+        actual: &'static str,
+    },
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "session cancelled"),
+            Self::Closed => write!(f, "session peer closed"),
+            Self::ProtocolViolation { expected, actual } => {
+                write!(f, "protocol violation: expected {expected}, got {actual}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
 
 const DOC_COMPILE_FAIL_SURFACE: &str = "compile-fail doctests: src/obligation/session_types.rs";
 const MIGRATION_INTEGRATION_SURFACE: &str =

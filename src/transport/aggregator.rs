@@ -1255,6 +1255,7 @@ struct BufferedSymbol {
     /// When it was received.
     received_at: Time,
     /// Path it was received on.
+    #[allow(dead_code)] // retained for future path-aware reorder diagnostics
     path: PathId,
 }
 
@@ -1268,13 +1269,6 @@ impl ReorderProcessResult {
         Self {
             ready,
             rollback_dedup_record: false,
-        }
-    }
-
-    fn dropped_due_to_buffer_overflow() -> Self {
-        Self {
-            ready: Vec::new(),
-            rollback_dedup_record: true,
         }
     }
 }

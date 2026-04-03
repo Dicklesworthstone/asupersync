@@ -2603,6 +2603,14 @@ impl FabricServiceBoundary {
         Self::ensure_transfer_mobility(&admission.validated, &target_subject)?;
         Self::ensure_morphism_target(morphism, &target_subject)?;
         Self::ensure_exact_morphism_target(morphism, &target_subject)?;
+
+        if target_subject.as_str() == self.request_subject.as_str() {
+            return Err(ServiceBoundaryError::RecursiveImportTransfer {
+                target_subject: target_subject.as_str().to_owned(),
+                boundary_subject: self.request_subject.as_str().to_owned(),
+            });
+        }
+
         let plan = self.compile_import_plan(morphism, requested_reply_space)?;
         obligation.transfer(
             callee,

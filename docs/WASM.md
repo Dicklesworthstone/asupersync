@@ -88,16 +88,17 @@ live tree actually supports, not what is architecturally plausible later.
 | Goal | Current contract | Live-tree evidence | Non-goals / caveats |
 |---|---|---|---|
 | Compile the semantic core under `wasm32` with one canonical browser profile | Supported today for contributors, CI, and contract validation | root `Cargo.toml` browser profile features; `src/lib.rs` compile-error gates; wasm profile commands in this doc and `docs/wasm_quickstart_migration.md` | This proves cfg/feature closure, not a public browser runtime bootstrap API |
-| Maintain the wasm ABI and package boundary from Rust | Supported today inside the repository via `asupersync-browser-core` and `asupersync-wasm` | `asupersync-browser-core/Cargo.toml`, `asupersync-wasm/Cargo.toml`, `packages/browser-core/`, `packages/browser/` | These crates exist to feed the JS/TS Browser Edition surface; they are not the ergonomic public Browser Edition API for external Rust consumers |
+| Maintain the wasm ABI and package boundary from Rust | Supported today inside the repository; `asupersync-browser-core` is the canonical owner and `asupersync-wasm` is a retained non-canonical scaffold | `asupersync-browser-core/Cargo.toml`, `asupersync-wasm/Cargo.toml`, `packages/browser-core/`, `packages/browser/` | These crates exist to feed the JS/TS Browser Edition surface; they are not the ergonomic public Browser Edition API for external Rust consumers |
 | Build a browser app that creates Browser Edition runtimes directly from Rust consumer code | Preview public lane | `RuntimeBuilder::browser()`, `RuntimeBuilder::inspect_browser_execution_ladder(...)`, `tests/wasm_browser_feasibility_matrix.rs`, and `src/runtime/builder.rs` | Document this as a preview dispatcher-backed lane with truthful fail-closed diagnostics, not as stable parity with the JS/TS Browser Edition packages |
 
 Current rule of thumb:
 
 - Treat `@asupersync/browser`, `@asupersync/react`, and `@asupersync/next` as
   the shipped public Browser Edition product surfaces.
-- Treat `asupersync-browser-core` and `asupersync-wasm` as Rust workspace
-  binding/package infrastructure, not as the promised end-user browser SDK for
-  Rust consumers.
+- Treat `asupersync-browser-core` as the canonical Rust workspace owner of the
+  shipped JS/WASM boundary.
+- Treat `asupersync-wasm` as a retained non-canonical scaffold for future or
+  alternative binding strategies, not as a second live boundary.
 - Treat `asupersync` plus exactly one `wasm-browser-*` profile as the way to
   validate browser-safe semantic-core closure, not as a guarantee of native
   `RuntimeBuilder` parity on `wasm32`.
@@ -138,7 +139,7 @@ lanes and avoid blending them together:
 |---|---|---|
 | Inspect the truthful browser execution ladder from Rust before deciding how to wire a browser entrypoint | `RuntimeBuilder::inspect_browser_execution_ladder()` or `RuntimeBuilder::inspect_browser_execution_ladder_with_preferred_lane(...)` | `src/runtime/builder.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
 | Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
-| Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
+| Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; use `asupersync-wasm` only when you need to keep the retained scaffold honest | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
 | Validate the maintained browser-facing Rust example that the repository actually proves end-to-end | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `scripts/validate_rust_browser_consumer.sh`, `tests/wasm_rust_browser_example_contract.rs` |
 | Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Preview public lane | `RuntimeBuilder::browser()` now exposes truthful automatic lane negotiation, explicit lane pinning, and structured fail-closed diagnostics; treat it as a preview dispatcher-backed path rather than broad native-runtime parity |
 
@@ -512,9 +513,11 @@ What Rust authors can rely on today:
   `RuntimeBuilder::inspect_browser_execution_ladder(...)` and
   `BrowserRuntimeBuilder::build_selection()` expose structured fail-closed
   diagnostics for Rust-authored browser startup.
-- `asupersync-browser-core` and `asupersync-wasm` provide the Rust-side
-  binding/export crates that generate and maintain the Browser Edition ABI and
-  package artifacts consumed by `@asupersync/browser` and friends.
+- `asupersync-browser-core` is the canonical Rust-side binding/export crate
+  that generates and maintains the shipped Browser Edition ABI and package
+  artifacts consumed by `@asupersync/browser` and friends.
+- `asupersync-wasm` is a retained non-canonical scaffold for future or
+  alternative binding strategies; it is not a second shipped ABI owner.
 - The maintained fixture workflow at `tests/fixtures/rust-browser-consumer/`
   plus `scripts/validate_rust_browser_consumer.sh` remains the authoritative
   end-to-end evidence bundle for this preview lane.
@@ -712,8 +715,8 @@ concurrency guarantees that matter most.
 | Crate | Purpose | Browser role |
 |---|---|---|
 | `asupersync` | Core runtime library | Compiles to wasm32 with browser feature profiles |
-| `asupersync-browser-core` | wasm-bindgen export boundary | Bridges core runtime to JS via ABI symbol table |
-| `asupersync-wasm` | Alternative WASM binding surface (scaffold) | Placeholder for future binding strategies |
+| `asupersync-browser-core` | Canonical wasm-bindgen export boundary | Bridges core runtime to JS via the shipped ABI symbol table |
+| `asupersync-wasm` | Retained non-canonical scaffold | Honest placeholder for future or alternative binding strategies; not a second live boundary |
 | `asupersync-tokio-compat` | Tokio bridge adapters | Native-only; not applicable to browser |
 
 ## Further Reading

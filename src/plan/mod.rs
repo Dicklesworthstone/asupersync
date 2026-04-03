@@ -381,15 +381,6 @@ impl EGraph {
         )
     }
 
-    /// Finds the canonical root without path compression (immutable access).
-    fn find_immut(&self, id: EClassId) -> EClassId {
-        let mut root = id.index();
-        while self.parent[root].index() != root {
-            root = self.parent[root].index();
-        }
-        EClassId::new(root)
-    }
-
     /// Merges two classes and returns the canonical representative.
     ///
     /// Determinism rule: the smallest id always wins.

@@ -524,7 +524,6 @@ pub enum LedgerEvent {
 /// Record of a registered controller within the registry.
 #[derive(Debug, Clone)]
 struct RegisteredController {
-    id: ControllerId,
     registration: ControllerRegistration,
     mode: ControllerMode,
     decisions_this_epoch: u32,
@@ -622,7 +621,6 @@ impl ControllerRegistry {
         self.controllers.insert(
             id,
             RegisteredController {
-                id,
                 registration,
                 mode,
                 decisions_this_epoch: 0,

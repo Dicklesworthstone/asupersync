@@ -1381,12 +1381,6 @@ where
         result
     }
 
-    /// Get current total count (active + idle + in-flight creates).
-    fn total_count(&self) -> usize {
-        let state = self.state.lock();
-        state.active + state.idle.len() + state.creating
-    }
-
     /// Reserve a creation slot under max-size accounting.
     fn reserve_create_slot(&self, waiter_id: Option<u64>) -> bool {
         let mut state = self.state.lock();
@@ -1495,15 +1489,6 @@ where
     async fn create_resource(&self) -> Result<R, PoolError> {
         let fut = self.factory.create();
         fut.await.map_err(|e| PoolError::CreateFailed(e.into()))
-    }
-
-    /// Register as a waiter.
-    fn register_waiter(&self, waker: std::task::Waker) -> u64 {
-        let mut state = self.state.lock();
-        let id = state.next_waiter_id;
-        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        state.waiters.push_back(PoolWaiter { id, waker });
-        id
     }
 
     /// Remove a waiter by ID.

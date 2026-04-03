@@ -16,8 +16,8 @@
 //! Wrappers enforce that handlers cannot access effects they don't need,
 //! preventing ambient authority leaks.
 
-use crate::cx::cap::CapSet;
 use crate::cx::Cx;
+use crate::cx::cap::CapSet;
 use std::sync::Arc;
 
 /// Capability set for web request handlers: time + IO only.
@@ -228,15 +228,15 @@ mod tests {
     }
 
     #[test]
-    fn web_context_accessors() {
+    fn wrapper_provides_access() {
+        fn requires_time<C: cap::HasTime>(_: &Cx<C>) {}
+        fn requires_io<C: cap::HasIo>(_: &Cx<C>) {}
+        fn requires_spawn<C: cap::HasSpawn>(_: &Cx<C>) {}
+
         let full_cx = Arc::new(Cx::for_testing());
         let web = WebContext::new(&full_cx, 7);
         let grpc = GrpcContext::new(&full_cx, "svc/method".to_string());
         let background = BackgroundContext::new(&full_cx, "worker".to_string());
-
-        fn requires_time<C: cap::HasTime>(_: &Cx<C>) {}
-        fn requires_io<C: cap::HasIo>(_: &Cx<C>) {}
-        fn requires_spawn<C: cap::HasSpawn>(_: &Cx<C>) {}
 
         requires_time(web.cx());
         requires_io(web.cx());

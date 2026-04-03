@@ -613,10 +613,10 @@ where
 /// This is useful for buffering an entire body into memory.
 #[derive(Debug)]
 pub struct Collected<B: Body> {
-    inner: B,
+    _inner: B,
     data: Vec<u8>,
     trailers: Option<HeaderMap>,
-    done: bool,
+    _done: bool,
 }
 
 impl<B: Body> Collected<B>
@@ -626,10 +626,10 @@ where
     /// Creates a new collecting body.
     pub fn new(inner: B) -> Self {
         Self {
-            inner,
+            _inner: inner,
             data: Vec::new(),
             trailers: None,
-            done: false,
+            _done: false,
         }
     }
 

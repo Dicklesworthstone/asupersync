@@ -7,6 +7,7 @@
 //! keep stronger semantics opt-in.
 
 #![allow(clippy::duplicate_mod)]
+#![allow(dead_code)] // Source files included via #[path] have many public API items unused in this test context
 
 use std::path::PathBuf;
 

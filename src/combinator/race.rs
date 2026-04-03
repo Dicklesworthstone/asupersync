@@ -686,10 +686,14 @@ pub fn make_race_all_result<T, E>(
     race_all_to_result(result)
 }
 
-/// Placeholder macro for builds without the `proc-macros` feature.
+/// Contract-enforcement placeholder for builds without the `proc-macros` feature.
 ///
-/// Enable the `proc-macros` feature to use the real `race!` proc macro from
-/// the crate root (`use asupersync::race;`).
+/// In `proc-macros` builds, the supported root macro DSL re-exports the real
+/// `race!` proc macro from the crate root (`use asupersync::race;`).
+///
+/// When `proc-macros` is disabled, the macro DSL is intentionally unavailable.
+/// This placeholder exists only to fail fast with a truthful error message
+/// instead of pretending a fallback macro exists.
 ///
 /// Without that feature, use the `Scope` APIs (`Scope::race`,
 /// `Scope::race_all`) when racing spawned tasks.
@@ -724,13 +728,17 @@ macro_rules! race {
     // Biased mode
     (biased; $($future:expr),+ $(,)?) => {{
         compile_error!(
-            "race! macro is not yet implemented. Use Scope::race() or Cx::race() instead."
+            "race! is unavailable without the `proc-macros` feature. Re-enable \
+             `proc-macros`, or use Scope::race() / Scope::race_all() for drained task \
+             races or Cx::race() for inline future races."
         );
     }};
     // Basic positional syntax
     ($($future:expr),+ $(,)?) => {{
         compile_error!(
-            "race! macro is not yet implemented. Use Scope::race() or Cx::race() instead."
+            "race! is unavailable without the `proc-macros` feature. Re-enable \
+             `proc-macros`, or use Scope::race() / Scope::race_all() for drained task \
+             races or Cx::race() for inline future races."
         );
     }};
 }

@@ -3789,7 +3789,11 @@ mod hex {
 }
 
 #[cfg(test)]
-#[allow(clippy::approx_constant, clippy::float_cmp, clippy::bool_assert_comparison)]
+#[allow(
+    clippy::approx_constant,
+    clippy::float_cmp,
+    clippy::bool_assert_comparison
+)]
 mod tests {
     use super::*;
     use crate::Cx;

@@ -154,10 +154,6 @@ impl<T> WatchInner<T> {
         self.sender_dropped.load(Ordering::Acquire)
     }
 
-    fn mark_sender_dropped(&self) {
-        self.sender_dropped.store(true, Ordering::Release);
-    }
-
     fn current_version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
     }

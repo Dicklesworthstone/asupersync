@@ -23,17 +23,6 @@ use std::task::{Context, Poll, Wake, Waker};
 use super::Service;
 use super::discover::{Change, Discover};
 
-fn noop_waker() -> Waker {
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
-    Waker::from(Arc::new(NoopWaker))
-}
-
 fn tracked_probe_waker() -> (Waker, Arc<AtomicBool>) {
     struct TrackWaker(Arc<AtomicBool>);
 
@@ -801,7 +790,18 @@ mod tests {
     use parking_lot::Mutex;
     use std::collections::VecDeque;
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::task::{Context, Poll};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    fn noop_waker() -> Waker {
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+
+        Waker::from(Arc::new(NoopWaker))
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

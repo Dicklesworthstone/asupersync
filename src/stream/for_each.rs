@@ -199,28 +199,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Default)]
-    struct OneThenDoneThenPanicStream {
-        emitted: bool,
-        completed: bool,
-    }
-
-    impl Stream for OneThenDoneThenPanicStream {
-        type Item = usize;
-
-        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            assert!(!self.completed, "inner stream repolled after completion");
-
-            if self.emitted {
-                self.completed = true;
-                Poll::Ready(None)
-            } else {
-                self.emitted = true;
-                Poll::Ready(Some(7))
-            }
-        }
-    }
-
     #[derive(Debug)]
     struct PollCountingEmptyStream {
         polls: Arc<AtomicUsize>,

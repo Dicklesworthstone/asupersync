@@ -814,10 +814,6 @@ impl<T> ClientIncomingBody<T> {
     const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
     const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
 
-    fn new(io: T, kind: ClientBodyKind, buffer: BytesMut) -> Self {
-        Self::with_max_body_size(io, kind, buffer, DEFAULT_MAX_BODY_SIZE)
-    }
-
     fn with_max_body_size(
         io: T,
         kind: ClientBodyKind,

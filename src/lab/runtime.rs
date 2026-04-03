@@ -2227,10 +2227,6 @@ impl LabScheduler {
         }
     }
 
-    fn worker_count(&self) -> usize {
-        self.workers.len()
-    }
-
     /// Returns true if no tasks are currently scheduled.
     #[must_use]
     pub fn is_empty(&self) -> bool {

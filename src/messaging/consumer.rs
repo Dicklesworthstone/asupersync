@@ -1407,6 +1407,8 @@ pub struct FabricConsumerState {
     pub pending_count: u64,
     /// Highest sequence durably acknowledged by the engine.
     pub ack_floor: u64,
+    /// Highest sequence dispatched by the engine.
+    pub highest_dispatched: u64,
     /// Pending acknowledgements keyed by their obligation id.
     pub pending_acks: BTreeMap<ObligationId, PendingAckState>,
     next_delivery_attempt: u32,
@@ -2058,11 +2060,9 @@ impl FabricConsumer {
 
         let incoming_rank = request.demand_class.priority_rank();
         let evicted = self.waiting_pull_requests[worst_index].clone();
-        let replaced = self.config.overflow_policy == ConsumerOverflowPolicy::ReplaceLowestPriority
+        let mut replaced = self.config.overflow_policy
+            == ConsumerOverflowPolicy::ReplaceLowestPriority
             && incoming_rank < evicted.request.demand_class.priority_rank();
-        if replaced {
-            self.waiting_pull_requests.remove(worst_index);
-        }
 
         if self.config.adaptive_kernel == AdaptiveConsumerKernel::AuditBacked {
             let snapshot = ConsumerOverflowDecisionSnapshot {
@@ -2084,6 +2084,10 @@ impl FabricConsumer {
                 snapshot.ci_width(),
             );
             let outcome = evaluate(&contract, &posterior, &ctx);
+
+            replaced = outcome.action_name
+                == ConsumerOverflowDecisionAction::ReplaceLowestPriority.label();
+
             self.push_decision(ConsumerDecisionRecord {
                 kind: ConsumerDecisionKind::Overflow,
                 action_name: outcome.action_name,
@@ -2092,6 +2096,10 @@ impl FabricConsumer {
                 pinned_client: request.pinned_client.clone(),
                 audit: outcome.audit_entry,
             });
+        }
+
+        if replaced {
+            self.waiting_pull_requests.remove(worst_index);
         }
 
         replaced
@@ -2281,6 +2289,7 @@ impl FabricConsumer {
 
         self.state.delivered_count = self.state.delivered_count.saturating_add(window_messages);
         self.state.pending_count = self.state.pending_count.saturating_add(window_messages);
+        self.state.highest_dispatched = self.state.highest_dispatched.max(window.end());
         self.state.pending_acks.insert(
             obligation_id,
             PendingAckState {

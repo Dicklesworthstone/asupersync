@@ -227,8 +227,6 @@ struct ObligationInner {
     progress: FulfillmentProgress,
     /// Creation timestamp.
     created_at: Time,
-    /// Description for debugging.
-    description: Option<String>,
     /// Optional registry mirror for state synchronization and deregistration.
     registry: Option<RegistryMirror>,
 }
@@ -281,7 +279,6 @@ impl SymbolicObligation {
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(total_symbols),
                 created_at,
-                description: None,
                 registry,
             }),
             resolved: false,
@@ -309,7 +306,6 @@ impl SymbolicObligation {
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(1),
                 created_at,
-                description: Some(format!("symbol {symbol_id}")),
                 registry,
             }),
             resolved: false,
@@ -338,7 +334,6 @@ impl SymbolicObligation {
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(expected_count),
                 created_at,
-                description: None,
                 registry,
             }),
             resolved: false,
@@ -367,7 +362,6 @@ impl SymbolicObligation {
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(min_symbols),
                 created_at,
-                description: None,
                 registry,
             }),
             resolved: false,
@@ -548,7 +542,6 @@ impl SymbolicObligation {
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(total),
                 created_at: Time::ZERO,
-                description: None,
                 registry: None,
             }),
             resolved: false,
@@ -620,7 +613,6 @@ pub(crate) struct ObligationEntry {
     kind: SymbolicObligationKind,
     object_id: ObjectId,
     holder: TaskId,
-    region: RegionId,
     #[allow(dead_code)]
     created_at: Time,
     state: SymbolicObligationState,
@@ -998,7 +990,6 @@ impl SymbolicObligationRegistry {
             kind,
             object_id,
             holder,
-            region,
             created_at,
             state: SymbolicObligationState::Reserved,
         };

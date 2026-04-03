@@ -1,3 +1,13 @@
+//! Canonical Rust-side wasm-bindgen boundary for the shipped Browser Edition.
+//!
+//! `asupersync-browser-core` is the sole workspace crate that owns the live
+//! v1 ABI/export surface consumed by `@asupersync/browser-core` and the
+//! higher-level JS/TS packages.
+//!
+//! The sibling `asupersync-wasm` crate is retained as a non-canonical scaffold
+//! for future or alternative binding strategies. It is not the current owner of
+//! the shipped JS/WASM boundary.
+//!
 #![deny(unsafe_code)]
 #![allow(clippy::missing_errors_doc)]
 // wasm-bindgen requires String at the JS boundary; impl functions mirror those signatures.

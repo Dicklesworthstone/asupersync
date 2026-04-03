@@ -242,11 +242,6 @@ fn collect_crlf_positions(buf: &[u8], out: &mut smallvec::SmallVec<[usize; 32]>)
     }
 }
 
-/// Parse the request line: `METHOD SP URI SP VERSION CRLF`.
-fn parse_request_line(line: &str) -> Result<(Method, String, Version), HttpError> {
-    parse_request_line_bytes(line.as_bytes())
-}
-
 fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
     // Fast path for the overwhelmingly common HTTP/1.x wire form:
     // `METHOD SP URI SP VERSION` with no extra whitespace tokens.
@@ -408,6 +403,7 @@ pub(super) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpE
 }
 
 /// Look up a header value (case-insensitive name match).
+#[cfg(test)]
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()

@@ -489,8 +489,6 @@ struct WaiterEntry {
     holder: TaskId,
     /// The region of the waiting task.
     region: RegionId,
-    /// When the waiter was enqueued.
-    enqueued_at: Time,
     /// Maximum virtual time at which the wait expires.
     deadline: Time,
 }
@@ -908,7 +906,6 @@ impl NameRegistry {
                             .push_back(WaiterEntry {
                                 holder,
                                 region,
-                                enqueued_at: now,
                                 deadline,
                             });
                         Ok(NameCollisionOutcome::Enqueued)

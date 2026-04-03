@@ -681,14 +681,17 @@ mod tests {
     use super::*;
     use crate::logging::TestEventKind;
     use crate::{
-        BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
-        OneshotRecvError, OneshotSender, TestMeta, WatchReceiver, WatchRecvError, WatchSender,
+        AsyncFile, BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver,
+        MpscSender, OneshotRecvError, OneshotSender, TcpListener, TcpStream, TestMeta, UdpSocket,
+        WatchReceiver, WatchRecvError, WatchSender,
     };
+    use std::collections::VecDeque;
     use std::future::Future;
-    use std::marker::PhantomData;
+    use std::io;
     use std::net::SocketAddr;
     use std::path::Path;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
     #[test]
@@ -898,81 +901,132 @@ mod tests {
 
     struct DummyRuntime;
 
-    // Use PhantomData<fn() -> T> to ensure types are always Send + Sync
-    // regardless of T's bounds (since fn() -> T is always Send + Sync).
-    // Manual Clone impls avoid requiring T: Clone.
-    struct DummyMpscSender<T>(PhantomData<fn() -> T>);
+    struct DummyMpscSender<T> {
+        queue: Arc<Mutex<VecDeque<T>>>,
+    }
+
     impl<T> Clone for DummyMpscSender<T> {
         fn clone(&self) -> Self {
-            Self(PhantomData)
+            Self {
+                queue: Arc::clone(&self.queue),
+            }
         }
     }
 
-    struct DummyMpscReceiver<T>(PhantomData<fn() -> T>);
-
-    struct DummyOneshotSender<T>(PhantomData<fn() -> T>);
-    impl<T> Clone for DummyOneshotSender<T> {
-        fn clone(&self) -> Self {
-            Self(PhantomData)
-        }
+    struct DummyMpscReceiver<T> {
+        queue: Arc<Mutex<VecDeque<T>>>,
     }
 
-    struct DummyBroadcastSender<T>(PhantomData<fn() -> T>);
+    struct DummyOneshotSender<T> {
+        value: Arc<Mutex<Option<T>>>,
+    }
+
+    struct DummyBroadcastSender<T> {
+        latest: Arc<Mutex<Option<T>>>,
+    }
+
     impl<T> Clone for DummyBroadcastSender<T> {
         fn clone(&self) -> Self {
-            Self(PhantomData)
+            Self {
+                latest: Arc::clone(&self.latest),
+            }
         }
     }
 
-    struct DummyBroadcastReceiver<T>(PhantomData<fn() -> T>);
+    struct DummyBroadcastReceiver<T> {
+        latest: Arc<Mutex<Option<T>>>,
+    }
 
-    struct DummyWatchSender<T>(PhantomData<fn() -> T>);
+    struct DummyWatchSender<T> {
+        value: Arc<Mutex<T>>,
+    }
+
     impl<T> Clone for DummyWatchSender<T> {
         fn clone(&self) -> Self {
-            Self(PhantomData)
+            Self {
+                value: Arc::clone(&self.value),
+            }
         }
     }
 
-    struct DummyWatchReceiver<T>(PhantomData<fn() -> T>);
+    struct DummyWatchReceiver<T> {
+        value: Arc<Mutex<T>>,
+    }
+
     impl<T> Clone for DummyWatchReceiver<T> {
         fn clone(&self) -> Self {
-            Self(PhantomData)
+            Self {
+                value: Arc::clone(&self.value),
+            }
         }
     }
 
+    #[derive(Debug)]
     struct DummyFile;
 
+    #[derive(Debug)]
     struct DummyTcpListener;
 
+    #[derive(Debug)]
     struct DummyTcpStream;
 
+    #[derive(Debug)]
     struct DummyUdpSocket;
 
+    fn dummy_unsupported(label: &'static str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("dummy runtime does not implement {label}"),
+        )
+    }
+
     impl<T: Send> MpscSender<T> for DummyMpscSender<T> {
-        fn send(&self, _value: T) -> Pin<Box<dyn Future<Output = Result<(), T>> + Send + '_>> {
-            Box::pin(async { panic!("dummy mpsc send") })
+        fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), T>> + Send + '_>> {
+            let queue = Arc::clone(&self.queue);
+            Box::pin(async move {
+                queue
+                    .lock()
+                    .expect("dummy mpsc queue lock poisoned")
+                    .push_back(value);
+                Ok(())
+            })
         }
     }
 
     impl<T: Send> MpscReceiver<T> for DummyMpscReceiver<T> {
         fn recv(&mut self) -> Pin<Box<dyn Future<Output = Option<T>> + Send + '_>> {
-            Box::pin(async { panic!("dummy mpsc recv") })
+            let queue = Arc::clone(&self.queue);
+            Box::pin(async move {
+                queue
+                    .lock()
+                    .expect("dummy mpsc queue lock poisoned")
+                    .pop_front()
+            })
         }
     }
 
     impl<T: Send> OneshotSender<T> for DummyOneshotSender<T> {
-        fn send(self, _value: T) -> Result<(), T> {
-            panic!("dummy oneshot send")
+        fn send(self, value: T) -> Result<(), T> {
+            let mut slot = self.value.lock().expect("dummy oneshot lock poisoned");
+            if slot.is_some() {
+                Err(value)
+            } else {
+                *slot = Some(value);
+                Ok(())
+            }
         }
     }
 
     impl<T: Send + Clone + 'static> BroadcastSender<T> for DummyBroadcastSender<T> {
-        fn send(&self, _value: T) -> Result<usize, T> {
-            panic!("dummy broadcast send")
+        fn send(&self, value: T) -> Result<usize, T> {
+            *self.latest.lock().expect("dummy broadcast lock poisoned") = Some(value);
+            Ok(1)
         }
 
         fn subscribe(&self) -> Box<dyn BroadcastReceiver<T>> {
-            Box::new(DummyBroadcastReceiver(PhantomData))
+            Box::new(DummyBroadcastReceiver {
+                latest: Arc::clone(&self.latest),
+            })
         }
     }
 
@@ -980,13 +1034,21 @@ mod tests {
         fn recv(
             &mut self,
         ) -> Pin<Box<dyn Future<Output = Result<T, BroadcastRecvError>> + Send + '_>> {
-            Box::pin(async { panic!("dummy broadcast recv") })
+            let latest = Arc::clone(&self.latest);
+            Box::pin(async move {
+                latest
+                    .lock()
+                    .expect("dummy broadcast lock poisoned")
+                    .clone()
+                    .ok_or(BroadcastRecvError::Closed)
+            })
         }
     }
 
     impl<T: Send + Sync> WatchSender<T> for DummyWatchSender<T> {
-        fn send(&self, _value: T) -> Result<(), T> {
-            panic!("dummy watch send")
+        fn send(&self, value: T) -> Result<(), T> {
+            *self.value.lock().expect("dummy watch lock poisoned") = value;
+            Ok(())
         }
     }
 
@@ -994,11 +1056,14 @@ mod tests {
         fn changed(
             &mut self,
         ) -> Pin<Box<dyn Future<Output = Result<(), WatchRecvError>> + Send + '_>> {
-            Box::pin(async { panic!("dummy watch recv") })
+            Box::pin(async { Ok(()) })
         }
 
         fn borrow_and_clone(&self) -> T {
-            panic!("dummy watch borrow")
+            self.value
+                .lock()
+                .expect("dummy watch lock poisoned")
+                .clone()
         }
     }
 
@@ -1007,36 +1072,36 @@ mod tests {
             &'a mut self,
             _buf: &'a [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy file write") })
+            Box::pin(async { Err(dummy_unsupported("file write_all")) })
         }
 
         fn read_exact<'a>(
             &'a mut self,
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy file read_exact") })
+            Box::pin(async { Err(dummy_unsupported("file read_exact")) })
         }
 
         fn read_to_end<'a>(
             &'a mut self,
             _buf: &'a mut Vec<u8>,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy file read_to_end") })
+            Box::pin(async { Err(dummy_unsupported("file read_to_end")) })
         }
 
         fn seek<'a>(
             &'a mut self,
             _pos: std::io::SeekFrom,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<u64>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy file seek") })
+            Box::pin(async { Err(dummy_unsupported("file seek")) })
         }
 
         fn sync_all(&self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
-            Box::pin(async { panic!("dummy file sync") })
+            Box::pin(async { Err(dummy_unsupported("file sync_all")) })
         }
 
         fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
-            Box::pin(async { panic!("dummy file shutdown") })
+            Box::pin(async { Err(dummy_unsupported("file shutdown")) })
         }
     }
 
@@ -1044,14 +1109,14 @@ mod tests {
         type Stream = DummyTcpStream;
 
         fn local_addr(&self) -> std::io::Result<SocketAddr> {
-            panic!("dummy tcp local_addr")
+            Err(dummy_unsupported("tcp listener local_addr"))
         }
 
         fn accept(
             &mut self,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, SocketAddr)>> + Send + '_>>
         {
-            Box::pin(async { panic!("dummy tcp accept") })
+            Box::pin(async { Err(dummy_unsupported("tcp listener accept")) })
         }
     }
 
@@ -1060,31 +1125,31 @@ mod tests {
             &'a mut self,
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy tcp read") })
+            Box::pin(async { Err(dummy_unsupported("tcp stream read")) })
         }
 
         fn read_exact<'a>(
             &'a mut self,
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy tcp read_exact") })
+            Box::pin(async { Err(dummy_unsupported("tcp stream read_exact")) })
         }
 
         fn write_all<'a>(
             &'a mut self,
             _buf: &'a [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy tcp write_all") })
+            Box::pin(async { Err(dummy_unsupported("tcp stream write_all")) })
         }
 
         fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
-            Box::pin(async { panic!("dummy tcp shutdown") })
+            Box::pin(async { Err(dummy_unsupported("tcp stream shutdown")) })
         }
     }
 
     impl crate::UdpSocket for DummyUdpSocket {
         fn local_addr(&self) -> std::io::Result<SocketAddr> {
-            panic!("dummy udp local_addr")
+            Err(dummy_unsupported("udp socket local_addr"))
         }
 
         fn send_to<'a>(
@@ -1092,7 +1157,7 @@ mod tests {
             _buf: &'a [u8],
             _addr: SocketAddr,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy udp send_to") })
+            Box::pin(async { Err(dummy_unsupported("udp socket send_to")) })
         }
 
         fn recv_from<'a>(
@@ -1100,7 +1165,7 @@ mod tests {
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<(usize, SocketAddr)>> + Send + 'a>>
         {
-            Box::pin(async { panic!("dummy udp recv_from") })
+            Box::pin(async { Err(dummy_unsupported("udp socket recv_from")) })
         }
     }
 
@@ -1151,34 +1216,53 @@ mod tests {
             &self,
             _capacity: usize,
         ) -> (Self::MpscSender<T>, Self::MpscReceiver<T>) {
-            (DummyMpscSender(PhantomData), DummyMpscReceiver(PhantomData))
+            let queue = Arc::new(Mutex::new(VecDeque::new()));
+            (
+                DummyMpscSender {
+                    queue: Arc::clone(&queue),
+                },
+                DummyMpscReceiver { queue },
+            )
         }
 
         fn oneshot_channel<T: Send + 'static>(
             &self,
         ) -> (Self::OneshotSender<T>, Self::OneshotReceiver<T>) {
-            let receiver: Self::OneshotReceiver<T> =
-                Box::pin(async { panic!("dummy oneshot recv") });
-            (DummyOneshotSender(PhantomData), receiver)
+            let value = Arc::new(Mutex::new(None));
+            let receiver_value = Arc::clone(&value);
+            let receiver: Self::OneshotReceiver<T> = Box::pin(async move {
+                receiver_value
+                    .lock()
+                    .expect("dummy oneshot lock poisoned")
+                    .take()
+                    .ok_or(OneshotRecvError)
+            });
+            (DummyOneshotSender { value }, receiver)
         }
 
         fn broadcast_channel<T: Send + Clone + 'static>(
             &self,
             _capacity: usize,
         ) -> (Self::BroadcastSender<T>, Self::BroadcastReceiver<T>) {
+            let latest = Arc::new(Mutex::new(None));
             (
-                DummyBroadcastSender(PhantomData),
-                DummyBroadcastReceiver(PhantomData),
+                DummyBroadcastSender {
+                    latest: Arc::clone(&latest),
+                },
+                DummyBroadcastReceiver { latest },
             )
         }
 
         fn watch_channel<T: Send + Sync + Clone + 'static>(
             &self,
-            _initial: T,
+            initial: T,
         ) -> (Self::WatchSender<T>, Self::WatchReceiver<T>) {
+            let value = Arc::new(Mutex::new(initial));
             (
-                DummyWatchSender(PhantomData),
-                DummyWatchReceiver(PhantomData),
+                DummyWatchSender {
+                    value: Arc::clone(&value),
+                },
+                DummyWatchReceiver { value },
             )
         }
 
@@ -1186,36 +1270,219 @@ mod tests {
             &'a self,
             _path: &'a Path,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::File>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy file create") })
+            Box::pin(async { Err(dummy_unsupported("file_create")) })
         }
 
         fn file_open<'a>(
             &'a self,
             _path: &'a Path,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::File>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy file open") })
+            Box::pin(async { Err(dummy_unsupported("file_open")) })
         }
 
         fn tcp_listen<'a>(
             &'a self,
             _addr: &'a str,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::TcpListener>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy tcp listen") })
+            Box::pin(async { Err(dummy_unsupported("tcp_listen")) })
         }
 
         fn tcp_connect<'a>(
             &'a self,
             _addr: SocketAddr,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::TcpStream>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy tcp connect") })
+            Box::pin(async { Err(dummy_unsupported("tcp_connect")) })
         }
 
         fn udp_bind<'a>(
             &'a self,
             _addr: &'a str,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::UdpSocket>> + Send + 'a>> {
-            Box::pin(async { panic!("dummy udp bind") })
+            Box::pin(async { Err(dummy_unsupported("udp_bind")) })
         }
+    }
+
+    #[test]
+    fn dummy_runtime_channels_are_non_panicking() {
+        let runtime = DummyRuntime;
+
+        let (tx, mut rx) = runtime.mpsc_channel::<u32>(4);
+        assert_eq!(runtime.block_on(tx.send(7)), Ok(()));
+        assert_eq!(runtime.block_on(rx.recv()), Some(7));
+        assert_eq!(runtime.block_on(rx.recv()), None);
+
+        let (tx, rx) = runtime.oneshot_channel::<u32>();
+        assert_eq!(tx.send(9), Ok(()));
+        assert_eq!(runtime.block_on(rx), Ok(9));
+
+        let (tx, mut rx) = runtime.broadcast_channel::<u32>(4);
+        assert_eq!(tx.send(11), Ok(1));
+        assert_eq!(runtime.block_on(rx.recv()), Ok(11));
+
+        let mut rx2 = tx.subscribe();
+        assert_eq!(runtime.block_on(rx2.recv()), Ok(11));
+
+        let (tx, mut rx) = runtime.watch_channel(13_u32);
+        assert_eq!(rx.borrow_and_clone(), 13);
+        assert_eq!(tx.send(17), Ok(()));
+        assert_eq!(runtime.block_on(rx.changed()), Ok(()));
+        assert_eq!(rx.borrow_and_clone(), 17);
+    }
+
+    #[test]
+    fn dummy_runtime_io_surfaces_fail_closed_with_unsupported_errors() {
+        let runtime = DummyRuntime;
+
+        let create_err = runtime
+            .block_on(runtime.file_create(Path::new("dummy.txt")))
+            .expect_err("dummy file_create should fail closed");
+        assert_eq!(create_err.kind(), io::ErrorKind::Unsupported);
+
+        let open_err = runtime
+            .block_on(runtime.file_open(Path::new("dummy.txt")))
+            .expect_err("dummy file_open should fail closed");
+        assert_eq!(open_err.kind(), io::ErrorKind::Unsupported);
+
+        let listen_err = runtime
+            .block_on(runtime.tcp_listen("127.0.0.1:0"))
+            .expect_err("dummy tcp_listen should fail closed");
+        assert_eq!(listen_err.kind(), io::ErrorKind::Unsupported);
+
+        let connect_err = runtime
+            .block_on(runtime.tcp_connect(SocketAddr::from(([127, 0, 0, 1], 80))))
+            .expect_err("dummy tcp_connect should fail closed");
+        assert_eq!(connect_err.kind(), io::ErrorKind::Unsupported);
+
+        let bind_err = runtime
+            .block_on(runtime.udp_bind("127.0.0.1:0"))
+            .expect_err("dummy udp_bind should fail closed");
+        assert_eq!(bind_err.kind(), io::ErrorKind::Unsupported);
+
+        let mut file = DummyFile;
+        assert_eq!(
+            runtime
+                .block_on(file.write_all(b"abc"))
+                .expect_err("dummy file write_all should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        let mut buf = [0_u8; 4];
+        assert_eq!(
+            runtime
+                .block_on(file.read_exact(&mut buf))
+                .expect_err("dummy file read_exact should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        let mut bytes = Vec::new();
+        assert_eq!(
+            runtime
+                .block_on(file.read_to_end(&mut bytes))
+                .expect_err("dummy file read_to_end should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(file.seek(std::io::SeekFrom::Start(0)))
+                .expect_err("dummy file seek should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(file.sync_all())
+                .expect_err("dummy file sync_all should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(file.shutdown())
+                .expect_err("dummy file shutdown should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+
+        let mut listener = DummyTcpListener;
+        assert_eq!(
+            listener
+                .local_addr()
+                .expect_err("dummy tcp local_addr should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(listener.accept())
+                .expect_err("dummy tcp accept should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+
+        let mut stream = DummyTcpStream;
+        assert_eq!(
+            runtime
+                .block_on(stream.read(&mut buf))
+                .expect_err("dummy tcp read should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(stream.read_exact(&mut buf))
+                .expect_err("dummy tcp read_exact should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(stream.write_all(b"abc"))
+                .expect_err("dummy tcp write_all should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(stream.shutdown())
+                .expect_err("dummy tcp shutdown should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+
+        let socket = DummyUdpSocket;
+        assert_eq!(
+            socket
+                .local_addr()
+                .expect_err("dummy udp local_addr should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(socket.send_to(b"abc", SocketAddr::from(([127, 0, 0, 1], 80))))
+                .expect_err("dummy udp send_to should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            runtime
+                .block_on(socket.recv_from(&mut buf))
+                .expect_err("dummy udp recv_from should fail closed")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn dummy_runtime_contains_no_panic_based_placeholders() {
+        let runner_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runner.rs");
+        let source = std::fs::read_to_string(&runner_path)
+            .unwrap_or_else(|_| panic!("could not read {}", runner_path.display()));
+        assert!(
+            !source.contains("panic!(\"dummy"),
+            "runner dummy runtime still contains panic-based placeholders"
+        );
     }
 
     /// A no-op waker that does nothing when woken.

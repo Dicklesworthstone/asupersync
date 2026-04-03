@@ -280,7 +280,6 @@ fn action_kind_rank(a: &LinkExitAction) -> u8 {
 /// Internal record of an active link between two tasks.
 #[derive(Debug, Clone)]
 struct LinkRecord {
-    link_ref: LinkRef,
     /// One side of the link.
     task_a: TaskId,
     /// Region owning task_a (for region-close cleanup).
@@ -380,7 +379,6 @@ impl LinkSet {
     ) -> LinkRef {
         let link_ref = LinkRef::new();
         let record = LinkRecord {
-            link_ref,
             task_a,
             region_a,
             policy_a,

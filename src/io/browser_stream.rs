@@ -1493,11 +1493,13 @@ impl From<HostApiPolicyError> for BrowserMessageError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // WASM browser support
 enum QueuedBrowserMessage {
     Payload(BrowserMessagePayload),
     Error(BrowserMessageError),
 }
 
+#[allow(dead_code)] // WASM browser support
 fn authorize_message_channel_surface(cap: &dyn HostApiIoCap) -> Result<(), BrowserMessageError> {
     cap.authorize(&HostApiRequest::new(HostApiSurface::MessageChannel))
         .map_err(BrowserMessageError::Policy)

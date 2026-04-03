@@ -64,10 +64,6 @@ impl<T> CacheEntry<T> {
     fn is_expired_at(&self, now: Time) -> bool {
         now >= self.expires_at
     }
-
-    fn remaining_ttl_at(&self, now: Time) -> Duration {
-        Duration::from_nanos(self.expires_at.duration_since(now))
-    }
 }
 
 #[derive(Debug, Clone)]

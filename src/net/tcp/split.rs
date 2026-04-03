@@ -555,16 +555,6 @@ pub struct OwnedReadHalf {
 }
 
 impl OwnedReadHalf {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new(stream: Arc<net::TcpStream>, registration: Option<IoRegistration>) -> Self {
-        Self {
-            inner: Arc::new(TcpStreamInner {
-                stream,
-                state: Mutex::new(split_io_state(registration)),
-            }),
-        }
-    }
-
     /// Create a paired read and write half sharing the same inner state.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new_pair(
@@ -742,13 +732,6 @@ pub struct OwnedWriteHalf {
 }
 
 impl OwnedWriteHalf {
-    pub(crate) fn new(inner: Arc<TcpStreamInner>) -> Self {
-        Self {
-            inner,
-            shutdown_on_drop: true,
-        }
-    }
-
     /// Returns the local address of the stream.
     pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
         #[cfg(target_arch = "wasm32")]

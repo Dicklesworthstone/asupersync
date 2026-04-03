@@ -760,8 +760,6 @@ pub struct ThreeLaneScheduler {
     shutdown: Arc<AtomicBool>,
     /// Coordination for waking workers.
     coordinator: Arc<WorkerCoordinator>,
-    /// Maximum consecutive cancel-lane dispatches before yielding.
-    cancel_streak_limit: usize,
     /// Browser-style ready dispatch burst limit before a host-turn handoff.
     ///
     /// `0` disables forced handoff behavior.
@@ -771,6 +769,7 @@ pub struct ThreeLaneScheduler {
     /// Whether workers are allowed to park when idle.
     enable_parking: bool,
     /// Timer driver for processing timer wakeups.
+    #[allow(dead_code)] // Timer integration in progress
     timer_driver: Option<TimerDriverHandle>,
     /// Shared runtime state for accessing task records and wake_state.
     state: Arc<ContendedMutex<RuntimeState>>,
@@ -985,7 +984,6 @@ impl ThreeLaneScheduler {
             timer_driver,
             state: Arc::clone(state),
             task_table,
-            cancel_streak_limit,
             browser_ready_handoff_limit,
             steal_batch_size,
             enable_parking,
@@ -2544,6 +2542,7 @@ impl ThreeLaneWorker {
     ///
     /// Uses EDF (Earliest Deadline First) ordering. Only returns tasks
     /// whose deadline has passed.
+    #[allow(dead_code)] // Scheduler dispatch integration path
     pub(crate) fn try_timed_work(&mut self) -> Option<TaskId> {
         // Get current time from timer driver or use Time::ZERO (always ready)
         let now = self
@@ -2563,6 +2562,7 @@ impl ThreeLaneWorker {
     }
 
     /// Tries to get ready work from fast queue, global, or local queues.
+    #[allow(dead_code)] // Scheduler dispatch integration path
     pub(crate) fn try_ready_work(&mut self) -> Option<TaskId> {
         // Highest priority: drain non-stealable local (!Send) tasks first.
         // These tasks are pinned to this worker and cannot run elsewhere.
@@ -3016,7 +3016,6 @@ impl ThreeLaneWorker {
                         local: Arc::clone(&self.local),
                         local_ready: Arc::clone(&self.local_ready),
                         parker: self.parker.clone(),
-                        fast_cancel: Arc::clone(&inner.read().fast_cancel),
                         cx_inner: Arc::downgrade(inner),
                     }))
                 } else {
@@ -3026,7 +3025,6 @@ impl ThreeLaneWorker {
                         wake_state: Arc::clone(&wake_state),
                         global: Arc::clone(&self.global),
                         coordinator: Arc::clone(&self.coordinator),
-                        fast_cancel: Arc::clone(&inner.read().fast_cancel),
                         cx_inner: Arc::downgrade(inner),
                     }))
                 };
@@ -3269,6 +3267,7 @@ impl ThreeLaneWorker {
     ///
     /// This is the hot-path variant used in Poll::Pending where only task record
     /// access is needed.
+    #[allow(dead_code)] // Used in scheduler dispatch + tests
     fn consume_cancel_ack(&self, task_id: TaskId) -> bool {
         self.with_task_table(|tt| Self::consume_cancel_ack_from_table(tt, task_id))
     }
@@ -3410,7 +3409,6 @@ struct CancelLaneWaker {
     wake_state: Arc<crate::record::task::TaskWakeState>,
     global: Arc<GlobalInjector>,
     coordinator: Arc<WorkerCoordinator>,
-    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
 }
 
@@ -3464,7 +3462,6 @@ struct ThreeLaneLocalCancelWaker {
     local: Arc<Mutex<PriorityScheduler>>,
     local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
-    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
 }
 
@@ -4256,7 +4253,6 @@ mod tests {
             wake_state,
             global: Arc::clone(&global),
             coordinator,
-            fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
             cx_inner: Arc::downgrade(&cx_inner),
         }));
 
@@ -4444,7 +4440,6 @@ mod tests {
             local: Arc::clone(&local),
             local_ready: Arc::clone(&local_ready),
             parker: Parker::new(),
-            fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
             cx_inner: Arc::downgrade(&cx_inner),
         };
 

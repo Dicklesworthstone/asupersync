@@ -34,6 +34,7 @@ pub enum WakeSource {
 impl WakeSource {
     #[inline]
     #[must_use]
+    #[allow(dead_code)] // used by trace! macro when tracing feature is enabled
     const fn label(self) -> &'static str {
         match self {
             Self::Timer => "timer",

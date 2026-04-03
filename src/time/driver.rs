@@ -1886,21 +1886,6 @@ mod tests {
         Arc::new(NoopWaker).into()
     }
 
-    /// A waker that sets an AtomicBool when woken.
-    struct FlagWaker {
-        flag: AtomicBool,
-    }
-
-    impl Wake for FlagWaker {
-        fn wake(self: Arc<Self>) {
-            self.flag.store(true, Ordering::SeqCst);
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.flag.store(true, Ordering::SeqCst);
-        }
-    }
-
     /// Creates a waker that sets an AtomicBool when woken.
     fn waker_that_sets(flag: Arc<AtomicBool>) -> Waker {
         // We create a new FlagWaker that shares the flag

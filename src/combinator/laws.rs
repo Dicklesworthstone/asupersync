@@ -160,7 +160,9 @@
 //! 5. **Quorum degeneracies must hold by construction.**
 //!    quorum(N,N) = join and quorum(1,N) ≃ race are definitional.
 
+#[cfg(test)]
 use crate::types::Severity;
+#[cfg(test)]
 use crate::types::policy::AggregateDecision;
 
 /// Every committed algebraic law, identified by name.
@@ -530,6 +532,7 @@ pub fn conditional_laws() -> Vec<LawEntry> {
 }
 
 /// Helper: severity of an `AggregateDecision`.
+#[cfg(test)]
 fn decision_severity<E>(d: &AggregateDecision<E>) -> Severity {
     match d {
         AggregateDecision::AllOk => Severity::Ok,

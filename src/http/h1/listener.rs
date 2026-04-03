@@ -520,14 +520,6 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
-fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
-    payload
-        .downcast_ref::<&str>()
-        .map(ToString::to_string)
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown panic".to_string())
-}
-
 /// Returns `true` for accept errors that are transient and should be retried.
 fn is_transient_accept_error(err: &io::Error) -> bool {
     matches!(

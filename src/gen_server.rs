@@ -1079,13 +1079,6 @@ impl<S: GenServer> GenServerHandle<S> {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }
 
-    fn closed_reason(&self) -> CancelReason {
-        self.inner
-            .upgrade()
-            .and_then(|inner| inner.read().cancel_reason.clone())
-            .unwrap_or_else(|| CancelReason::user("join channel closed"))
-    }
-
     /// Signals the server to stop gracefully.
     ///
     /// Closes the mailbox and waits for the server to process remaining messages.
@@ -5159,6 +5152,7 @@ mod tests {
         }
 
         enum AccumCall {
+            #[allow(dead_code)]
             GetSum,
         }
         enum AccumCast {

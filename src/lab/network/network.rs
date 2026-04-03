@@ -120,6 +120,7 @@ pub enum NetworkTraceKind {
 
 #[derive(Debug)]
 struct SimulatedHost {
+    #[allow(dead_code)] // retained for debug diagnostics
     name: String,
     inbox: Vec<Packet>,
     crashed: bool,

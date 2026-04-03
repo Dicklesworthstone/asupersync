@@ -10,7 +10,7 @@ members = [
     "franken_decision",
     "frankenlab", "drop_unwrap_finder",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "asupersync-wasm"]
 
 [package]
 name = "asupersync"

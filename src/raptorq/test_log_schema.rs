@@ -797,11 +797,6 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     violations
 }
 
-/// Helper: check if a field is missing or null in a JSON value.
-fn value_missing_or_null(parent: &serde_json::Value, field: &str) -> bool {
-    parent.get(field).is_none_or(serde_json::Value::is_null)
-}
-
 fn validate_required_unsigned_integer_field(
     parent: &serde_json::Value,
     field: &str,

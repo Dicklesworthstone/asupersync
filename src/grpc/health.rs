@@ -240,25 +240,6 @@ impl HealthService {
         services
     }
 
-    fn watched_status(&self, service: &str) -> ServingStatus {
-        if service.is_empty() {
-            self.check(&HealthCheckRequest::server())
-                .map_or(ServingStatus::ServiceUnknown, |response| response.status)
-        } else {
-            self.get_status(service)
-                .unwrap_or(ServingStatus::ServiceUnknown)
-        }
-    }
-
-    fn watched_version(&self, service: &str) -> u64 {
-        if service.is_empty() {
-            self.version()
-        } else {
-            let watch_versions = self.watch_versions.read();
-            watch_versions.get(service).copied().unwrap_or(0)
-        }
-    }
-
     /// Read status and version atomically for a named service.
     ///
     /// Both the statuses lock and watch_versions lock are held simultaneously

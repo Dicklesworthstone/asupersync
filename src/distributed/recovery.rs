@@ -485,13 +485,11 @@ impl Default for RecoveryDecodingConfig {
 #[derive(Debug)]
 enum DecoderState {
     /// Waiting for enough symbols.
-    Accumulating { received: u32, needed: u32 },
-    /// Ready to decode.
-    Ready,
+    Accumulating { received: u32 },
     /// Decode complete.
     Complete,
     /// Decode failed.
-    Failed { reason: String },
+    Failed,
 }
 
 /// Decodes collected symbols back into region state.
@@ -516,10 +514,7 @@ impl StateDecoder {
     pub fn new(config: RecoveryDecodingConfig) -> Self {
         Self {
             config,
-            decoder_state: DecoderState::Accumulating {
-                received: 0,
-                needed: 0,
-            },
+            decoder_state: DecoderState::Accumulating { received: 0 },
             symbols: Vec::with_capacity(64),
             seen_symbols: HashSet::with_capacity(64),
         }
@@ -535,7 +530,7 @@ impl StateDecoder {
         self.symbols.push(auth_symbol.clone());
 
         // Update state
-        if let DecoderState::Accumulating { received, .. } = &mut self.decoder_state {
+        if let DecoderState::Accumulating { received } = &mut self.decoder_state {
             *received = saturating_symbol_count(self.symbols.len());
         }
 
@@ -564,10 +559,7 @@ impl StateDecoder {
     pub fn reset(&mut self) {
         self.symbols.clear();
         self.seen_symbols.clear();
-        self.decoder_state = DecoderState::Accumulating {
-            received: 0,
-            needed: 0,
-        };
+        self.decoder_state = DecoderState::Accumulating { received: 0 };
     }
 
     /// Attempts to decode the collected symbols into raw bytes.
@@ -577,9 +569,7 @@ impl StateDecoder {
     pub fn decode(&mut self, params: &ObjectParams) -> Result<Vec<u8>, Error> {
         let k = params.min_symbols_for_decode();
         if self.symbols.len() < k as usize {
-            self.decoder_state = DecoderState::Failed {
-                reason: format!("insufficient: have {}, need {k}", self.symbols.len()),
-            };
+            self.decoder_state = DecoderState::Failed;
             return Err(Error::insufficient_symbols(
                 saturating_symbol_count(self.symbols.len()),
                 k,
@@ -605,9 +595,7 @@ impl StateDecoder {
             DecodingPipeline::new(config)
         };
         if let Err(err) = pipeline.set_object_params(*params) {
-            self.decoder_state = DecoderState::Failed {
-                reason: err.to_string(),
-            };
+            self.decoder_state = DecoderState::Failed;
             return Err(Error::from(err));
         }
 
@@ -634,9 +622,7 @@ impl StateDecoder {
                 Ok(data)
             }
             Err(err) => {
-                self.decoder_state = DecoderState::Failed {
-                    reason: err.to_string(),
-                };
+                self.decoder_state = DecoderState::Failed;
                 Err(Error::from(err))
             }
         }
@@ -1583,14 +1569,6 @@ mod tests {
             SymbolId::new(ObjectId::new_for_test(1), 0, esi),
             data.to_vec(),
             SymbolKind::Source,
-        )
-    }
-
-    fn make_repair_symbol(esi: u32, data: &[u8]) -> Symbol {
-        Symbol::new(
-            SymbolId::new(ObjectId::new_for_test(1), 0, esi),
-            data.to_vec(),
-            SymbolKind::Repair,
         )
     }
 

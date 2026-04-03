@@ -1464,6 +1464,9 @@ impl CompiledSupervisor {
                             &crate::types::CancelReason::shutdown(),
                             None,
                         );
+                        if let Some(r) = state.region(region) {
+                            r.begin_close(None);
+                        }
                         state.advance_region_state(region);
                         return Err(SupervisorSpawnError::ChildStartFailed {
                             child: child.name.clone(),
@@ -3266,8 +3269,6 @@ impl Eq for Down {}
 /// Internal bookkeeping for a single monitor relationship.
 #[derive(Debug, Clone)]
 struct MonitorEntry {
-    /// Unique reference for this monitor.
-    monitor_ref: MonitorRef,
     /// The watching task.
     watcher: TaskId,
     /// Region that owns the watcher (for cleanup on region close).
@@ -3335,7 +3336,6 @@ impl MonitorTable {
         self.next_ref += 1;
 
         let entry = MonitorEntry {
-            monitor_ref: mref,
             watcher,
             watcher_region,
             monitored,

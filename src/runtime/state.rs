@@ -234,6 +234,10 @@ struct LeakedObligationInfo {
     acquired_at: SourceLocation,
     held_duration_ns: u64,
     description: Option<String>,
+    /// Backtrace captured at obligation acquisition time, used for diagnostics
+    /// in `mark_obligation_leaked` via `ObligationLeakInfo`.
+    #[allow(dead_code)]
+    // populated for diagnostic completeness; read via ObligationLeakInfo path
     acquire_backtrace: Option<Arc<Backtrace>>,
 }
 

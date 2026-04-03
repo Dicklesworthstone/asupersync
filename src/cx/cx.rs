@@ -304,6 +304,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Creates a new capability context from shared state (internal use).
+    #[allow(dead_code)] // Internal construction path for runtime integration
     pub(crate) fn from_inner(inner: Arc<parking_lot::RwLock<CxInner>>) -> Self {
         let (region, task) = {
             let guard = inner.read();
@@ -661,6 +662,7 @@ impl<Caps> Cx<Caps> {
 
     /// Attaches a pre-shared Macaroon handle to this context (internal use).
     #[must_use]
+    #[allow(dead_code)] // Macaroon integration API
     pub(crate) fn with_macaroon_handle(mut self, handle: Option<Arc<MacaroonToken>>) -> Self {
         Arc::make_mut(&mut self.handles).macaroon = handle;
         self
@@ -674,6 +676,7 @@ impl<Caps> Cx<Caps> {
 
     /// Returns a cloned `Arc` handle to the macaroon, if any.
     #[must_use]
+    #[allow(dead_code)] // Macaroon integration API
     pub(crate) fn macaroon_handle(&self) -> Option<Arc<MacaroonToken>> {
         self.handles.macaroon.clone()
     }

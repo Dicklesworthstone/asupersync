@@ -184,7 +184,6 @@ pub struct DownNotification {
 /// Internal record of an active monitor.
 #[derive(Debug, Clone)]
 struct MonitorRecord {
-    monitor_ref: MonitorRef,
     /// The task watching for termination.
     watcher: TaskId,
     /// The region owning the watcher (for region-close cleanup).
@@ -240,7 +239,6 @@ impl MonitorSet {
     ) -> MonitorRef {
         let monitor_ref = MonitorRef::new();
         let record = MonitorRecord {
-            monitor_ref,
             watcher,
             watcher_region,
             monitored,

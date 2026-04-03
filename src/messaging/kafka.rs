@@ -7,10 +7,11 @@
 //! # Design
 //!
 //! The implementation wraps the rdkafka crate (when available) with a Cx
-//! integration layer. When the `kafka` feature is disabled, the non-transactional
-//! producer surface uses a deterministic local fallback and the transactional
-//! surface simulates atomic staging/commit/abort without pretending a broker ack
-//! occurred.
+//! integration layer. When the `kafka` feature is disabled, the producer and
+//! transaction APIs remain available only as a harness lane: sends land in a
+//! deterministic in-process broker and transactions stage/commit/abort locally
+//! so tests and contract probes can exercise honest semantics without implying
+//! a real broker-backed deployment.
 //!
 //! # Exactly-Once Semantics
 //!
@@ -504,6 +505,8 @@ struct StubBrokerState {
 
 #[cfg(not(feature = "kafka"))]
 #[derive(Debug)]
+/// Harness-only deterministic in-process broker shared by the fallback
+/// producer and consumer paths when the real Kafka feature is disabled.
 struct StubBroker {
     state: Mutex<StubBrokerState>,
     notify: Notify,
@@ -600,6 +603,7 @@ pub(crate) fn reset_stub_broker_for_tests() {
 }
 
 #[cfg(all(not(feature = "kafka"), test))]
+#[allow(dead_code)] // Guard held for test serialization — not read, just held
 pub(crate) struct StubBrokerTestGuard(parking_lot::MutexGuard<'static, ()>);
 
 #[cfg(all(not(feature = "kafka"), test))]
@@ -614,7 +618,7 @@ pub(crate) fn lock_stub_broker_for_tests() -> StubBrokerTestGuard {
     let lock = STUB_BROKER_TEST_LOCK.get_or_init(|| Mutex::new(()));
     let guard = lock.lock();
 
-    // The broker fallback is global state shared across producer and consumer
+    // The harness broker is global state shared across producer and consumer
     // unit tests, so keep one test in the lane at a time and reset state on
     // both entry and exit.
     reset_stub_broker_for_tests();
@@ -810,6 +814,8 @@ enum TransactionPhase {
     #[default]
     Idle,
     Active,
+    #[allow(dead_code)]
+    // Transaction lifecycle state machine — used by mark_transaction_finalizing
     Finalizing,
     NeedsAbortRecovery,
 }
@@ -826,8 +832,8 @@ struct TransactionalProducerState {
 /// Kafka producer with Cx integration.
 ///
 /// With the `kafka` feature enabled this wraps a real `rdkafka` producer.
-/// Without it, the producer uses a deterministic local fallback for tests and
-/// contract validation.
+/// Without it, the producer talks to the harness-only in-process broker used
+/// for tests and contract validation; it is not a production Kafka transport.
 pub struct KafkaProducer {
     config: ProducerConfig,
     closed: AtomicBool,
@@ -1100,9 +1106,10 @@ impl TransactionalConfig {
 /// Transactional Kafka producer for exactly-once semantics.
 ///
 /// Provides atomic message publishing across multiple topics/partitions. The
-/// `kafka` feature uses broker-backed Kafka transactions; the fallback path
-/// simulates transactional staging locally so commit/abort semantics stay
-/// truthful instead of hard-erroring.
+/// `kafka` feature uses broker-backed Kafka transactions. Without that feature,
+/// transactions only stage against the harness broker so commit/abort
+/// semantics stay testable without implying broker-backed exactly-once
+/// delivery.
 pub struct TransactionalProducer {
     config: TransactionalConfig,
     state: Mutex<TransactionalProducerState>,
@@ -1218,6 +1225,7 @@ impl TransactionalProducer {
         }
     }
 
+    #[allow(dead_code)] // Transaction lifecycle state machine
     fn mark_transaction_finalizing(&self) {
         let mut state = self.state.lock();
         if state.phase == TransactionPhase::Active {
@@ -1232,6 +1240,7 @@ impl TransactionalProducer {
         state.staged_records.clear();
     }
 
+    #[allow(dead_code)] // Transaction lifecycle state machine
     fn mark_transaction_needs_abort(&self) {
         let mut state = self.state.lock();
         state.phase = TransactionPhase::NeedsAbortRecovery;

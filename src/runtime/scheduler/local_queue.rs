@@ -98,6 +98,7 @@ impl LocalQueue {
     }
 
     /// Clears the current thread-local queue.
+    #[allow(dead_code)] // symmetric API with set_current; reserved for shutdown paths
     pub(crate) fn clear_current() {
         CURRENT_QUEUE.with(|slot| {
             slot.borrow_mut().take();

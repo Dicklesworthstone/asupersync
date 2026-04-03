@@ -189,11 +189,6 @@ impl TimerSlot {
         }
     }
 
-    /// Returns true if the slot is empty.
-    fn is_empty(&self) -> bool {
-        self.head.get().is_none()
-    }
-
     /// Pushes a node to the back of the list.
     ///
     /// # Safety
@@ -627,10 +622,6 @@ impl<const SLOTS: usize> WheelLevel<SLOTS> {
             cursor,
             resolution_ns,
         }
-    }
-
-    fn range_ns(&self) -> u64 {
-        self.resolution_ns.saturating_mul(SLOTS as u64)
     }
 }
 

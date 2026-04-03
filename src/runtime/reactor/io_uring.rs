@@ -5,6 +5,13 @@
 //! backends: higher layers must explicitly re-arm after they observe
 //! `WouldBlock`.
 //!
+//! This file carries both the real Linux `io-uring` backend and the cfg-off
+//! fallback contract. In the live `runtime::reactor` export graph,
+//! `IoUringReactor` is re-exported only on Linux builds. When the `io-uring`
+//! feature is disabled on Linux, the exported symbol intentionally returns
+//! `Unsupported` from construction and every reactor operation, while
+//! `create_reactor()` falls back to `EpollReactor`.
+//!
 //! NOTE: This module uses unsafe to submit SQEs and manage eventfd FDs.
 //! The safety invariants are documented inline.
 
@@ -1081,17 +1088,29 @@ mod imp {
     use super::super::{Events, Interest, Reactor, Source, Token};
     use std::io;
 
-    /// Stub io_uring reactor for non-Linux or when feature is disabled.
+    const UNSUPPORTED_MESSAGE: &str = "IoUringReactor requires Linux with the io-uring feature enabled; use create_reactor() for epoll fallback";
+
+    fn unsupported() -> io::Error {
+        io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED_MESSAGE)
+    }
+
+    /// Unsupported fallback for builds without the live io_uring backend.
+    ///
+    /// In the public `runtime::reactor` export graph this matters for Linux
+    /// builds without the `io-uring` feature. Non-Linux targets do not
+    /// re-export `IoUringReactor` from `runtime::reactor`.
     #[derive(Debug, Default)]
     pub struct IoUringReactor;
 
     impl IoUringReactor {
-        /// Create a new io_uring reactor (unsupported on this platform/config).
+        /// Create a new io_uring reactor.
+        ///
+        /// # Errors
+        ///
+        /// Returns `Unsupported` unless the build target is Linux and the
+        /// `io-uring` feature is enabled.
         pub fn new() -> io::Result<Self> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "IoUringReactor is not available (linux + io-uring feature required)",
-            ))
+            Err(unsupported())
         }
     }
 
@@ -1102,24 +1121,15 @@ mod imp {
             _token: Token,
             _interest: Interest,
         ) -> io::Result<()> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "IoUringReactor is not available (linux + io-uring feature required)",
-            ))
+            Err(unsupported())
         }
 
         fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "IoUringReactor is not available (linux + io-uring feature required)",
-            ))
+            Err(unsupported())
         }
 
         fn deregister(&self, _token: Token) -> io::Result<()> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "IoUringReactor is not available (linux + io-uring feature required)",
-            ))
+            Err(unsupported())
         }
 
         fn poll(
@@ -1127,17 +1137,11 @@ mod imp {
             _events: &mut Events,
             _timeout: Option<std::time::Duration>,
         ) -> io::Result<usize> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "IoUringReactor is not available (linux + io-uring feature required)",
-            ))
+            Err(unsupported())
         }
 
         fn wake(&self) -> io::Result<()> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "IoUringReactor is not available (linux + io-uring feature required)",
-            ))
+            Err(unsupported())
         }
 
         fn registration_count(&self) -> usize {
@@ -1151,10 +1155,21 @@ mod imp {
         #[cfg(unix)]
         use std::os::unix::net::UnixStream;
 
+        fn assert_unsupported_contract(err: &io::Error) {
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_eq!(err.to_string(), UNSUPPORTED_MESSAGE);
+        }
+
         #[test]
         fn test_new_unsupported_returns_error() {
             let err = IoUringReactor::new().expect_err("io_uring should be unsupported");
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_unsupported_contract(&err);
+        }
+
+        #[test]
+        fn test_cfg_off_contract_message_is_explicit() {
+            let err = IoUringReactor::new().expect_err("cfg-off contract should be explicit");
+            assert_unsupported_contract(&err);
         }
 
         #[cfg(unix)]
@@ -1166,17 +1181,17 @@ mod imp {
             let err = reactor
                 .register(&left, Token::new(1), Interest::READABLE)
                 .expect_err("register should be unsupported");
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_unsupported_contract(&err);
 
             let err = reactor
                 .modify(Token::new(1), Interest::WRITABLE)
                 .expect_err("modify should be unsupported");
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_unsupported_contract(&err);
 
             let err = reactor
                 .deregister(Token::new(1))
                 .expect_err("deregister should be unsupported");
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_unsupported_contract(&err);
         }
 
         #[test]
@@ -1187,10 +1202,10 @@ mod imp {
             let err = reactor
                 .poll(&mut events, None)
                 .expect_err("poll should be unsupported");
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_unsupported_contract(&err);
 
             let err = reactor.wake().expect_err("wake should be unsupported");
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_unsupported_contract(&err);
         }
 
         #[test]

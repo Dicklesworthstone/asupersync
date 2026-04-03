@@ -24,6 +24,156 @@ rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --n
 rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture
 ```
 
+## Shared Validation Contract (asupersync-ay6qvw)
+
+This section is the canonical validation contract for the stub-resolution closeout
+track. Z0 freezes the shared schema and execution policy here; Z0a, Z0b, Z1,
+Z2, and every terminal bead in Tracks B-I must consume this section instead of
+inventing runner-specific conventions.
+
+The authoritative stub inventory and end-state selection lives in
+`docs/stub_disposition_matrix.md`. This section defines how those track-level
+end-states must be validated and recorded.
+
+If an older duplicate bead is reopened or superseded, the successor inherits
+the same validation obligations below; do not fork the contract just because
+the bead ID changed during plan cleanup.
+
+### Required Validation Classes
+
+Every terminal bead in Tracks B-I must explicitly contribute one or more of
+the following evidence classes:
+
+- `unit`: inline/module tests proving the local invariant of the changed surface
+- `integration`: real-component or cross-module coverage of the changed boundary
+- `e2e`: deterministic script or maintained scenario proving the user-visible or
+  cross-component workflow
+- `scan`: structural/policy evidence (placeholder scans, waivers, cfg/build
+  matrix checks, docs-truthfulness scans)
+- `audit`: synchronized docs, matrix rows, audit index entries, and handoff notes
+
+If a class is not applicable, the bead notes or closeout doc must say `N/A`
+and explain why. Silence is not an allowed contract.
+
+### Required Structured Fields
+
+New Track-Z validation artifacts must use the exact field names below unless a
+pre-existing schema already owns that surface. Legacy runners may keep older
+schemas, but any new summary or NDJSON record added for stub-resolution work
+must preserve these names and meanings.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `schema_version` | yes | Stable schema discriminator for the artifact or log row |
+| `bead_id` | yes | Owning bead, for example `asupersync-v2ofj7.8.6` |
+| `track_id` | yes | Owning track lane, for example `B` through `I` or `Z` |
+| `scenario_id` | yes | Stable scenario or check id |
+| `validation_surface` | yes | One of `unit`, `integration`, `e2e`, `scan`, `audit` |
+| `profile_family` | yes | Profile or feature family under test |
+| `feature_flags` | yes | Explicit feature set or build mode being validated |
+| `seed_or_fixture_id` | yes | Deterministic seed or stable fixture identifier |
+| `config_snapshot_ref` | yes | Pointer to the config, workload, or policy snapshot used |
+| `command` | yes | Exact command that executed the validation step |
+| `expected_outcome` | yes | Contract expectation for the step |
+| `observed_outcome` | yes | Actual result, using stable language like `passed`, `failed`, `unsupported`, `skipped` |
+| `exit_code` | yes | Process exit status for the validation step |
+| `artifact_path` | yes | Canonical path to the primary summary artifact for this step |
+| `replay_pointer` | no | Replay trace, repro command, or equivalent deterministic failure pointer |
+| `rch_routed` | yes | `true` when the cargo-heavy step actually ran through `rch` |
+| `execution_backend` | yes | One of `rch`, `local`, `rch_local_fallback`, `dry_run` |
+| `cargo_target_dir` | conditional | Required for any cargo-backed scripted run; identifies the isolated target dir |
+| `evidence_owner` | yes | Bead or closeout lane responsible for keeping the evidence green |
+
+Additional fields may be added, but they must be additive and must not rename
+or weaken the required fields above.
+
+### Artifact Roots And Ownership
+
+Do not invent new top-level artifact roots when an existing canonical root
+already fits the surface.
+
+| Surface | Canonical owner | Canonical root | Required artifacts |
+| --- | --- | --- | --- |
+| Unit or integration test harness | Rust test harness | `$ASUPERSYNC_TEST_ARTIFACTS_DIR/<test_id>/<seed>/` | `repro_manifest.json`, `events.ndjson` or equivalent event log, `summary.json`, optional `environment.json` |
+| Deterministic E2E suite | Runner script under `scripts/` | `target/e2e-results/<suite>/<run_id>/` | `summary.json`, scenario log (`scenarios.ndjson` or suite-specific equivalent), optional `validation_stages.ndjson`, step logs |
+| Scan or policy ratchet | Checker script or policy gate | `artifacts/` or `target/e2e-results/<suite>/` when the scan is suite-owned | One summary JSON plus one machine-readable event log, with the summary pointing at both |
+| Audit or doc closeout | In-repo docs and audit records | `docs/`, `TESTING.md`, `audit_index.jsonl` when applicable | Updated contract docs, disposition references, and residual-scope notes |
+
+Naming rules:
+- Use stable filenames where the repo already has a convention: `summary.json`,
+  `scenarios.ndjson`, `validation_stages.ndjson`, `repro_manifest.json`.
+- Summary artifacts own the cross-links. If a runner emits multiple logs, the
+  summary must point to the primary scenario log, stage log, and replay pointer.
+- Scan and policy gates should prefer `artifacts/<contract>_summary.json` and
+  `artifacts/<contract>_events.ndjson` unless they are already part of an
+  existing suite root.
+
+### RCH Execution Policy
+
+All cargo-heavy validation for Track-Z work must follow this policy:
+
+- Canonical form:
+
+  ```bash
+  rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-<lane-id> cargo <...>
+  ```
+
+- Interactive one-shot commands must use `rch exec -- cargo ...` or the
+  canonical `env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=... cargo ...` form.
+- Scripted or multi-stage validation must expose `RCH_BIN` and route cargo via
+  `"$RCH_BIN" exec -- ...` when `rch` is available.
+- Scripted cargo runs must set an isolated `CARGO_TARGET_DIR` per
+  suite/run/stage/attempt. Accepted patterns are
+  `${PROJECT_ROOT}/.rch_target_<suite>/<run_id>/<stage>` or
+  `${TMPDIR:-/tmp}/rch-<suite>-<run_id>-<stage>`.
+- Repeated commands in the same validation lane should reuse the same isolated
+  target dir to preserve remote cache locality.
+- If a scripted `rch` attempt falls back to local execution, the run must not
+  silently count as compliant. Record `execution_backend="rch_local_fallback"`
+  and preserve the attempt log that showed the fallback. The downgrade must
+  also be called out in the bead thread or handoff note.
+- Dry-run or contract-only paths that intentionally skip cargo must record
+  `execution_backend="dry_run"` and explain why no remote execution occurred.
+- Summary artifacts for cargo-backed runs must record both `rch_routed` and
+  `cargo_target_dir`.
+
+### Evidence Matrix For Terminal Tracks
+
+The rows below are the minimum evidence ownership contract for the current
+canonical terminal beads referenced by the disposition matrix.
+
+| Bead | Surface | Required evidence |
+| --- | --- | --- |
+| `asupersync-v2ofj7.2.2` | Surviving WASM boundary exports, errors, and types | boundary `unit` tests on export/error/type helpers, targeted consumer/build `integration` checks, deterministic consumer workflow `e2e`, and `audit` updates making the surviving owner and duplicate role explicit |
+| `asupersync-v2ofj7.2.3` | Canonical WASM packaging, build, and consumer story | build-matrix `scan`, maintained consumer `e2e`, packaging artifact summary, and `audit` updates naming the canonical JS/WASM owner |
+| `asupersync-v2ofj7.3.2` | Macro fallback docs and reexports after contract freeze | macro export or compile-fail `unit` coverage, proc/no-proc build-matrix `scan`, and `audit` updates for docs, examples, and reexports |
+| `asupersync-v2ofj7.4.1` | TLS pinning contract truthfulness | known-answer and malformed-input `unit` tests, focused `integration`, feature-gate `scan`, and `audit` security/doc updates |
+| `asupersync-v2ofj7.4.2` | Real `AuthenticationTag` cryptographic contract | known-answer plus misuse/error `unit` tests, security-path `integration`, deterministic security-path `e2e` where user-visible, and `audit` security/doc updates |
+| `asupersync-v2ofj7.4.3` | Browser entropy contract truthfulness | boundary `unit` or compile coverage, browser-profile `scan`, consumer-facing `audit` updates, and `e2e` only if host behavior changed |
+| `asupersync-v2ofj7.5.2` | Kafka producer and consumer paths aligned to the chosen contract | focused producer/consumer `unit` coverage, transport or harness-lane `integration`, deterministic brokerless-or-real-broker `e2e` per the chosen contract, and `audit` updates clarifying supported vs harness-only behavior |
+| `asupersync-v2ofj7.5.3` | Kafka validation and stale waiver retirement | contract or policy `scan`, focused `integration` or `e2e` proving the chosen fallback or production truth, and waiver/doc `audit` updates |
+| `asupersync-v2ofj7.6.2` | Remote spawn, result, cancel, and close lifecycle | lifecycle state-machine `unit` tests, remote-boundary `integration`, deterministic remote-path `e2e` or scripted scenario, and `audit` updates for protocol truthfulness |
+| `asupersync-v2ofj7.6.3` | Remote deterministic harness and failure-injection validation | harness `unit` coverage, deterministic fault-injection `e2e`, replay or debug `scan`, and `audit` updates for protocol and harness contracts |
+| `asupersync-v2ofj7.7.2` | Transport-backed session-type send, recv, and close semantics | typestate/runtime `unit` coverage, transport-backed `integration`, deterministic session workflow `e2e`, and `audit` updates for the chosen bridge |
+| `asupersync-v2ofj7.7.6` | Typed session integration coverage and contract docs | maintained `integration` and `e2e` suite coverage, unsupported-surface `scan` where needed, and session-contract `audit` updates |
+| `asupersync-v2ofj7.8.6` | Legacy `UringReactor` shim resolution | cfg-aware `unit` and compile coverage, build verification `integration` where relevant, stale-shim `scan`, and reactor support/doc `audit` updates |
+| `asupersync-v2ofj7.8.7` | `IoUringReactor` cfg-off unsupported semantics | cfg/build `scan`, unsupported-path `unit` tests, and platform-matrix `audit` updates |
+| `asupersync-v2ofj7.8.8` | Stale duplicate reactor files, docs, and waivers cleanup | stale-surface `scan`, docs/module-path `audit`, and regression `integration` checks required to prove no public truth drift |
+| `asupersync-v2ofj7.9.1` | Example and test-harness `SplitReader::poll_read` cleanup | harness `unit` coverage, example or integration proof, and `audit` updates for example truthfulness |
+| `asupersync-v2ofj7.9.2` | Panic-based conformance dummy runtime replacement | replacement `unit` coverage, real-component `integration`, and `audit` updates retiring dummy-runtime claims |
+| `asupersync-v2ofj7.9.3` | Honest end-state for `asupersync_v4_api_skeleton.rs` | structural `scan`, doc/API `audit`, and supporting `integration` or compile coverage if the public surface changes |
+
+### Z-Track Deliverable Split
+
+Downstream Z-track beads own distinct validation layers:
+
+- Z0a owns structural probes and invariant tests that continuously check the
+  disposition matrix.
+- Z0b owns the heavy `rch`-backed runner and the feature/profile matrix.
+- Z1 owns the scan ratchet, allowlists, and waiver policy.
+- Z2 owns the closeout evidence bundle, audit/doc sync, and final replayable
+  proof packet.
+
 ## Phase 2 Differential Policy Docs
 
 When widening the lab-vs-live program beyond the semantic core, use these docs

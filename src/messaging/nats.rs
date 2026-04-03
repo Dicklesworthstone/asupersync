@@ -416,6 +416,7 @@ struct NatsReadBuffer {
 }
 
 impl NatsReadBuffer {
+    #[cfg(test)]
     fn new() -> Self {
         Self::with_limit(DEFAULT_MAX_READ_BUFFER)
     }
@@ -477,6 +478,7 @@ enum NatsMessage {
 
 /// Internal subscription state.
 struct SubscriptionState {
+    #[allow(dead_code)] // read via tracing format strings
     subject: String,
     sender: mpsc::Sender<Message>,
 }

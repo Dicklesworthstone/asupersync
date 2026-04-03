@@ -341,11 +341,6 @@ mod tests {
         })
     }
 
-    fn clean_env() {
-        let _guard = crate::test_utils::env_lock();
-        clean_env_locked();
-    }
-
     fn clean_env_locked() {
         for var in &[
             ENV_WORKER_THREADS,

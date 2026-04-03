@@ -528,6 +528,7 @@ impl Interaction {
     /// Return the first sender/decider in this interaction, if any.
     ///
     /// Used for knowledge-of-choice validation.
+    #[cfg(test)]
     fn first_active_participant(&self) -> Option<&str> {
         match self {
             Self::Comm { sender, .. } => Some(sender),

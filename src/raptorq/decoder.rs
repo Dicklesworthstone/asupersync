@@ -465,11 +465,6 @@ impl Equation {
         self.terms.len()
     }
 
-    /// Returns the lowest column index (pivot candidate).
-    fn lowest_col(&self) -> Option<usize> {
-        self.terms.first().map(|(col, _)| *col)
-    }
-
     /// Returns the coefficient for the given column, or zero.
     fn coef(&self, col: usize) -> Gf256 {
         self.terms
@@ -1009,28 +1004,6 @@ fn row_nonzero_count(a: &[Gf256], n_cols: usize, row: usize) -> usize {
         .count()
 }
 
-#[inline]
-fn should_use_sparse_row_update(pivot_nnz: usize, n_cols: usize) -> bool {
-    if n_cols == 0 {
-        return false;
-    }
-
-    // Explicit cost model: compare sparse-vs-dense column-touch counts with
-    // a conservative overhead multiplier for sparse index iteration.
-    pivot_nnz.saturating_mul(HYBRID_SPARSE_COST_DENOMINATOR)
-        <= n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR)
-}
-
-fn pivot_nonzero_columns(pivot_row: &[Gf256], n_cols: usize) -> Vec<usize> {
-    let mut cols = Vec::with_capacity(n_cols.min(32));
-    for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
-        if !coef.is_zero() {
-            cols.push(idx);
-        }
-    }
-    cols
-}
-
 fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Option<Vec<usize>> {
     if n_cols == 0 {
         return None;
@@ -1077,24 +1050,6 @@ fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Op
         cols.push(idx);
     }
     Some(cols)
-}
-
-fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
-    if n_cols < HARD_REGIME_MIN_COLS {
-        return false;
-    }
-
-    let total_cells = n_rows.saturating_mul(n_cols);
-    if total_cells == 0 {
-        return false;
-    }
-
-    let nonzeros = matrix_nonzero_count(a);
-    let dense =
-        nonzeros.saturating_mul(100) >= total_cells.saturating_mul(HARD_REGIME_DENSITY_PERCENT);
-    let near_square = n_rows <= n_cols.saturating_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS);
-
-    dense || near_square
 }
 
 fn select_hard_regime_plan(n_rows: usize, n_cols: usize, a: &[Gf256]) -> HardRegimePlan {
@@ -2523,6 +2478,27 @@ impl ReceivedSymbol {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test-only: checks whether sparse row update is beneficial.
+    fn should_use_sparse_row_update(pivot_nnz: usize, n_cols: usize) -> bool {
+        if n_cols == 0 {
+            return false;
+        }
+        pivot_nnz.saturating_mul(HYBRID_SPARSE_COST_DENOMINATOR)
+            <= n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR)
+    }
+
+    /// Test-only: collects nonzero column indices from a pivot row.
+    fn pivot_nonzero_columns(pivot_row: &[Gf256], n_cols: usize) -> Vec<usize> {
+        let mut cols = Vec::with_capacity(n_cols.min(32));
+        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+            if !coef.is_zero() {
+                cols.push(idx);
+            }
+        }
+        cols
+    }
+
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::{
         UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,

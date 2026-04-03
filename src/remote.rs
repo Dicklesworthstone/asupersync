@@ -12,11 +12,19 @@
 //! - **Lease-based liveness**: Remote tasks maintain liveness via leases. If a lease
 //!   expires, the local region can escalate (cancel, restart, or fail).
 //!
-//! # Phase 0
+//! # Supported Contract
 //!
-//! This is the API surface definition. The actual network transport and remote
-//! execution protocol are defined in the remote protocol bead (tmh.1.2). In Phase 0,
-//! `spawn_remote` creates a handle but does not perform real network operations.
+//! This module is the authoritative remote execution contract for Track F. It
+//! defines:
+//!
+//! - the transport-agnostic protocol payloads and envelopes
+//! - the origin/remote state machines for spawn/ack/cancel/result/lease flows
+//! - the capability, region-ownership, and idempotency rules for remote work
+//! - the deterministic no-runtime fallback used when no [`RemoteRuntime`] is attached
+//!
+//! The core crate does not embed a production network backend here. Transport is
+//! injected through [`RemoteRuntime`] / [`RemoteTransport`], so deterministic lab
+//! harnesses and later real transports share the same protocol and lifecycle rules.
 
 use crate::channel::oneshot;
 use crate::cx::Cx;
@@ -556,10 +564,13 @@ impl std::error::Error for RemoteError {}
 /// all remote handles participate in quiescence: the region waits for remote
 /// tasks to complete (or escalates via cancellation/lease expiry).
 ///
-/// # Phase 0
+/// # Current Contract
 ///
-/// In Phase 0, the handle wraps a oneshot channel. The actual remote protocol
-/// (spawn/ack/cancel/result/heartbeat) is defined in tmh.1.2.
+/// The handle is the local, region-owned proxy for the remote lifecycle defined
+/// in this module. Attached runtimes drive it via the explicit
+/// spawn/ack/cancel/result/lease protocol. When no runtime is attached, the
+/// handle resolves through the configured deterministic fallback instead of
+/// silently spawning detached work.
 pub struct RemoteHandle {
     /// Unique identifier for this remote task.
     remote_task_id: RemoteTaskId,
@@ -793,12 +804,13 @@ impl RemoteHandle {
 /// the calling task. When the region closes, it waits for all remote
 /// handles to resolve (or escalates per policy).
 ///
-/// # Phase 0
+/// # Current Contract
 ///
-/// In Phase 0, attached runtimes can still use deterministic harnesses such as
-/// [`DistributedHarness`](crate::lab::network::DistributedHarness). When no
+/// Attached runtimes can use deterministic harnesses such as
+/// [`DistributedHarness`](crate::lab::network::DistributedHarness) or later
+/// real transports that implement the protocol defined in this module. When no
 /// runtime is attached, `spawn_remote()` resolves the handle to the configured
-/// explicit fallback error immediately. This keeps the stub deterministic and
+/// explicit fallback error immediately. This keeps behavior deterministic and
 /// avoids detached wall-clock work outside structured concurrency.
 ///
 /// # Errors
@@ -2953,7 +2965,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Protocol tests (tmh.1.2)
+    // Remote protocol contract tests
     // -----------------------------------------------------------------------
 
     #[test]

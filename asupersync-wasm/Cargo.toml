@@ -3,7 +3,7 @@ name = "asupersync-wasm"
 version = "0.1.0"
 edition = "2024"
 license-file = "../LICENSE"
-description = "WASM/JS bindings for the Asupersync async runtime (Browser Edition)."
+description = "Non-canonical scaffold for future or alternative Browser Edition WASM binding strategies."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["async", "wasm", "browser", "bindings", "structured-concurrency"]
 categories = ["asynchronous", "wasm", "web-programming"]
@@ -12,6 +12,8 @@ categories = ["asynchronous", "wasm", "web-programming"]
 policy_version = "1.0.0"
 abi_version = "1.0"
 owner_track = "asupersync-3qv04.2"
+
+[workspace]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -33,6 +35,7 @@ web-sys = { version = "0.3", features = [
 
 # Structured serialization across the JS/WASM boundary.
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
 serde-wasm-bindgen = "0.6"
 
 [dev-dependencies]

@@ -426,47 +426,6 @@ mod tests {
         matches!(&svc.state, State::Ready(_))
     }
 
-    // A service that tracks concurrency
-    struct TrackingService {
-        current: Arc<AtomicUsize>,
-        max_seen: Arc<AtomicUsize>,
-    }
-
-    impl TrackingService {
-        fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-            let current = Arc::new(AtomicUsize::new(0));
-            let max_seen = Arc::new(AtomicUsize::new(0));
-            (
-                Self {
-                    current: current.clone(),
-                    max_seen: max_seen.clone(),
-                },
-                current,
-                max_seen,
-            )
-        }
-    }
-
-    impl Service<()> for TrackingService {
-        type Response = ();
-        type Error = std::convert::Infallible;
-        type Future = std::future::Ready<Result<(), std::convert::Infallible>>;
-
-        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn call(&mut self, _req: ()) -> Self::Future {
-            let prev = self.current.fetch_add(1, Ordering::SeqCst);
-            let current = prev + 1;
-            // Update max if this is a new high
-            self.max_seen.fetch_max(current, Ordering::SeqCst);
-            // In a real scenario, work would happen here
-            self.current.fetch_sub(1, Ordering::SeqCst);
-            ready(Ok(()))
-        }
-    }
-
     // Simple echo service
     struct EchoService;
 

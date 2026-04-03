@@ -70,6 +70,7 @@ impl std::error::Error for FinalizerViolation {}
 /// Record of a finalizer registration.
 #[derive(Debug, Clone)]
 struct FinalizerRecord {
+    #[allow(dead_code)] // retained for debug diagnostics
     id: FinalizerId,
     region: RegionId,
     registered_at: Time,

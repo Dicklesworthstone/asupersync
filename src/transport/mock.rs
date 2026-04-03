@@ -251,6 +251,7 @@ impl SimNetwork {
 #[derive(Debug)]
 struct Delay {
     sleep: Sleep,
+    #[allow(dead_code)] // stored for potential delay reset
     time_getter: fn() -> Time,
 }
 

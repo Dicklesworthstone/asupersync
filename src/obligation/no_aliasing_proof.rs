@@ -157,19 +157,17 @@ struct GhostEntry {
     kind: ObligationKind,
     /// Region this permit belongs to.
     region: RegionId,
-    /// When the permit was reserved.
-    reserved_at: Time,
 }
 
 /// Ghost state for a consumed (resolved) permit.
 #[derive(Debug, Clone)]
 struct ConsumedEntry {
     /// How it was resolved.
-    resolution: ConsumedHow,
+    _resolution: ConsumedHow,
     /// When it was resolved.
     resolved_at: Time,
     /// Original holder at resolution time.
-    last_holder: TaskId,
+    _last_holder: TaskId,
 }
 
 /// How a permit was consumed.
@@ -204,6 +202,7 @@ impl GhostPermitMap {
     }
 
     /// Get the unique holder if the permit is active.
+    #[cfg(test)]
     fn holder_of(&self, id: ObligationId) -> Option<TaskId> {
         self.active.get(&id).map(|e| e.holder)
     }
@@ -636,7 +635,6 @@ impl NoAliasingProver {
                 holder,
                 kind,
                 region,
-                reserved_at: time,
             },
         );
 
@@ -801,9 +799,9 @@ impl NoAliasingProver {
         self.ghost.consumed.insert(
             obligation,
             ConsumedEntry {
-                resolution: how,
+                _resolution: how,
                 resolved_at: time,
-                last_holder: entry.holder,
+                _last_holder: entry.holder,
             },
         );
 
@@ -926,9 +924,9 @@ impl NoAliasingProver {
         self.ghost.consumed.insert(
             obligation,
             ConsumedEntry {
-                resolution: ConsumedHow::Leaked,
+                _resolution: ConsumedHow::Leaked,
                 resolved_at: time,
-                last_holder: entry.holder,
+                _last_holder: entry.holder,
             },
         );
 

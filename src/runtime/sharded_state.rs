@@ -783,6 +783,7 @@ mod lock_order {
     /// Returns the number of shard locks currently held by this thread.
     ///
     /// Useful in tests to verify guards properly track acquisitions.
+    #[cfg(test)]
     pub fn held_count() -> usize {
         HELD.with(|held| held.borrow().len())
     }
@@ -790,6 +791,7 @@ mod lock_order {
     /// Returns a snapshot of the shard locks currently held by this thread.
     ///
     /// Returns labels in acquisition order (earliest first).
+    #[cfg(test)]
     pub fn held_labels() -> Vec<&'static str> {
         HELD.with(|held| held.borrow().iter().map(|s| s.label()).collect())
     }

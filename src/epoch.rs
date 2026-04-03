@@ -404,7 +404,8 @@ impl Epoch {
         self.metadata.insert(key.into(), value.into());
     }
 
-    // Logging integration
+    // Logging integration — diagnostic methods for structured epoch tracing
+    #[allow(dead_code)]
     fn log_created(&self) -> LogEntry {
         LogEntry::info("Epoch created")
             .with_field("epoch_id", format!("{}", self.id))
@@ -412,6 +413,7 @@ impl Epoch {
             .with_field("expected_end", format!("{}", self.expected_end))
     }
 
+    #[allow(dead_code)]
     fn log_state_change(&self, old_state: EpochState) -> LogEntry {
         LogEntry::info("Epoch state changed")
             .with_field("epoch_id", format!("{}", self.id))
@@ -419,6 +421,7 @@ impl Epoch {
             .with_field("to_state", format!("{:?}", self.state))
     }
 
+    #[allow(dead_code)]
     fn log_completed(&self) -> LogEntry {
         LogEntry::info("Epoch completed")
             .with_field("epoch_id", format!("{}", self.id))
@@ -785,7 +788,8 @@ impl EpochBarrier {
         self.participants.read().clone()
     }
 
-    // Logging integration
+    // Logging integration — diagnostic methods for barrier tracing
+    #[allow(dead_code)]
     fn log_arrival(&self, participant: &str) -> LogEntry {
         LogEntry::debug("Epoch barrier arrival")
             .with_field("epoch_id", format!("{}", self.epoch))
@@ -794,6 +798,7 @@ impl EpochBarrier {
             .with_field("expected", format!("{}", self.expected))
     }
 
+    #[allow(dead_code)]
     fn log_triggered(&self, result: &BarrierResult) -> LogEntry {
         LogEntry::info("Epoch barrier triggered")
             .with_field("epoch_id", format!("{}", self.epoch))
@@ -918,14 +923,6 @@ impl EpochClock {
         // Check history
         self.history.read().iter().find(|e| e.id == id).cloned()
     }
-
-    // Logging integration
-    #[allow(clippy::unused_self)]
-    fn log_advance(&self, from: EpochId, to: EpochId) -> LogEntry {
-        LogEntry::info("Epoch advanced")
-            .with_field("from_epoch", format!("{from}"))
-            .with_field("to_epoch", format!("{to}"))
-    }
 }
 
 // ============================================================================
@@ -1042,6 +1039,7 @@ impl EpochContext {
         }
     }
 
+    #[allow(dead_code)] // Diagnostic logging for epoch context lifecycle
     fn log_created(&self) -> LogEntry {
         LogEntry::debug("Epoch context created")
             .with_field("epoch_id", format!("{}", self.epoch_id))
@@ -1049,6 +1047,7 @@ impl EpochContext {
             .with_field("operation_budget", format!("{:?}", self.operation_budget))
     }
 
+    #[allow(dead_code)]
     fn log_expired(&self, now: Time) -> LogEntry {
         LogEntry::warn("Epoch expired")
             .with_field("epoch_id", format!("{}", self.epoch_id))
@@ -1056,6 +1055,7 @@ impl EpochContext {
             .with_field("current_time_ms", format!("{}", now.as_millis()))
     }
 
+    #[allow(dead_code)]
     fn log_budget_exhausted(&self) -> LogEntry {
         LogEntry::info("Epoch operation budget exhausted")
             .with_field("epoch_id", format!("{}", self.epoch_id))
@@ -1626,13 +1626,6 @@ where
     breaker
         .call(now, op)
         .map_err(EpochCircuitBreakerError::CircuitBreaker)
-}
-
-fn log_epoch_transition(from: EpochId, to: EpochId, behavior: EpochTransitionBehavior) -> LogEntry {
-    LogEntry::info("Epoch transition")
-        .with_field("from_epoch", format!("{from}"))
-        .with_field("to_epoch", format!("{to}"))
-        .with_field("behavior", format!("{behavior:?}"))
 }
 
 // ============================================================================

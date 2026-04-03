@@ -254,19 +254,9 @@ impl<S> RateLimit<S> {
     }
 
     /// Refills tokens based on elapsed time.
+    #[cfg(test)]
     fn refill(&mut self, now: Time) {
         self.refill_state(now);
-    }
-
-    /// Tries to acquire a token.
-    #[inline]
-    fn try_acquire(&mut self) -> bool {
-        if self.tokens > 0 {
-            self.tokens -= 1;
-            true
-        } else {
-            false
-        }
     }
 
     /// Polls readiness with an explicit time value.

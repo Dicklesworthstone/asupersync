@@ -387,10 +387,6 @@ impl SymbolSet {
         })
     }
 
-    fn check_threshold(&self, progress: &BlockProgress) -> bool {
-        Self::calculate_threshold(progress, &self.threshold_config)
-    }
-
     fn estimate_symbol_size(symbol: &Symbol) -> usize {
         std::mem::size_of::<SymbolId>() + symbol.data().len() + SYMBOL_OVERHEAD_BYTES
     }

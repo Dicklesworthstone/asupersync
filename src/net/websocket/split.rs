@@ -444,19 +444,6 @@ where
         })
     }
 
-    /// Internal: initiate close without waiting.
-    async fn initiate_close(&self, reason: CloseReason) -> Result<(), WsError> {
-        let frame = {
-            let mut shared = self.shared.lock();
-            shared.close_handshake.initiate(reason)
-        };
-
-        if let Some(f) = frame {
-            self.send_frame_internal(&f).await?;
-        }
-        Ok(())
-    }
-
     fn encode_frame_with_entropy(
         &self,
         frame: &Frame,
@@ -479,6 +466,7 @@ where
     }
 
     /// Internal: send a single frame (for control messages like pong/close).
+    #[allow(dead_code)] // WebSocket control frame API
     async fn send_frame_internal(&self, frame: &Frame) -> Result<(), WsError> {
         let entropy = { Arc::clone(&self.shared.lock().entropy) };
         self.send_frame_internal_with_entropy(frame, entropy.as_ref())

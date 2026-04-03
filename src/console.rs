@@ -142,6 +142,7 @@ impl Console {
         }
     }
 
+    #[cfg(test)]
     fn effective_color_support(&self) -> ColorSupport {
         match self.color_mode {
             ColorMode::Never => ColorSupport::None,

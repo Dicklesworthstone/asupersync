@@ -142,6 +142,7 @@ pub fn patch(handler: impl Handler) -> MethodRouter {
 #[derive(Debug, Clone)]
 struct RoutePattern {
     /// The original pattern string (e.g., "/users/:id/posts/:post_id").
+    #[allow(dead_code)] // retained for debug diagnostics
     raw: String,
     /// Segments: either literal strings or parameter names.
     segments: Vec<Segment>,
@@ -486,6 +487,7 @@ mod tests {
         use crate::web::handler::FnHandler1;
 
         #[derive(serde::Deserialize)]
+        #[allow(dead_code)] // fields read via deserialization
         struct Pagination {
             page: u32,
         }

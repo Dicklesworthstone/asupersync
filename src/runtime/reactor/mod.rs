@@ -42,8 +42,25 @@
 //! | Linux | epoll | `epoll.rs` |
 //! | macOS/BSD | kqueue | `kqueue.rs` |
 //! | Windows | IOCP | `windows.rs` |
-//! | Browser/wasm32 | BrowserReactor (scaffold) | `browser.rs` |
+//! | Browser/wasm32 | BrowserReactor | `browser.rs` |
 //! | Testing | virtual | `lab.rs` |
+//!
+//! # Public Export Contract
+//!
+//! The live `runtime::reactor` export graph is intentionally cfg-gated:
+//!
+//! | Target / feature | Public symbols | Live source | Contract |
+//! |------------------|----------------|-------------|----------|
+//! | Linux | `EpollReactor`, `IoUringReactor` | `epoll.rs`, `io_uring.rs` | `EpollReactor` is the always-available Linux backend. `IoUringReactor` is exported on Linux builds; it is real with the `io-uring` feature and intentionally returns `Unsupported` without that feature. |
+//! | macOS/BSD | `KqueueReactor` | `kqueue.rs` | Live BSD-family backend only. |
+//! | Windows | `IocpReactor` | `windows.rs` | Live Windows backend only. |
+//! | wasm32 | `BrowserReactor` | `browser.rs` | Browser event-loop reactor. |
+//! | Deterministic tests | `LabReactor` | `lab.rs` | Virtual reactor for replayable tests. |
+//!
+//! Historical source files such as `src/runtime/reactor/uring.rs` and
+//! `src/runtime/reactor/macos.rs` are not part of the current public export graph.
+//! They are legacy or duplicate cleanup targets, not the authoritative API
+//! contract for `runtime::reactor`.
 //!
 //! # Usage Pattern
 //!

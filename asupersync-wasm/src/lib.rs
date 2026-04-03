@@ -1,37 +1,39 @@
 //! # asupersync-wasm
 //!
-//! WASM/JS bindings for the Asupersync async runtime (Browser Edition).
+//! Non-canonical Browser Edition binding scaffold.
 //!
-//! This crate provides the concrete `#[wasm_bindgen]` export boundary that
-//! bridges the Asupersync runtime to JavaScript. It wraps the
-//! [`WasmExportDispatcher`] from the core crate with thin JS-callable functions.
+//! This crate is intentionally not the owner of the shipped JS/WASM boundary
+//! today. `asupersync-browser-core` owns the live v1 wasm-bindgen export
+//! surface consumed by `@asupersync/browser-core` and the higher-level JS/TS
+//! packages.
 //!
-//! ## Architecture
+//! `asupersync-wasm` is retained as workspace scaffolding for future or
+//! alternative binding strategies so the repository can converge on one
+//! truthful boundary owner without deleting historical structure.
+//!
+//! ## Current role
 //!
 //! ```text
-//! JS caller  -->  #[wasm_bindgen] exports (this crate)
-//!                       |
-//!                       v
-//!                 WasmExportDispatcher (asupersync::types::wasm_abi)
-//!                       |
-//!                       v
-//!                 Asupersync runtime (regions, tasks, scopes)
+//! JS/TS packages  -->  asupersync-browser-core  -->  live v1 ABI boundary
+//!                                           \
+//!                                            \-> asupersync-wasm (retained scaffold)
 //! ```
 //!
-//! The export surface matches the v1 ABI symbol table defined in the core
-//! crate. Handle encoding uses opaque `u64` values (slot + generation).
-//! Outcomes are serialized via `serde-wasm-bindgen` preserving the four-valued
-//! model (ok, err, cancelled, panicked).
+//! Until a later bead deliberately gives this crate a new supported role, treat
+//! it as a non-canonical scaffold rather than a second live boundary.
 //!
-//! ## Crate Features
-//!
-//! - `minimal` — smallest wasm surface, no browser I/O
-//! - `dev` — development profile with browser I/O
-//! - `prod` — production profile with browser I/O (default)
-//! - `deterministic` — replay-safe profile with browser trace
+//! The crate therefore exposes only explicit scaffold metadata and fail-closed
+//! helpers that point callers at the canonical boundary owner.
 
 #![deny(unsafe_code)]
 
+pub mod error;
 mod exports;
-mod error;
-mod types;
+pub mod types;
+
+pub use crate::error::RetainedBoundaryError;
+pub use crate::exports::{
+    canonical_boundary_status, canonical_boundary_status_json, fail_closed_symbol,
+    fail_closed_symbol_json,
+};
+pub use crate::types::RetainedBoundaryStatus;

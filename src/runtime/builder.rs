@@ -219,26 +219,28 @@ impl Drop for ScopedRuntimeHandle {
     }
 }
 
+#[allow(dead_code)] // Used on wasm32 target
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeHostServicesKind {
     NativeStdThread,
-    BrowserHost,
 }
 
+#[allow(dead_code)] // Used on wasm32 target
 impl RuntimeHostServicesKind {
     const fn as_str(self) -> &'static str {
         match self {
             Self::NativeStdThread => "native-std-thread",
-            Self::BrowserHost => "browser-host",
         }
     }
 }
 
+#[allow(dead_code)] // Used on wasm32 target
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BrowserHostServicesContract {
     required_capabilities: &'static [&'static str],
 }
 
+#[allow(dead_code)] // Used on wasm32 target
 impl BrowserHostServicesContract {
     const V1: Self = Self {
         required_capabilities: &[
@@ -425,6 +427,7 @@ fn default_runtime_host_services() -> Arc<dyn RuntimeHostServices> {
     Arc::new(NativeThreadHostServices::new())
 }
 
+#[allow(dead_code)] // Used on wasm32 target
 fn unsupported_browser_bootstrap_message(host_services: &dyn RuntimeHostServices) -> String {
     let contract = host_services.browser_contract();
     format!(
@@ -3621,34 +3624,6 @@ fn lock_state<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
     state.lock()
 }
 
-fn run_task<F, T>(
-    state: &Arc<Mutex<JoinState<T>>>,
-    future: &Arc<Mutex<Option<F>>>,
-    config: &RuntimeConfig,
-) where
-    F: Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    if let Some(callback) = config.on_thread_start.as_ref() {
-        callback();
-    }
-
-    let future = {
-        let mut guard = lock_state(future);
-        guard.take()
-    };
-    let Some(future) = future else {
-        return;
-    };
-    let output = run_future_with_budget(future, config.poll_budget);
-
-    if let Some(callback) = config.on_thread_stop.as_ref() {
-        callback();
-    }
-
-    complete_task(state, Ok(output));
-}
-
 fn complete_task<T>(state: &Arc<Mutex<JoinState<T>>>, output: std::thread::Result<T>) {
     let waker = {
         let mut guard = lock_state(state);
@@ -3711,16 +3686,6 @@ impl Wake for ThreadWaker {
     }
 }
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
-fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
-}
-
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
@@ -3735,6 +3700,16 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
 
     fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
         match payload.downcast::<String>() {
@@ -5061,11 +5036,6 @@ mod tests {
             }
             result
         })
-    }
-
-    fn clean_env() {
-        let _guard = crate::test_utils::env_lock();
-        clean_env_locked();
     }
 
     fn clean_env_locked() {
