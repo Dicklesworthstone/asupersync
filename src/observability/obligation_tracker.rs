@@ -194,11 +194,16 @@ impl ObligationTracker {
         }
     }
 
-    /// Get the current time from the timer driver, or ZERO if unavailable.
+    /// Get the current runtime time for observability.
+    ///
+    /// Live runtimes advance time through the timer driver, while timerless
+    /// runtimes and many direct tests only move `RuntimeState::now`.
+    /// Prefer the timer driver when present and fall back to the logical state
+    /// clock otherwise so obligation ages remain meaningful in both modes.
     fn current_time(&self) -> Time {
         self.state
             .timer_driver()
-            .map_or(Time::ZERO, TimerDriverHandle::now)
+            .map_or(self.state.now, TimerDriverHandle::now)
     }
 
     /// List all active obligations.
@@ -443,8 +448,11 @@ impl crate::console::Render for RawText<'_> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arc_with_non_send_sync)]
 mod tests {
     use super::*;
+    use crate::Budget;
+    use crate::time::{TimerDriverHandle, VirtualClock};
 
     #[test]
     fn test_obligation_state_is_active() {
@@ -627,5 +635,56 @@ mod tests {
             description: Some("test".into()),
         };
         assert!(!info.is_active());
+    }
+
+    #[test]
+    fn tracker_uses_runtime_logical_time_without_timer_driver() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let obligation_id = state
+            .create_obligation(ObligationKind::Lease, task_id, root, Some("lease".into()))
+            .expect("create obligation");
+        state.now = Time::from_secs(65);
+
+        let tracker = ObligationTracker::new(Arc::new(state), None);
+        let obligations = tracker.list_obligations();
+        assert_eq!(obligations.len(), 1);
+        assert_eq!(obligations[0].id, obligation_id);
+        assert_eq!(obligations[0].age, Duration::from_secs(65));
+
+        let leaks = tracker.find_potential_leaks_default();
+        assert_eq!(leaks.len(), 1);
+        assert_eq!(leaks[0].id, obligation_id);
+        assert_eq!(leaks[0].age, Duration::from_secs(65));
+
+        let summary = tracker.summary();
+        assert_eq!(summary.total_active, 1);
+        assert_eq!(summary.potential_leaks, 1);
+        assert_eq!(summary.age_warnings, 1);
+    }
+
+    #[test]
+    fn tracker_prefers_timer_driver_when_available() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let obligation_id = state
+            .create_obligation(ObligationKind::Ack, task_id, root, None)
+            .expect("create obligation");
+        state.now = Time::from_secs(5);
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
+            VirtualClock::starting_at(Time::from_secs(8)),
+        )));
+
+        let tracker = ObligationTracker::new(Arc::new(state), None);
+        let obligations = tracker.list_obligations();
+        assert_eq!(obligations.len(), 1);
+        assert_eq!(obligations[0].id, obligation_id);
+        assert_eq!(obligations[0].age, Duration::from_secs(8));
     }
 }

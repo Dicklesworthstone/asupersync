@@ -44,7 +44,7 @@ use crate::lab::network::{Fault, HostId, NetworkConfig, SimulatedNetwork};
 use crate::remote::{
     CancelRequest, IdempotencyKey, IdempotencyStore, LeaseRenewal, MessageEnvelope, NodeId,
     RemoteCap, RemoteError, RemoteMessage, RemoteOutcome, RemoteRuntime, RemoteTaskId,
-    ResultDelivery, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
+    RemoteTaskState, ResultDelivery, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
 };
 use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
 use crate::types::Time;
@@ -54,8 +54,13 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-type PendingResultsMap =
-    BTreeMap<RemoteTaskId, crate::channel::oneshot::Sender<Result<RemoteOutcome, RemoteError>>>;
+#[derive(Debug)]
+struct PendingResultEntry {
+    tx: Option<crate::channel::oneshot::Sender<Result<RemoteOutcome, RemoteError>>>,
+    state: RemoteTaskState,
+}
+
+type PendingResultsMap = BTreeMap<RemoteTaskId, PendingResultEntry>;
 type SharedPendingResults = Arc<Mutex<PendingResultsMap>>;
 
 #[derive(Clone, Debug)]
@@ -102,7 +107,23 @@ impl RemoteRuntime for VirtualNetworkRuntime {
         tx: crate::channel::oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
     ) {
         let mut pending = self.pending_results.lock();
-        pending.insert(task_id, tx);
+        pending.insert(
+            task_id,
+            PendingResultEntry {
+                tx: Some(tx),
+                state: RemoteTaskState::Pending,
+            },
+        );
+    }
+
+    fn observe_task_state(&self, task_id: RemoteTaskId) -> Option<RemoteTaskState> {
+        let pending = self.pending_results.lock();
+        pending.get(&task_id).map(|entry| entry.state)
+    }
+
+    fn clear_task_state(&self, task_id: RemoteTaskId) {
+        let mut pending = self.pending_results.lock();
+        pending.remove(&task_id);
     }
 
     fn unregister_task(&self, task_id: RemoteTaskId) {
@@ -248,7 +269,7 @@ impl SimNode {
 
         match envelope.payload {
             RemoteMessage::SpawnRequest(req) => self.handle_spawn(req, now),
-            RemoteMessage::SpawnAck(ack) => Self::handle_spawn_ack(ack),
+            RemoteMessage::SpawnAck(ack) => self.handle_spawn_ack(ack),
             RemoteMessage::CancelRequest(cancel) => self.handle_cancel(&cancel),
             RemoteMessage::ResultDelivery(result) => self.handle_result(result),
             RemoteMessage::LeaseRenewal(renewal) => self.handle_lease_renewal(&renewal),
@@ -353,9 +374,31 @@ impl SimNode {
         });
     }
 
-    fn handle_spawn_ack(_ack: SpawnAck) {
-        // Origin node processes ack — in a full implementation this would
-        // update the RemoteHandle state. For harness testing, we log only.
+    fn handle_spawn_ack(&self, ack: SpawnAck) {
+        let rejected = {
+            let mut pending = self.pending_results.lock();
+            pending.get_mut(&ack.remote_task_id).and_then(|entry| {
+                entry.tx.as_ref()?;
+
+                match ack.status {
+                    SpawnAckStatus::Accepted => {
+                        if entry.state == RemoteTaskState::Pending {
+                            entry.state = RemoteTaskState::Running;
+                        }
+                        None
+                    }
+                    SpawnAckStatus::Rejected(reason) => {
+                        entry.state = RemoteTaskState::Failed;
+                        entry.tx.take().map(|tx| (tx, reason))
+                    }
+                }
+            })
+        };
+
+        if let Some((tx, reason)) = rejected {
+            let cx = Cx::for_testing();
+            let _ = tx.send(&cx, Err(RemoteError::SpawnRejected(reason)));
+        }
     }
 
     fn handle_cancel(&mut self, cancel: &CancelRequest) {
@@ -369,11 +412,29 @@ impl SimNode {
     }
 
     fn handle_result(&self, result: ResultDelivery) {
-        // Deliver result to pending local task (application code)
-        let mut pending = self.pending_results.lock();
-        if let Some(tx) = pending.remove(&result.remote_task_id) {
+        let ResultDelivery {
+            remote_task_id,
+            outcome,
+            execution_time: _,
+        } = result;
+
+        let tx = {
+            let mut pending = self.pending_results.lock();
+            pending.get_mut(&remote_task_id).and_then(|entry| {
+                entry.state = match &outcome {
+                    RemoteOutcome::Success(_) => RemoteTaskState::Completed,
+                    RemoteOutcome::Cancelled(_) => RemoteTaskState::Cancelled,
+                    RemoteOutcome::Failed(_) | RemoteOutcome::Panicked(_) => {
+                        RemoteTaskState::Failed
+                    }
+                };
+                entry.tx.take()
+            })
+        };
+
+        if let Some(tx) = tx {
             let cx = Cx::for_testing();
-            let _ = tx.send(&cx, Ok(result.outcome));
+            let _ = tx.send(&cx, Ok(outcome));
         }
     }
 
@@ -676,15 +737,18 @@ impl DistributedHarness {
         let src = self.node_to_host[from];
         let Some(&dst) = self.node_to_host.get(to) else {
             if let RemoteMessage::SpawnRequest(req) = msg {
-                if let Some(node) = self.nodes.get_mut(from) {
+                let tx = if let Some(node) = self.nodes.get_mut(from) {
                     let mut pending = node.pending_results.lock();
-                    if let Some(tx) = pending.remove(&req.remote_task_id) {
-                        let cx = Cx::for_testing();
-                        let _ = tx.send(
-                            &cx,
-                            Err(RemoteError::NodeUnreachable(to.as_str().to_owned())),
-                        );
-                    }
+                    pending.get_mut(&req.remote_task_id).and_then(|entry| {
+                        entry.state = RemoteTaskState::Failed;
+                        entry.tx.take()
+                    })
+                } else {
+                    None
+                };
+                if let Some(tx) = tx {
+                    let cx = Cx::for_testing();
+                    let _ = tx.send(&cx, Err(RemoteError::NodeUnreachable(to.as_str().to_owned())));
                 }
             }
             return;
@@ -1247,6 +1311,40 @@ mod tests {
         // B should have no running tasks
         let node_b = harness.node(&b).unwrap();
         assert_eq!(node_b.running_task_count(), 0);
+    }
+
+    #[test]
+    fn rejected_spawn_ack_fails_pending_remote_handle() {
+        let (mut harness, a, b) = setup_harness();
+        let cap = harness.node(&a).unwrap().create_cap();
+        let cx = Cx::for_testing().with_remote_cap(cap);
+        let mut handle = crate::spawn_remote(
+            &cx,
+            b.clone(),
+            crate::ComputationName::new("compute"),
+            crate::remote::RemoteInput::empty(),
+        )
+        .expect("spawn");
+
+        assert_eq!(handle.state(), RemoteTaskState::Pending);
+
+        harness
+            .nodes
+            .get_mut(&a)
+            .expect("origin node")
+            .handle_spawn_ack(SpawnAck {
+                remote_task_id: handle.remote_task_id(),
+                status: SpawnAckStatus::Rejected(SpawnRejectReason::CapacityExceeded),
+                assigned_node: b,
+            });
+
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
+        let err = handle.try_join().expect_err("rejected spawn");
+        assert_eq!(
+            err,
+            RemoteError::SpawnRejected(SpawnRejectReason::CapacityExceeded)
+        );
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
     }
 
     #[test]
