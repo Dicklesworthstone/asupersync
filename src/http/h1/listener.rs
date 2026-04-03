@@ -11,6 +11,7 @@ use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
 use crate::tracing_compat::error;
+use crate::cx::scope::payload_to_string;
 use crate::{cx::Cx, types::Time};
 use std::future::Future;
 use std::io;
