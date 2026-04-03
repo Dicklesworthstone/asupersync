@@ -8,8 +8,8 @@ use std::task::{Context, Poll};
 
 use crate::config::RaptorQConfig;
 use crate::cx::Cx;
-use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
-use crate::encoding::{EncodingPipeline, max_object_size};
+use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
+use crate::encoding::{max_object_size, EncodingPipeline};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
@@ -48,7 +48,7 @@ pub struct ReceiveOutcome {
     pub data: Vec<u8>,
     /// Number of symbols used for decoding.
     pub symbols_received: usize,
-    /// Whether authentication was verified.
+    /// Whether every symbol consumed for decode was cryptographically verified.
     pub authenticated: bool,
 }
 
@@ -236,27 +236,38 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
             symbol_size: self.config.encoding.symbol_size,
             max_block_size: self.config.encoding.max_block_size,
             repair_overhead: self.config.encoding.repair_overhead,
-            verify_auth: self.security.is_some(),
+            // Authenticate target-object symbols at the receiver boundary so
+            // strict mode fails closed before decode and ReceiveOutcome can
+            // report whether consumed symbols were actually verified.
+            verify_auth: false,
             ..Default::default()
         };
 
-        let mut decoder = match &self.security {
-            Some(ctx) => DecodingPipeline::with_auth(decoding_config, ctx.clone()),
-            None => DecodingPipeline::new(decoding_config),
-        };
+        let mut decoder = DecodingPipeline::new(decoding_config);
 
         decoder.set_object_params(*params).map_err(Error::from)?;
 
         let mut symbols_received = 0usize;
+        let mut authenticated = self.security.is_some();
 
         // Read symbols until decoding completes.
         while !decoder.is_complete() {
             cx.checkpoint()?;
 
-            if let Some(auth_symbol) = poll_next_blocking(&mut self.source)? {
+            if let Some(mut auth_symbol) = poll_next_blocking(&mut self.source)? {
                 // Skip symbols for other objects.
                 if auth_symbol.symbol().object_id() != params.object_id {
                     continue;
+                }
+
+                if let Some(ctx) = &self.security {
+                    if !auth_symbol.is_verified() {
+                        ctx.verify_authenticated_symbol(&mut auth_symbol)
+                            .map_err(|err| {
+                                Error::new(ErrorKind::CorruptedSymbol).with_message(err.to_string())
+                            })?;
+                    }
+                    authenticated &= auth_symbol.is_verified();
                 }
 
                 match decoder.feed(auth_symbol).map_err(Error::from)? {
@@ -267,6 +278,10 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                         if let Some(ref mut m) = self.metrics {
                             m.counter("raptorq.symbols_received").increment();
                         }
+                    }
+                    SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => {
+                        return Err(Error::new(ErrorKind::CorruptedSymbol)
+                            .with_message("symbol authentication failed during receive"));
                     }
                     SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_) => {
                         // Not used for decoding; keep waiting for usable symbols.
@@ -281,7 +296,6 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
             }
         }
 
-        let authenticated = self.security.is_some();
         let data = decoder.into_data().map_err(Error::from)?;
 
         if let Some(ref mut m) = self.metrics {
@@ -474,7 +488,7 @@ fn poll_next_blocking<S: SymbolStream + Unpin>(
 mod tests {
     use super::*;
     use crate::observability::Metrics;
-    use crate::security::{AuthenticationTag, SecurityContext};
+    use crate::security::{AuthMode, AuthenticationTag, SecurityContext};
     use crate::transport::channel;
     use crate::transport::error::{SinkError, StreamError};
     use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
@@ -1162,6 +1176,90 @@ mod tests {
 
         let recv = receiver.receive_object(&cx, &params).unwrap();
         assert!(recv.authenticated);
+    }
+
+    #[test]
+    fn test_receive_object_bad_target_tag_with_strict_security_fails_closed() {
+        let cx: Cx = Cx::for_testing();
+        let sender_security = SecurityContext::for_testing(42);
+        let sink = VecSink::new();
+        let mut sender =
+            RaptorQSender::new(RaptorQConfig::default(), sink, Some(sender_security), None);
+
+        let data = vec![0x11u8; 1024];
+        let object_id = ObjectId::new_for_test(45);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let mut symbols: Vec<AuthenticatedSymbol> =
+            sender.transport_mut().symbols.drain(..).collect();
+        let corrupted = symbols.remove(0);
+        symbols.insert(
+            0,
+            AuthenticatedSymbol::from_parts(corrupted.into_symbol(), AuthenticationTag::zero()),
+        );
+        let stream = VecStream::new(symbols);
+        let mut receiver = RaptorQReceiver::new(
+            RaptorQConfig::default(),
+            stream,
+            Some(SecurityContext::for_testing(42)),
+            None,
+        );
+
+        let err = receiver
+            .receive_object(&cx, &params)
+            .expect_err("strict auth should fail closed on a bad target tag");
+
+        assert_eq!(err.kind(), ErrorKind::CorruptedSymbol);
+    }
+
+    #[test]
+    fn test_receive_object_permissive_security_marks_receive_as_unauthenticated() {
+        let cx: Cx = Cx::for_testing();
+        let sender_security = SecurityContext::for_testing(42);
+        let sink = VecSink::new();
+        let mut sender =
+            RaptorQSender::new(RaptorQConfig::default(), sink, Some(sender_security), None);
+
+        let data = vec![0x77u8; 1024];
+        let object_id = ObjectId::new_for_test(46);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let mut symbols: Vec<AuthenticatedSymbol> =
+            sender.transport_mut().symbols.drain(..).collect();
+        let corrupted = symbols.remove(0);
+        symbols.insert(
+            0,
+            AuthenticatedSymbol::from_parts(corrupted.into_symbol(), AuthenticationTag::zero()),
+        );
+        let stream = VecStream::new(symbols);
+        let mut receiver = RaptorQReceiver::new(
+            RaptorQConfig::default(),
+            stream,
+            Some(SecurityContext::for_testing(42).with_mode(AuthMode::Permissive)),
+            None,
+        );
+
+        let recv = receiver
+            .receive_object(&cx, &params)
+            .expect("permissive mode should allow decode to continue");
+
+        assert_eq!(&recv.data[..data.len()], &data);
+        assert!(
+            !recv.authenticated,
+            "permissive-mode decode with an unverified symbol must not report authenticated"
+        );
     }
 
     #[test]

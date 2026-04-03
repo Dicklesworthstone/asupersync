@@ -401,6 +401,18 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
         p1 == expected_p1,
         "P1 must equal smallest prime >= P (expected {expected_p1}, got {p1})"
     );
+    assert!(tuple.d > 0, "LT degree must be > 0");
+    assert!(tuple.d1 > 0, "PI degree must be > 0");
+    assert!(
+        tuple.a > 0 && tuple.a < w,
+        "LT step must satisfy 1 <= a < W"
+    );
+    assert!(
+        tuple.a1 > 0 && tuple.a1 < p1,
+        "PI step must satisfy 1 <= a1 < P1"
+    );
+    assert!(tuple.b < w, "LT start must be < W");
+    assert!(tuple.b1 < p1, "PI start must be < P1");
 
     let mut out = Vec::with_capacity(tuple.d + tuple.d1);
 
@@ -666,6 +678,63 @@ mod tests {
         assert!(
             result.is_err(),
             "tuple_indices should reject non-canonical P1 values"
+        );
+    }
+
+    fn assert_tuple_indices_rejects_invalid_tuple(tuple: LtTuple, message: &str) {
+        let result = std::panic::catch_unwind(|| tuple_indices(tuple, 17, 10, 11));
+        assert!(result.is_err(), "{message}");
+    }
+
+    #[test]
+    fn tuple_indices_reject_zero_degrees() {
+        assert_tuple_indices_rejects_invalid_tuple(
+            LtTuple {
+                d: 0,
+                a: 4,
+                b: 9,
+                d1: 2,
+                a1: 5,
+                b1: 1,
+            },
+            "tuple_indices should reject zero LT degree instead of silently emitting an extra LT index",
+        );
+        assert_tuple_indices_rejects_invalid_tuple(
+            LtTuple {
+                d: 2,
+                a: 4,
+                b: 9,
+                d1: 0,
+                a1: 5,
+                b1: 1,
+            },
+            "tuple_indices should reject zero PI degree instead of silently emitting an extra PI index",
+        );
+    }
+
+    #[test]
+    fn tuple_indices_reject_zero_steps_before_iteration() {
+        assert_tuple_indices_rejects_invalid_tuple(
+            LtTuple {
+                d: 2,
+                a: 0,
+                b: 9,
+                d1: 2,
+                a1: 5,
+                b1: 1,
+            },
+            "tuple_indices should reject zero LT step instead of producing degenerate duplicate walks",
+        );
+        assert_tuple_indices_rejects_invalid_tuple(
+            LtTuple {
+                d: 2,
+                a: 4,
+                b: 9,
+                d1: 2,
+                a1: 0,
+                b1: 10,
+            },
+            "tuple_indices should reject zero PI step instead of risking a non-terminating PI-side walk",
         );
     }
 
