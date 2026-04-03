@@ -348,7 +348,7 @@ impl<R, S> Chan<R, S> {
 
 // -- Send transition --
 
-impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
+impl<R, T, S> Chan<R, Send<T, S>> {
     /// Send a value (pure typestate mode, no transport).
     ///
     /// In pure typestate mode, the value is discarded and only the state
@@ -356,7 +356,9 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
     pub fn send(self, _value: T) -> Chan<R, S> {
         self.transition()
     }
+}
 
+impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
     /// Send a value over the transport, transitioning to the continuation state.
     ///
     /// Returns `SessionError::Cancelled` if the `Cx` is cancelled, or
@@ -365,7 +367,7 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
     /// # Panics
     ///
     /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
-    /// to check, or construct with [`new_session_with_transport`].
+    /// to check, or construct with [`new_transport_pair`].
     pub async fn send_async(mut self, cx: &Cx, value: T) -> Result<Chan<R, S>, SessionError> {
         let transport = self
             .transport
@@ -393,7 +395,7 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
 
 // -- Recv transition --
 
-impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
+impl<R, T, S> Chan<R, Recv<T, S>> {
     /// Receive a value (pure typestate mode, no transport).
     ///
     /// In pure typestate mode, the caller provides the value. Use
@@ -401,7 +403,9 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
     pub fn recv(self, value: T) -> (T, Chan<R, S>) {
         (value, self.transition())
     }
+}
 
+impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
     /// Receive a value from the transport, transitioning to the continuation state.
     ///
     /// Returns `SessionError::Cancelled` if the `Cx` is cancelled, or
@@ -614,15 +618,16 @@ impl<R, S> Drop for Chan<R, S> {
 
 /// Create a transport-backed session pair for any protocol.
 ///
-/// Returns `(Chan<Initiator, I>, Chan<Responder, R>)` where each endpoint
-/// has bidirectional mpsc channels to the peer.
+/// `IS` and `RS` are the session types for the initiator and responder
+/// respectively (e.g., `send_permit::InitiatorSession<T>` and
+/// `send_permit::ResponderSession<T>`).
 ///
 /// `buffer` controls the mpsc channel capacity for backpressure.
-pub fn new_transport_pair<I, R>(
+pub fn new_transport_pair<IS, RS>(
     channel_id: u64,
     obligation_kind: ObligationKind,
     buffer: usize,
-) -> (Chan<Initiator, I>, Chan<Responder, R>) {
+) -> (Chan<Initiator, IS>, Chan<Responder, RS>) {
     let (tx_i2r, rx_i2r) =
         mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
     let (tx_r2i, rx_r2i) =
@@ -677,7 +682,8 @@ pub mod send_permit_compat {
 #[cfg(not(feature = "proc-macros"))]
 /// Session types for the SendPermit → Ack protocol.
 pub mod send_permit {
-    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
+    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send, SessionTransport};
+    use crate::channel::mpsc;
     use crate::record::ObligationKind;
 
     /// Reserve request marker.
@@ -781,7 +787,7 @@ pub mod lease_compat {
 #[cfg(not(feature = "proc-macros"))]
 /// Session types for the Lease → Release protocol.
 pub mod lease {
-    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
+    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send, SessionTransport};
     use crate::record::ObligationKind;
 
     /// Acquire request marker.
@@ -1054,24 +1060,23 @@ pub struct TracingContract;
 ///       │
 ///       ├── Typestate transition (compile-time)
 ///       │
-///       └── TransportBridge
+///       └── SessionTransport (bidirectional)
 ///               │
-///               ├── tx: TrackedSender<SessionMessage<T>>
-///               │       └── reserve(&cx) → TrackedPermit → send(v) → CommittedProof
+///               ├── tx: mpsc::Sender<Box<dyn Any + Send>>
+///               │       └── reserve(&cx) → Permit → send(Box::new(v))
 ///               │
-///               └── rx: mpsc::Receiver<SessionMessage<T>>
-///                       └── recv(&cx) → T | SessionError
+///               └── rx: mpsc::Receiver<Box<dyn Any + Send>>
+///                       └── recv(&cx) → downcast::<T>() | SessionError
 /// ```
 ///
 /// ### Wire Format
 ///
-/// Each protocol transition maps to a `SessionMessage` discriminant:
+/// The transport uses `Box<dyn Any + Send>` with runtime downcasting:
 ///
 /// ```text
-///   SessionMessage::Payload(T)    — for Send<T, S> transitions
-///   SessionMessage::SelectLeft    — for Select<A, B>.select_left()
-///   SessionMessage::SelectRight   — for Select<A, B>.select_right()
-///   SessionMessage::Close         — for End.close()
+///   Send<T, S>  transitions  → Box::new(value: T), downcast::<T>() on recv
+///   Select<A,B> transitions  → Box::new(Branch::Left | Branch::Right)
+///   End.close()              → no transport message (local disarm only)
 /// ```
 ///
 /// ### Capability Requirements
@@ -1125,22 +1130,13 @@ pub struct TracingContract;
 #[allow(dead_code)] // Contract type — used as documentation anchor
 pub struct TransportBridgeContract;
 
-/// Session message wire format for the in-process transport bridge.
-///
-/// Each protocol transition maps to a discriminant. The receiver
-/// pattern-matches to validate protocol adherence at runtime.
-#[derive(Debug)]
-#[allow(dead_code)] // Wire format for G2 implementation
-pub enum SessionMessage<T> {
-    /// Payload delivery for `Send<T, S>` transitions.
-    Payload(T),
-    /// Branch selection: left branch chosen.
-    SelectLeft,
-    /// Branch selection: right branch chosen.
-    SelectRight,
-    /// Session close signal.
-    Close,
-}
+// Note: The transport implementation uses `Box<dyn Any + Send>` with runtime
+// downcasting rather than a typed `SessionMessage<T>` enum. This is because
+// the payload type changes at each protocol step (e.g., `ReserveMsg` then `u64`
+// then `AbortMsg`), so a single typed channel cannot carry all transitions.
+// Branch selections (`Select`/`Offer`) send `Branch::Left`/`Branch::Right`
+// values. The `close()` method does not send a transport message — it only
+// disarms the drop bomb locally.
 
 /// Errors from transport-backed session operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
