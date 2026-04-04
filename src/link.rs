@@ -378,6 +378,13 @@ impl LinkSet {
         policy_b: ExitPolicy,
     ) -> LinkRef {
         let link_ref = LinkRef::new();
+        // Self-links are exposed as a single logical edge, so they need one
+        // canonical exit policy across introspection, mutation, and delivery.
+        let (policy_a, policy_b) = if task_a == task_b {
+            (policy_a, policy_a)
+        } else {
+            (policy_a, policy_b)
+        };
         let record = LinkRecord {
             task_a,
             region_a,
@@ -556,6 +563,9 @@ impl LinkSet {
         };
         if rec.task_a == task {
             rec.policy_a = policy;
+            if rec.task_b == task {
+                rec.policy_b = policy;
+            }
             true
         } else if rec.task_b == task {
             rec.policy_b = policy;
@@ -1044,6 +1054,37 @@ mod tests {
                 assert_eq!(*link_ref, lref);
             }
             other => panic!("expected CancelPeer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exits_self_link_honors_visible_policy_from_establishment() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref = set.establish_with_policy(a, r1, ExitPolicy::Trap, a, r1, ExitPolicy::Ignore);
+
+        assert_eq!(set.exit_policy_for(lref, a), Some(ExitPolicy::Trap));
+        assert_eq!(set.peers_with_policy(a), vec![(lref, a, ExitPolicy::Trap)]);
+
+        let actions = set
+            .resolve_exits(
+                a,
+                Time::from_secs(1),
+                &DownReason::Error("boom".to_string()),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LinkExitAction::DeliverExit { to, signal } => {
+                assert_eq!(*to, a);
+                assert_eq!(signal.from, a);
+                assert_eq!(signal.link_ref, lref);
+                assert!(matches!(signal.reason, DownReason::Error(_)));
+            }
+            other => panic!("expected DeliverExit, got {other:?}"),
         }
     }
 
@@ -1719,6 +1760,46 @@ mod tests {
         assert_eq!(set.exit_policy_for(lref, t1), Some(ExitPolicy::Trap));
         // t2 unchanged
         assert_eq!(set.exit_policy_for(lref, t2), Some(ExitPolicy::Propagate));
+    }
+
+    #[test]
+    fn set_exit_policy_updates_self_link_resolution() {
+        let mut set = LinkSet::new();
+        let task = test_task_id(1, 0);
+        let region = test_region_id(0, 0);
+
+        let lref = set.establish_with_policy(
+            task,
+            region,
+            ExitPolicy::Trap,
+            task,
+            region,
+            ExitPolicy::Ignore,
+        );
+
+        assert!(set.set_exit_policy(lref, task, ExitPolicy::Ignore));
+        assert_eq!(set.exit_policy_for(lref, task), Some(ExitPolicy::Ignore));
+        assert_eq!(
+            set.peers_with_policy(task),
+            vec![(lref, task, ExitPolicy::Ignore)]
+        );
+
+        let actions = set
+            .resolve_exits(
+                task,
+                Time::from_secs(1),
+                &DownReason::Error("boom".to_string()),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LinkExitAction::Ignored { to, link_ref } => {
+                assert_eq!(*to, task);
+                assert_eq!(*link_ref, lref);
+            }
+            other => panic!("expected Ignored, got {other:?}"),
+        }
     }
 
     #[test]

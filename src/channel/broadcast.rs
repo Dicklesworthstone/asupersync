@@ -241,10 +241,10 @@ pub struct SendPermit<'a, T> {
 impl<T: Clone> SendPermit<'_, T> {
     /// Sends the message.
     ///
-    /// Returns the number of receivers that will see this message.
+    /// Returns the number of receivers that were live at commit time.
     ///
-    /// If all receivers drop after reservation but before commit, this returns
-    /// `0` and does not mutate channel state.
+    /// If all receivers drop before the final commit snapshot, this returns `0`
+    /// and leaves channel state unchanged.
     pub fn send(self, msg: T) -> usize {
         let mut inner = self.sender.channel.inner.lock();
 
@@ -263,6 +263,18 @@ impl<T: Clone> SendPermit<'_, T> {
 
         let index = inner.total_sent;
         inner.buffer.push_back(Slot { msg, index });
+
+        // Snapshot receiver liveness before unlocking so late subscribers are
+        // never counted for a message that committed before they existed.
+        let live_receivers = self.sender.channel.receiver_count.load(Ordering::Acquire);
+        if live_receivers == 0 {
+            let _ = inner.buffer.pop_back();
+            if let Some(slot) = popped {
+                inner.buffer.push_front(slot);
+            }
+            return 0;
+        }
+
         inner.total_sent += 1;
 
         // Drain wakers under lock (by ownership, no clone), wake outside
@@ -276,8 +288,7 @@ impl<T: Clone> SendPermit<'_, T> {
             waker.wake();
         }
 
-        // Re-read for most accurate count (a receiver could drop during send).
-        self.sender.channel.receiver_count.load(Ordering::Acquire)
+        live_receivers
     }
 }
 
@@ -524,6 +535,70 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct DropBlocker {
+        entered_tx: std::sync::mpsc::SyncSender<()>,
+        release_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        armed: AtomicUsize,
+    }
+
+    impl DropBlocker {
+        fn new() -> (
+            Arc<Self>,
+            std::sync::mpsc::Receiver<()>,
+            std::sync::mpsc::SyncSender<()>,
+        ) {
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            (
+                Arc::new(Self {
+                    entered_tx,
+                    release_rx: std::sync::Mutex::new(Some(release_rx)),
+                    armed: AtomicUsize::new(1),
+                }),
+                entered_rx,
+                release_tx,
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    enum GateMsg {
+        Blocking(Arc<DropBlocker>),
+        Plain(i32),
+    }
+
+    impl Clone for GateMsg {
+        fn clone(&self) -> Self {
+            match self {
+                Self::Blocking(blocker) => Self::Blocking(Arc::clone(blocker)),
+                Self::Plain(value) => Self::Plain(*value),
+            }
+        }
+    }
+
+    impl Drop for GateMsg {
+        fn drop(&mut self) {
+            let Self::Blocking(blocker) = self else {
+                return;
+            };
+
+            if blocker.armed.fetch_sub(1, AtomicOrdering::AcqRel) != 1 {
+                return;
+            }
+
+            let _ = blocker.entered_tx.send(());
+            let release_rx = blocker
+                .release_rx
+                .lock()
+                .expect("drop blocker mutex poisoned")
+                .take();
+            if let Some(rx) = release_rx {
+                rx.recv().expect("drop blocker release recv");
+            }
+        }
+    }
+
     #[test]
     fn basic_send_recv() {
         init_test("basic_send_recv");
@@ -654,6 +729,62 @@ mod tests {
         );
 
         crate::test_complete!("send_returns_live_receiver_count");
+    }
+
+    #[test]
+    fn send_count_excludes_receivers_that_subscribe_after_commit() {
+        init_test("send_count_excludes_receivers_that_subscribe_after_commit");
+        let cx = test_cx();
+        let (tx, mut rx1) = channel::<GateMsg>(1);
+        let (blocker, entered_rx, release_tx) = DropBlocker::new();
+
+        tx.send(&cx, GateMsg::Blocking(blocker)).unwrap();
+
+        let tx_thread = tx.clone();
+        let handle = std::thread::spawn(move || {
+            let cx = test_cx();
+            tx_thread.send(&cx, GateMsg::Plain(2)).expect("send failed")
+        });
+
+        entered_rx.recv().expect("drop blocker entered");
+
+        let mut rx2 = tx.subscribe();
+        release_tx.send(()).expect("drop blocker release send");
+
+        let count = handle.join().expect("sender thread panicked");
+        crate::assert_with_log!(
+            count == 1,
+            "send count excludes late subscriber",
+            1usize,
+            count
+        );
+
+        let lag = block_on(rx1.recv(&cx));
+        crate::assert_with_log!(
+            matches!(lag, Err(RecvError::Lagged(1))),
+            "existing receiver first observes eviction lag",
+            true,
+            matches!(lag, Err(RecvError::Lagged(1)))
+        );
+
+        let got1 = block_on(rx1.recv(&cx)).unwrap();
+        crate::assert_with_log!(
+            matches!(got1, GateMsg::Plain(2)),
+            "existing receiver sees committed message",
+            true,
+            matches!(got1, GateMsg::Plain(2))
+        );
+
+        tx.send(&cx, GateMsg::Plain(3)).unwrap();
+        let got2 = block_on(rx2.recv(&cx)).unwrap();
+        crate::assert_with_log!(
+            matches!(got2, GateMsg::Plain(3)),
+            "late subscriber sees only future message",
+            true,
+            matches!(got2, GateMsg::Plain(3))
+        );
+
+        crate::test_complete!("send_count_excludes_receivers_that_subscribe_after_commit");
     }
 
     #[test]
