@@ -358,6 +358,20 @@ impl<R, T, S> Chan<R, Send<T, S>> {
     }
 }
 
+fn map_transport_send_error<T>(error: &mpsc::SendError<T>) -> SessionError {
+    match error {
+        mpsc::SendError::Disconnected(_) => SessionError::Closed,
+        mpsc::SendError::Cancelled(_) => SessionError::Cancelled,
+        mpsc::SendError::Full(_) => {
+            debug_assert!(
+                false,
+                "transport-backed session send unexpectedly returned SendError::Full"
+            );
+            SessionError::Closed
+        }
+    }
+}
+
 impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
     /// Send a value over the transport, transitioning to the continuation state.
     ///
@@ -374,22 +388,14 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
             .take()
             .expect("send_async called on non-transport-backed session channel");
 
-        let ok = transport
-            .tx
-            .reserve(cx)
-            .await
-            .map(|permit| {
-                permit.send(Box::new(value) as Box<dyn std::any::Any + std::marker::Send>);
-            })
-            .is_ok();
-
-        if ok {
-            self.transport = Some(transport);
-            Ok(self.transition())
-        } else {
+        let boxed = Box::new(value) as Box<dyn std::any::Any + std::marker::Send>;
+        if let Err(error) = transport.tx.send(cx, boxed).await {
             self.closed = true;
-            Err(SessionError::Closed)
+            return Err(map_transport_send_error(&error));
         }
+
+        self.transport = Some(transport);
+        Ok(self.transition())
     }
 }
 
@@ -421,9 +427,12 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
             .take()
             .expect("recv_async called on non-transport-backed session channel");
 
-        let Ok(boxed) = transport.rx.recv(cx).await else {
-            self.closed = true;
-            return Err(SessionError::Closed);
+        let boxed = match transport.rx.recv(cx).await {
+            Ok(boxed) => boxed,
+            Err(error) => {
+                self.closed = true;
+                return Err(map_transport_recv_error(error));
+            }
         };
 
         let Ok(value) = boxed.downcast::<T>() else {
@@ -436,6 +445,20 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
 
         self.transport = Some(transport);
         Ok((*value, self.transition()))
+    }
+}
+
+fn map_transport_recv_error(error: mpsc::RecvError) -> SessionError {
+    match error {
+        mpsc::RecvError::Disconnected => SessionError::Closed,
+        mpsc::RecvError::Cancelled => SessionError::Cancelled,
+        mpsc::RecvError::Empty => {
+            debug_assert!(
+                false,
+                "transport-backed session recv unexpectedly returned RecvError::Empty"
+            );
+            SessionError::Closed
+        }
     }
 }
 
@@ -461,47 +484,46 @@ impl<R, A, B> Chan<R, Select<A, B>> {
     }
 
     /// Select the left branch and notify the peer via transport.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
+    /// to check, or use [`select_left`](Self::select_left) for pure typestate mode.
     pub async fn select_left_async(mut self, cx: &Cx) -> Result<Chan<R, A>, SessionError> {
-        if let Some(transport) = self.transport.take() {
-            let ok = transport
-                .tx
-                .reserve(cx)
-                .await
-                .map(|permit| {
-                    permit
-                        .send(Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>);
-                })
-                .is_ok();
-            if ok {
-                self.transport = Some(transport);
-            } else {
-                self.closed = true;
-                return Err(SessionError::Closed);
-            }
+        let transport = self
+            .transport
+            .take()
+            .expect("select_left_async called on non-transport-backed session channel");
+
+        let branch = Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>;
+        if let Err(error) = transport.tx.send(cx, branch).await {
+            self.closed = true;
+            return Err(map_transport_send_error(&error));
         }
+
+        self.transport = Some(transport);
         Ok(self.transition())
     }
 
     /// Select the right branch and notify the peer via transport.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
+    /// to check, or use [`select_right`](Self::select_right) for pure typestate mode.
     pub async fn select_right_async(mut self, cx: &Cx) -> Result<Chan<R, B>, SessionError> {
-        if let Some(transport) = self.transport.take() {
-            let ok = transport
-                .tx
-                .reserve(cx)
-                .await
-                .map(|permit| {
-                    permit.send(
-                        Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>,
-                    );
-                })
-                .is_ok();
-            if ok {
-                self.transport = Some(transport);
-            } else {
-                self.closed = true;
-                return Err(SessionError::Closed);
-            }
+        let transport = self
+            .transport
+            .take()
+            .expect("select_right_async called on non-transport-backed session channel");
+
+        let branch = Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>;
+        if let Err(error) = transport.tx.send(cx, branch).await {
+            self.closed = true;
+            return Err(map_transport_send_error(&error));
         }
+
+        self.transport = Some(transport);
         Ok(self.transition())
     }
 }
@@ -531,9 +553,12 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
             .take()
             .expect("offer_async called on non-transport-backed session channel");
 
-        let Ok(boxed) = transport.rx.recv(cx).await else {
-            self.closed = true;
-            return Err(SessionError::Closed);
+        let boxed = match transport.rx.recv(cx).await {
+            Ok(boxed) => boxed,
+            Err(error) => {
+                self.closed = true;
+                return Err(map_transport_recv_error(error));
+            }
         };
 
         let Ok(branch) = boxed.downcast::<Branch>() else {
@@ -2039,6 +2064,174 @@ mod tests {
                     panic!("expected error, got Ok");
                 }
             }
+        });
+    }
+
+    #[test]
+    fn transport_backed_send_async_cancelled_cx_returns_cancelled() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(301, ObligationKind::SendPermit, 4);
+        receiver.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            cx.set_cancel_reason(crate::types::CancelReason::user(
+                "transport-backed send cancelled",
+            ));
+
+            let result = sender.send_async(&cx, send_permit::ReserveMsg).await;
+            assert!(matches!(result, Err(SessionError::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn transport_backed_recv_async_cancelled_cx_returns_cancelled() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(302, ObligationKind::SendPermit, 4);
+        sender.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            cx.set_cancel_reason(crate::types::CancelReason::user(
+                "transport-backed recv cancelled",
+            ));
+
+            let result = receiver.recv_async(&cx).await;
+            assert!(matches!(result, Err(SessionError::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn transport_backed_select_async_cancelled_cx_returns_cancelled() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let cancelled_cx = Cx::for_testing();
+            cancelled_cx.set_cancel_reason(crate::types::CancelReason::user(
+                "transport-backed select cancelled",
+            ));
+
+            let (sender_left, receiver_left) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(303, ObligationKind::SendPermit, 4);
+            let sender_left = sender_left
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver_left) = receiver_left.recv_async(&cx).await.unwrap();
+            let left_result = sender_left.select_left_async(&cancelled_cx).await;
+            receiver_left.disarm_for_test();
+            assert!(matches!(left_result, Err(SessionError::Cancelled)));
+
+            let (sender_right, receiver_right) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(304, ObligationKind::SendPermit, 4);
+            let sender_right = sender_right
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver_right) = receiver_right.recv_async(&cx).await.unwrap();
+            let right_result = sender_right.select_right_async(&cancelled_cx).await;
+            receiver_right.disarm_for_test();
+            assert!(matches!(right_result, Err(SessionError::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn transport_backed_offer_async_cancelled_cx_returns_cancelled() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(305, ObligationKind::SendPermit, 4);
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let sender = sender
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver) = receiver.recv_async(&cx).await.unwrap();
+            sender.disarm_for_test();
+
+            let cancelled_cx = Cx::for_testing();
+            cancelled_cx.set_cancel_reason(crate::types::CancelReason::user(
+                "transport-backed offer cancelled",
+            ));
+
+            let result = receiver.offer_async(&cancelled_cx).await;
+            assert!(matches!(result, Err(SessionError::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn transport_backed_recv_offer_and_select_peer_drop_return_closed() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+
+            let (sender_recv, receiver_recv) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(306, ObligationKind::SendPermit, 4);
+            sender_recv.disarm_for_test();
+            let recv_result = receiver_recv.recv_async(&cx).await;
+            assert!(matches!(recv_result, Err(SessionError::Closed)));
+
+            let (sender_offer, receiver_offer) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(307, ObligationKind::SendPermit, 4);
+            let sender_offer = sender_offer
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver_offer) = receiver_offer.recv_async(&cx).await.unwrap();
+            sender_offer.disarm_for_test();
+            let offer_result = receiver_offer.offer_async(&cx).await;
+            assert!(matches!(offer_result, Err(SessionError::Closed)));
+
+            let (sender_select, receiver_select) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(308, ObligationKind::SendPermit, 4);
+            let sender_select = sender_select
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver_select) = receiver_select.recv_async(&cx).await.unwrap();
+            receiver_select.disarm_for_test();
+            let select_result = sender_select.select_left_async(&cx).await;
+            assert!(matches!(select_result, Err(SessionError::Closed)));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "select_left_async called on non-transport-backed session channel")]
+    fn select_left_async_panics_without_transport_backing() {
+        let (sender, receiver) = send_permit::new_session::<u64>(309);
+        receiver.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let sender = sender.send(send_permit::ReserveMsg);
+            let _ = sender.select_left_async(&cx).await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "select_right_async called on non-transport-backed session channel")]
+    fn select_right_async_panics_without_transport_backing() {
+        let (sender, receiver) = send_permit::new_session::<u64>(310);
+        receiver.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let sender = sender.send(send_permit::ReserveMsg);
+            let _ = sender.select_right_async(&cx).await;
         });
     }
 

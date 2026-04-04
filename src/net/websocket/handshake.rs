@@ -76,6 +76,25 @@ fn extension_token(offer: &str) -> &str {
     offer.split(';').next().unwrap_or("").trim()
 }
 
+fn header_has_token(value: &str, token: &str) -> bool {
+    value
+        .split(',')
+        .map(str::trim)
+        .any(|part| part.eq_ignore_ascii_case(token))
+}
+
+fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError> {
+    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+        Ok((&data[..pos + 4], &data[pos + 4..]))
+    } else if let Some(pos) = data.windows(2).position(|w| w == b"\n\n") {
+        Ok((&data[..pos + 2], &data[pos + 2..]))
+    } else {
+        Err(HandshakeError::InvalidRequest(
+            "incomplete HTTP headers".into(),
+        ))
+    }
+}
+
 /// Parsed WebSocket URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WsUrl {
@@ -415,9 +434,9 @@ impl ClientHandshake {
         let upgrade = response
             .header("upgrade")
             .ok_or(HandshakeError::MissingHeader("Upgrade"))?;
-        if !upgrade.eq_ignore_ascii_case("websocket") {
+        if !header_has_token(upgrade, "websocket") {
             return Err(HandshakeError::InvalidRequest(format!(
-                "Upgrade header must be 'websocket', got '{upgrade}'"
+                "Upgrade header must contain 'websocket', got '{upgrade}'"
             )));
         }
 
@@ -425,7 +444,7 @@ impl ClientHandshake {
         let connection = response
             .header("connection")
             .ok_or(HandshakeError::MissingHeader("Connection"))?;
-        if !connection.to_ascii_lowercase().contains("upgrade") {
+        if !header_has_token(connection, "upgrade") {
             return Err(HandshakeError::InvalidRequest(format!(
                 "Connection header must contain 'Upgrade', got '{connection}'"
             )));
@@ -534,9 +553,9 @@ impl ServerHandshake {
         let upgrade = request
             .header("upgrade")
             .ok_or(HandshakeError::MissingHeader("Upgrade"))?;
-        if !upgrade.eq_ignore_ascii_case("websocket") {
+        if !header_has_token(upgrade, "websocket") {
             return Err(HandshakeError::InvalidRequest(format!(
-                "Upgrade header must be 'websocket', got '{upgrade}'"
+                "Upgrade header must contain 'websocket', got '{upgrade}'"
             )));
         }
 
@@ -544,7 +563,7 @@ impl ServerHandshake {
         let connection = request
             .header("connection")
             .ok_or(HandshakeError::MissingHeader("Connection"))?;
-        if !connection.to_ascii_lowercase().contains("upgrade") {
+        if !header_has_token(connection, "upgrade") {
             return Err(HandshakeError::InvalidRequest(format!(
                 "Connection header must contain 'Upgrade', got '{connection}'"
             )));
@@ -692,14 +711,7 @@ impl HttpRequest {
     /// Returns `HandshakeError::InvalidRequest` if parsing fails.
     #[allow(clippy::option_if_let_else)]
     pub fn parse_with_trailing(data: &[u8]) -> Result<(Self, &[u8]), HandshakeError> {
-        let (header_bytes, trailing) =
-            if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-                (&data[..pos + 4], &data[pos + 4..])
-            } else if let Some(pos) = data.windows(2).position(|w| w == b"\n\n") {
-                (&data[..pos + 2], &data[pos + 2..])
-            } else {
-                (data, &[][..])
-            };
+        let (header_bytes, trailing) = split_http_header_block(data)?;
 
         let text = std::str::from_utf8(header_bytes)
             .map_err(|_| HandshakeError::InvalidRequest("invalid UTF-8".into()))?;
@@ -778,7 +790,8 @@ impl HttpResponse {
     ///
     /// Returns `HandshakeError::InvalidRequest` if parsing fails.
     pub fn parse(data: &[u8]) -> Result<Self, HandshakeError> {
-        let text = std::str::from_utf8(data)
+        let (header_bytes, _trailing) = split_http_header_block(data)?;
+        let text = std::str::from_utf8(header_bytes)
             .map_err(|_| HandshakeError::InvalidRequest("invalid UTF-8".into()))?;
 
         let mut lines = text.lines();
@@ -926,6 +939,51 @@ mod tests {
     }
 
     #[test]
+    fn test_client_validate_response_rejects_connection_substring_false_positive() {
+        let handshake = ClientHandshake {
+            url: WsUrl::parse("ws://example.com/chat").unwrap(),
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+            protocols: vec![],
+            extensions: vec![],
+            headers: BTreeMap::new(),
+        };
+
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: websocket\r\n\
+              Connection: notupgrade\r\n\
+              Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              \r\n",
+        )
+        .unwrap();
+
+        let err = handshake.validate_response(&response).unwrap_err();
+        assert!(matches!(err, HandshakeError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn test_client_validate_response_allows_upgrade_header_token_list() {
+        let handshake = ClientHandshake {
+            url: WsUrl::parse("ws://example.com/chat").unwrap(),
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+            protocols: vec![],
+            extensions: vec![],
+            headers: BTreeMap::new(),
+        };
+
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: h2c, websocket\r\n\
+              Connection: keep-alive, Upgrade\r\n\
+              Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              \r\n",
+        )
+        .unwrap();
+
+        assert!(handshake.validate_response(&response).is_ok());
+    }
+
+    #[test]
     fn test_client_validate_response_bad_accept() {
         let handshake = ClientHandshake {
             url: WsUrl::parse("ws://example.com/chat").unwrap(),
@@ -1042,6 +1100,44 @@ mod tests {
         let accept = server.accept(&request).unwrap();
         assert_eq!(accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
         assert_eq!(accept.protocol, Some("chat".to_string()));
+    }
+
+    #[test]
+    fn test_server_accept_allows_upgrade_header_token_list() {
+        let server = ServerHandshake::new();
+
+        let request = HttpRequest::parse(
+            b"GET /chat HTTP/1.1\r\n\
+              Host: example.com\r\n\
+              Upgrade: h2c, websocket\r\n\
+              Connection: keep-alive, Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              \r\n",
+        )
+        .unwrap();
+
+        let accept = server.accept(&request).unwrap();
+        assert_eq!(accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn test_server_accept_rejects_connection_substring_false_positive() {
+        let server = ServerHandshake::new();
+
+        let request = HttpRequest::parse(
+            b"GET /chat HTTP/1.1\r\n\
+              Host: example.com\r\n\
+              Upgrade: websocket\r\n\
+              Connection: notupgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              \r\n",
+        )
+        .unwrap();
+
+        let err = server.accept(&request).unwrap_err();
+        assert!(matches!(err, HandshakeError::InvalidRequest(_)));
     }
 
     #[test]
@@ -1175,6 +1271,19 @@ mod tests {
     }
 
     #[test]
+    fn test_http_request_parse_rejects_incomplete_headers() {
+        let err = HttpRequest::parse(
+            b"GET /chat HTTP/1.1\r\n\
+              Host: example.com\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n",
+        )
+        .expect_err("missing blank line must be treated as an incomplete request");
+
+        assert!(matches!(err, HandshakeError::InvalidRequest(_)));
+    }
+
+    #[test]
     fn test_http_response_parse() {
         let response = HttpResponse::parse(
             b"HTTP/1.1 101 Switching Protocols\r\n\
@@ -1189,6 +1298,19 @@ mod tests {
         assert_eq!(response.reason, "Switching Protocols");
         assert_eq!(response.header("upgrade"), Some("websocket"));
         assert_eq!(response.header("sec-websocket-accept"), Some("xyz"));
+    }
+
+    #[test]
+    fn test_http_response_parse_rejects_incomplete_headers() {
+        let err = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Sec-WebSocket-Accept: xyz\r\n",
+        )
+        .expect_err("missing blank line must be treated as an incomplete response");
+
+        assert!(matches!(err, HandshakeError::InvalidRequest(_)));
     }
 
     #[test]

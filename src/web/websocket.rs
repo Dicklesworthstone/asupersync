@@ -85,9 +85,9 @@ impl FromRequest for WebSocketUpgrade {
         let upgrade = req
             .header("upgrade")
             .ok_or_else(|| ExtractionError::bad_request("missing Upgrade header"))?;
-        if !upgrade.eq_ignore_ascii_case("websocket") {
+        if !header_has_token(upgrade, "websocket") {
             return Err(ExtractionError::bad_request(format!(
-                "Upgrade header must be 'websocket', got '{upgrade}'"
+                "Upgrade header must contain 'websocket', got '{upgrade}'"
             )));
         }
 
@@ -458,6 +458,17 @@ mod tests {
         let req = Request::new("GET", "/ws")
             .with_header("upgrade", "WebSocket")
             .with_header("connection", "Upgrade")
+            .with_header("sec-websocket-version", "13")
+            .with_header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+
+        assert!(WebSocketUpgrade::from_request(req).is_ok());
+    }
+
+    #[test]
+    fn accepts_upgrade_header_with_additional_tokens() {
+        let req = Request::new("GET", "/ws")
+            .with_header("upgrade", "h2c, WebSocket")
+            .with_header("connection", "keep-alive, Upgrade")
             .with_header("sec-websocket-version", "13")
             .with_header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
 

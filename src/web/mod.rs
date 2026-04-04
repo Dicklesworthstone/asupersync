@@ -69,7 +69,7 @@ pub use extract::{
 };
 pub use handler::{
     AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,
-    Handler,
+    FnHandler, FnHandler1, FnHandler2, FnHandler3, FnHandler4, Handler,
 };
 pub use nextjs_bootstrap::{
     BootstrapCommand, BootstrapLogEvent, BootstrapRecoveryAction, NextjsBootstrapConfig,

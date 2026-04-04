@@ -481,7 +481,7 @@ pub trait ToSql: Sync {
 /// impl FromSql for PgVector {
 ///     fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
 ///         // parse text or binary representation
-///         todo!()
+///         Err(PgError::Protocol("parse pgvector".into()))
 ///     }
 ///     fn accepts(oid: u32) -> bool { true } // pgvector OID is dynamic
 /// }

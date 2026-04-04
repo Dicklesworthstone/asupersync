@@ -85,13 +85,26 @@ impl PlanCost {
 
     /// Total scalar cost for comparison (weighted sum).
     #[must_use]
-    pub fn total(&self) -> u64 {
+    pub const fn total(&self) -> u64 {
         // Weight critical path heavily, then cancel checkpoints, then allocations
         self.critical_path
             .saturating_mul(1000)
             .saturating_add(self.cancel_checkpoints.saturating_mul(100))
             .saturating_add(self.obligation_pressure.saturating_mul(10))
             .saturating_add(self.allocations)
+    }
+
+    #[must_use]
+    fn comparison_key(&self) -> (u64, u64, u64, u64, u64) {
+        // Break weighted-total ties with the full vector so `Ord` stays
+        // consistent with the derived field-wise `Eq`.
+        (
+            self.total(),
+            self.critical_path,
+            self.cancel_checkpoints,
+            self.obligation_pressure,
+            self.allocations,
+        )
     }
 }
 
@@ -103,7 +116,7 @@ impl PartialOrd for PlanCost {
 
 impl Ord for PlanCost {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.total().cmp(&other.total())
+        self.comparison_key().cmp(&other.comparison_key())
     }
 }
 
@@ -223,9 +236,7 @@ impl<'a> Extractor<'a> {
             if cost == PlanCost::UNKNOWN {
                 continue;
             }
-            if cost.total() < best_cost.total()
-                || (cost.total() == best_cost.total() && best.is_none())
-            {
+            if best.is_none() || cost < best_cost {
                 best_cost = cost;
                 best = Some(node);
             }
@@ -623,6 +634,37 @@ mod tests {
     }
 
     #[test]
+    fn extract_total_tie_prefers_better_full_cost_vector() {
+        init_test();
+        let mut eg = EGraph::new();
+
+        let seed = eg.add_leaf("seed");
+        let worse = eg.add_race(vec![seed]);
+
+        let better_children: Vec<_> = (0..101)
+            .map(|idx| eg.add_leaf(format!("join-{idx}")))
+            .collect();
+        let better = eg.add_join(better_children);
+
+        eg.merge(worse, better);
+
+        let mut extractor = Extractor::new(&mut eg);
+        let (dag, cert) = extractor.extract(worse);
+
+        assert!(cert.verify(&dag).is_ok());
+        assert_eq!(cert.cost.total(), 1102);
+        assert_eq!(cert.cost.cancel_checkpoints, 0);
+        assert_eq!(cert.cost.critical_path, 1);
+        assert_eq!(cert.cost.allocations, 102);
+
+        let root = dag.root().expect("root");
+        assert!(matches!(
+            dag.node(root),
+            Some(PlanNode::Join { children }) if children.len() == 101
+        ));
+    }
+
+    #[test]
     fn extract_merge_with_cyclic_enode_prefers_acyclic_candidate() {
         init_test();
         let mut eg = EGraph::new();
@@ -681,6 +723,34 @@ mod tests {
         assert!(display.contains("cancel=2"));
         assert!(display.contains("obl=1"));
         assert!(display.contains("depth=3"));
+    }
+
+    #[test]
+    fn cost_ordering_breaks_weighted_total_ties_by_full_vector() {
+        init_test();
+        let shallower_without_cancel = PlanCost {
+            allocations: 102,
+            cancel_checkpoints: 0,
+            obligation_pressure: 0,
+            critical_path: 1,
+        };
+        let racier_with_fewer_allocations = PlanCost {
+            allocations: 2,
+            cancel_checkpoints: 1,
+            obligation_pressure: 0,
+            critical_path: 1,
+        };
+
+        assert_eq!(
+            shallower_without_cancel.total(),
+            racier_with_fewer_allocations.total()
+        );
+        assert_ne!(shallower_without_cancel, racier_with_fewer_allocations);
+        assert_ne!(
+            shallower_without_cancel.cmp(&racier_with_fewer_allocations),
+            std::cmp::Ordering::Equal
+        );
+        assert!(shallower_without_cancel < racier_with_fewer_allocations);
     }
 
     #[test]

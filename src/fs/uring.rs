@@ -64,8 +64,10 @@ struct IoUringFileInner {
     ring: Mutex<IoUring>,
     /// The open file descriptor.
     fd: OwnedFd,
-    /// Current file position for sequential read/write.
+    /// Logical file position for sequential read/write.
     position: AtomicU64,
+    /// Serializes implicit-cursor operations and logical seeks.
+    cursor_lock: Mutex<()>,
     /// State for pending read operation.
     read_state: Mutex<OpState>,
     /// State for pending write operation.
@@ -139,6 +141,12 @@ fn polled_after_completion_error(operation: &str) -> io::Error {
     ))
 }
 
+fn missing_explicit_offset_error(operation: &str) -> io::Error {
+    io::Error::other(format!(
+        "io_uring {operation}_at future missing explicit offset"
+    ))
+}
+
 impl Drop for IoUringFile {
     fn drop(&mut self) {
         // Best-effort safety: if any ops are in flight on this ring, make sure we
@@ -179,6 +187,16 @@ impl Drop for IoUringFile {
 }
 
 impl IoUringFile {
+    fn current_fd_position(fd: RawFd) -> io::Result<u64> {
+        // SAFETY: lseek is safe with a valid fd. We only query the current
+        // offset so the logical cursor matches the transferred descriptor.
+        let result = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        u64::try_from(result).map_err(|_| io::Error::other("seek result out of range"))
+    }
+
     /// Opens a file in read-only mode using io_uring.
     ///
     /// This uses `IORING_OP_OPENAT` for async file open.
@@ -216,6 +234,7 @@ impl IoUringFile {
                 ring: Mutex::new(ring),
                 fd: owned_fd,
                 position: AtomicU64::new(0),
+                cursor_lock: Mutex::new(()),
                 read_state: Mutex::new(OpState::Idle),
                 write_state: Mutex::new(OpState::Idle),
                 sync_state: Mutex::new(OpState::Idle),
@@ -230,6 +249,7 @@ impl IoUringFile {
     /// The caller must ensure that `fd` is a valid, open file descriptor
     /// that is not used elsewhere.
     pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
+        let position = Self::current_fd_position(fd)?;
         // SAFETY: caller guarantees fd is valid and not used elsewhere
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let ring = IoUring::new(DEFAULT_ENTRIES)?;
@@ -238,7 +258,8 @@ impl IoUringFile {
             inner: Arc::new(IoUringFileInner {
                 ring: Mutex::new(ring),
                 fd: owned_fd,
-                position: AtomicU64::new(0),
+                position: AtomicU64::new(position),
+                cursor_lock: Mutex::new(()),
                 read_state: Mutex::new(OpState::Idle),
                 write_state: Mutex::new(OpState::Idle),
                 sync_state: Mutex::new(OpState::Idle),
@@ -251,11 +272,10 @@ impl IoUringFile {
     /// This uses `IORING_OP_READ` for true async read.
     #[must_use]
     pub fn read<'a>(&'a self, buf: &'a mut [u8]) -> ReadFuture<'a> {
-        let offset = self.inner.position.load(Ordering::Relaxed);
         ReadFuture {
             file: self,
             buf,
-            offset,
+            offset: None,
             update_position: true,
             done: false,
         }
@@ -269,7 +289,7 @@ impl IoUringFile {
         ReadFuture {
             file: self,
             buf,
-            offset,
+            offset: Some(offset),
             update_position: false,
             done: false,
         }
@@ -280,11 +300,10 @@ impl IoUringFile {
     /// This uses `IORING_OP_WRITE` for true async write.
     #[must_use]
     pub fn write<'a>(&'a self, buf: &'a [u8]) -> WriteFuture<'a> {
-        let offset = self.inner.position.load(Ordering::Relaxed);
         WriteFuture {
             file: self,
             buf,
-            offset,
+            offset: None,
             update_position: true,
             done: false,
         }
@@ -298,7 +317,7 @@ impl IoUringFile {
         WriteFuture {
             file: self,
             buf,
-            offset,
+            offset: Some(offset),
             update_position: false,
             done: false,
         }
@@ -328,34 +347,30 @@ impl IoUringFile {
         }
     }
 
-    /// Returns the current position in the file.
+    /// Returns the logical current position used by sequential read/write operations.
     #[must_use]
     pub fn position(&self) -> u64 {
         self.inner.position.load(Ordering::Relaxed)
     }
 
-    /// Sets the file position.
+    fn checked_seek_target(base: u64, delta: i64) -> io::Result<u64> {
+        base.checked_add_signed(delta)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek offset out of range"))
+    }
+
+    /// Sets the logical file position used by sequential read/write operations.
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
-        let fd = self.inner.fd.as_raw_fd();
-        let (whence, offset) = match pos {
-            SeekFrom::Start(n) => {
-                let offset = i64::try_from(n).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "seek offset out of range")
-                })?;
-                (libc::SEEK_SET, offset)
+        let _cursor_guard = self.inner.cursor_lock.lock();
+        let current = self.inner.position.load(Ordering::Relaxed);
+
+        let new_pos = match pos {
+            SeekFrom::Start(n) => n,
+            SeekFrom::End(delta) => {
+                let end = self.metadata()?.len();
+                Self::checked_seek_target(end, delta)?
             }
-            SeekFrom::End(n) => (libc::SEEK_END, n),
-            SeekFrom::Current(n) => (libc::SEEK_CUR, n),
+            SeekFrom::Current(delta) => Self::checked_seek_target(current, delta)?,
         };
-
-        // SAFETY: lseek is safe with a valid fd.
-        let result = unsafe { libc::lseek(fd, offset, whence) };
-        if result < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let new_pos =
-            u64::try_from(result).map_err(|_| io::Error::other("seek result out of range"))?;
         self.inner.position.store(new_pos, Ordering::Relaxed);
         Ok(new_pos)
     }
@@ -367,6 +382,7 @@ impl IoUringFile {
         let fd = self.inner.fd.as_raw_fd();
         let size_off = libc::off_t::try_from(size)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "size out of range"))?;
+        let _cursor_guard = self.inner.cursor_lock.lock();
         // SAFETY: ftruncate is safe with a valid fd.
         let result = unsafe { libc::ftruncate(fd, size_off) };
         if result < 0 {
@@ -500,7 +516,7 @@ impl AsRawFd for IoUringFile {
 pub struct ReadFuture<'a> {
     file: &'a IoUringFile,
     buf: &'a mut [u8],
-    offset: u64,
+    offset: Option<u64>,
     update_position: bool,
     done: bool,
 }
@@ -515,16 +531,23 @@ impl std::future::Future for ReadFuture<'_> {
         if this.done {
             return Poll::Ready(Err(polled_after_completion_error("read")));
         }
-        let result = this.file.blocking_read_at(this.buf, this.offset);
-
-        if let Ok(n) = result {
-            if this.update_position {
+        let result = if this.update_position {
+            let _cursor_guard = this.file.inner.cursor_lock.lock();
+            let offset = this.file.inner.position.load(Ordering::Relaxed);
+            let result = this.file.blocking_read_at(this.buf, offset);
+            if let Ok(n) = result {
                 this.file
                     .inner
                     .position
-                    .fetch_add(n as u64, Ordering::Relaxed);
+                    .store(offset.saturating_add(n as u64), Ordering::Relaxed);
             }
-        }
+            result
+        } else {
+            match this.offset {
+                Some(offset) => this.file.blocking_read_at(this.buf, offset),
+                None => Err(missing_explicit_offset_error("read")),
+            }
+        };
 
         this.done = true;
         Poll::Ready(result)
@@ -535,7 +558,7 @@ impl std::future::Future for ReadFuture<'_> {
 pub struct WriteFuture<'a> {
     file: &'a IoUringFile,
     buf: &'a [u8],
-    offset: u64,
+    offset: Option<u64>,
     update_position: bool,
     done: bool,
 }
@@ -548,16 +571,23 @@ impl std::future::Future for WriteFuture<'_> {
         if this.done {
             return Poll::Ready(Err(polled_after_completion_error("write")));
         }
-        let result = this.file.blocking_write_at(this.buf, this.offset);
-
-        if let Ok(n) = result {
-            if this.update_position {
+        let result = if this.update_position {
+            let _cursor_guard = this.file.inner.cursor_lock.lock();
+            let offset = this.file.inner.position.load(Ordering::Relaxed);
+            let result = this.file.blocking_write_at(this.buf, offset);
+            if let Ok(n) = result {
                 this.file
                     .inner
                     .position
-                    .fetch_add(n as u64, Ordering::Relaxed);
+                    .store(offset.saturating_add(n as u64), Ordering::Relaxed);
             }
-        }
+            result
+        } else {
+            match this.offset {
+                Some(offset) => this.file.blocking_write_at(this.buf, offset),
+                None => Err(missing_explicit_offset_error("write")),
+            }
+        };
 
         this.done = true;
         Poll::Ready(result)
@@ -594,10 +624,13 @@ impl AsyncRead for IoUringFile {
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let _cursor_guard = self.inner.cursor_lock.lock();
         let offset = self.inner.position.load(Ordering::Relaxed);
         let n = self.blocking_read_at(buf.unfilled(), offset)?;
         buf.advance(n);
-        self.inner.position.fetch_add(n as u64, Ordering::Relaxed);
+        self.inner
+            .position
+            .store(offset.saturating_add(n as u64), Ordering::Relaxed);
         Poll::Ready(Ok(()))
     }
 }
@@ -608,9 +641,12 @@ impl AsyncWrite for IoUringFile {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let _cursor_guard = self.inner.cursor_lock.lock();
         let offset = self.inner.position.load(Ordering::Relaxed);
         let n = self.blocking_write_at(buf, offset)?;
-        self.inner.position.fetch_add(n as u64, Ordering::Relaxed);
+        self.inner
+            .position
+            .store(offset.saturating_add(n as u64), Ordering::Relaxed);
         Poll::Ready(Ok(n))
     }
 
@@ -640,6 +676,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::ffi::OsString;
+    use std::os::fd::IntoRawFd;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
     use std::sync::Arc;
@@ -661,7 +698,7 @@ mod tests {
         Waker::from(Arc::new(TestNoopWaker))
     }
 
-    fn assert_polled_after_completion(err: io::Error, operation: &str) {
+    fn assert_polled_after_completion(err: &io::Error, operation: &str) {
         assert_eq!(err.kind(), io::ErrorKind::Other);
         assert_eq!(
             err.to_string(),
@@ -872,6 +909,204 @@ mod tests {
     }
 
     #[test]
+    fn test_uring_seek_current_uses_logical_position() {
+        init_test("test_uring_seek_current_uses_logical_position");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_seek_current_position.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+
+            let n = file.write(b"abcdef").await.unwrap();
+            crate::assert_with_log!(n == 6, "write length", 6usize, n);
+
+            let current = file.seek(SeekFrom::Current(0)).unwrap();
+            crate::assert_with_log!(current == 6, "current seek result", 6u64, current);
+            crate::assert_with_log!(
+                file.position() == 6,
+                "position after current seek",
+                6u64,
+                file.position()
+            );
+
+            let current = file.seek(SeekFrom::Current(-2)).unwrap();
+            crate::assert_with_log!(current == 4, "rewound seek result", 4u64, current);
+            crate::assert_with_log!(
+                file.position() == 4,
+                "position after rewind",
+                4u64,
+                file.position()
+            );
+
+            let mut tail = [0u8; 2];
+            let n = file.read(&mut tail).await.unwrap();
+            crate::assert_with_log!(n == 2, "tail read length", 2usize, n);
+            crate::assert_with_log!(
+                &tail == b"ef",
+                "tail read bytes",
+                "ef",
+                String::from_utf8_lossy(&tail)
+            );
+        });
+        crate::test_complete!("test_uring_seek_current_uses_logical_position");
+    }
+
+    #[test]
+    fn test_uring_from_raw_fd_preserves_existing_cursor_position() {
+        init_test("test_uring_from_raw_fd_preserves_existing_cursor_position");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_from_raw_fd_cursor.txt");
+
+            std::fs::write(&path, b"abcdef").unwrap();
+            let mut std_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            std::io::Seek::seek(&mut std_file, SeekFrom::Start(2)).unwrap();
+
+            let raw_fd = std_file.into_raw_fd();
+            let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();
+
+            crate::assert_with_log!(
+                file.position() == 2,
+                "initial logical cursor preserves raw fd offset",
+                2u64,
+                file.position()
+            );
+            let current = file.seek(SeekFrom::Current(0)).unwrap();
+            crate::assert_with_log!(current == 2, "seek current", 2u64, current);
+
+            let mut buf = [0u8; 2];
+            let n = file.read(&mut buf).await.unwrap();
+            crate::assert_with_log!(n == 2, "read length", 2usize, n);
+            crate::assert_with_log!(
+                &buf == b"cd",
+                "read starts from transferred cursor",
+                "cd",
+                String::from_utf8_lossy(&buf)
+            );
+            crate::assert_with_log!(
+                file.position() == 4,
+                "position after read from transferred cursor",
+                4u64,
+                file.position()
+            );
+        });
+        crate::test_complete!("test_uring_from_raw_fd_preserves_existing_cursor_position");
+    }
+
+    #[test]
+    fn test_uring_write_uses_position_at_poll_time() {
+        init_test("test_uring_write_uses_position_at_poll_time");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_lazy_write_position.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+
+            let first = file.write(b"abc");
+            let second = file.write(b"def");
+
+            let n = first.await.unwrap();
+            crate::assert_with_log!(n == 3, "first write length", 3usize, n);
+            crate::assert_with_log!(
+                file.position() == 3,
+                "position after first write",
+                3u64,
+                file.position()
+            );
+
+            let n = second.await.unwrap();
+            crate::assert_with_log!(n == 3, "second write length", 3usize, n);
+            crate::assert_with_log!(
+                file.position() == 6,
+                "position after second write",
+                6u64,
+                file.position()
+            );
+
+            file.sync_all().await.unwrap();
+
+            let mut buf = [0u8; 6];
+            let n = file.read_at(&mut buf, 0).await.unwrap();
+            crate::assert_with_log!(n == 6, "read back length", 6usize, n);
+            crate::assert_with_log!(
+                &buf == b"abcdef",
+                "write futures append in poll order",
+                "abcdef",
+                String::from_utf8_lossy(&buf)
+            );
+        });
+        crate::test_complete!("test_uring_write_uses_position_at_poll_time");
+    }
+
+    #[test]
+    fn test_uring_read_uses_position_at_poll_time() {
+        init_test("test_uring_read_uses_position_at_poll_time");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_lazy_read_position.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+            file.write_at(b"abcdef", 0).await.unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+
+            let mut first_buf = [0u8; 3];
+            let mut second_buf = [0u8; 3];
+            let first = file.read(&mut first_buf);
+            let second = file.read(&mut second_buf);
+
+            let n = first.await.unwrap();
+            crate::assert_with_log!(n == 3, "first read length", 3usize, n);
+            crate::assert_with_log!(
+                &first_buf == b"abc",
+                "first read bytes",
+                "abc",
+                String::from_utf8_lossy(&first_buf)
+            );
+            crate::assert_with_log!(
+                file.position() == 3,
+                "position after first read",
+                3u64,
+                file.position()
+            );
+
+            let n = second.await.unwrap();
+            crate::assert_with_log!(n == 3, "second read length", 3usize, n);
+            crate::assert_with_log!(
+                &second_buf == b"def",
+                "second read bytes",
+                "def",
+                String::from_utf8_lossy(&second_buf)
+            );
+            crate::assert_with_log!(
+                file.position() == 6,
+                "position after second read",
+                6u64,
+                file.position()
+            );
+        });
+        crate::test_complete!("test_uring_read_uses_position_at_poll_time");
+    }
+
+    #[test]
     fn test_uring_file_sync_data() {
         init_test("test_uring_file_sync_data");
         futures_lite::future::block_on(async {
@@ -899,19 +1134,20 @@ mod tests {
 
         let file = IoUringFile::open(&path).unwrap();
         let mut buf = [0u8; 5];
-        let mut future = file.read(&mut buf);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let first = Pin::new(&mut future).poll(&mut cx);
-        assert!(matches!(first, Poll::Ready(Ok(5))));
-        assert_eq!(file.position(), 5);
+        {
+            let mut future = file.read(&mut buf);
+            let first = Pin::new(&mut future).poll(&mut cx);
+            assert!(matches!(first, Poll::Ready(Ok(5))));
+            assert_eq!(file.position(), 5);
 
-        match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "read"),
-            other => panic!("expected fail-closed read repoll, got {other:?}"),
+            match Pin::new(&mut future).poll(&mut cx) {
+                Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "read"),
+                other => panic!("expected fail-closed read repoll, got {other:?}"),
+            }
         }
-        drop(future);
         assert_eq!(&buf, b"hello");
         assert_eq!(file.position(), 5);
         crate::test_complete!("test_uring_read_future_second_poll_fails_closed");
@@ -938,7 +1174,7 @@ mod tests {
         assert_eq!(file.position(), 3);
 
         match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "write"),
+            Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "write"),
             other => panic!("expected fail-closed write repoll, got {other:?}"),
         }
         assert_eq!(file.position(), 3);
@@ -965,7 +1201,7 @@ mod tests {
         assert!(matches!(first, Poll::Ready(Ok(()))));
 
         match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "sync"),
+            Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "sync"),
             other => panic!("expected fail-closed sync repoll, got {other:?}"),
         }
         crate::test_complete!("test_uring_sync_future_second_poll_fails_closed");
@@ -988,7 +1224,7 @@ mod tests {
         assert_eq!(file.position(), 0);
 
         match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "write"),
+            Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "write"),
             other => panic!("expected fail-closed repoll after write error, got {other:?}"),
         }
         assert_eq!(file.position(), 0);

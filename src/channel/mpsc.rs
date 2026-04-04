@@ -280,7 +280,8 @@ impl<T> Sender<T> {
     /// Returns `Ok(None)` if the value was sent without eviction,
     /// `Ok(Some(evicted))` if the oldest message was evicted to make room,
     /// `Err(SendError::Full(value))` if all capacity is consumed by reserved
-    /// slots and there is nothing to evict, or
+    /// slots, or if a queued waiter already owns the next free slot and there
+    /// is nothing evictable to displace, or
     /// `Err(SendError::Disconnected(value))` if the receiver has dropped.
     ///
     /// This is used by the `DropOldest` backpressure policy. The evicted
@@ -294,9 +295,10 @@ impl<T> Sender<T> {
     ///
     /// Returns `Ok(None)` if the value was sent without eviction,
     /// `Ok(Some(evicted))` if a matching queued message was evicted to make room,
-    /// `Err(SendError::Full(value))` if the channel is full but no matching queued
-    /// message is evictable, or `Err(SendError::Disconnected(value))` if the
-    /// receiver has dropped.
+    /// `Err(SendError::Full(value))` if the channel is physically full, or
+    /// logically full because a queued waiter owns the next free slot, and no
+    /// matching queued message is evictable, or `Err(SendError::Disconnected(value))`
+    /// if the receiver has dropped.
     pub fn send_evict_oldest_where<F>(
         &self,
         value: T,
@@ -311,8 +313,16 @@ impl<T> Sender<T> {
             return Err(SendError::Disconnected(value));
         }
 
-        let evicted = if inner.has_capacity(self.shared.capacity) {
+        let has_physical_capacity = inner.has_capacity(self.shared.capacity);
+        let has_logical_capacity = has_physical_capacity && inner.send_wakers.is_empty();
+
+        let evicted = if has_logical_capacity {
             None
+        } else if has_physical_capacity {
+            // A queued waiter already owns the next free slot. Preserve FIFO
+            // ordering by treating the channel as logically full, but do not
+            // evict a committed message when there is still real capacity.
+            return Err(SendError::Full(value));
         } else if let Some(index) = inner.queue.iter().position(&mut predicate) {
             // Evict the oldest committed message (not a reserved slot) that the
             // caller explicitly allows us to drop.
@@ -323,8 +333,8 @@ impl<T> Sender<T> {
                     .expect("position() returned a valid queue index"),
             )
         } else {
-            // Either all capacity is consumed by reserved slots, or every queued
-            // value is protected by the caller's predicate.
+            // Either all capacity is consumed by reserved slots (and waiters), or
+            // every queued value is protected by the caller's predicate.
             return Err(SendError::Full(value));
         };
 
@@ -1531,6 +1541,40 @@ mod tests {
         };
         crate::assert_with_log!(qlen == 1, "queue len", 1, qlen);
         crate::test_complete!("send_evict_oldest_no_eviction_with_capacity");
+    }
+
+    #[test]
+    fn send_evict_oldest_does_not_drop_messages_when_waiter_owns_free_slot() {
+        init_test("send_evict_oldest_does_not_drop_messages_when_waiter_owns_free_slot");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(2);
+
+        tx.try_send(10).expect("send 10");
+        tx.try_send(11).expect("send 11");
+
+        let mut reserve = Box::pin(tx.reserve(&cx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
+
+        let first = rx.try_recv().expect("recv 10");
+        crate::assert_with_log!(first == 10, "first recv", 10, first);
+
+        let result = tx.send_evict_oldest(99);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Full(99))),
+            "logical full when waiter owns free slot",
+            "Err(Full(99))",
+            format!("{:?}", result)
+        );
+
+        let preserved = rx.try_recv().expect("recv preserved 11");
+        crate::assert_with_log!(preserved == 11, "preserved queued value", 11, preserved);
+
+        drop(reserve);
+        crate::test_complete!(
+            "send_evict_oldest_does_not_drop_messages_when_waiter_owns_free_slot"
+        );
     }
 
     // --- Audit tests (SapphireHill, 2026-02-15) ---

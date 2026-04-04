@@ -6,6 +6,7 @@
 
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]
@@ -52,7 +53,8 @@ impl Default for PoolConfig {
 #[derive(Debug)]
 pub struct SymbolBuffer {
     data: Box<[u8]>,
-    in_use: bool,
+    checked_out: bool,
+    owner_pool_id: Option<u64>,
 }
 
 impl SymbolBuffer {
@@ -62,7 +64,8 @@ impl SymbolBuffer {
         let len = symbol_size as usize;
         Self {
             data: vec![0u8; len].into_boxed_slice(),
-            in_use: false,
+            checked_out: false,
+            owner_pool_id: None,
         }
     }
 
@@ -91,13 +94,21 @@ impl SymbolBuffer {
     }
 
     /// Marks the buffer as in use.
-    fn mark_in_use(&mut self) {
-        self.in_use = true;
+    fn mark_in_use(&mut self, owner_pool_id: u64) {
+        self.checked_out = true;
+        self.owner_pool_id = Some(owner_pool_id);
     }
 
     /// Marks the buffer as free.
     fn mark_free(&mut self) {
-        self.in_use = false;
+        self.checked_out = false;
+        self.owner_pool_id = None;
+    }
+}
+
+impl Drop for SymbolBuffer {
+    fn drop(&mut self) {
+        self.data.fill(0);
     }
 }
 
@@ -137,6 +148,7 @@ impl std::error::Error for PoolExhausted {}
 pub struct SymbolPool {
     free_list: Vec<SymbolBuffer>,
     allocated: usize,
+    pool_id: u64,
     config: PoolConfig,
     stats: PoolStats,
 }
@@ -149,6 +161,7 @@ impl SymbolPool {
         let mut pool = Self {
             free_list: Vec::with_capacity(config.initial_size),
             allocated: 0,
+            pool_id: next_symbol_pool_id(),
             config,
             stats: PoolStats::default(),
         };
@@ -197,7 +210,7 @@ impl SymbolPool {
     /// Allocates a symbol buffer from the pool.
     pub fn allocate(&mut self) -> Result<SymbolBuffer, PoolExhausted> {
         if let Some(mut buffer) = self.free_list.pop() {
-            buffer.mark_in_use();
+            buffer.mark_in_use(self.pool_id);
             self.allocated += 1;
             self.stats.allocations += 1;
             self.stats.pool_hits += 1;
@@ -220,12 +233,30 @@ impl SymbolPool {
     }
 
     /// Returns a buffer to the pool.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the buffer length does not match the pool configuration, if
+    /// the buffer was never checked out from any pool, or if it belongs to a
+    /// different pool.
     pub fn deallocate(&mut self, mut buffer: SymbolBuffer) {
         let expected_len = self.config.symbol_size as usize;
-
-        if !buffer.in_use || buffer.len() != expected_len {
-            return;
-        }
+        assert_eq!(
+            buffer.len(),
+            expected_len,
+            "Cannot deallocate buffer of size {} into pool of size {}",
+            buffer.len(),
+            self.config.symbol_size
+        );
+        assert!(
+            buffer.checked_out,
+            "Cannot deallocate buffer that is not currently checked out from a pool"
+        );
+        assert_eq!(
+            buffer.owner_pool_id,
+            Some(self.pool_id),
+            "Cannot deallocate buffer checked out from a different pool"
+        );
 
         buffer.as_mut_slice().fill(0);
         buffer.mark_free();
@@ -255,6 +286,11 @@ impl SymbolPool {
             self.free_list.truncate(target);
         }
     }
+}
+
+fn next_symbol_pool_id() -> u64 {
+    static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_SYMBOL_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Global resource limits.
@@ -624,6 +660,7 @@ fn prepare_limit_exceeded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
     fn test_pool_allocate_deallocate() {
@@ -954,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn deallocate_rejects_invalid_buffers() {
+    fn deallocate_rejects_invalid_buffers_without_mutating_state() {
         let mut pool = SymbolPool::new(PoolConfig {
             symbol_size: 1024,
             initial_size: 0,
@@ -965,15 +1002,50 @@ mod tests {
 
         let baseline = pool.stats().clone();
 
-        // Wrong length and not marked in-use.
-        pool.deallocate(SymbolBuffer::new(8));
-        assert_eq!(pool.stats().deallocations, baseline.deallocations);
-        assert_eq!(pool.stats().current_usage, baseline.current_usage);
+        for invalid in [SymbolBuffer::new(8), SymbolBuffer::new(1024)] {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                pool.deallocate(invalid);
+            }));
+            assert!(result.is_err(), "invalid buffer return must panic");
+            assert_eq!(pool.stats().deallocations, baseline.deallocations);
+            assert_eq!(pool.stats().current_usage, baseline.current_usage);
+        }
+    }
 
-        // Correct length but still not marked in-use.
-        pool.deallocate(SymbolBuffer::new(1024));
-        assert_eq!(pool.stats().deallocations, baseline.deallocations);
-        assert_eq!(pool.stats().current_usage, baseline.current_usage);
+    #[test]
+    fn deallocate_rejects_cross_pool_buffers_without_mutating_state() {
+        let config = PoolConfig {
+            symbol_size: 8,
+            initial_size: 1,
+            max_size: 1,
+            allow_growth: false,
+            growth_increment: 1,
+        };
+        let mut pool = SymbolPool::new(config.clone());
+        let valid = pool.allocate().expect("valid alloc");
+
+        let mut other_pool = SymbolPool::new(config);
+        let foreign = other_pool.allocate().expect("foreign alloc");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            pool.deallocate(foreign);
+        }));
+        assert!(result.is_err(), "cross-pool return must panic");
+        assert_eq!(pool.stats().deallocations, 0);
+        assert_eq!(pool.stats().current_usage, 1);
+        assert!(
+            pool.try_allocate().is_none(),
+            "foreign buffer must not expand capacity"
+        );
+        assert_eq!(other_pool.stats().current_usage, 1);
+        assert!(
+            other_pool.try_allocate().is_none(),
+            "foreign pool must still account for its live checkout"
+        );
+
+        pool.deallocate(valid);
+        assert_eq!(pool.stats().deallocations, 1);
+        assert_eq!(pool.stats().current_usage, 0);
     }
 
     #[test]

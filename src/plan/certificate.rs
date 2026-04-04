@@ -254,17 +254,34 @@ impl RewriteCertificate {
     /// Produce a compact representation suitable for serialization.
     ///
     /// Strips detail strings and encodes steps as `(rule_discriminant, before, after)`.
-    #[must_use]
-    pub fn compact(&self) -> CompactCertificate {
-        CompactCertificate {
+    pub fn compact(&self) -> Result<CompactCertificate, CompactCertificateError> {
+        let before_node_count = u32::try_from(self.before_node_count).map_err(|_| {
+            CompactCertificateError::NodeCountOverflow {
+                field: "before_node_count",
+                value: self.before_node_count,
+            }
+        })?;
+        let after_node_count = u32::try_from(self.after_node_count).map_err(|_| {
+            CompactCertificateError::NodeCountOverflow {
+                field: "after_node_count",
+                value: self.after_node_count,
+            }
+        })?;
+
+        let mut steps = Vec::with_capacity(self.steps.len());
+        for (idx, step) in self.steps.iter().enumerate() {
+            steps.push(CompactStep::try_from_certified(idx, step)?);
+        }
+
+        Ok(CompactCertificate {
             version: self.version,
             policy_bits: pack_policy(self.policy),
             before_hash: self.before_hash,
             after_hash: self.after_hash,
-            before_node_count: self.before_node_count as u32,
-            after_node_count: self.after_node_count as u32,
-            steps: self.steps.iter().map(CompactStep::from_certified).collect(),
-        }
+            before_node_count,
+            after_node_count,
+            steps,
+        })
     }
 }
 
@@ -296,13 +313,52 @@ pub struct CompactStep {
     pub after: u32,
 }
 
+/// Errors produced when compacting a rewrite certificate into the fixed-width
+/// wire format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactCertificateError {
+    /// A node count does not fit in the compact `u32` field.
+    NodeCountOverflow {
+        /// The overflowing count field.
+        field: &'static str,
+        /// The original value that could not be represented.
+        value: usize,
+    },
+    /// A step references a node id that does not fit in the compact `u32` field.
+    StepNodeOverflow {
+        /// Step index in the full certificate.
+        step: usize,
+        /// The overflowing step field.
+        field: &'static str,
+        /// The original value that could not be represented.
+        value: usize,
+    },
+}
+
 impl CompactStep {
-    fn from_certified(step: &CertifiedStep) -> Self {
-        Self {
+    fn try_from_certified(
+        step_index: usize,
+        step: &CertifiedStep,
+    ) -> Result<Self, CompactCertificateError> {
+        let before = u32::try_from(step.before.index()).map_err(|_| {
+            CompactCertificateError::StepNodeOverflow {
+                step: step_index,
+                field: "before",
+                value: step.before.index(),
+            }
+        })?;
+        let after = u32::try_from(step.after.index()).map_err(|_| {
+            CompactCertificateError::StepNodeOverflow {
+                step: step_index,
+                field: "after",
+                value: step.after.index(),
+            }
+        })?;
+        Ok(Self {
             rule: step.rule as u8,
-            before: step.before.index() as u32,
-            after: step.after.index() as u32,
-        }
+            before,
+            after,
+        })
     }
 
     /// Wire size of one compact step: 1 (rule) + 4 (before) + 4 (after) = 9 bytes.
@@ -312,7 +368,7 @@ impl CompactStep {
 /// Detail-free certificate for serialization and size-bounded storage.
 ///
 /// Each step is 9 bytes (1-byte rule discriminant + two 4-byte node indices).
-/// The header is fixed at 37 bytes. Total wire size = 37 + 9 * step_count.
+/// The header is fixed at 33 bytes. Total wire size = 33 + 9 * step_count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactCertificate {
     /// Schema version.
@@ -344,7 +400,8 @@ impl CompactCertificate {
 
     /// Returns true if the certificate size is within the linear bound
     /// `HEADER_SIZE + 9 * max_steps`. Use `max_steps = after_node_count`
-    /// as a conservative bound (each node touched at most once).
+    /// as a conservative bound (each compact step references a node in the
+    /// pre- or post-rewrite DAG).
     #[must_use]
     pub fn is_within_linear_bound(&self) -> bool {
         // A well-formed rewrite sequence touches each node at most a constant
@@ -1571,7 +1628,9 @@ mod tests {
         let (_, cert) = dag
             .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
-        let compact = cert.compact();
+        let compact = cert
+            .compact()
+            .expect("compact certificate fits u32 wire format");
         assert_eq!(compact.steps.len(), cert.steps.len());
         assert_eq!(compact.version, cert.version);
         assert_eq!(compact.before_hash, cert.before_hash);
@@ -1579,8 +1638,8 @@ mod tests {
 
         for (cs, fs) in compact.steps.iter().zip(cert.steps.iter()) {
             assert_eq!(cs.rule, fs.rule as u8);
-            assert_eq!(cs.before, fs.before.index() as u32);
-            assert_eq!(cs.after, fs.after.index() as u32);
+            assert_eq!(cs.before, u32::try_from(fs.before.index()).unwrap());
+            assert_eq!(cs.after, u32::try_from(fs.after.index()).unwrap());
         }
     }
 
@@ -1599,7 +1658,9 @@ mod tests {
         let (_, cert) = dag
             .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
-        let compact = cert.compact();
+        let compact = cert
+            .compact()
+            .expect("compact certificate fits u32 wire format");
         let bound = compact.byte_size_bound();
         // 1 step => 33 + 9 = 42 bytes
         assert_eq!(
@@ -1624,7 +1685,9 @@ mod tests {
         let (_, cert) = dag
             .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
-        let compact = cert.compact();
+        let compact = cert
+            .compact()
+            .expect("compact certificate fits u32 wire format");
         assert!(compact.is_within_linear_bound());
     }
 
@@ -1641,7 +1704,9 @@ mod tests {
             .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         assert!(cert.is_identity());
-        let compact = cert.compact();
+        let compact = cert
+            .compact()
+            .expect("compact certificate fits u32 wire format");
         assert!(compact.steps.is_empty());
         assert_eq!(compact.byte_size_bound(), CompactCertificate::HEADER_SIZE);
         assert!(compact.is_within_linear_bound());
@@ -1680,12 +1745,77 @@ mod tests {
             ],
         };
 
-        let raw_compact = cert.compact();
-        let minimized_compact = cert.minimize().compact();
+        let raw_compact = cert
+            .compact()
+            .expect("compact certificate fits u32 wire format");
+        let minimized_compact = cert
+            .minimize()
+            .compact()
+            .expect("compact certificate fits u32 wire format");
 
         assert_eq!(raw_compact.steps.len(), 3);
         assert_eq!(minimized_compact.steps.len(), 1);
         assert!(minimized_compact.byte_size_bound() < raw_compact.byte_size_bound());
+    }
+
+    #[test]
+    fn compact_rejects_node_count_overflow() {
+        init_test();
+        if usize::BITS <= u32::BITS {
+            return;
+        }
+
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::conservative(),
+            before_hash: PlanHash(0xABCD),
+            after_hash: PlanHash(0xABCD),
+            before_node_count: (u32::MAX as usize) + 1,
+            after_node_count: 1,
+            steps: Vec::new(),
+        };
+
+        let err = cert.compact().expect_err("overflow must be rejected");
+        assert_eq!(
+            err,
+            CompactCertificateError::NodeCountOverflow {
+                field: "before_node_count",
+                value: (u32::MAX as usize) + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn compact_rejects_step_node_overflow() {
+        init_test();
+        if usize::BITS <= u32::BITS {
+            return;
+        }
+
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::conservative(),
+            before_hash: PlanHash(0x1234),
+            after_hash: PlanHash(0x1234),
+            before_node_count: 1,
+            after_node_count: 1,
+            steps: vec![CertifiedStep {
+                rule: RewriteRule::JoinAssoc,
+                before: PlanId::new((u32::MAX as usize) + 1),
+                after: PlanId::new(0),
+                detail: "overflow".to_string(),
+            }],
+        };
+
+        let err = cert.compact().expect_err("overflow must be rejected");
+        assert_eq!(
+            err,
+            CompactCertificateError::StepNodeOverflow {
+                step: 0,
+                field: "before",
+                value: (u32::MAX as usize) + 1,
+            }
+        );
     }
 
     // -----------------------------------------------------------------------

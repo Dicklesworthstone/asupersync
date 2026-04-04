@@ -310,8 +310,12 @@ where
                                 let mut pending = shared.pending.lock();
                                 *pending = pending.saturating_sub(1);
                                 let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+                                let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
                                 drop(pending);
                                 for w in wakers {
+                                    w.wake();
+                                }
+                                for w in inner_wakers {
                                     w.wake();
                                 }
                             }
