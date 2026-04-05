@@ -84,15 +84,19 @@ fn header_has_token(value: &str, token: &str) -> bool {
 }
 
 fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError> {
-    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-        Ok((&data[..pos + 4], &data[pos + 4..]))
-    } else if let Some(pos) = data.windows(2).position(|w| w == b"\n\n") {
-        Ok((&data[..pos + 2], &data[pos + 2..]))
-    } else {
-        Err(HandshakeError::InvalidRequest(
-            "incomplete HTTP headers".into(),
-        ))
-    }
+    data.windows(4).position(|w| w == b"\r\n\r\n").map_or_else(
+        || {
+            data.windows(2).position(|w| w == b"\n\n").map_or_else(
+                || {
+                    Err(HandshakeError::InvalidRequest(
+                        "incomplete HTTP headers".into(),
+                    ))
+                },
+                |pos| Ok((&data[..pos + 2], &data[pos + 2..])),
+            )
+        },
+        |pos| Ok((&data[..pos + 4], &data[pos + 4..])),
+    )
 }
 
 /// Parsed WebSocket URL.

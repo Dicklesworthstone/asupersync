@@ -42,6 +42,15 @@ fn browser_udp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
     Poll::Ready(Err(browser_udp_unsupported(op)))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn empty_datagram_recv_from_buffer_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "UdpSocket::recv_from requires a non-empty buffer",
+    )
+}
+
 /// A UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
@@ -200,6 +209,11 @@ impl UdpSocket {
         {
             let _ = (self, cx, buf);
             return browser_udp_poll_unsupported("UdpSocket::poll_recv_from");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if buf.is_empty() {
+            return Poll::Ready(Err(empty_datagram_recv_from_buffer_error()));
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -652,6 +666,27 @@ mod tests {
 
             let (n, _) = server.recv_from(&mut buf).await.unwrap();
             assert_eq!(&buf[..n], b"peek");
+        });
+    }
+
+    #[test]
+    fn udp_recv_from_rejects_empty_buffer_without_consuming_datagram() {
+        future::block_on(async {
+            let mut server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let server_addr = server.local_addr().unwrap();
+            let mut client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let client_addr = client.local_addr().unwrap();
+
+            client.send_to(b"ping", server_addr).await.unwrap();
+
+            let mut empty = [];
+            let err = server.recv_from(&mut empty).await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+            let mut buf = [0u8; 16];
+            let (n, peer) = server.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"ping");
+            assert_eq!(peer, client_addr);
         });
     }
 

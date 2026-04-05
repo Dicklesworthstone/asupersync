@@ -40,6 +40,14 @@ use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::task::{Context, Poll};
 
+#[inline]
+fn empty_datagram_recv_from_buffer_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "UnixDatagram::recv_from requires a non-empty buffer",
+    )
+}
+
 /// A Unix domain socket datagram.
 ///
 /// Provides connectionless, unreliable datagram communication for inter-process
@@ -382,6 +390,10 @@ impl UnixDatagram {
     /// println!("Received {} bytes from {:?}", n, addr);
     /// ```
     pub async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        if buf.is_empty() {
+            return Err(empty_datagram_recv_from_buffer_error());
+        }
+
         std::future::poll_fn(|cx| match self.inner.recv_from(buf) {
             Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -982,6 +994,52 @@ mod tests {
             );
         });
         crate::test_complete!("test_datagram_peek_from_unbound_sender_reports_unnamed_addr");
+    }
+
+    #[test]
+    fn test_recv_from_rejects_empty_buffer_without_consuming_datagram() {
+        init_test("test_datagram_recv_from_empty_buffer");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+            let client_path = dir.path().join("client.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::bind(&client_path).expect("bind client failed");
+
+            client
+                .send_to(b"ping", &server_path)
+                .await
+                .expect("send_to failed");
+
+            let mut empty = [];
+            let err = server
+                .recv_from(&mut empty)
+                .await
+                .expect_err("empty buffer must fail");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::InvalidInput,
+                "error kind",
+                io::ErrorKind::InvalidInput,
+                err.kind()
+            );
+
+            let mut buf = [0u8; 4];
+            let (received, addr) = server
+                .recv_from(&mut buf)
+                .await
+                .expect("recv_from after error failed");
+            crate::assert_with_log!(received == 4, "recv bytes", 4, received);
+            crate::assert_with_log!(&buf == b"ping", "recv data", b"ping", buf);
+            let recv_path = addr.as_pathname().map(std::path::Path::to_path_buf);
+            crate::assert_with_log!(
+                recv_path.as_ref() == Some(&client_path),
+                "recv addr",
+                Some(&client_path),
+                recv_path.as_ref()
+            );
+        });
+        crate::test_complete!("test_datagram_recv_from_empty_buffer");
     }
 
     #[test]

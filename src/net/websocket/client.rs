@@ -805,10 +805,10 @@ async fn write_all<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> io::Resul
     Ok(())
 }
 
-/// Read HTTP response (until \r\n\r\n).
+/// Read HTTP response (until the blank line ending the headers).
 ///
 /// Returns `(headers, trailing)` where `trailing` contains any bytes read
-/// past the `\r\n\r\n` boundary (these belong to the first WebSocket frame
+/// past the header boundary (these belong to the first WebSocket frame
 /// and must be fed into the WebSocket codec's read buffer).
 async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<(Vec<u8>, Vec<u8>)> {
     use std::future::poll_fn;
@@ -838,8 +838,12 @@ async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<(V
 
         // Split at the header boundary so trailing bytes (part of the first
         // WebSocket frame) are not lost.
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            let split_at = pos + 4;
+        if let Some(split_at) = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|pos| pos + 4)
+            .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|pos| pos + 2))
+        {
             let trailing = buf[split_at..].to_vec();
             buf.truncate(split_at);
             return Ok((buf, trailing));
@@ -1004,6 +1008,39 @@ mod tests {
         ) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    #[test]
+    fn read_http_response_accepts_lf_only_headers_and_preserves_trailing_bytes() {
+        future::block_on(async {
+            let mut io = TestIo::with_read_data(
+                b"HTTP/1.1 101 Switching Protocols\n\
+                  Upgrade: websocket\n\
+                  Connection: Upgrade\n\
+                  Sec-WebSocket-Accept: xyz\n\
+                  \n\
+                  \x81\x00"
+                    .to_vec(),
+            );
+
+            let (headers, trailing) = read_http_response(&mut io)
+                .await
+                .expect("LF-only response should still parse");
+
+            assert_eq!(
+                headers,
+                b"HTTP/1.1 101 Switching Protocols\n\
+                  Upgrade: websocket\n\
+                  Connection: Upgrade\n\
+                  Sec-WebSocket-Accept: xyz\n\
+                  \n"
+            );
+            assert_eq!(trailing, vec![0x81, 0x00]);
+
+            let parsed = HttpResponse::parse(&headers).expect("parsed response");
+            assert_eq!(parsed.status, 101);
+            assert_eq!(parsed.header("upgrade"), Some("websocket"));
+        });
     }
 
     #[test]
