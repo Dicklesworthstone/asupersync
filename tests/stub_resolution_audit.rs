@@ -257,7 +257,18 @@ fn probe_11_api_skeleton_relocated() {
         !Path::new("asupersync_v4_api_skeleton.rs").exists(),
         "API skeleton still in project root"
     );
-    eprintln!("[PASS] API skeleton relocated from project root");
+
+    let readme = read_source("README.md");
+    assert!(
+        !readme.contains("./asupersync_v4_api_skeleton.rs"),
+        "README.md still links to the removed root API skeleton path"
+    );
+    assert!(
+        readme.contains("./docs/design/api_skeleton_v4.rs"),
+        "README.md must link to the relocated API skeleton under docs/design/"
+    );
+
+    eprintln!("[PASS] API skeleton relocated from project root and README points at docs/design/");
 }
 
 // ── Probe 12: No skeleton_placeholder! in src/ ─────────────────────────
