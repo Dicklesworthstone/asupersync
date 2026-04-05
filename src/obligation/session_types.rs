@@ -747,10 +747,8 @@ pub mod send_permit {
         Chan<Initiator, SenderSession<T>>,
         Chan<Responder, ReceiverSession<T>>,
     ) {
-        let (tx_i2r, rx_i2r) =
-            crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
-        let (tx_r2i, rx_r2i) =
-            crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        let (tx_i2r, rx_i2r) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        let (tx_r2i, rx_r2i) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
         (
             Chan::new_with_transport(
                 channel_id,
