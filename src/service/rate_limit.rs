@@ -5,9 +5,11 @@
 
 use super::{Layer, Service};
 use crate::types::Time;
+use parking_lot::Mutex;
 use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -102,13 +104,17 @@ impl<S> Layer<S> for RateLimitLayer {
 #[derive(Debug)]
 pub struct RateLimit<S> {
     inner: S,
-    /// Current number of available tokens (plain field — `&mut self` is exclusive).
-    tokens: u64,
+    /// Shared token-bucket state. Cloned services must coordinate available
+    /// capacity through the same bucket so cloning cannot multiply throughput.
+    state: Arc<Mutex<SharedRateLimitState>>,
     /// Number of tokens reserved by successful `poll_ready` calls that have not
-    /// yet been consumed by `call()`.
-    reserved_tokens: u64,
-    /// Last time tokens were refilled.
-    last_refill: Option<Time>,
+    /// yet been consumed by `call()`. Reservations are handle-local because a
+    /// fresh clone must not be able to spend another handle's readiness grant.
+    ///
+    /// Because clones share the bucket, abandoning a granted reservation must
+    /// return the token to the shared bucket on drop instead of leaking shared
+    /// capacity until the next refill window.
+    reservations: LocalReservationState,
     /// Maximum tokens (bucket capacity).
     rate: u64,
     /// Period for refilling tokens.
@@ -118,16 +124,24 @@ pub struct RateLimit<S> {
     sleep: Option<crate::time::Sleep>,
 }
 
+#[derive(Debug)]
+struct SharedRateLimitState {
+    /// Current number of available tokens in the shared bucket.
+    tokens: u64,
+    /// Last time the bucket state was refilled.
+    last_refill: Option<Time>,
+}
+
 impl<S: Clone> Clone for RateLimit<S> {
     fn clone(&self) -> Self {
+        let state = Arc::clone(&self.state);
         Self {
             inner: self.inner.clone(),
-            tokens: self.tokens,
+            state: Arc::clone(&state),
             // Readiness reservations are handle-local and must not be inherited
             // by a fresh clone, or a clone can spend another handle's poll_ready
             // reservation without performing its own readiness check.
-            reserved_tokens: 0,
-            last_refill: self.last_refill,
+            reservations: LocalReservationState::new(state, self.rate),
             rate: self.rate,
             period: self.period,
             time_getter: self.time_getter,
@@ -146,11 +160,14 @@ impl<S> RateLimit<S> {
     /// * `period` - The time period
     #[must_use]
     pub fn new(inner: S, rate: u64, period: Duration) -> Self {
+        let state = Arc::new(Mutex::new(SharedRateLimitState {
+            tokens: rate, // Start with full bucket
+            last_refill: None,
+        }));
         Self {
             inner,
-            tokens: rate, // Start with full bucket
-            reserved_tokens: 0,
-            last_refill: None,
+            state: Arc::clone(&state),
+            reservations: LocalReservationState::new(state, rate),
             rate,
             period,
             time_getter: wall_clock_now,
@@ -166,11 +183,14 @@ impl<S> RateLimit<S> {
         period: Duration,
         time_getter: fn() -> Time,
     ) -> Self {
+        let state = Arc::new(Mutex::new(SharedRateLimitState {
+            tokens: rate,
+            last_refill: None,
+        }));
         Self {
             inner,
-            tokens: rate,
-            reserved_tokens: 0,
-            last_refill: None,
+            state: Arc::clone(&state),
+            reservations: LocalReservationState::new(state, rate),
             rate,
             period,
             time_getter,
@@ -200,7 +220,14 @@ impl<S> RateLimit<S> {
     #[inline]
     #[must_use]
     pub fn available_tokens(&self) -> u64 {
-        self.tokens
+        self.state.lock().tokens
+    }
+
+    #[cfg(test)]
+    #[inline]
+    #[must_use]
+    fn reserved_tokens(&self) -> u64 {
+        self.reservations.reserved_tokens
     }
 
     /// Returns a reference to the inner service.
@@ -224,16 +251,21 @@ impl<S> RateLimit<S> {
 
     /// Refills tokens based on elapsed time.
     #[inline]
-    fn refill_state(&mut self, now: Time) {
-        let last_refill = self.last_refill.unwrap_or(now);
+    fn refill_state_locked(
+        state: &mut SharedRateLimitState,
+        rate: u64,
+        period: Duration,
+        now: Time,
+    ) {
+        let last_refill = state.last_refill.unwrap_or(now);
         let elapsed_nanos = now.as_nanos().saturating_sub(last_refill.as_nanos());
-        let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let period_nanos = period.as_nanos().min(u128::from(u64::MAX)) as u64;
 
         if period_nanos == 0 {
             // Zero period means "no throttling": always make at least one token
             // available so poll_ready never stalls even when rate == 0.
-            self.tokens = self.rate.max(1);
-            self.last_refill = Some(now);
+            state.tokens = rate.max(1);
+            state.last_refill = Some(now);
             return;
         }
 
@@ -242,21 +274,22 @@ impl<S> RateLimit<S> {
             let periods = elapsed_nanos / period_nanos;
             if periods > 0 {
                 // Add tokens for complete periods
-                let new_tokens = periods.saturating_mul(self.rate);
-                self.tokens = self.tokens.saturating_add(new_tokens).min(self.rate);
+                let new_tokens = periods.saturating_mul(rate);
+                state.tokens = state.tokens.saturating_add(new_tokens).min(rate);
                 // Update last_refill to the last complete period boundary
                 let refill_time = last_refill.saturating_add_nanos(periods * period_nanos);
-                self.last_refill = Some(refill_time);
+                state.last_refill = Some(refill_time);
             }
-        } else if self.last_refill.is_none() {
-            self.last_refill = Some(now);
+        } else if state.last_refill.is_none() {
+            state.last_refill = Some(now);
         }
     }
 
     /// Refills tokens based on elapsed time.
     #[cfg(test)]
-    fn refill(&mut self, now: Time) {
-        self.refill_state(now);
+    fn refill(&self, now: Time) {
+        let mut state = self.state.lock();
+        Self::refill_state_locked(&mut state, self.rate, self.period, now);
     }
 
     /// Polls readiness with an explicit time value.
@@ -271,13 +304,26 @@ impl<S> RateLimit<S> {
     where
         S: Service<Request>,
     {
-        self.refill_state(now);
-        if self.tokens == 0 {
-            // Wake up caller to retry later
-            if let Some(last) = self.last_refill {
-                let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
-                let next_deadline = last.saturating_add_nanos(period_nanos);
+        let next_deadline = {
+            let mut state = self.state.lock();
+            Self::refill_state_locked(&mut state, self.rate, self.period, now);
+            if state.tokens == 0 {
+                let next_deadline = state.last_refill.map(|last_refill| {
+                    let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
+                    last_refill.saturating_add_nanos(period_nanos)
+                });
+                drop(state);
+                next_deadline
+            } else {
+                state.tokens -= 1;
+                drop(state);
+                None
+            }
+        };
 
+        if next_deadline.is_some() {
+            // Wake up caller to retry later
+            if let Some(next_deadline) = next_deadline {
                 let need_new_sleep = self
                     .sleep
                     .as_ref()
@@ -296,17 +342,22 @@ impl<S> RateLimit<S> {
         }
 
         self.sleep = None;
-        self.tokens -= 1;
+        let inner = &mut self.inner;
+        let reserved_tokens = &mut self.reservations.reserved_tokens;
+        let mut token_restore_guard = ReservedTokenGuard::new(
+            Arc::clone(&self.state),
+            self.rate,
+            self.period.is_zero(),
+            true,
+        );
 
-        match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
+        match inner.poll_ready(cx).map_err(RateLimitError::Inner) {
             Poll::Ready(Ok(())) => {
-                self.reserved_tokens += 1;
+                *reserved_tokens += 1;
+                token_restore_guard.defuse();
                 Poll::Ready(Ok(()))
             }
-            other => {
-                self.tokens += 1;
-                other
-            }
+            other => other,
         }
     }
 }
@@ -359,26 +410,75 @@ where
 
     #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
-        if self.reserved_tokens == 0 {
+        if self.reservations.reserved_tokens == 0 {
             return RateLimitFuture::immediate_error(RateLimitError::NotReady);
         }
 
-        self.reserved_tokens -= 1;
-        let mut token_restore_guard = ReservedTokenGuard::new(&mut self.tokens, true);
+        self.reservations.reserved_tokens -= 1;
+        let mut token_restore_guard = ReservedTokenGuard::new(
+            Arc::clone(&self.state),
+            self.rate,
+            self.period.is_zero(),
+            true,
+        );
         let future = self.inner.call(req);
         token_restore_guard.defuse();
         RateLimitFuture::new(future)
     }
 }
 
-struct ReservedTokenGuard<'a> {
-    tokens: &'a mut u64,
+#[derive(Debug)]
+struct LocalReservationState {
+    state: Arc<Mutex<SharedRateLimitState>>,
+    reserved_tokens: u64,
+    rate: u64,
+}
+
+impl LocalReservationState {
+    fn new(state: Arc<Mutex<SharedRateLimitState>>, rate: u64) -> Self {
+        Self {
+            state,
+            reserved_tokens: 0,
+            rate,
+        }
+    }
+}
+
+impl Drop for LocalReservationState {
+    fn drop(&mut self) {
+        if self.reserved_tokens == 0 {
+            return;
+        }
+
+        let mut state = self.state.lock();
+        let max_tokens = self.rate.max(1);
+        state.tokens = state
+            .tokens
+            .saturating_add(self.reserved_tokens)
+            .min(max_tokens);
+    }
+}
+
+struct ReservedTokenGuard {
+    state: Arc<Mutex<SharedRateLimitState>>,
+    rate: u64,
+    zero_period: bool,
     armed: bool,
 }
 
-impl<'a> ReservedTokenGuard<'a> {
-    fn new(tokens: &'a mut u64, armed: bool) -> Self {
-        Self { tokens, armed }
+impl ReservedTokenGuard {
+    fn new(
+        state: Arc<Mutex<SharedRateLimitState>>,
+        rate: u64,
+        zero_period: bool,
+        armed: bool,
+    ) -> Self {
+        Self {
+            state,
+            rate,
+            zero_period,
+            armed,
+        }
     }
 
     fn defuse(&mut self) {
@@ -386,10 +486,16 @@ impl<'a> ReservedTokenGuard<'a> {
     }
 }
 
-impl Drop for ReservedTokenGuard<'_> {
+impl Drop for ReservedTokenGuard {
     fn drop(&mut self) {
         if self.armed {
-            *self.tokens = self.tokens.saturating_add(1);
+            let mut state = self.state.lock();
+            let max_tokens = if self.zero_period {
+                self.rate.max(1)
+            } else {
+                self.rate
+            };
+            state.tokens = state.tokens.saturating_add(1).min(max_tokens);
         }
     }
 }
@@ -576,10 +682,33 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct PanicOnPollReadyService;
+
+    impl Service<()> for PanicOnPollReadyService {
+        type Response = ();
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<(), &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            panic!("panic while probing inner readiness");
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            ready(Ok(()))
+        }
+    }
+
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
     fn test_time() -> Time {
         Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+    }
+
+    fn set_bucket_state<S>(svc: &RateLimit<S>, tokens: u64, last_refill: Option<Time>) {
+        let mut state = svc.state.lock();
+        state.tokens = tokens;
+        state.last_refill = last_refill;
     }
 
     #[test]
@@ -724,13 +853,10 @@ mod tests {
     #[test]
     fn refill_adds_tokens() {
         init_test("refill_adds_tokens");
-        let mut svc = RateLimit::new(EchoService, 10, Duration::from_secs(1));
+        let svc = RateLimit::new(EchoService, 10, Duration::from_secs(1));
 
         // Drain all tokens
-        {
-            svc.tokens = 0;
-            svc.last_refill = Some(Time::from_secs(0));
-        }
+        set_bucket_state(&svc, 0, Some(Time::from_secs(0)));
 
         // Refill after 1 second
         svc.refill(Time::from_secs(1));
@@ -744,13 +870,10 @@ mod tests {
     #[test]
     fn refill_caps_at_rate() {
         init_test("refill_caps_at_rate");
-        let mut svc = RateLimit::new(EchoService, 5, Duration::from_secs(1));
+        let svc = RateLimit::new(EchoService, 5, Duration::from_secs(1));
 
         // Start with some tokens
-        {
-            svc.tokens = 3;
-            svc.last_refill = Some(Time::from_secs(0));
-        }
+        set_bucket_state(&svc, 3, Some(Time::from_secs(0)));
 
         // Refill after 2 seconds
         svc.refill(Time::from_secs(2));
@@ -766,10 +889,7 @@ mod tests {
         init_test("poll_ready_uses_time_getter");
         let mut svc =
             RateLimit::with_time_getter(EchoService, 5, Duration::from_secs(1), test_time);
-        {
-            svc.tokens = 0;
-            svc.last_refill = Some(Time::from_secs(0));
-        }
+        set_bucket_state(&svc, 0, Some(Time::from_secs(0)));
         TEST_NOW.store(1_000_000_000, Ordering::SeqCst);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -803,7 +923,12 @@ mod tests {
             1,
             svc.available_tokens()
         );
-        crate::assert_with_log!(svc.reserved_tokens == 0, "reserved", 0, svc.reserved_tokens);
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 0,
+            "reserved",
+            0,
+            svc.reserved_tokens()
+        );
 
         ready.store(true, Ordering::SeqCst);
         let second = svc.poll_ready_with_time::<()>(Time::from_secs(0), &mut cx);
@@ -815,7 +940,12 @@ mod tests {
             0,
             svc.available_tokens()
         );
-        crate::assert_with_log!(svc.reserved_tokens == 1, "reserved", 1, svc.reserved_tokens);
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 1,
+            "reserved",
+            1,
+            svc.reserved_tokens()
+        );
         crate::test_complete!(
             "poll_ready_with_time_respects_inner_pending_and_reserves_token_on_ready"
         );
@@ -845,7 +975,12 @@ mod tests {
             1,
             svc.available_tokens()
         );
-        crate::assert_with_log!(svc.reserved_tokens == 0, "reserved", 0, svc.reserved_tokens);
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 0,
+            "reserved",
+            0,
+            svc.reserved_tokens()
+        );
         crate::test_complete!("poll_ready_with_time_propagates_inner_error");
     }
 
@@ -865,7 +1000,12 @@ mod tests {
             0,
             svc.available_tokens()
         );
-        crate::assert_with_log!(svc.reserved_tokens == 1, "reserved", 1, svc.reserved_tokens);
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 1,
+            "reserved",
+            1,
+            svc.reserved_tokens()
+        );
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _future = svc.call(());
@@ -879,6 +1019,33 @@ mod tests {
             svc.available_tokens()
         );
         crate::test_complete!("poll_ready_with_time_reserved_token_restores_on_call_panic");
+    }
+
+    #[test]
+    fn poll_ready_with_time_restores_token_on_inner_panic() {
+        init_test("poll_ready_with_time_restores_token_on_inner_panic");
+        let mut svc = RateLimit::new(PanicOnPollReadyService, 1, Duration::from_secs(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = svc.poll_ready_with_time::<()>(Time::from_secs(0), &mut cx);
+        }));
+        let panicked = panic.is_err();
+        crate::assert_with_log!(panicked, "inner poll_ready panicked", true, panicked);
+        crate::assert_with_log!(
+            svc.available_tokens() == 1,
+            "available after panic",
+            1,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 0,
+            "reserved",
+            0,
+            svc.reserved_tokens()
+        );
+        crate::test_complete!("poll_ready_with_time_restores_token_on_inner_panic");
     }
 
     #[test]
@@ -902,7 +1069,12 @@ mod tests {
             1,
             svc.available_tokens()
         );
-        crate::assert_with_log!(svc.reserved_tokens == 0, "reserved", 0, svc.reserved_tokens);
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 0,
+            "reserved",
+            0,
+            svc.reserved_tokens()
+        );
         crate::test_complete!("call_without_poll_ready_returns_not_ready");
     }
 
@@ -910,10 +1082,7 @@ mod tests {
     fn zero_period_keeps_bucket_full() {
         init_test("zero_period_keeps_bucket_full");
         let mut svc = RateLimit::with_time_getter(EchoService, 2, Duration::ZERO, test_time);
-        {
-            svc.tokens = 0;
-            svc.last_refill = Some(Time::from_secs(0));
-        }
+        set_bucket_state(&svc, 0, Some(Time::from_secs(0)));
 
         TEST_NOW.store(1, Ordering::SeqCst);
         let waker = noop_waker();
@@ -992,14 +1161,25 @@ mod tests {
         let ready = svc.poll_ready(&mut cx);
         let ok = matches!(ready, Poll::Ready(Ok(())));
         crate::assert_with_log!(ok, "ready ok", true, ok);
-        crate::assert_with_log!(svc.reserved_tokens == 1, "reserved", 1, svc.reserved_tokens);
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 1,
+            "reserved",
+            1,
+            svc.reserved_tokens()
+        );
 
         let mut cloned = svc.clone();
         crate::assert_with_log!(
-            cloned.reserved_tokens == 0,
+            cloned.available_tokens() == 0,
+            "clone sees shared token depletion",
+            0,
+            cloned.available_tokens()
+        );
+        crate::assert_with_log!(
+            cloned.reserved_tokens() == 0,
             "clone reserved tokens reset",
             0,
-            cloned.reserved_tokens
+            cloned.reserved_tokens()
         );
 
         let mut clone_future = cloned.call(7);
@@ -1022,6 +1202,98 @@ mod tests {
             original_ok
         );
         crate::test_complete!("rate_limit_clone_does_not_inherit_reserved_tokens");
+    }
+
+    #[test]
+    fn rate_limit_clone_shares_bucket_state() {
+        init_test("rate_limit_clone_shares_bucket_state");
+        let mut svc = RateLimit::new(EchoService, 1, Duration::from_secs(1));
+        let mut cloned = svc.clone();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
+        let first_ready = matches!(first, Poll::Ready(Ok(())));
+        crate::assert_with_log!(first_ready, "first ready", true, first_ready);
+        crate::assert_with_log!(
+            cloned.available_tokens() == 0,
+            "clone sees depleted bucket",
+            0,
+            cloned.available_tokens()
+        );
+
+        let second = cloned.poll_ready_with_time::<i32>(Time::from_millis(500), &mut cx);
+        crate::assert_with_log!(
+            second.is_pending(),
+            "second pending",
+            true,
+            second.is_pending()
+        );
+
+        let mut fut = svc.call(7);
+        let result = Pin::new(&mut fut).poll(&mut cx);
+        let first_ok = matches!(result, Poll::Ready(Ok(7)));
+        crate::assert_with_log!(first_ok, "first call result", true, first_ok);
+
+        let third = cloned.poll_ready_with_time::<i32>(Time::from_secs(1), &mut cx);
+        let third_ready = matches!(third, Poll::Ready(Ok(())));
+        crate::assert_with_log!(third_ready, "third ready after refill", true, third_ready);
+        crate::test_complete!("rate_limit_clone_shares_bucket_state");
+    }
+
+    #[test]
+    fn dropping_clone_restores_shared_reserved_token() {
+        init_test("dropping_clone_restores_shared_reserved_token");
+        let mut svc = RateLimit::new(EchoService, 1, Duration::from_secs(1));
+        let mut cloned = svc.clone();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "original ready", true, ready_ok);
+        crate::assert_with_log!(
+            cloned.available_tokens() == 0,
+            "clone sees depleted bucket before drop",
+            0,
+            cloned.available_tokens()
+        );
+
+        drop(svc);
+
+        crate::assert_with_log!(
+            cloned.available_tokens() == 1,
+            "drop restores shared token",
+            1,
+            cloned.available_tokens()
+        );
+
+        let clone_ready = cloned.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
+        let clone_ready_ok = matches!(clone_ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(
+            clone_ready_ok,
+            "clone ready after drop",
+            true,
+            clone_ready_ok
+        );
+        crate::test_complete!("dropping_clone_restores_shared_reserved_token");
+    }
+
+    #[test]
+    fn reserved_token_guard_caps_restored_bucket_at_rate() {
+        init_test("reserved_token_guard_caps_restored_bucket_at_rate");
+        let state = Arc::new(Mutex::new(SharedRateLimitState {
+            tokens: 1,
+            last_refill: Some(Time::ZERO),
+        }));
+
+        {
+            let _guard = ReservedTokenGuard::new(Arc::clone(&state), 1, false, true);
+        }
+
+        let tokens = state.lock().tokens;
+        crate::assert_with_log!(tokens == 1, "restored tokens capped", 1, tokens);
+        crate::test_complete!("reserved_token_guard_caps_restored_bucket_at_rate");
     }
 
     #[test]
