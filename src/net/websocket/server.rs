@@ -26,7 +26,7 @@
 //! ```
 
 use super::client::{Message, MessageAssembler, WebSocketConfig};
-use super::close::{CloseHandshake, CloseReason};
+use super::close::{CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{AcceptResponse, HandshakeError, HttpRequest, ServerHandshake};
 use crate::bytes::BytesMut;
@@ -403,9 +403,13 @@ where
                     Opcode::Close => {
                         // Handle close handshake
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
-                            let send_result = self.send_frame(response).await;
-                            self.close_handshake.mark_response_sent();
+                            let send_result = async {
+                                self.encode_frame(response)?;
+                                self.flush_write_buf().await
+                            }
+                            .await;
                             send_result?;
+                            self.close_handshake.mark_response_sent();
                         }
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
@@ -509,6 +513,12 @@ where
 
     /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+        if self.close_handshake.state() == CloseState::CloseReceived {
+            self.flush_write_buf().await?;
+            self.close_handshake.mark_response_sent();
+            return Ok(());
+        }
+
         if let Some(frame) = self.close_handshake.initiate(reason) {
             self.send_frame(frame).await?;
         }
@@ -537,6 +547,25 @@ where
             let _ = self.write_buf.split_to(n);
         }
 
+        poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
+
+        Ok(())
+    }
+
+    async fn write_buf_to_io(&mut self, buf: &mut BytesMut) -> Result<(), WsError> {
+        use std::future::poll_fn;
+
+        while !buf.is_empty() {
+            let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &buf[..])).await?;
+            if n == 0 {
+                return Err(WsError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write returned 0",
+                )));
+            }
+            let _ = buf.split_to(n);
+        }
+
         // Ensure the underlying I/O stream is flushed
         poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
 
@@ -545,8 +574,12 @@ where
 
     /// Internal: send a single frame.
     async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        self.encode_frame(frame)?;
-        self.flush_write_buf().await
+        if !self.write_buf.is_empty() {
+            self.flush_write_buf().await?;
+        }
+        let mut encoded = BytesMut::new();
+        self.codec.encode(frame, &mut encoded)?;
+        self.write_buf_to_io(&mut encoded).await
     }
 
     /// Internal: read more data into buffer.
@@ -648,6 +681,7 @@ mod tests {
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use futures_lite::future;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::task::Poll;
 
     struct TestIo {
@@ -655,6 +689,9 @@ mod tests {
         read_pos: usize,
         written: Vec<u8>,
         fail_writes: bool,
+        pending_first_write: bool,
+        pending_first_flush: bool,
+        flush_calls: usize,
     }
 
     impl TestIo {
@@ -668,6 +705,9 @@ mod tests {
                 read_pos: 0,
                 written: Vec::new(),
                 fail_writes: false,
+                pending_first_write: false,
+                pending_first_flush: false,
+                flush_calls: 0,
             }
         }
 
@@ -675,10 +715,29 @@ mod tests {
             self.fail_writes = true;
             self
         }
+
+        fn with_pending_first_write(mut self) -> Self {
+            self.pending_first_write = true;
+            self
+        }
+
+        fn with_pending_first_flush(mut self) -> Self {
+            self.pending_first_flush = true;
+            self
+        }
     }
 
     fn encode_client_frame(frame: Frame) -> Vec<u8> {
         let mut codec = FrameCodec::client();
+        let mut out = BytesMut::new();
+        codec
+            .encode(frame, &mut out)
+            .expect("frame encoding should succeed");
+        out.to_vec()
+    }
+
+    fn encode_server_frame(frame: Frame) -> Vec<u8> {
+        let mut codec = FrameCodec::server();
         let mut out = BytesMut::new();
         codec
             .encode(frame, &mut out)
@@ -703,7 +762,7 @@ mod tests {
     impl AsyncWrite for TestIo {
         fn poll_write(
             mut self: Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
+            cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
             if self.fail_writes {
@@ -712,14 +771,25 @@ mod tests {
                     "synthetic write failure",
                 )));
             }
+            if self.pending_first_write {
+                self.pending_first_write = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             self.written.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
         }
 
         fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
         ) -> Poll<io::Result<()>> {
+            self.flush_calls += 1;
+            if self.pending_first_flush {
+                self.pending_first_flush = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             Poll::Ready(Ok(()))
         }
 
@@ -933,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_marks_close_response_sent_even_if_send_fails() {
+    fn recv_keeps_close_received_state_if_response_send_fails() {
         future::block_on(async {
             let accept = AcceptResponse {
                 accept_key: String::new(),
@@ -955,8 +1025,175 @@ mod tests {
                 "expected synthetic broken-pipe write failure, got {err:?}"
             );
             assert!(
+                !ws.is_closed(),
+                "failed close response writes must not incorrectly finish the handshake"
+            );
+            assert_eq!(
+                ws.close_handshake.state(),
+                crate::net::websocket::CloseState::CloseReceived,
+                "failed close response writes must leave the handshake waiting for a retry"
+            );
+        });
+    }
+
+    #[derive(Debug)]
+    struct NoopWake;
+
+    impl std::task::Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    #[test]
+    fn cancelled_send_does_not_flush_frame_later() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::new().with_pending_first_write(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            let cancelled = Message::text("cancelled");
+            let delivered = Message::text("delivered");
+            let mut cancelled_send = Box::pin(ws.send(&cx, cancelled));
+            let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_send.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "first send should park before any bytes are written"
+            );
+            drop(cancelled_send);
+
+            assert!(
+                ws.write_buf.is_empty(),
+                "dropping a parked send must not leave its frame in the shared write buffer"
+            );
+
+            ws.send(&cx, delivered.clone())
+                .await
+                .expect("second send should succeed");
+
+            let expected = vec![129, 9, 100, 101, 108, 105, 118, 101, 114, 101, 100];
+            assert_eq!(
+                ws.io.written, expected,
+                "later flushes must not emit bytes from a cancelled send"
+            );
+        });
+    }
+
+    #[test]
+    fn close_after_cancelled_recv_flushes_pending_echo_without_second_close() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let read_data = encode_client_frame(Frame::close(Some(1000), None));
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(read_data).with_pending_first_write(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            let mut cancelled_recv = Box::pin(ws.recv(&cx));
+            let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "recv should park while flushing the echoed close response"
+            );
+            drop(cancelled_recv);
+
+            assert_eq!(
+                ws.close_handshake.state(),
+                CloseState::CloseReceived,
+                "cancelling recv mid-flush must leave the echoed response pending"
+            );
+            assert!(
+                !ws.write_buf.is_empty(),
+                "the echoed close response should stay buffered for a later retry"
+            );
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("close should finish the pending echoed response");
+
+            assert!(
                 ws.is_closed(),
-                "close handshake must transition to closed even when close response send fails"
+                "finishing the pending echoed response must close the handshake"
+            );
+            assert_eq!(
+                ws.io.written,
+                encode_server_frame(Frame::close(Some(1000), None)),
+                "retrying close after a cancelled recv must not append a second close frame"
+            );
+        });
+    }
+
+    #[test]
+    fn close_after_cancelled_recv_retries_pending_transport_flush_without_second_close() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let read_data = encode_client_frame(Frame::close(Some(1000), None));
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(read_data).with_pending_first_flush(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            let mut cancelled_recv = Box::pin(ws.recv(&cx));
+            let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "recv should park while the echoed close response is waiting on poll_flush"
+            );
+            drop(cancelled_recv);
+
+            assert_eq!(
+                ws.close_handshake.state(),
+                CloseState::CloseReceived,
+                "cancelling recv during poll_flush must leave the echoed response pending"
+            );
+            assert!(
+                ws.write_buf.is_empty(),
+                "all close-response bytes should already be written before the deferred flush"
+            );
+            assert_eq!(
+                ws.io.flush_calls, 1,
+                "the cancelled recv should have attempted exactly one transport flush"
+            );
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("close should retry the deferred transport flush");
+
+            assert!(ws.is_closed(), "retrying the deferred flush must close the handshake");
+            assert_eq!(
+                ws.io.written,
+                encode_server_frame(Frame::close(Some(1000), None)),
+                "retrying close after a cancelled recv must not append a second close frame"
+            );
+            assert_eq!(
+                ws.io.flush_calls, 2,
+                "close should retry the deferred transport flush once"
             );
         });
     }

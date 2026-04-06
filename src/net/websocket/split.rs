@@ -141,9 +141,14 @@ async fn acquire_write_permit<IO>(
 async fn flush_write_buf<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
 ) -> Result<(), WsError> {
-    use std::future::poll_fn;
-
     let _permit = acquire_write_permit(shared).await;
+    flush_shared_write_buf_with_permit(shared).await
+}
+
+async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+) -> Result<(), WsError> {
+    use std::future::poll_fn;
 
     while {
         let guard = shared.lock();
@@ -174,6 +179,51 @@ async fn flush_write_buf<IO: AsyncWrite + Unpin>(
     }
 
     // Ensure the underlying I/O stream is flushed
+    poll_fn(|poll_cx| {
+        let mut guard = shared.lock();
+        Pin::new(&mut guard.io).poll_flush(poll_cx)
+    })
+    .await?;
+
+    Ok(())
+}
+
+async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    buf: &mut BytesMut,
+) -> Result<(), WsError> {
+    use std::future::poll_fn;
+
+    let _permit = acquire_write_permit(shared).await;
+    flush_shared_write_buf_with_permit(shared).await?;
+
+    if buf.is_empty() {
+        return Ok(());
+    }
+
+    let n = poll_fn(|poll_cx| {
+        let mut guard = shared.lock();
+        Pin::new(&mut guard.io).poll_write(poll_cx, &buf[..])
+    })
+    .await?;
+
+    if n == 0 {
+        return Err(WsError::Io(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "write returned 0",
+        )));
+    }
+
+    let _ = buf.split_to(n);
+    if !buf.is_empty() {
+        {
+            let mut guard = shared.lock();
+            guard.write_buf.extend_from_slice(&buf[..]);
+            buf.clear();
+        }
+        return flush_shared_write_buf_with_permit(shared).await;
+    }
+
     poll_fn(|poll_cx| {
         let mut guard = shared.lock();
         Pin::new(&mut guard.io).poll_flush(poll_cx)
@@ -342,8 +392,8 @@ where
                             let send_result = self
                                 .send_frame_internal_with_entropy(&response_frame, cx.entropy())
                                 .await;
-                            self.shared.lock().close_handshake.mark_response_sent();
                             send_result?;
+                            self.shared.lock().close_handshake.mark_response_sent();
                         }
 
                         let reason = CloseReason::parse(&frame.payload).ok();
@@ -574,6 +624,16 @@ where
 
     /// Internal: initiate close without waiting.
     async fn initiate_close(&self, reason: CloseReason) -> Result<(), WsError> {
+        let pending_response = {
+            let shared = self.shared.lock();
+            shared.close_handshake.state() == CloseState::CloseReceived
+        };
+        if pending_response {
+            flush_write_buf(&self.shared).await?;
+            self.shared.lock().close_handshake.mark_response_sent();
+            return Ok(());
+        }
+
         let frame = {
             let mut shared = self.shared.lock();
             shared.close_handshake.initiate(reason)
@@ -585,25 +645,19 @@ where
         Ok(())
     }
 
-    fn encode_frame_with_entropy(
-        &self,
-        frame: &Frame,
-        entropy: &dyn EntropySource,
-    ) -> Result<(), WsError> {
-        let mut shared = self.shared.lock();
-        let shared = &mut *shared;
-        shared
-            .codec
-            .encode_with_entropy(frame, &mut shared.write_buf, entropy)
-    }
-
     async fn send_frame_with_entropy(
         &self,
         frame: &Frame,
         entropy: &dyn EntropySource,
     ) -> Result<(), WsError> {
-        self.encode_frame_with_entropy(frame, entropy)?;
-        flush_write_buf(&self.shared).await
+        let mut encoded = BytesMut::new();
+        {
+            let shared = &mut *self.shared.lock();
+            shared
+                .codec
+                .encode_with_entropy(frame, &mut encoded, entropy)?;
+        }
+        write_owned_buf_with_permit(&self.shared, &mut encoded).await
     }
 
     /// Internal: send a single frame.
@@ -631,6 +685,9 @@ mod tests {
         read_pos: usize,
         written: Vec<u8>,
         fail_writes: bool,
+        pending_first_write: bool,
+        partial_first_write_len: Option<usize>,
+        pending_after_partial_write: bool,
     }
 
     impl TestIo {
@@ -640,11 +697,25 @@ mod tests {
                 read_pos: 0,
                 written: Vec::new(),
                 fail_writes: false,
+                pending_first_write: false,
+                partial_first_write_len: None,
+                pending_after_partial_write: false,
             }
         }
 
         fn with_write_failure(mut self) -> Self {
             self.fail_writes = true;
+            self
+        }
+
+        fn with_pending_first_write(mut self) -> Self {
+            self.pending_first_write = true;
+            self
+        }
+
+        fn with_partial_first_write(mut self, len: usize) -> Self {
+            self.partial_first_write_len = Some(len);
+            self.pending_after_partial_write = true;
             self
         }
     }
@@ -690,7 +761,7 @@ mod tests {
     impl AsyncWrite for TestIo {
         fn poll_write(
             mut self: Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
+            cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
             if self.fail_writes {
@@ -698,6 +769,21 @@ mod tests {
                     io::ErrorKind::BrokenPipe,
                     "synthetic write failure",
                 )));
+            }
+            if self.pending_first_write {
+                self.pending_first_write = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if let Some(len) = self.partial_first_write_len.take() {
+                let to_write = len.min(buf.len());
+                self.written.extend_from_slice(&buf[..to_write]);
+                return Poll::Ready(Ok(to_write));
+            }
+            if self.pending_after_partial_write {
+                self.pending_after_partial_write = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
             self.written.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
@@ -757,6 +843,15 @@ mod tests {
         let mut out = BytesMut::new();
         codec
             .encode(frame, &mut out)
+            .expect("frame encoding should succeed");
+        out.to_vec()
+    }
+
+    fn encode_client_frame_with_entropy(frame: &Frame, entropy: &dyn EntropySource) -> Vec<u8> {
+        let codec = FrameCodec::client();
+        let mut out = BytesMut::new();
+        codec
+            .encode_with_entropy(frame, &mut out, entropy)
             .expect("frame encoding should succeed");
         out.to_vec()
     }
@@ -1024,6 +1119,15 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
     #[test]
     fn writer_permit_release_wakes_all_waiters() {
         future::block_on(async {
@@ -1094,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn split_recv_marks_close_response_sent_even_if_send_fails() {
+    fn split_recv_keeps_close_received_state_if_response_send_fails() {
         future::block_on(async {
             let read_data = encode_server_frame(Frame::close(Some(1000), None));
             let ws = WebSocket::from_upgraded(
@@ -1113,8 +1217,218 @@ mod tests {
                 "expected synthetic broken-pipe write failure, got {err:?}"
             );
             assert!(
-                read.is_closed(),
-                "close handshake must transition to closed even when close response send fails"
+                !read.is_closed(),
+                "failed close response writes must not incorrectly finish the handshake"
+            );
+            assert_eq!(
+                read.shared.lock().close_handshake.state(),
+                CloseState::CloseReceived,
+                "failed close response writes must leave the handshake waiting for a retry"
+            );
+        });
+    }
+
+    #[test]
+    fn cancelled_write_half_send_does_not_flush_frame_later() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, mut write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0xAA, 0xBB, 0xCC, 0xDD])));
+
+            {
+                let mut shared = read.shared.lock();
+                shared.codec = FrameCodec::server();
+            }
+
+            let permit = acquire_write_permit(&read.shared).await;
+            let cancelled = Message::text("cancelled");
+            let delivered = Message::text("delivered");
+            let mut cancelled_send = Box::pin(write.send(&cx, cancelled));
+            let wake_counter = CountingWake::new();
+            let task_waker: Waker = Waker::from(Arc::clone(&wake_counter));
+            let mut task_cx = Context::from_waker(&task_waker);
+
+            assert!(
+                matches!(cancelled_send.as_mut().poll(&mut task_cx), Poll::Pending),
+                "first send should park waiting for the write permit"
+            );
+            drop(cancelled_send);
+            assert!(
+                read.shared.lock().write_buf.is_empty(),
+                "dropping a parked split send must not leave bytes in the shared write buffer"
+            );
+
+            drop(permit);
+            write
+                .send(&cx, delivered.clone())
+                .await
+                .expect("second send should succeed");
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            assert_eq!(
+                ws.io.written,
+                encode_server_frame(Frame::from(delivered)),
+                "later flushes must not emit bytes from a cancelled split send"
+            );
+        });
+    }
+
+    #[test]
+    fn cancelled_write_half_send_after_partial_write_preserves_tail_for_later_flush() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(vec![]).with_partial_first_write(1),
+                WebSocketConfig::default(),
+            );
+            let (read, mut write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0xAA, 0xBB, 0xCC, 0xDD])));
+
+            {
+                let mut shared = read.shared.lock();
+                shared.codec = FrameCodec::server();
+            }
+
+            let cancelled = Message::text("cancelled");
+            let delivered = Message::text("delivered");
+            let expected_cancelled = encode_server_frame(Frame::from(cancelled.clone()));
+            let expected_delivered = encode_server_frame(Frame::from(delivered.clone()));
+            let mut cancelled_send = Box::pin(write.send(&cx, cancelled));
+            let waker = Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_send.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "send should park after partially writing the frame and buffering the tail"
+            );
+            drop(cancelled_send);
+
+            assert!(
+                !read.shared.lock().write_buf.is_empty(),
+                "after any byte hits the wire, the unwritten split-send tail must stay durable"
+            );
+
+            write
+                .send(&cx, delivered)
+                .await
+                .expect("later sends should flush the durable tail first");
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            let mut expected = expected_cancelled;
+            expected.extend_from_slice(&expected_delivered);
+            assert_eq!(
+                ws.io.written, expected,
+                "later flushes must preserve the partially written split frame before the next send"
+            );
+        });
+    }
+
+    #[test]
+    fn close_after_cancelled_recv_flushes_pending_echo_without_second_close() {
+        future::block_on(async {
+            let peer_close = encode_server_frame(Frame::close(Some(1000), None));
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(peer_close).with_pending_first_write(),
+                WebSocketConfig::default(),
+            );
+            let (mut read, mut write) = ws.split();
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x46, 0xD0, 0x1B, 0x0A]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let mut cancelled_recv = Box::pin(read.recv(&cx));
+            let waker = Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "recv should park while flushing the echoed close response"
+            );
+            drop(cancelled_recv);
+
+            assert_eq!(
+                write.close_state(),
+                CloseState::CloseReceived,
+                "cancelling recv mid-flush must leave the echoed response pending"
+            );
+            assert!(
+                !read.shared.lock().write_buf.is_empty(),
+                "the echoed close response should stay buffered for a later retry"
+            );
+
+            write
+                .close(CloseReason::going_away())
+                .await
+                .expect("close should finish the pending echoed response");
+
+            assert_eq!(
+                write.close_state(),
+                CloseState::Closed,
+                "finishing the pending echoed response must close the handshake"
+            );
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            assert_eq!(
+                ws.io.written,
+                encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref()),
+                "retrying close after a cancelled recv must not append a second close frame"
+            );
+        });
+    }
+
+    #[test]
+    fn close_after_partially_flushed_echo_preserves_tail_without_second_close() {
+        future::block_on(async {
+            let peer_close = encode_server_frame(Frame::close(Some(1000), None));
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(peer_close).with_partial_first_write(1),
+                WebSocketConfig::default(),
+            );
+            let (mut read, mut write) = ws.split();
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x46, 0xD0, 0x1B, 0x0A]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let expected =
+                encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref());
+            let mut cancelled_recv = Box::pin(read.recv(&cx));
+            let waker = Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "recv should park after partially flushing the echoed close response"
+            );
+            drop(cancelled_recv);
+
+            assert_eq!(
+                write.close_state(),
+                CloseState::CloseReceived,
+                "partial close-response flush must leave the split handshake awaiting completion"
+            );
+            assert!(
+                !read.shared.lock().write_buf.is_empty(),
+                "the echoed split close tail must remain buffered after partial I/O"
+            );
+            {
+                let guard = read.shared.lock();
+                assert_eq!(
+                    guard.io.written,
+                    expected[..1].to_vec(),
+                    "only the committed close-frame prefix should hit the transport before retry"
+                );
+            }
+
+            write
+                .close(CloseReason::going_away())
+                .await
+                .expect("close should flush the durable close tail");
+
+            assert_eq!(
+                write.close_state(),
+                CloseState::Closed,
+                "completing the echoed close tail must close the split handshake"
+            );
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            assert_eq!(
+                ws.io.written, expected,
+                "retrying close must finish the original split close frame without appending a second one"
             );
         });
     }

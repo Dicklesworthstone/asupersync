@@ -445,8 +445,7 @@ where
         }
 
         let frame = Frame::from(msg);
-        self.encode_frame_with_entropy(&frame, cx.entropy())?;
-        self.flush_write_buf().await
+        self.send_frame_with_entropy(&frame, cx.entropy()).await
     }
 
     /// Receive a message.
@@ -510,8 +509,8 @@ where
                                 self.flush_write_buf().await
                             }
                             .await;
-                            self.close_handshake.mark_response_sent();
                             send_result?;
+                            self.close_handshake.mark_response_sent();
                         }
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
@@ -616,6 +615,14 @@ where
 
     /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+        if self.close_handshake.state() == CloseState::CloseReceived {
+            if !self.write_buf.is_empty() {
+                self.flush_write_buf().await?;
+            }
+            self.close_handshake.mark_response_sent();
+            return Ok(());
+        }
+
         if let Some(frame) = self.close_handshake.initiate(reason) {
             self.send_frame(&frame).await?;
         }
@@ -629,6 +636,17 @@ where
     ) -> Result<(), WsError> {
         self.codec
             .encode_with_entropy(frame, &mut self.write_buf, entropy)
+    }
+
+    fn encode_frame_bytes_with_entropy(
+        &self,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<BytesMut, WsError> {
+        let mut encoded = BytesMut::new();
+        self.codec
+            .encode_with_entropy(frame, &mut encoded, entropy)?;
+        Ok(encoded)
     }
 
     async fn flush_write_buf(&mut self) -> Result<(), WsError> {
@@ -646,17 +664,54 @@ where
             let _ = self.write_buf.split_to(n);
         }
 
-        // Ensure the underlying I/O stream is flushed
         poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
 
         Ok(())
     }
 
+    async fn write_frame_bytes_to_io(&mut self, buf: &mut BytesMut) -> Result<(), WsError> {
+        use std::future::poll_fn;
+
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &buf[..])).await?;
+        if n == 0 {
+            return Err(WsError::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write returned 0",
+            )));
+        }
+        let _ = buf.split_to(n);
+
+        if !buf.is_empty() {
+            self.write_buf.extend_from_slice(&buf[..]);
+            buf.clear();
+            return self.flush_write_buf().await;
+        }
+
+        poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
+
+        Ok(())
+    }
+
+    async fn send_frame_with_entropy(
+        &mut self,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        if !self.write_buf.is_empty() {
+            self.flush_write_buf().await?;
+        }
+        let mut encoded = self.encode_frame_bytes_with_entropy(frame, entropy)?;
+        self.write_frame_bytes_to_io(&mut encoded).await
+    }
+
     /// Internal: send a single frame.
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), WsError> {
         let entropy = Arc::clone(&self.entropy);
-        self.encode_frame_with_entropy(frame, entropy.as_ref())?;
-        self.flush_write_buf().await
+        self.send_frame_with_entropy(frame, entropy.as_ref()).await
     }
 
     /// Internal: read more data into buffer.
@@ -939,6 +994,9 @@ mod tests {
         read_pos: usize,
         written: Vec<u8>,
         fail_writes: bool,
+        pending_first_write: bool,
+        partial_first_write_len: Option<usize>,
+        pending_after_partial_write: bool,
     }
 
     impl TestIo {
@@ -952,11 +1010,25 @@ mod tests {
                 read_pos: 0,
                 written: Vec::new(),
                 fail_writes: false,
+                pending_first_write: false,
+                partial_first_write_len: None,
+                pending_after_partial_write: false,
             }
         }
 
         fn with_write_failure(mut self) -> Self {
             self.fail_writes = true;
+            self
+        }
+
+        fn with_pending_first_write(mut self) -> Self {
+            self.pending_first_write = true;
+            self
+        }
+
+        fn with_partial_first_write(mut self, len: usize) -> Self {
+            self.partial_first_write_len = Some(len);
+            self.pending_after_partial_write = true;
             self
         }
     }
@@ -984,10 +1056,19 @@ mod tests {
         }
     }
 
+    fn encode_client_frame_with_entropy(frame: &Frame, entropy: &dyn EntropySource) -> Vec<u8> {
+        let codec = FrameCodec::client();
+        let mut out = BytesMut::new();
+        codec
+            .encode_with_entropy(frame, &mut out, entropy)
+            .expect("frame encoding should succeed");
+        out.to_vec()
+    }
+
     impl AsyncWrite for TestIo {
         fn poll_write(
             mut self: Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
+            cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
             if self.fail_writes {
@@ -995,6 +1076,21 @@ mod tests {
                     io::ErrorKind::BrokenPipe,
                     "synthetic write failure",
                 )));
+            }
+            if self.pending_first_write {
+                self.pending_first_write = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if let Some(len) = self.partial_first_write_len.take() {
+                let to_write = len.min(buf.len());
+                self.written.extend_from_slice(&buf[..to_write]);
+                return Poll::Ready(Ok(to_write));
+            }
+            if self.pending_after_partial_write {
+                self.pending_after_partial_write = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
             self.written.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
@@ -1386,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_marks_close_response_sent_even_if_send_fails() {
+    fn recv_keeps_close_received_state_if_response_send_fails() {
         future::block_on(async {
             let io = TestIo::with_read_data(encode_server_frame(Frame::close(Some(1000), None)))
                 .with_write_failure();
@@ -1402,8 +1498,211 @@ mod tests {
                 "expected synthetic broken-pipe write failure, got {err:?}"
             );
             assert!(
+                !ws.is_closed(),
+                "failed close response writes must not incorrectly finish the handshake"
+            );
+            assert_eq!(
+                ws.close_state(),
+                CloseState::CloseReceived,
+                "failed close response writes must leave the handshake waiting for a retry"
+            );
+        });
+    }
+
+    #[derive(Debug)]
+    struct NoopWake;
+
+    impl std::task::Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    #[test]
+    fn cancelled_send_does_not_flush_frame_later() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x12, 0x34, 0x56, 0x78]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let mut ws = WebSocket::from_upgraded(
+                TestIo::new().with_pending_first_write(),
+                WebSocketConfig::default(),
+            );
+
+            let cancelled = Message::text("cancelled");
+            let delivered = Message::text("delivered");
+            let mut cancelled_send = Box::pin(ws.send(&cx, cancelled));
+            let waker = std::task::Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_send.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "first send should park before any bytes are written"
+            );
+            drop(cancelled_send);
+
+            assert!(
+                ws.write_buf.is_empty(),
+                "dropping a parked send must not leave its frame in the shared write buffer"
+            );
+
+            ws.send(&cx, delivered.clone())
+                .await
+                .expect("second send should succeed");
+
+            let expected =
+                encode_client_frame_with_entropy(&Frame::from(delivered), entropy.as_ref());
+            assert_eq!(
+                ws.io.written, expected,
+                "later flushes must not emit bytes from a cancelled send"
+            );
+        });
+    }
+
+    #[test]
+    fn cancelled_send_after_partial_write_preserves_tail_for_later_flush() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x12, 0x34, 0x56, 0x78]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let mut ws = WebSocket::from_upgraded(
+                TestIo::new().with_partial_first_write(1),
+                WebSocketConfig::default(),
+            );
+
+            let cancelled = Message::text("cancelled");
+            let delivered = Message::text("delivered");
+            let expected_cancelled =
+                encode_client_frame_with_entropy(&Frame::from(cancelled.clone()), entropy.as_ref());
+            let expected_delivered =
+                encode_client_frame_with_entropy(&Frame::from(delivered.clone()), entropy.as_ref());
+            let mut cancelled_send = Box::pin(ws.send(&cx, cancelled));
+            let waker = std::task::Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_send.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "send should park after the first byte is written and the remainder is buffered"
+            );
+            drop(cancelled_send);
+
+            assert!(
+                !ws.write_buf.is_empty(),
+                "after any byte hits the wire, the unwritten tail must stay durable"
+            );
+            assert_eq!(
+                ws.io.written,
+                expected_cancelled[..1].to_vec(),
+                "the transport should contain only the committed prefix before retry"
+            );
+
+            ws.send(&cx, delivered)
+                .await
+                .expect("second send should flush the durable tail before the next frame");
+
+            let mut expected = expected_cancelled;
+            expected.extend_from_slice(&expected_delivered);
+            assert_eq!(
+                ws.io.written, expected,
+                "later flushes must preserve the partially written frame before the next send"
+            );
+        });
+    }
+
+    #[test]
+    fn close_after_cancelled_recv_flushes_pending_echo_without_second_close() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x21, 0x43, 0x65, 0x87]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let peer_close = encode_server_frame(Frame::close(Some(1000), None));
+            let mut ws = WebSocket::from_upgraded(
+                TestIo::with_read_data(peer_close).with_pending_first_write(),
+                WebSocketConfig::default(),
+            );
+            let mut cancelled_recv = Box::pin(ws.recv(&cx));
+            let waker = std::task::Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "recv should park while flushing the echoed close response"
+            );
+            drop(cancelled_recv);
+
+            assert_eq!(
+                ws.close_state(),
+                CloseState::CloseReceived,
+                "cancelling recv mid-flush must leave the echoed response pending"
+            );
+            assert!(
+                !ws.write_buf.is_empty(),
+                "the echoed close response should stay buffered for a later retry"
+            );
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("close should finish the pending echoed response");
+
+            assert!(
                 ws.is_closed(),
-                "close handshake must transition to closed even when close response send fails"
+                "finishing the pending echoed response must close the handshake"
+            );
+
+            let expected =
+                encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref());
+            assert_eq!(
+                ws.io.written, expected,
+                "retrying close after a cancelled recv must not append a second close frame"
+            );
+        });
+    }
+
+    #[test]
+    fn close_after_partially_flushed_echo_preserves_tail_without_second_close() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x21, 0x43, 0x65, 0x87]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let peer_close = encode_server_frame(Frame::close(Some(1000), None));
+            let mut ws = WebSocket::from_upgraded(
+                TestIo::with_read_data(peer_close).with_partial_first_write(1),
+                WebSocketConfig::default(),
+            );
+            let expected =
+                encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref());
+            let mut cancelled_recv = Box::pin(ws.recv(&cx));
+            let waker = std::task::Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "recv should park after partially flushing the echoed close response"
+            );
+            drop(cancelled_recv);
+
+            assert_eq!(
+                ws.close_state(),
+                CloseState::CloseReceived,
+                "partial close-response flush must leave the handshake awaiting completion"
+            );
+            assert!(
+                !ws.write_buf.is_empty(),
+                "the echoed close tail must remain buffered after partial I/O"
+            );
+            assert_eq!(
+                ws.io.written,
+                expected[..1].to_vec(),
+                "only the committed close-frame prefix should hit the transport before retry"
+            );
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("close should flush the durable close tail");
+
+            assert!(
+                ws.is_closed(),
+                "completing the echoed close tail must close the handshake"
+            );
+            assert_eq!(
+                ws.io.written, expected,
+                "retrying close must finish the original close frame without appending a second one"
             );
         });
     }
@@ -1449,7 +1748,8 @@ mod tests {
     fn send_uses_cx_entropy_for_client_masking() {
         future::block_on(async {
             let mut ws = WebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default());
-            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0xAA, 0xBB, 0xCC, 0xDD])));
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0xAA, 0xBB, 0xCC, 0xDD]));
+            let cx = test_cx_with_entropy(entropy);
 
             ws.send(&cx, Message::text("hi"))
                 .await
