@@ -19,6 +19,7 @@ WORK_DIR="$(mktemp -d "${RUN_DIR}/work.XXXXXX")"
 PKG_DIR="${WORK_DIR}/pkg"
 CONSUMER_DIR="${WORK_DIR}/consumer"
 CARGO_WRAPPER="${WORK_DIR}/cargo-rch"
+TARGET_DIR="${WORK_DIR}/target"
 
 require_cmd() {
   local cmd="$1"
@@ -47,7 +48,7 @@ cat > "${CARGO_WRAPPER}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${REPO_ROOT}"
-exec rch exec -- cargo "\$@"
+exec rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "\$@"
 EOF
 chmod +x "${CARGO_WRAPPER}"
 

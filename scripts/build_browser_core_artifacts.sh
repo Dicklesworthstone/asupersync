@@ -54,12 +54,13 @@ esac
 mkdir -p "${STAGING_DIR}" "${PACKAGE_DIR}" "${WRAPPER_ROOT}"
 WORK_DIR="$(mktemp -d "${WRAPPER_ROOT}/${PROFILE}.XXXXXX")"
 CARGO_WRAPPER="${WORK_DIR}/cargo-rch"
+TARGET_DIR="${WORK_DIR}/target"
 
 cat > "${CARGO_WRAPPER}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${REPO_ROOT}"
-exec "${RCH_BIN}" exec -- cargo "\$@"
+exec "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "\$@"
 EOF
 chmod +x "${CARGO_WRAPPER}"
 

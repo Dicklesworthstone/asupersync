@@ -12,11 +12,13 @@ SUMMARY_PATH_FIELD="${ARTIFACT_PATH_ROOT}/stub_resolution_scan_summary.json"
 ALLOWLIST_FILE="${PROJECT_ROOT}/.stub-allowlist.txt"
 TMP_EVENTS="$(mktemp)"
 TMP_SUMMARY="$(mktemp)"
-BEAD_ID="asupersync-v2ofj7.10.6"
+# Z1 owns the scan ratchet / allowlist policy surface. Z0b owns the heavier
+# rch-backed verification runner that consumes this scan as one stage.
+BEAD_ID="asupersync-v2ofj7.10.1"
 TRACK_ID="Z"
 PROFILE_FAMILY="stub-resolution-scan"
 COMMAND_STRING="bash ${SCRIPT_DIR}/$(basename "$0")"
-CONFIG_SNAPSHOT_REF="TESTING.md::Shared Validation Contract (asupersync-ay6qvw)"
+CONFIG_SNAPSHOT_REF="docs/stub_closure_policy.md::Scan Rules; TESTING.md::Shared Validation Contract (asupersync-ay6qvw)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 mkdir -p "$ARTIFACT_ROOT"
@@ -352,6 +354,35 @@ check_stub_resolution_probe_module_exists() {
     fi
 }
 
+check_stub_ratchet_assets_are_audited() {
+    local audit_file="${PROJECT_ROOT}/audit_index.jsonl"
+    if [[ ! -f "$audit_file" ]]; then
+        report_fail "ZR-SCAN-AUDIT-RATCHET-ASSETS" "audit_index.jsonl is missing" "$audit_file"
+        return 0
+    fi
+
+    local missing=""
+    local required_paths=(
+        "scripts/scan_stubs.sh"
+        "scripts/verify_stub_resolution.sh"
+        "tests/stub_resolution_audit.rs"
+        "docs/stub_closure_policy.md"
+        ".stub-allowlist.txt"
+    )
+
+    for path in "${required_paths[@]}"; do
+        if ! rg -Fq "\"file\":\"${path}\"" "$audit_file"; then
+            missing+="${path}"$'\n'
+        fi
+    done
+
+    if [[ -z "$missing" ]]; then
+        report_pass "ZR-SCAN-AUDIT-RATCHET-ASSETS" "Stub-ratchet assets are recorded in audit_index.jsonl" "scan, verification, policy, probe, and allowlist assets have audit entries"
+    else
+        report_fail "ZR-SCAN-AUDIT-RATCHET-ASSETS" "Stub-ratchet assets are missing audit_index.jsonl entries" "$(printf '%s' "$missing" | sed '/^$/d')"
+    fi
+}
+
 check_no_unimplemented_in_examples_and_tests() {
     local matches
     if command -v ast-grep >/dev/null 2>&1; then
@@ -377,6 +408,7 @@ check_no_conformance_dummy_panics
 check_api_skeleton_moved_out_of_root
 check_no_skeleton_placeholders_in_src
 check_stub_resolution_probe_module_exists
+check_stub_ratchet_assets_are_audited
 check_no_unimplemented_in_examples_and_tests
 
 ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

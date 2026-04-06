@@ -64,6 +64,11 @@ explicit deprecated alias or otherwise clearly non-authoritative.
 
 ## Scan Rules (consumed by Z1)
 
+The canonical Z1 scan-ratchet entrypoint is `scripts/scan_stubs.sh`. Its
+emitted scan summary/event artifacts are owned by the Z1 scan-ratchet policy
+surface; the heavier Z0b verification runner may consume those artifacts as one
+stage, but it does not replace or re-own the scan contract.
+
 | Rule | Pattern | Violation If |
 |------|---------|-------------|
 | No crate-level dead_code | `#![allow(dead_code)]` in lib.rs | Present |

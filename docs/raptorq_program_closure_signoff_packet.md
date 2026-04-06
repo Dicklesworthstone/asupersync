@@ -98,6 +98,13 @@ not closure-ready until `TRACK_G` is still the sole blocker and
 it names who curates the packet while H2 remains draft-blocked and who is
 responsible for the final go/no-go publication once Track-G closes.
 
+`residual_risk_register` now also carries `upstream_active_leaf_bead_ids` so
+the direct blocker owner and any still-active upstream closure-critical leaves
+are linked mechanically instead of only by prose. In the current blocked state,
+the open Track-G risk stays owned by `asupersync-2cyx5` and explicitly names
+`asupersync-36m6p` as the active upstream Track-E leaf that still gates final
+sign-off through governance closure.
+
 Blocked-state ownership is explicit and stable while the packet stays
 `draft_blocked`:
 
