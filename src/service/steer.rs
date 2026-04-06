@@ -208,15 +208,18 @@ where
                         }
                     }
                 }
-                SteerState::Calling { mut future } => {
-                    let result = Pin::new(&mut future).poll(cx).map_err(SteerError::Inner);
-                    if result.is_pending() {
+                SteerState::Calling { mut future } => match Pin::new(&mut future).poll(cx) {
+                    Poll::Pending => {
                         this.state = SteerState::Calling { future };
-                    } else {
-                        this.state = SteerState::Done;
+                        return Poll::Pending;
                     }
-                    return result;
-                }
+                    Poll::Ready(Ok(response)) => {
+                        return Poll::Ready(Ok(response));
+                    }
+                    Poll::Ready(Err(err)) => {
+                        return Poll::Ready(Err(SteerError::Inner(err)));
+                    }
+                },
                 SteerState::Done => {
                     return Poll::Ready(Err(SteerError::PolledAfterCompletion));
                 }
@@ -304,6 +307,7 @@ mod tests {
     use super::*;
     use futures_lite::future::block_on;
     use std::future::{Ready, ready};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
@@ -398,6 +402,33 @@ mod tests {
 
         fn call(&mut self, _req: usize) -> Self::Future {
             ready(Err("boom"))
+        }
+    }
+
+    struct PanicOnPollFuture;
+
+    impl Future for PanicOnPollFuture {
+        type Output = Result<usize, std::convert::Infallible>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!("panic in future poll");
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct PanicOnPollService;
+
+    impl Service<usize> for PanicOnPollService {
+        type Response = usize;
+        type Error = std::convert::Infallible;
+        type Future = PanicOnPollFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: usize) -> Self::Future {
+            PanicOnPollFuture
         }
     }
 
@@ -722,5 +753,29 @@ mod tests {
             second,
             Poll::Ready(Err(SteerError::PolledAfterCompletion))
         ));
+    }
+
+    #[test]
+    fn steer_future_inner_panic_fails_closed() {
+        init_test("steer_future_inner_panic_fails_closed");
+        let mut future = SteerFuture::<PanicOnPollService, usize> {
+            state: SteerState::<PanicOnPollService, usize>::Calling {
+                future: PanicOnPollFuture,
+            },
+        };
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        assert!(panic.is_err(), "inner panic should propagate");
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(SteerError::PolledAfterCompletion))
+        ));
+        crate::test_complete!("steer_future_inner_panic_fails_closed");
     }
 }

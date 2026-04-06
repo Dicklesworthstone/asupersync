@@ -693,11 +693,11 @@ mod tests {
     }
 
     std::thread_local! {
-        static TEST_NOW: std::cell::Cell<u64> = std::cell::Cell::new(0);
+        static TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW.with(|t| t.get()))
+        Time::from_nanos(TEST_NOW.with(std::cell::Cell::get))
     }
 
     fn set_test_time(t: u64) {
@@ -751,7 +751,7 @@ mod tests {
         type Output = Result<u32, &'static str>;
 
         fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-            if TEST_NOW.load(Ordering::SeqCst) >= self.ready_at {
+            if TEST_NOW.with(std::cell::Cell::get) >= self.ready_at {
                 Poll::Ready(
                     self.result
                         .take()
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn config_with_time_getter() {
-        TEST_NOW.store(55, Ordering::SeqCst);
+        set_test_time(55);
         let config = HedgeConfig::new(Duration::from_nanos(5)).with_time_getter(test_time);
         assert_eq!((config.time_getter())(), Time::from_nanos(55));
     }
@@ -1028,7 +1028,7 @@ mod tests {
 
     #[test]
     fn hedge_primary_completes_before_delay_without_backup() {
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let calls = Arc::new(AtomicUsize::new(0));
         let mut hedge = Hedge::new(
             TimedService::new(
@@ -1043,12 +1043,10 @@ mod tests {
 
         let mut future = hedge.call(7);
         let res = Pin::new(&mut future).poll(&mut cx);
-        if !res.is_pending() {
-            panic!("Expected pending, got {:?}", res);
-        }
+        assert!(res.is_pending(), "Expected pending, got {res:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        TEST_NOW.store(5, Ordering::SeqCst);
+        set_test_time(5);
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(11))));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1058,7 +1056,7 @@ mod tests {
 
     #[test]
     fn hedge_dispatches_backup_after_delay_and_backup_can_win() {
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let calls = Arc::new(AtomicUsize::new(0));
         let mut hedge = Hedge::new(
             TimedService::new(
@@ -1077,12 +1075,12 @@ mod tests {
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        TEST_NOW.store(10, Ordering::SeqCst);
+        set_test_time(10);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(hedge.hedged_requests(), 1);
 
-        TEST_NOW.store(12, Ordering::SeqCst);
+        set_test_time(12);
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(22))));
         assert_eq!(hedge.hedge_wins(), 1);
@@ -1090,7 +1088,7 @@ mod tests {
 
     #[test]
     fn hedge_backup_can_rescue_primary_error() {
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let calls = Arc::new(AtomicUsize::new(0));
         let mut hedge = Hedge::new(
             TimedService::new(
@@ -1111,9 +1109,9 @@ mod tests {
         let mut future = hedge.call(7);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
 
-        TEST_NOW.store(10, Ordering::SeqCst);
+        set_test_time(10);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
-        TEST_NOW.store(12, Ordering::SeqCst);
+        set_test_time(12);
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(77))));
         assert_eq!(hedge.hedged_requests(), 1);
@@ -1122,7 +1120,7 @@ mod tests {
 
     #[test]
     fn hedge_reports_both_failed_when_primary_and_backup_fail() {
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let calls = Arc::new(AtomicUsize::new(0));
         let mut hedge = Hedge::new(
             TimedService::new(
@@ -1142,11 +1140,11 @@ mod tests {
 
         let mut future = hedge.call(7);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
-        TEST_NOW.store(10, Ordering::SeqCst);
+        set_test_time(10);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
-        TEST_NOW.store(12, Ordering::SeqCst);
+        set_test_time(12);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
-        TEST_NOW.store(30, Ordering::SeqCst);
+        set_test_time(30);
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(
             result,
@@ -1159,7 +1157,7 @@ mod tests {
 
     #[test]
     fn hedge_max_pending_zero_disables_backup_dispatch() {
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let calls = Arc::new(AtomicUsize::new(0));
         let mut hedge = Hedge::new(
             TimedService::new(
@@ -1176,12 +1174,12 @@ mod tests {
 
         let mut future = hedge.call(7);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
-        TEST_NOW.store(10, Ordering::SeqCst);
+        set_test_time(10);
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(hedge.hedged_requests(), 0);
 
-        TEST_NOW.store(30, Ordering::SeqCst);
+        set_test_time(30);
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(11))));
     }
@@ -1296,7 +1294,7 @@ mod tests {
 
     #[test]
     fn hedge_future_debug() {
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let fut = HedgeFuture::new(
             TimedFuture {
                 ready_at: 5,
@@ -1415,7 +1413,7 @@ mod tests {
     fn hedge_future_second_poll_fails_closed() {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let mut fut = HedgeFuture::new(
             TimedFuture {
                 ready_at: 0,

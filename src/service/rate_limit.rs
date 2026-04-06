@@ -665,7 +665,7 @@ mod tests {
     use super::*;
     use std::future::ready;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
@@ -790,10 +790,16 @@ mod tests {
         }
     }
 
-    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    std::thread_local! {
+        static TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        Time::from_nanos(TEST_NOW.with(std::cell::Cell::get))
+    }
+
+    fn set_test_time(t: u64) {
+        TEST_NOW.with(|now| now.set(t));
     }
 
     fn set_bucket_state<S>(svc: &RateLimit<S>, tokens: u64, last_refill: Option<Time>) {
@@ -986,7 +992,7 @@ mod tests {
         let mut svc =
             RateLimit::with_time_getter(EchoService, 5, Duration::from_secs(1), test_time);
         set_bucket_state(&svc, 0, Some(Time::from_secs(0)));
-        TEST_NOW.store(1_000_000_000, Ordering::SeqCst);
+        set_test_time(1_000_000_000);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1234,7 +1240,7 @@ mod tests {
         let mut svc = RateLimit::with_time_getter(EchoService, 2, Duration::ZERO, test_time);
         set_bucket_state(&svc, 0, Some(Time::from_secs(0)));
 
-        TEST_NOW.store(1, Ordering::SeqCst);
+        set_test_time(1);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1250,7 +1256,7 @@ mod tests {
     fn zero_period_zero_rate_still_ready() {
         init_test("zero_period_zero_rate_still_ready");
         let mut svc = RateLimit::with_time_getter(EchoService, 0, Duration::ZERO, test_time);
-        TEST_NOW.store(1, Ordering::SeqCst);
+        set_test_time(1);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1626,7 +1632,7 @@ mod tests {
             RateLimit::with_time_getter(EchoService, 1, Duration::from_secs(1), test_time);
 
         // Set time to 0, consume the single token via poll_ready + call.
-        TEST_NOW.store(0, Ordering::SeqCst);
+        set_test_time(0);
         let first = svc.poll_ready(&mut cx);
         let ok = matches!(first, Poll::Ready(Ok(())));
         crate::assert_with_log!(ok, "first ready", true, ok);

@@ -419,7 +419,7 @@ mod tests {
     use crate::types::{Budget, RegionId, TaskId};
     use std::future::{pending, ready};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     /// A no-op waker for testing.
@@ -529,15 +529,21 @@ mod tests {
         let _ = timeout.inner();
     }
 
-    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    std::thread_local! {
+        static TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        Time::from_nanos(TEST_NOW.with(std::cell::Cell::get))
+    }
+
+    fn set_test_time(t: u64) {
+        TEST_NOW.with(|now| now.set(t));
     }
 
     #[test]
     fn timeout_uses_time_getter_for_deadline() {
-        TEST_NOW.store(1_000, Ordering::SeqCst);
+        set_test_time(1_000);
         let mut svc = Timeout::with_time_getter(EchoService, Duration::from_nanos(500), test_time);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -548,7 +554,7 @@ mod tests {
 
     #[test]
     fn timeout_future_poll_honors_custom_time_getter() {
-        TEST_NOW.store(1_000, Ordering::SeqCst);
+        set_test_time(1_000);
         let mut svc = Timeout::with_time_getter(NeverService, Duration::from_nanos(500), test_time);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -559,7 +565,7 @@ mod tests {
             Future::poll(Pin::new(&mut future), &mut cx);
         assert!(first.is_pending());
 
-        TEST_NOW.store(2_000, Ordering::SeqCst);
+        set_test_time(2_000);
         let second: Poll<Result<(), TimeoutError<std::convert::Infallible>>> =
             Future::poll(Pin::new(&mut future), &mut cx);
         assert!(matches!(second, Poll::Ready(Err(TimeoutError::Elapsed(_)))));
