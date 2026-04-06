@@ -681,6 +681,24 @@ impl Command {
         })
     }
 
+    fn spawn_with_temporary_stdio(
+        &mut self,
+        stdin: Stdio,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> Result<Child, ProcessError> {
+        let previous = (
+            std::mem::replace(&mut self.stdin, stdin),
+            std::mem::replace(&mut self.stdout, stdout),
+            std::mem::replace(&mut self.stderr, stderr),
+        );
+        let result = self.spawn();
+        self.stdin = previous.0;
+        self.stdout = previous.1;
+        self.stderr = previous.2;
+        result
+    }
+
     /// Spawns the command and waits for it to complete, collecting output.
     ///
     /// Stdout and stderr are captured; stdin is set to null.
@@ -699,11 +717,7 @@ impl Command {
     /// println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
     /// ```
     pub fn output(&mut self) -> Result<Output, ProcessError> {
-        self.stdin(Stdio::Null);
-        self.stdout(Stdio::Pipe);
-        self.stderr(Stdio::Pipe);
-
-        let child = self.spawn()?;
+        let child = self.spawn_with_temporary_stdio(Stdio::Null, Stdio::Pipe, Stdio::Pipe)?;
         child.wait_with_output()
     }
 
@@ -712,11 +726,7 @@ impl Command {
     /// Uses cooperative polling to avoid blocking the runtime thread while
     /// waiting for process exit and draining pipes.
     pub async fn output_async(&mut self) -> Result<Output, ProcessError> {
-        self.stdin(Stdio::Null);
-        self.stdout(Stdio::Pipe);
-        self.stderr(Stdio::Pipe);
-
-        let child = self.spawn()?;
+        let child = self.spawn_with_temporary_stdio(Stdio::Null, Stdio::Pipe, Stdio::Pipe)?;
         child.wait_with_output_async().await
     }
 
@@ -739,7 +749,8 @@ impl Command {
     /// }
     /// ```
     pub fn status(&mut self) -> Result<ExitStatus, ProcessError> {
-        let mut child = self.spawn()?;
+        let mut child =
+            self.spawn_with_temporary_stdio(Stdio::Inherit, Stdio::Inherit, Stdio::Inherit)?;
         child.wait()
     }
 
@@ -748,7 +759,8 @@ impl Command {
     /// Uses cooperative polling to avoid blocking the runtime thread while
     /// waiting for process exit.
     pub async fn status_async(&mut self) -> Result<ExitStatus, ProcessError> {
-        let mut child = self.spawn()?;
+        let mut child =
+            self.spawn_with_temporary_stdio(Stdio::Inherit, Stdio::Inherit, Stdio::Inherit)?;
         child.wait_async().await
     }
 }
@@ -2576,6 +2588,109 @@ mod tests {
             String::from_utf8_lossy(&output.stdout)
         );
         crate::test_complete!("test_command_output");
+    }
+
+    #[test]
+    fn test_command_output_preserves_stdio_configuration() {
+        init_test("test_command_output_preserves_stdio_configuration");
+
+        let mut cmd = Command::new("echo");
+        cmd.arg("preserved").stdout(Stdio::Null);
+
+        let output = cmd.output().expect("output failed");
+        crate::assert_with_log!(
+            output.stdout == b"preserved\n",
+            "output stdout",
+            "preserved\\n",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let child = cmd.spawn().expect("spawn after output failed");
+        let result = child.wait_with_output().expect("post-output wait failed");
+        crate::assert_with_log!(
+            result.stdout.is_empty(),
+            "stdout config preserved after output",
+            true,
+            result.stdout.is_empty()
+        );
+        crate::test_complete!("test_command_output_preserves_stdio_configuration");
+    }
+
+    #[test]
+    fn test_command_output_async_preserves_stdio_configuration() {
+        init_test("test_command_output_async_preserves_stdio_configuration");
+
+        let mut cmd = Command::new("echo");
+        cmd.arg("preserved-async").stdout(Stdio::Null);
+
+        let output = futures_lite::future::block_on(cmd.output_async()).expect("output failed");
+        crate::assert_with_log!(
+            output.stdout == b"preserved-async\n",
+            "async output stdout",
+            "preserved-async\\n",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let child = cmd.spawn().expect("spawn after async output failed");
+        let result = child
+            .wait_with_output()
+            .expect("post-async-output wait failed");
+        crate::assert_with_log!(
+            result.stdout.is_empty(),
+            "stdout config preserved after output_async",
+            true,
+            result.stdout.is_empty()
+        );
+        crate::test_complete!("test_command_output_async_preserves_stdio_configuration");
+    }
+
+    #[test]
+    fn test_command_status_preserves_stdio_configuration() {
+        init_test("test_command_status_preserves_stdio_configuration");
+
+        let mut cmd = Command::new("echo");
+        cmd.arg("status-preserved").stdout(Stdio::Pipe);
+
+        let status = cmd.status().expect("status failed");
+        crate::assert_with_log!(status.success(), "status success", true, status.success());
+
+        let child = cmd.spawn().expect("spawn after status failed");
+        let result = child.wait_with_output().expect("post-status wait failed");
+        crate::assert_with_log!(
+            result.stdout == b"status-preserved\n",
+            "stdout config preserved after status",
+            "status-preserved\\n",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        crate::test_complete!("test_command_status_preserves_stdio_configuration");
+    }
+
+    #[test]
+    fn test_command_status_async_preserves_stdio_configuration() {
+        init_test("test_command_status_async_preserves_stdio_configuration");
+
+        let mut cmd = Command::new("echo");
+        cmd.arg("status-async-preserved").stdout(Stdio::Pipe);
+
+        let status = futures_lite::future::block_on(cmd.status_async()).expect("status failed");
+        crate::assert_with_log!(
+            status.success(),
+            "async status success",
+            true,
+            status.success()
+        );
+
+        let child = cmd.spawn().expect("spawn after status_async failed");
+        let result = child
+            .wait_with_output()
+            .expect("post-status_async wait failed");
+        crate::assert_with_log!(
+            result.stdout == b"status-async-preserved\n",
+            "stdout config preserved after status_async",
+            "status-async-preserved\\n",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        crate::test_complete!("test_command_status_async_preserves_stdio_configuration");
     }
 
     /// Invariant: ProcessError has Debug and Display formatting.
