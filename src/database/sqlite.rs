@@ -413,10 +413,6 @@ impl SqliteConnectionInner {
         self.conn.as_ref().ok_or(SqliteError::ConnectionClosed)
     }
 
-    fn get_mut(&mut self) -> Result<&mut rusqlite::Connection, SqliteError> {
-        self.conn.as_mut().ok_or(SqliteError::ConnectionClosed)
-    }
-
     fn close(&mut self) {
         self.conn = None;
     }

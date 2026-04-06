@@ -361,7 +361,7 @@ mod pool_integration {
         let mgr = Arc::new(MockManager::new());
         let config = DbPoolConfig::with_max_size(5).validate_on_checkout(true);
         let pool = DbPool::new(
-            Arc::try_unwrap(mgr.clone()).unwrap_or_else(|a| {
+            Arc::try_unwrap(mgr).unwrap_or_else(|a| {
                 // Build a new manager that shares the atomic state
                 MockManager {
                     connect_count: AtomicU32::new(a.connect_count.load(Ordering::Relaxed)),
@@ -394,7 +394,7 @@ mod pool_integration {
 
         // Third acquire should fail (pool is full, no idle connections)
         let result = pool.try_get();
-        assert!(matches!(result, None), "pool should be at capacity");
+        assert!(result.is_none(), "pool should be at capacity");
 
         let stats = pool.stats();
         assert_eq!(stats.total, 2);

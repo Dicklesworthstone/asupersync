@@ -1582,6 +1582,8 @@ impl PgConnectOptions {
             } else {
                 (host_port, 5432)
             }
+        } else if host_port.matches(':').count() > 1 {
+            (host_port, 5432)
         } else {
             host_port
                 .rsplit_once(':')

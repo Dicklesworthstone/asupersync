@@ -160,15 +160,6 @@ struct IdleConnection<C> {
 }
 
 impl<C> IdleConnection<C> {
-    fn new(conn: C) -> Self {
-        let now = Instant::now();
-        Self {
-            conn,
-            created_at: now,
-            last_used: now,
-        }
-    }
-
     fn is_expired(&self, config: &DbPoolConfig) -> bool {
         self.created_at.elapsed() > config.max_lifetime
     }
@@ -517,6 +508,7 @@ impl<M: ConnectionManager> DbPool<M> {
         };
 
         if let Some(c) = conn_to_disconnect {
+            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             self.manager.disconnect(c);
         }
     }
@@ -541,6 +533,11 @@ impl<M: ConnectionManager> DbPool<M> {
         let idle: Vec<_> = inner.idle.drain(..).collect();
         let drained = idle.len();
         inner.total = inner.total.saturating_sub(drained);
+        if drained > 0 {
+            self.stats
+                .total_discards
+                .fetch_add(drained as u64, Ordering::Relaxed);
+        }
         drop(inner);
         for entry in idle {
             self.manager.disconnect(entry.conn);
@@ -746,6 +743,40 @@ pub struct AsyncDbPool<M: AsyncConnectionManager> {
     stats: PoolStatCounters,
 }
 
+struct AsyncValidationGuard<'a, M: AsyncConnectionManager> {
+    pool: &'a AsyncDbPool<M>,
+    conn: Option<M::Connection>,
+}
+
+impl<M: AsyncConnectionManager> Drop for AsyncValidationGuard<'_, M> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let mut inner = self.pool.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+            drop(inner);
+            self.pool
+                .stats
+                .total_discards
+                .fetch_add(1, Ordering::Relaxed);
+            self.pool.manager.disconnect(conn);
+        }
+    }
+}
+
+struct AsyncCreationGuard<'a, M: AsyncConnectionManager> {
+    pool: &'a AsyncDbPool<M>,
+    disarmed: bool,
+}
+
+impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let mut inner = self.pool.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+        }
+    }
+}
+
 impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     /// Create a new async connection pool.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
@@ -810,40 +841,6 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         &self,
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
-        struct ValidationGuard<'a, M: AsyncConnectionManager> {
-            pool: &'a AsyncDbPool<M>,
-            conn: Option<M::Connection>,
-        }
-
-        impl<M: AsyncConnectionManager> Drop for ValidationGuard<'_, M> {
-            fn drop(&mut self) {
-                if let Some(conn) = self.conn.take() {
-                    let mut inner = self.pool.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
-                    drop(inner);
-                    self.pool
-                        .stats
-                        .total_discards
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.pool.manager.disconnect(conn);
-                }
-            }
-        }
-
-        struct CreationGuard<'a, M: AsyncConnectionManager> {
-            pool: &'a AsyncDbPool<M>,
-            disarmed: bool,
-        }
-
-        impl<M: AsyncConnectionManager> Drop for CreationGuard<'_, M> {
-            fn drop(&mut self) {
-                if !self.disarmed {
-                    let mut inner = self.pool.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
-                }
-            }
-        }
-
         loop {
             if cx.is_cancel_requested() {
                 return Err(DbPoolError::Timeout);
@@ -872,7 +869,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
 
                 if self.config.validate_on_checkout {
-                    let mut guard = ValidationGuard {
+                    let mut guard = AsyncValidationGuard {
                         pool: self,
                         conn: Some(idle.conn),
                     };
@@ -881,6 +878,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         .manager
                         .is_valid(cx, guard.conn.as_mut().unwrap())
                         .await;
+
+                    if cx.is_cancel_requested() {
+                        return Err(DbPoolError::Timeout);
+                    }
 
                     if !valid {
                         self.stats
@@ -904,13 +905,18 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 inner.total += 1;
             }
 
-            let mut creation_guard = CreationGuard {
+            let mut creation_guard = AsyncCreationGuard {
                 pool: self,
                 disarmed: false,
             };
 
             match self.manager.connect(cx).await {
                 Outcome::Ok(conn) => {
+                    if cx.is_cancel_requested() {
+                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                        self.manager.disconnect(conn);
+                        return Err(DbPoolError::Timeout);
+                    }
                     creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
                     return self.finish_async_checkout(conn, Instant::now());
@@ -969,8 +975,6 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             }
         }
     }
-
-
 
     fn finish_async_checkout(
         &self,
@@ -1181,10 +1185,6 @@ mod tests {
             }
         }
 
-        fn creates(&self) -> usize {
-            self.creates.load(Ordering::SeqCst)
-        }
-
         fn disconnects(&self) -> usize {
             self.disconnects.load(Ordering::SeqCst)
         }
@@ -1278,6 +1278,53 @@ mod tests {
         }
 
         async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
+            conn.valid.load(Ordering::SeqCst)
+        }
+
+        fn disconnect(&self, _conn: Self::Connection) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct SlowAsyncTestManager {
+        next_id: AtomicUsize,
+        valid: Arc<AtomicBool>,
+        disconnects: AtomicUsize,
+        connect_delay: Duration,
+        validate_delay: Duration,
+    }
+
+    impl SlowAsyncTestManager {
+        fn with_delays(connect_delay: Duration, validate_delay: Duration) -> Self {
+            Self {
+                next_id: AtomicUsize::new(1),
+                valid: Arc::new(AtomicBool::new(true)),
+                disconnects: AtomicUsize::new(0),
+                connect_delay,
+                validate_delay,
+            }
+        }
+
+        fn disconnects(&self) -> usize {
+            self.disconnects.load(Ordering::SeqCst)
+        }
+    }
+
+    impl AsyncConnectionManager for SlowAsyncTestManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+            crate::time::sleep(crate::time::wall_now(), self.connect_delay).await;
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            Outcome::Ok(TestConnection {
+                id,
+                valid: self.valid.clone(),
+            })
+        }
+
+        async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
+            crate::time::sleep(crate::time::wall_now(), self.validate_delay).await;
             conn.valid.load(Ordering::SeqCst)
         }
 
@@ -1388,6 +1435,93 @@ mod tests {
             "cancelled retries must not hold active leases"
         );
         crate::test_complete!("async_get_with_retry_observes_cancellation_during_backoff");
+    }
+
+    #[test]
+    fn async_get_cancellation_after_connect_does_not_hand_out_connection() {
+        init_test("async_get_cancellation_after_connect_does_not_hand_out_connection");
+        let pool = AsyncDbPool::new(
+            SlowAsyncTestManager::with_delays(Duration::from_millis(40), Duration::ZERO),
+            DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+        );
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let result = block_on(pool.get(&cx));
+
+        canceller
+            .join()
+            .expect("cancel thread should finish cleanly");
+
+        assert!(matches!(result, Err(DbPoolError::Timeout)));
+        let stats = pool.stats();
+        assert_eq!(stats.total, 0, "cancelled connect must not retain capacity");
+        assert_eq!(
+            stats.active, 0,
+            "cancelled connect must not hand out a lease"
+        );
+        assert_eq!(
+            stats.total_discards, 1,
+            "late connect success should be disconnected"
+        );
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("async_get_cancellation_after_connect_does_not_hand_out_connection");
+    }
+
+    #[test]
+    fn async_get_cancellation_during_validation_discards_connection() {
+        init_test("async_get_cancellation_during_validation_discards_connection");
+        let pool = AsyncDbPool::new(
+            SlowAsyncTestManager::with_delays(Duration::ZERO, Duration::from_millis(40)),
+            DbPoolConfig::with_max_size(1),
+        );
+
+        let warm_cx = Cx::for_testing();
+        let conn = block_on(pool.get(&warm_cx)).expect("warmup acquire should succeed");
+        conn.return_to_pool();
+        assert_eq!(
+            pool.stats().idle,
+            1,
+            "warmup should leave one idle connection"
+        );
+
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let result = block_on(pool.get(&cx));
+
+        canceller
+            .join()
+            .expect("cancel thread should finish cleanly");
+
+        assert!(matches!(result, Err(DbPoolError::Timeout)));
+        let stats = pool.stats();
+        assert_eq!(
+            stats.total, 0,
+            "cancelled validation must discard the in-flight connection"
+        );
+        assert_eq!(
+            stats.active, 0,
+            "cancelled validation must not leak a checked-out lease"
+        );
+        assert_eq!(
+            stats.idle, 0,
+            "cancelled validation must not return the stale connection"
+        );
+        assert_eq!(
+            stats.total_discards, 1,
+            "validated connection cancelled mid-flight should be disconnected"
+        );
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("async_get_cancellation_during_validation_discards_connection");
     }
 
     #[test]
@@ -1658,6 +1792,7 @@ mod tests {
         pool.close();
         assert_eq!(pool.stats().idle, 0);
         assert_eq!(pool.manager.disconnects(), 1);
+        assert_eq!(pool.stats().total_discards, 1);
         crate::test_complete!("close_drains_idle");
     }
 
@@ -1673,6 +1808,7 @@ mod tests {
         conn.return_to_pool();
         assert_eq!(pool.stats().total, 0);
         assert_eq!(pool.manager.disconnects(), 1);
+        assert_eq!(pool.stats().total_discards, 1);
         crate::test_complete!("close_discards_returned_connections");
     }
 

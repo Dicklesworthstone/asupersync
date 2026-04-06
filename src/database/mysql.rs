@@ -962,6 +962,8 @@ impl MySqlConnectOptions {
                     "unclosed IPv6 bracket in host".to_string(),
                 ));
             }
+        } else if host_port.matches(':').count() > 1 {
+            (host_port, 3306)
         } else {
             host_port
                 .rsplit_once(':')
@@ -1506,6 +1508,7 @@ impl MySqlConnection {
                 // Result set
                 match self.read_result_set(cx, &data).await {
                     Ok(rows) => Outcome::Ok(rows),
+                    Err(MySqlError::Cancelled(r)) => Outcome::Cancelled(r),
                     Err(e) => Outcome::Err(e),
                 }
             }
@@ -1848,6 +1851,7 @@ impl MySqlConnection {
                 // Result set - consume it and return 0 affected rows
                 match self.read_result_set(cx, &data).await {
                     Ok(_) => Outcome::Ok(0),
+                    Err(MySqlError::Cancelled(r)) => Outcome::Cancelled(r),
                     Err(e) => Outcome::Err(e),
                 }
             }
@@ -2056,6 +2060,8 @@ impl MySqlConnection {
         let mut expected_seq = self.inner.sequence;
         let mut last_seq;
         let mut data = Vec::new();
+        // Practical limit for reassembled packets (DoS mitigation).
+        const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
 
         loop {
             let mut header = [0u8; 4];
@@ -2066,7 +2072,13 @@ impl MySqlConnection {
 
             if len > 0 {
                 let start = data.len();
-                data.resize(start + len as usize, 0);
+                let new_len = start.saturating_add(len as usize);
+                if new_len > MAX_PAYLOAD_SIZE {
+                    return Err(MySqlError::Protocol(format!(
+                        "packet payload {new_len} exceeds maximum allowed {MAX_PAYLOAD_SIZE}"
+                    )));
+                }
+                data.resize(new_len, 0);
                 self.read_exact(&mut data[start..]).await?;
             }
 

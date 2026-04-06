@@ -777,7 +777,7 @@ fn e2e_sqlite_operations_after_close() {
         test_section!("Batch execute on closed connection");
         match conn.execute_batch(&cx, "SELECT 1").await {
             Outcome::Err(_) => {
-                tracing::info!("correctly rejected batch execute on closed connection")
+                tracing::info!("correctly rejected batch execute on closed connection");
             }
             other => panic!("expected Err, got {other:?}"),
         }

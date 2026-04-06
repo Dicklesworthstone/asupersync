@@ -321,7 +321,7 @@ pub use pg::{PgSavepoint, with_pg_transaction, with_pg_transaction_retry};
 
 #[cfg(feature = "sqlite")]
 mod sqlite {
-    use super::*;
+    use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteTransaction};
     use std::fmt;
 
@@ -441,7 +441,6 @@ mod sqlite {
                     if let Err(reason) = wait_retry_delay(cx, delay).await {
                         return Outcome::Cancelled(reason);
                     }
-                    continue;
                 }
                 _ => return result,
             }
@@ -524,6 +523,7 @@ mod sqlite {
         }
 
         /// Access the underlying transaction.
+        #[must_use]
         pub fn transaction(&self) -> &SqliteTransaction<'tx> {
             self.tx
         }

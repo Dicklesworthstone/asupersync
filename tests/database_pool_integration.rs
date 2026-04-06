@@ -15,7 +15,9 @@ mod tests {
     use super::*;
 
     use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
+    use asupersync::database::pool::DbPoolStats;
     use std::fmt;
+    use std::error::Error;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
@@ -237,11 +239,11 @@ mod tests {
         let pool = DbPool::new(MockManager::new(), DbPoolConfig::with_max_size(1));
 
         let held = pool.get().unwrap();
-        assert!(matches!(pool.try_get(), None));
+        assert!(pool.try_get().is_none());
 
         drop(held);
         let got = pool.try_get();
-        assert!(matches!(got, Some(_)));
+        assert!(got.is_some());
         asupersync::test_complete!("pool_try_get_nonblocking");
     }
 
@@ -638,7 +640,6 @@ mod tests {
         assert!(format!("{validation}").contains("validation"));
 
         // Error trait source.
-        use std::error::Error;
         assert!(closed.source().is_none());
         assert!(connect_err.source().is_some());
         asupersync::test_complete!("pool_error_variants");
@@ -691,8 +692,6 @@ mod tests {
     #[test]
     fn pool_stats_default_and_debug() {
         init_test("pool_stats_default_and_debug");
-        use asupersync::database::pool::DbPoolStats;
-
         let stats = DbPoolStats::default();
         assert_eq!(stats.idle, 0);
         assert_eq!(stats.active, 0);
@@ -701,7 +700,7 @@ mod tests {
         let dbg = format!("{stats:?}");
         assert!(dbg.contains("DbPoolStats"));
 
-        let cloned = stats.clone();
+        let cloned = stats;
         assert_eq!(cloned.total, 0);
         asupersync::test_complete!("pool_stats_default_and_debug");
     }
