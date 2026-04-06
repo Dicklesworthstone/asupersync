@@ -263,6 +263,120 @@ impl<F, E, S, R> BufferFuture<F, E, S, R> {
             state: BufferFutureState::Error(Some(err)),
         }
     }
+
+    fn release_pending_slot(shared: &SharedBuffer<S>) {
+        let mut pending = shared.pending.lock();
+        *pending = pending.saturating_sub(1);
+        let ready_wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+        let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+        drop(pending);
+        for waker in ready_wakers {
+            waker.wake();
+        }
+        for waker in inner_wakers {
+            waker.wake();
+        }
+    }
+}
+
+struct BufferTransitionGuard<'a, F, E, S, R> {
+    marker: std::marker::PhantomData<&'a mut BufferFuture<F, E, S, R>>,
+    shared: Arc<SharedBuffer<S>>,
+    armed: bool,
+}
+
+impl<F, E, S, R> Drop for BufferTransitionGuard<'_, F, E, S, R> {
+    fn drop(&mut self) {
+        if self.armed {
+            BufferFuture::<F, E, S, R>::release_pending_slot(self.shared.as_ref());
+        }
+    }
+}
+
+impl<F, Response, Error, S, R> BufferFuture<F, Error, S, R>
+where
+    F: Future<Output = Result<Response, Error>> + Unpin,
+    S: Service<R, Response = Response, Error = Error, Future = F>,
+    Error: Unpin,
+    R: Unpin,
+{
+    fn poll_waiting_for_ready(
+        &mut self,
+        cx: &mut Context<'_>,
+        mut request: Option<R>,
+        shared: Arc<SharedBuffer<S>>,
+    ) -> Option<Poll<Result<Response, BufferError<Error>>>> {
+        let mut transition_guard: BufferTransitionGuard<'_, F, Error, S, R> =
+            BufferTransitionGuard {
+                marker: std::marker::PhantomData,
+                shared: Arc::clone(&shared),
+                armed: true,
+            };
+        let mut inner = shared.inner.lock();
+        match inner.poll_ready(cx) {
+            Poll::Ready(Ok(())) => {
+                let req = request.take().expect("request missing");
+                let future = inner.call(req);
+                drop(inner);
+
+                let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                for waker in wakers {
+                    waker.wake();
+                }
+
+                self.state = BufferFutureState::Active { future, shared };
+                transition_guard.armed = false;
+                None
+            }
+            Poll::Ready(Err(e)) => {
+                drop(inner);
+                transition_guard.armed = false;
+                self.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
+                Self::release_pending_slot(shared.as_ref());
+                None
+            }
+            Poll::Pending => {
+                drop(inner);
+                {
+                    let mut wakers = shared.inner_wakers.lock();
+                    push_waker_if_new(&mut wakers, cx.waker());
+                }
+                self.state = BufferFutureState::WaitingForReady { request, shared };
+                transition_guard.armed = false;
+                Some(Poll::Pending)
+            }
+        }
+    }
+
+    fn poll_active(
+        &mut self,
+        cx: &mut Context<'_>,
+        mut future: F,
+        shared: Arc<SharedBuffer<S>>,
+    ) -> Poll<Result<Response, BufferError<Error>>> {
+        let mut transition_guard: BufferTransitionGuard<'_, F, Error, S, R> =
+            BufferTransitionGuard {
+                marker: std::marker::PhantomData,
+                shared: Arc::clone(&shared),
+                armed: true,
+            };
+        match Pin::new(&mut future).poll(cx) {
+            Poll::Ready(result) => {
+                transition_guard.armed = false;
+                self.state = BufferFutureState::Done;
+                Self::release_pending_slot(shared.as_ref());
+                Poll::Ready(match result {
+                    Ok(v) => Ok(v),
+                    Err(e) => Err(BufferError::Inner(e)),
+                })
+            }
+            Poll::Pending => {
+                self.state = BufferFutureState::Active { future, shared };
+                transition_guard.armed = false;
+                Poll::Pending
+            }
+        }
+    }
 }
 
 impl<F, Response, Error, S, R> Future for BufferFuture<F, Error, S, R>
@@ -277,94 +391,27 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             let this = self.as_mut().get_mut();
-
-            match &mut this.state {
+            let state = std::mem::replace(&mut this.state, BufferFutureState::Done);
+            let poll = match state {
                 BufferFutureState::WaitingForReady { request, shared } => {
-                    let mut inner = shared.inner.lock();
-                    match inner.poll_ready(cx) {
-                        Poll::Ready(Ok(())) => {
-                            let req = request.take().expect("request missing");
-                            let future = inner.call(req);
-                            drop(inner);
-
-                            let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                            for w in wakers {
-                                w.wake();
-                            }
-
-                            let shared_clone = Arc::clone(shared);
-                            this.state = BufferFutureState::Active {
-                                future,
-                                shared: shared_clone,
-                            };
-                            // Loop around to poll Active
-                        }
-                        Poll::Ready(Err(e)) => {
-                            drop(inner);
-                            // Release the pending slot before transitioning to Error.
-                            // Without this, the pending counter leaks permanently:
-                            // call() increments pending, but Error/Done states don't
-                            // carry `shared` and Drop only decrements for
-                            // WaitingForReady/Active.
-                            {
-                                let mut pending = shared.pending.lock();
-                                *pending = pending.saturating_sub(1);
-                                let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                                let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                                drop(pending);
-                                for w in wakers {
-                                    w.wake();
-                                }
-                                for w in inner_wakers {
-                                    w.wake();
-                                }
-                            }
-                            this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
-                            // Loop around to poll Error
-                        }
-                        Poll::Pending => {
-                            drop(inner);
-                            {
-                                let mut wakers = shared.inner_wakers.lock();
-                                push_waker_if_new(&mut wakers, cx.waker());
-                            }
-                            return Poll::Pending;
-                        }
-                    }
+                    this.poll_waiting_for_ready(cx, request, shared)
                 }
-                BufferFutureState::Active { future, shared } => match Pin::new(future).poll(cx) {
-                    Poll::Ready(result) => {
-                        let mut pending = shared.pending.lock();
-                        *pending = pending.saturating_sub(1);
-                        let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                        let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                        drop(pending);
-                        for w in wakers {
-                            w.wake();
-                        }
-                        for w in inner_wakers {
-                            w.wake();
-                        }
-
-                        this.state = BufferFutureState::Done;
-
-                        match result {
-                            Ok(v) => return Poll::Ready(Ok(v)),
-                            Err(e) => return Poll::Ready(Err(BufferError::Inner(e))),
-                        }
-                    }
-                    Poll::Pending => {
-                        return Poll::Pending;
-                    }
-                },
-                BufferFutureState::Error(err) => {
+                BufferFutureState::Active { future, shared } => {
+                    Some(this.poll_active(cx, future, shared))
+                }
+                BufferFutureState::Error(mut err) => {
                     let err = err.take().expect("polled after completion");
                     this.state = BufferFutureState::Done;
-                    return Poll::Ready(Err(err));
+                    Some(Poll::Ready(Err(err)))
                 }
                 BufferFutureState::Done => {
-                    return Poll::Ready(Err(BufferError::PolledAfterCompletion));
+                    this.state = BufferFutureState::Done;
+                    Some(Poll::Ready(Err(BufferError::PolledAfterCompletion)))
                 }
+            };
+
+            if let Some(poll) = poll {
+                return poll;
             }
         }
     }
@@ -375,20 +422,7 @@ impl<F, E, S, R> Drop for BufferFuture<F, E, S, R> {
         match &mut self.state {
             BufferFutureState::WaitingForReady { shared, .. }
             | BufferFutureState::Active { shared, .. } => {
-                let mut pending = shared.pending.lock();
-                *pending = pending.saturating_sub(1);
-                let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                drop(pending);
-                for w in wakers {
-                    w.wake();
-                }
-
-                // Also wake any other tasks waiting for inner_ready, since we
-                // might have been holding the spot, or we just freed a slot.
-                let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                for w in inner_wakers {
-                    w.wake();
-                }
+                Self::release_pending_slot(shared.as_ref());
             }
             _ => {}
         }
@@ -665,6 +699,48 @@ mod tests {
                 state: Arc::clone(&self.state),
                 response: req * 2,
             }
+        }
+    }
+
+    struct PanicOnCallService;
+
+    impl Service<i32> for PanicOnCallService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            panic!("panic in call")
+        }
+    }
+
+    struct PanicOnPollFuture;
+
+    impl Future for PanicOnPollFuture {
+        type Output = Result<i32, std::convert::Infallible>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!("panic in future poll")
+        }
+    }
+
+    struct PanicOnPollService;
+
+    impl Service<i32> for PanicOnPollService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = PanicOnPollFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            PanicOnPollFuture
         }
     }
 
@@ -1047,6 +1123,52 @@ mod tests {
             poll2,
             Poll::Ready(Err(BufferError::PolledAfterCompletion))
         ));
+    }
+
+    #[test]
+    fn buffer_future_call_panic_releases_slot_and_fails_closed() {
+        init_test("buffer_future_call_panic_releases_slot_and_fails_closed");
+        let mut svc = Buffer::new(PanicOnCallService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(1);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(svc.pending(), 0);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+        crate::test_complete!("buffer_future_call_panic_releases_slot_and_fails_closed");
+    }
+
+    #[test]
+    fn buffer_future_active_panic_releases_slot_and_fails_closed() {
+        init_test("buffer_future_active_panic_releases_slot_and_fails_closed");
+        let mut svc = Buffer::new(PanicOnPollService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(1);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(svc.pending(), 0);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+        crate::test_complete!("buffer_future_active_panic_releases_slot_and_fails_closed");
     }
 
     // ================================================================
