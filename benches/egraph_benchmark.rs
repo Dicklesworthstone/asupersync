@@ -205,7 +205,9 @@ fn bench_extract_flat(c: &mut Criterion) {
                 },
                 |(mut eg, root)| {
                     let mut extractor = Extractor::new(&mut eg);
-                    let (dag, cert) = extractor.extract(root);
+                    let (dag, cert) = extractor
+                        .extract(root)
+                        .expect("benchmark e-graph should extract successfully");
                     std::hint::black_box((&dag, &cert));
                 },
                 BatchSize::SmallInput,
@@ -228,7 +230,9 @@ fn bench_extract_balanced_tree(c: &mut Criterion) {
                 },
                 |(mut eg, root)| {
                     let mut extractor = Extractor::new(&mut eg);
-                    let (dag, cert) = extractor.extract(root);
+                    let (dag, cert) = extractor
+                        .extract(root)
+                        .expect("benchmark tree should extract successfully");
                     std::hint::black_box((&dag, &cert));
                 },
                 BatchSize::SmallInput,
@@ -258,7 +262,9 @@ fn bench_extract_after_merge(c: &mut Criterion) {
             },
             |(mut eg, root)| {
                 let mut extractor = Extractor::new(&mut eg);
-                let (dag, cert) = extractor.extract(root);
+                let (dag, cert) = extractor
+                    .extract(root)
+                    .expect("merged benchmark graph should extract successfully");
                 std::hint::black_box((&dag, &cert));
             },
             BatchSize::SmallInput,
@@ -293,7 +299,9 @@ fn bench_full_workflow(c: &mut Criterion) {
 
                 // Extract best plan
                 let mut extractor = Extractor::new(&mut eg);
-                let (dag, cert) = extractor.extract(timed);
+                let (dag, cert) = extractor
+                    .extract(timed)
+                    .expect("timed benchmark graph should extract successfully");
 
                 std::hint::black_box((&dag, &cert));
             });

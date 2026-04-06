@@ -1395,7 +1395,9 @@ pub fn run_e2e_pipeline(
         let mut cache = HashMap::new();
         original_dag.root().is_none_or(|root| {
             let root_ec = dag_to_egraph_rec(&original_dag, root, &mut eg, &mut cache);
-            let (extracted, _) = Extractor::new(&mut eg).extract(root_ec);
+            let (extracted, _) = Extractor::new(&mut eg)
+                .extract(root_ec)
+                .expect("original DAG should round-trip through extraction");
             let extracted_outcomes = extracted
                 .root()
                 .map(|r| outcome_sets(&extracted, r))
@@ -1411,7 +1413,9 @@ pub fn run_e2e_pipeline(
         let mut cache = HashMap::new();
         optimized_dag.root().is_none_or(|root| {
             let root_ec = dag_to_egraph_rec(&optimized_dag, root, &mut eg, &mut cache);
-            let (extracted, _) = Extractor::new(&mut eg).extract(root_ec);
+            let (extracted, _) = Extractor::new(&mut eg)
+                .extract(root_ec)
+                .expect("optimized DAG should round-trip through extraction");
             let extracted_outcomes = extracted
                 .root()
                 .map(|r| outcome_sets(&extracted, r))
@@ -1814,7 +1818,9 @@ mod tests {
 
             if let Some(root) = fixture.dag.root() {
                 let root_eclass = dag_to_egraph_rec(&fixture.dag, root, &mut eg, &mut cache);
-                let (extracted_dag, _cert) = Extractor::new(&mut eg).extract(root_eclass);
+                let (extracted_dag, _cert) = Extractor::new(&mut eg)
+                    .extract(root_eclass)
+                    .expect("fixture DAG should extract successfully");
                 let extracted_outcomes = extracted_dag
                     .root()
                     .map(|r| outcome_sets(&extracted_dag, r))
@@ -1893,7 +1899,9 @@ mod tests {
 
             if let Some(root) = fixture.dag.root() {
                 let root_eclass = dag_to_egraph_rec(&fixture.dag, root, &mut eg, &mut cache);
-                let (extracted_dag, _cert) = Extractor::new(&mut eg).extract(root_eclass);
+                let (extracted_dag, _cert) = Extractor::new(&mut eg)
+                    .extract(root_eclass)
+                    .expect("rewritten fixture DAG should extract successfully");
                 let extracted_outcomes = extracted_dag
                     .root()
                     .map(|r| outcome_sets(&extracted_dag, r))

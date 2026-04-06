@@ -161,7 +161,10 @@ impl<'a> Extractor<'a> {
     ///
     /// The extraction is deterministic: given the same e-graph structure,
     /// it always produces the same `PlanDag`.
-    pub fn extract(&mut self, root: EClassId) -> (PlanDag, ExtractionCertificate) {
+    pub fn extract(
+        &mut self,
+        root: EClassId,
+    ) -> Result<(PlanDag, ExtractionCertificate), ExtractionError> {
         // Compute costs for all reachable classes
         self.compute_cost(root);
 
@@ -169,14 +172,14 @@ impl<'a> Extractor<'a> {
         let mut dag = PlanDag::new();
         let mut id_map: BTreeMap<EClassId, PlanId> = BTreeMap::new();
         let canonical_root = self.egraph.canonical_id(root);
-        assert!(
-            self.best_node.contains_key(&canonical_root),
-            "extractor found no acyclic extraction candidate for root class {}",
-            canonical_root.index()
-        );
+        if !self.best_node.contains_key(&canonical_root) {
+            return Err(ExtractionError::NoExtractableCandidate {
+                class: canonical_root,
+            });
+        }
         let mut building = BTreeSet::new();
 
-        let dag_root = self.build_plan_node(root, &mut dag, &mut id_map, &mut building);
+        let dag_root = self.build_plan_node(root, &mut dag, &mut id_map, &mut building)?;
         dag.set_root(dag_root);
 
         let cost = self
@@ -193,7 +196,7 @@ impl<'a> Extractor<'a> {
             node_count: dag.nodes.len(),
         };
 
-        (dag, cert)
+        Ok((dag, cert))
     }
 
     /// Computes the best cost for a class (memoized, bottom-up).
@@ -262,6 +265,9 @@ impl<'a> Extractor<'a> {
                 cost
             }
             ENode::Join { children } => {
+                if children.is_empty() {
+                    return PlanCost::UNKNOWN;
+                }
                 let mut cost = PlanCost::ZERO;
                 for child in children {
                     let child_cost = self.compute_cost(*child);
@@ -272,6 +278,9 @@ impl<'a> Extractor<'a> {
                 cost
             }
             ENode::Race { children } => {
+                if children.is_empty() {
+                    return PlanCost::UNKNOWN;
+                }
                 let mut cost = PlanCost::ZERO;
                 for child in children {
                     let child_cost = self.compute_cost(*child);
@@ -300,23 +309,21 @@ impl<'a> Extractor<'a> {
         dag: &mut PlanDag,
         id_map: &mut BTreeMap<EClassId, PlanId>,
         building: &mut BTreeSet<EClassId>,
-    ) -> PlanId {
+    ) -> Result<PlanId, ExtractionError> {
         let canonical = self.egraph.canonical_id(id);
 
         if let Some(&plan_id) = id_map.get(&canonical) {
-            return plan_id;
+            return Ok(plan_id);
         }
-        assert!(
-            building.insert(canonical),
-            "cyclic extraction candidate survived cost selection for class {}",
-            canonical.index()
-        );
+        if !building.insert(canonical) {
+            return Err(ExtractionError::CycleSurvivedCostSelection { class: canonical });
+        }
 
         let node = self
             .best_node
             .get(&canonical)
             .cloned()
-            .expect("best_node computed for all reachable classes");
+            .ok_or(ExtractionError::NoExtractableCandidate { class: canonical })?;
 
         let plan_id = match &node {
             ENode::Leaf { label } => dag.leaf(label.as_str()),
@@ -324,25 +331,25 @@ impl<'a> Extractor<'a> {
                 let child_ids: Vec<PlanId> = children
                     .iter()
                     .map(|c| self.build_plan_node(*c, dag, id_map, building))
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 dag.join(child_ids)
             }
             ENode::Race { children } => {
                 let child_ids: Vec<PlanId> = children
                     .iter()
                     .map(|c| self.build_plan_node(*c, dag, id_map, building))
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 dag.race(child_ids)
             }
             ENode::Timeout { child, duration } => {
-                let child_id = self.build_plan_node(*child, dag, id_map, building);
+                let child_id = self.build_plan_node(*child, dag, id_map, building)?;
                 dag.timeout(child_id, *duration)
             }
         };
 
         building.remove(&canonical);
         id_map.insert(canonical, plan_id);
-        plan_id
+        Ok(plan_id)
     }
 }
 
@@ -375,6 +382,10 @@ impl ExtractionCertificate {
                 expected: CertificateVersion::CURRENT.number(),
                 found: self.version.number(),
             });
+        }
+
+        if let Err(err) = dag.validate() {
+            return Err(ExtractionVerifyError::InvalidPlan(err));
         }
 
         let actual_hash = PlanHash::of(dag);
@@ -456,6 +467,38 @@ fn dag_plan_cost(dag: &PlanDag) -> PlanCost {
     visit(dag, root, &mut memo)
 }
 
+/// Error from plan extraction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtractionError {
+    /// The target e-class had no valid acyclic extraction candidate.
+    NoExtractableCandidate {
+        /// Canonical class that could not be extracted.
+        class: EClassId,
+    },
+    /// An internally selected candidate re-entered a class during DAG building.
+    CycleSurvivedCostSelection {
+        /// Canonical class where the cycle was detected.
+        class: EClassId,
+    },
+}
+
+impl std::fmt::Display for ExtractionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoExtractableCandidate { class } => {
+                write!(f, "no extractable candidate for e-class {}", class.index())
+            }
+            Self::CycleSurvivedCostSelection { class } => write!(
+                f,
+                "cyclic extraction candidate survived cost selection for e-class {}",
+                class.index()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExtractionError {}
+
 /// Error from extraction verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractionVerifyError {
@@ -487,6 +530,8 @@ pub enum ExtractionVerifyError {
         /// Actual cost recomputed from the DAG.
         actual: PlanCost,
     },
+    /// The extracted plan DAG is structurally invalid.
+    InvalidPlan(crate::plan::PlanError),
 }
 
 // ===========================================================================
@@ -510,7 +555,9 @@ mod tests {
         let a = eg.add_leaf("a");
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(a);
+        let (dag, cert) = extractor
+            .extract(a)
+            .expect("leaf extraction should succeed");
 
         assert_eq!(dag.nodes.len(), 1);
         assert!(cert.verify(&dag).is_ok());
@@ -527,7 +574,9 @@ mod tests {
         let join = eg.add_join(vec![a, b]);
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(join);
+        let (dag, cert) = extractor
+            .extract(join)
+            .expect("join extraction should succeed");
 
         assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
@@ -546,7 +595,9 @@ mod tests {
         let race = eg.add_race(vec![a, b]);
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(race);
+        let (dag, cert) = extractor
+            .extract(race)
+            .expect("race extraction should succeed");
 
         assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
@@ -562,7 +613,9 @@ mod tests {
         let join = eg.add_join(vec![obl, plain]);
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(join);
+        let (dag, cert) = extractor
+            .extract(join)
+            .expect("obligation extraction should succeed");
 
         assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
@@ -578,7 +631,9 @@ mod tests {
         let t2 = eg.add_timeout(t1, Duration::from_secs(10));
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(t2);
+        let (dag, cert) = extractor
+            .extract(t2)
+            .expect("timeout extraction should succeed");
 
         assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
@@ -597,11 +652,15 @@ mod tests {
         let r = eg.add_race(vec![j1, c]);
 
         let mut extractor1 = Extractor::new(&mut eg);
-        let (dag1, cert1) = extractor1.extract(r);
+        let (dag1, cert1) = extractor1
+            .extract(r)
+            .expect("first extraction should succeed");
 
         // Extract again (new extractor, same egraph)
         let mut extractor2 = Extractor::new(&mut eg);
-        let (dag2, cert2) = extractor2.extract(r);
+        let (dag2, cert2) = extractor2
+            .extract(r)
+            .expect("second extraction should succeed");
 
         assert_eq!(cert1.plan_hash, cert2.plan_hash);
         assert_eq!(cert1.cost, cert2.cost);
@@ -625,7 +684,9 @@ mod tests {
         eg.merge(j1, j2);
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(j1);
+        let (dag, cert) = extractor
+            .extract(j1)
+            .expect("merged extraction should succeed");
 
         // Should pick the flatter representation (lower cost)
         assert!(cert.verify(&dag).is_ok());
@@ -649,7 +710,9 @@ mod tests {
         eg.merge(worse, better);
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(worse);
+        let (dag, cert) = extractor
+            .extract(worse)
+            .expect("tie-broken extraction should succeed");
 
         assert!(cert.verify(&dag).is_ok());
         assert_eq!(cert.cost.total(), 1102);
@@ -676,7 +739,34 @@ mod tests {
         eg.merge(leaf, recursive_join);
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, cert) = extractor.extract(leaf);
+        let (dag, cert) = extractor
+            .extract(leaf)
+            .expect("cyclic merge extraction should succeed");
+
+        assert!(cert.verify(&dag).is_ok());
+        assert_eq!(dag.nodes.len(), 1);
+        assert_eq!(cert.cost, PlanCost::LEAF);
+
+        let root = dag.root().expect("root");
+        assert!(matches!(
+            dag.node(root),
+            Some(PlanNode::Leaf { label }) if label == "a"
+        ));
+    }
+
+    #[test]
+    fn extract_merge_with_empty_join_prefers_valid_candidate() {
+        init_test();
+        let mut eg = EGraph::new();
+        let leaf = eg.add_leaf("a");
+        let empty_join = eg.add_join(Vec::new());
+
+        eg.merge(leaf, empty_join);
+
+        let mut extractor = Extractor::new(&mut eg);
+        let (dag, cert) = extractor
+            .extract(leaf)
+            .expect("empty-join merge extraction should succeed");
 
         assert!(cert.verify(&dag).is_ok());
         assert_eq!(dag.nodes.len(), 1);
@@ -707,6 +797,19 @@ mod tests {
 
         // Critical path dominates
         assert!(low.total() < high.total());
+    }
+
+    #[test]
+    fn extract_root_with_only_empty_join_returns_error() {
+        init_test();
+        let mut eg = EGraph::new();
+        let empty_join = eg.add_join(Vec::new());
+
+        let result = Extractor::new(&mut eg).extract(empty_join);
+        assert!(matches!(
+            result,
+            Err(ExtractionError::NoExtractableCandidate { class }) if class == empty_join
+        ));
     }
 
     #[test]
@@ -760,7 +863,9 @@ mod tests {
         let a = eg.add_leaf("a");
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, mut cert) = extractor.extract(a);
+        let (dag, mut cert) = extractor
+            .extract(a)
+            .expect("certificate source extraction should succeed");
 
         cert.version = CertificateVersion::from_number(99);
         let result = cert.verify(&dag);
@@ -777,7 +882,9 @@ mod tests {
         let a = eg.add_leaf("a");
 
         let mut extractor = Extractor::new(&mut eg);
-        let (mut dag, cert) = extractor.extract(a);
+        let (mut dag, cert) = extractor
+            .extract(a)
+            .expect("hash-mismatch source extraction should succeed");
 
         // Mutate the DAG
         dag.leaf("extra");
@@ -798,7 +905,9 @@ mod tests {
         let join = eg.add_join(vec![a, b]);
 
         let mut extractor = Extractor::new(&mut eg);
-        let (dag, mut cert) = extractor.extract(join);
+        let (dag, mut cert) = extractor
+            .extract(join)
+            .expect("cost-mismatch source extraction should succeed");
 
         cert.cost.allocations = cert.cost.allocations.saturating_add(1);
 
@@ -806,6 +915,35 @@ mod tests {
         assert!(matches!(
             result,
             Err(ExtractionVerifyError::CostMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn certificate_rejects_structurally_invalid_dag() {
+        init_test();
+        let mut eg = EGraph::new();
+        let a = eg.add_leaf("a");
+
+        let mut extractor = Extractor::new(&mut eg);
+        let (mut dag, mut cert) = extractor
+            .extract(a)
+            .expect("invalid-dag source extraction should succeed");
+
+        let root = dag.root().expect("root");
+        dag.nodes[root.index()] = PlanNode::Join {
+            children: Vec::new(),
+        };
+        cert.plan_hash = PlanHash::of(&dag);
+        cert.node_count = dag.nodes.len();
+        cert.cost = dag_plan_cost(&dag);
+
+        let result = cert.verify(&dag);
+        assert!(matches!(
+            result,
+            Err(ExtractionVerifyError::InvalidPlan(
+                crate::plan::PlanError::EmptyChildren { parent }
+            ))
+                if parent == root
         ));
     }
 
@@ -878,7 +1016,9 @@ mod tests {
         let mut eg = EGraph::new();
         let a = eg.add_leaf("x");
         let mut ext = Extractor::new(&mut eg);
-        let (_dag, cert) = ext.extract(a);
+        let (_dag, cert) = ext
+            .extract(a)
+            .expect("certificate extraction should succeed");
 
         let dbg = format!("{cert:?}");
         assert!(dbg.contains("ExtractionCertificate"));
@@ -906,6 +1046,9 @@ mod tests {
             expected: PlanCost::ZERO,
             actual: PlanCost::LEAF,
         };
+        let e5 = ExtractionVerifyError::InvalidPlan(crate::plan::PlanError::Cycle {
+            at: PlanId::new(0),
+        });
 
         let dbg1 = format!("{e1:?}");
         assert!(dbg1.contains("VersionMismatch"));
@@ -915,6 +1058,8 @@ mod tests {
         assert!(dbg3.contains("NodeCountMismatch"));
         let dbg4 = format!("{e4:?}");
         assert!(dbg4.contains("CostMismatch"));
+        let dbg5 = format!("{e5:?}");
+        assert!(dbg5.contains("InvalidPlan"));
 
         // Clone + PartialEq
         let e1c = e1.clone();
