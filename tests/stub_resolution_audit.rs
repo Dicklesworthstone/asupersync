@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn read_source(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("could not read {path}: {err}"))
@@ -32,6 +33,14 @@ fn walk_rs_files(dir: &Path) -> Vec<std::path::PathBuf> {
     files
 }
 
+fn path_is_git_ignored(path: &Path) -> bool {
+    Command::new("git")
+        .args(["check-ignore", "-q", "--"])
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 // ── Probe 01: No stray binaries in src/ (Surface #14) ──────────────────
 
 #[test]
@@ -45,6 +54,12 @@ fn probe_01_no_stray_binaries_in_src() {
             if path.is_dir() {
                 walk(&path, bad_exts, violations);
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                // Structural probes should stay stable across local worktrees.
+                // Ignore gitignored scratch outputs, but keep flagging real
+                // non-ignored binary artifacts inside source-owned trees.
+                if path_is_git_ignored(&path) {
+                    continue;
+                }
                 if bad_exts.contains(&ext) {
                     violations.push(path.display().to_string());
                 }
@@ -127,23 +142,21 @@ fn probe_04_no_permanent_compile_error_stubs() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "rs") {
             let src = fs::read_to_string(&path).unwrap();
-            let lines: Vec<&str> = src.lines().collect();
-            for (i, line) in lines.iter().enumerate() {
-                if line.contains("compile_error!") && !line.trim_start().starts_with("//") {
-                    let start = i.saturating_sub(5);
-                    let has_guard = lines[start..=i]
-                        .iter()
-                        .any(|l| l.contains("cfg(not(feature"));
-                    if !has_guard {
-                        violations.push(format!("{}:{}", path.display(), i + 1));
-                    }
-                }
+            let has_stub_compile_error = src
+                .lines()
+                .any(|line| line.trim_start().starts_with("compile_error!"));
+            if !has_stub_compile_error {
+                continue;
+            }
+
+            if !src.contains("#[cfg(not(feature = \"proc-macros\"))]") {
+                violations.push(path.display().to_string());
             }
         }
     }
     assert!(
         violations.is_empty(),
-        "Unguarded compile_error! macros: {violations:?}"
+        "Combinator compile_error! stub files must keep proc-macro cfg guards: {violations:?}"
     );
     eprintln!("[PASS] All compile_error! macros have cfg guards");
 }

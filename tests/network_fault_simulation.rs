@@ -141,6 +141,38 @@ fn deterministic_trace(seed: u64) -> Vec<String> {
         .collect()
 }
 
+fn has_spawn_received(events: &[NodeEvent], task_id: RemoteTaskId) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::SpawnReceived { task_id: seen, .. } if *seen == task_id))
+}
+
+fn has_cancel_received(events: &[NodeEvent], task_id: RemoteTaskId) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::CancelReceived { task_id: seen } if *seen == task_id))
+}
+
+fn has_task_completed(events: &[NodeEvent], task_id: RemoteTaskId) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id: seen } if *seen == task_id))
+}
+
+fn has_task_cancelled(events: &[NodeEvent], task_id: RemoteTaskId) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::TaskCancelled { task_id: seen } if *seen == task_id))
+}
+
+fn has_crashed(events: &[NodeEvent]) -> bool {
+    events.iter().any(|e| matches!(e, NodeEvent::Crashed))
+}
+
+fn has_restarted(events: &[NodeEvent]) -> bool {
+    events.iter().any(|e| matches!(e, NodeEvent::Restarted))
+}
+
 // ============================================================================
 // Partition Tests
 // ============================================================================
@@ -533,25 +565,55 @@ fn cancel_dropped_by_partition() {
     harness.inject_spawn(&a, &b, task_id);
     harness.run_for(Duration::from_millis(10));
 
-    // Partition, then cancel (cancel is dropped)
+    // Partition at the current simulation time, then advance one tick so the
+    // cancel is sent into an already-partitioned network.
     harness.set_fault_script(FaultScript::new().at(
-        Duration::from_millis(15),
+        Duration::from_millis(10),
         HarnessFault::Network(Fault::Partition {
             hosts_a: vec![HostId::new(1)],
             hosts_b: vec![HostId::new(2)],
         }),
     ));
+    harness.run_for(Duration::from_millis(1));
+
     harness.inject_cancel(&a, &b, task_id);
     harness.run_for(Duration::from_millis(30));
 
     let node_b = harness.node(&b).unwrap();
-    let cancel_received = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::CancelReceived { .. }));
-    // Cancel may or may not have arrived depending on timing
-    // What matters is the task either completes or keeps running
-    info!(cancel_received, "cancel_received during partition");
+    let cancel_received = has_cancel_received(node_b.events(), task_id);
+    assert_with_log!(
+        !cancel_received,
+        "cancel dropped by active partition",
+        false,
+        cancel_received
+    );
+
+    let cancelled = has_task_cancelled(node_b.events(), task_id);
+    assert_with_log!(
+        !cancelled,
+        "task not cancelled while cancel is partitioned away",
+        false,
+        cancelled
+    );
+
+    let completed = has_task_completed(node_b.events(), task_id);
+    assert_with_log!(
+        !completed,
+        "task not completed yet inside the observation window",
+        false,
+        completed
+    );
+
+    let running = node_b.running_task_count();
+    assert_with_log!(running == 1, "task keeps running", 1, running);
+
+    let dropped = harness.network_metrics().packets_dropped > 0;
+    assert_with_log!(
+        dropped,
+        "partition dropped at least one packet",
+        true,
+        dropped
+    );
 
     test_complete!("cancel_dropped_by_partition");
 }
@@ -568,54 +630,95 @@ fn crash_restart_lifecycle() {
     let (mut harness, a, b) = harness_with_conditions(50, NetworkConditions::local());
     let task_id1 = RemoteTaskId::next();
 
+    harness.set_fault_script(
+        FaultScript::new()
+            .at(
+                Duration::from_millis(15),
+                HarnessFault::CrashNode(NodeId::new("node-b")),
+            )
+            .at(
+                Duration::from_millis(80),
+                HarnessFault::RestartNode(NodeId::new("node-b")),
+            ),
+    );
+
     // Spawn task on B
     harness.inject_spawn(&a, &b, task_id1);
     harness.run_for(Duration::from_millis(10));
 
     // Verify spawn received
-    let received = harness
-        .node(&b)
-        .unwrap()
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }));
+    let received = has_spawn_received(harness.node(&b).unwrap().events(), task_id1);
     assert_with_log!(received, "spawn received before crash", true, received);
 
-    // Crash B
-    harness.set_fault_script(FaultScript::new().at(
-        Duration::from_millis(15),
-        HarnessFault::CrashNode(NodeId::new("node-b")),
-    ));
+    // Crash B while task_id1 is still running.
     harness.run_for(Duration::from_millis(20));
+
+    let node_b = harness.node(&b).unwrap();
+    let crashed = has_crashed(node_b.events());
+    assert_with_log!(crashed, "node crashed", true, crashed);
+
+    let task1_completed = has_task_completed(node_b.events(), task_id1);
+    assert_with_log!(
+        !task1_completed,
+        "crashed task does not complete cleanly",
+        false,
+        task1_completed
+    );
+
+    let task1_cancelled = has_task_cancelled(node_b.events(), task_id1);
+    assert_with_log!(
+        !task1_cancelled,
+        "crash drops task instead of reporting cancel",
+        false,
+        task1_cancelled
+    );
+
+    let running_after_crash = node_b.running_task_count();
+    assert_with_log!(
+        running_after_crash == 0,
+        "crash clears running tasks",
+        0,
+        running_after_crash
+    );
 
     // Send during crash — should be dropped
     let task_id2 = RemoteTaskId::next();
     harness.inject_spawn(&a, &b, task_id2);
-    harness.run_for(Duration::from_millis(50));
+    harness.run_for(Duration::from_millis(60));
 
-    // Restart B
-    harness.set_fault_script(FaultScript::new().at(
-        Duration::from_millis(80),
-        HarnessFault::RestartNode(NodeId::new("node-b")),
-    ));
-    harness.run_for(Duration::from_millis(30));
+    let node_b = harness.node(&b).unwrap();
+    let restarted = has_restarted(node_b.events());
+    assert_with_log!(restarted, "node restarted", true, restarted);
+
+    let task2_received = has_spawn_received(node_b.events(), task_id2);
+    assert_with_log!(
+        !task2_received,
+        "spawn sent during crash stays dropped after restart",
+        false,
+        task2_received
+    );
 
     // Spawn after restart
     let task_id3 = RemoteTaskId::next();
     harness.inject_spawn(&a, &b, task_id3);
-    harness.run_for(Duration::from_millis(300));
+    harness.run_for(Duration::from_millis(200));
 
     let node_b = harness.node(&b).unwrap();
-    let crashed = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::Crashed));
-    let restarted = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::Restarted));
-    assert_with_log!(crashed, "node crashed", true, crashed);
-    assert_with_log!(restarted, "node restarted", true, restarted);
+    let task3_received = has_spawn_received(node_b.events(), task_id3);
+    assert_with_log!(
+        task3_received,
+        "spawn after restart is received",
+        true,
+        task3_received
+    );
+
+    let task3_completed = has_task_completed(node_b.events(), task_id3);
+    assert_with_log!(
+        task3_completed,
+        "spawn after restart completes",
+        true,
+        task3_completed
+    );
 
     test_complete!("crash_restart_lifecycle");
 }

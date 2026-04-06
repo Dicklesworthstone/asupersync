@@ -199,7 +199,7 @@ fn retained_wasm_manifest_declares_non_canonical_scaffold_policy() {
         "description = \"Non-canonical scaffold for future or alternative Browser Edition WASM binding strategies.\"",
         "[package.metadata.asupersync_wasm_policy]",
         "policy_version = \"1.0.0\"",
-        "owner_track = \"asupersync-3qv04.2\"",
+        "owner_track = \"asupersync-v2ofj7.2\"",
     ] {
         assert!(
             manifest.contains(marker),
