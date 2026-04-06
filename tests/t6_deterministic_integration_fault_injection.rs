@@ -264,6 +264,7 @@ mod retry_integration {
 
 // ─── Error Classification Parity ─────────────────────────────────────────────
 
+#[cfg(feature = "postgres")]
 mod error_classification {
     use asupersync::database::postgres::PgError;
 
@@ -391,6 +392,7 @@ mod error_classification {
     }
 }
 
+#[cfg(feature = "mysql")]
 mod mysql_error_classification {
     use asupersync::database::mysql::MySqlError;
 
@@ -500,6 +502,7 @@ mod mysql_error_classification {
     }
 }
 
+#[cfg(feature = "sqlite")]
 mod sqlite_error_classification {
     use asupersync::database::sqlite::SqliteError;
 
@@ -586,7 +589,7 @@ mod sqlite_error_classification {
         let constraint = SqliteError::Sqlite("UNIQUE constraint failed".to_string());
         assert_eq!(constraint.error_code(), Some("SQLITE_CONSTRAINT"));
 
-        let io = SqliteError::Io(std::io::Error::new(std::io::ErrorKind::Other, "disk"));
+        let io = SqliteError::Io(std::io::Error::other("disk"));
         assert_eq!(io.error_code(), Some("SQLITE_IOERR"));
 
         // Generic messages without a known keyword map to None
@@ -601,6 +604,7 @@ mod sqlite_error_classification {
 
 // ─── Cross-Backend Error Classification Equivalence ──────────────────────────
 
+#[cfg(all(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 mod cross_backend_equivalence {
     use asupersync::database::mysql::MySqlError;
     use asupersync::database::postgres::PgError;
@@ -779,6 +783,7 @@ mod transaction_retry_eligibility {
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     fn c_rty_02_pg_retry_eligibility() {
         use asupersync::database::postgres::PgError;
 
@@ -802,6 +807,7 @@ mod transaction_retry_eligibility {
     }
 
     #[test]
+    #[cfg(feature = "mysql")]
     fn c_rty_02_mysql_retry_eligibility() {
         use asupersync::database::mysql::MySqlError;
 
@@ -822,6 +828,7 @@ mod transaction_retry_eligibility {
     }
 
     #[test]
+    #[cfg(feature = "sqlite")]
     fn c_rty_02_sqlite_retry_eligibility() {
         use asupersync::database::sqlite::SqliteError;
 
@@ -1298,11 +1305,11 @@ mod contract_artifacts {
         for (domain, info) in t65_summary.as_object().unwrap() {
             let count = info["count"].as_u64().unwrap();
             let impl_count = info["implemented"].as_u64().unwrap()
-                + info.get("partial").and_then(|v| v.as_u64()).unwrap_or(0)
-                + info.get("defined").and_then(|v| v.as_u64()).unwrap_or(0)
+                + info.get("partial").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                + info.get("defined").and_then(serde_json::Value::as_u64).unwrap_or(0)
                 + info
                     .get("not_implemented")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
             assert_eq!(
                 count, impl_count,
@@ -1315,11 +1322,11 @@ mod contract_artifacts {
         for (domain, info) in t69_summary.as_object().unwrap() {
             let count = info["count"].as_u64().unwrap();
             let sum = info["implemented"].as_u64().unwrap()
-                + info.get("partial").and_then(|v| v.as_u64()).unwrap_or(0)
-                + info.get("defined").and_then(|v| v.as_u64()).unwrap_or(0)
+                + info.get("partial").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                + info.get("defined").and_then(serde_json::Value::as_u64).unwrap_or(0)
                 + info
                     .get("not_implemented")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
             assert_eq!(
                 count, sum,
@@ -1516,7 +1523,7 @@ mod kafka_error_classification {
 
     #[test]
     fn c_err_05_kafka_invalid_topic_is_permanent() {
-        let err = KafkaError::InvalidTopic("".to_string());
+        let err = KafkaError::InvalidTopic(String::new());
         assert!(!err.is_transient());
         assert!(!err.is_retryable());
     }
@@ -1608,13 +1615,10 @@ mod messaging_cross_system_equivalence {
 
     #[test]
     fn c_err_05_all_io_errors_are_transient() {
-        let nats = NatsError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
-        let kafka = KafkaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
-        let redis = RedisError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
-        let js = JsError::Nats(NatsError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "io",
-        )));
+        let nats = NatsError::Io(std::io::Error::other("io"));
+        let kafka = KafkaError::Io(std::io::Error::other("io"));
+        let redis = RedisError::Io(std::io::Error::other("io"));
+        let js = JsError::Nats(NatsError::Io(std::io::Error::other("io")));
 
         assert!(nats.is_transient(), "NATS I/O must be transient");
         assert!(kafka.is_transient(), "Kafka I/O must be transient");
@@ -1641,9 +1645,9 @@ mod messaging_cross_system_equivalence {
 
     #[test]
     fn c_err_05_all_io_errors_are_connection_errors() {
-        let nats = NatsError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
-        let kafka = KafkaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
-        let redis = RedisError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let nats = NatsError::Io(std::io::Error::other("io"));
+        let kafka = KafkaError::Io(std::io::Error::other("io"));
+        let redis = RedisError::Io(std::io::Error::other("io"));
 
         assert!(nats.is_connection_error());
         assert!(kafka.is_connection_error());

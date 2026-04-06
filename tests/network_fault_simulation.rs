@@ -147,6 +147,12 @@ fn has_spawn_received(events: &[NodeEvent], task_id: RemoteTaskId) -> bool {
         .any(|e| matches!(e, NodeEvent::SpawnReceived { task_id: seen, .. } if *seen == task_id))
 }
 
+fn has_spawn_accepted(events: &[NodeEvent], task_id: RemoteTaskId) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id: seen } if *seen == task_id))
+}
+
 fn has_cancel_received(events: &[NodeEvent], task_id: RemoteTaskId) -> bool {
     events
         .iter()
@@ -171,6 +177,43 @@ fn has_crashed(events: &[NodeEvent]) -> bool {
 
 fn has_restarted(events: &[NodeEvent]) -> bool {
     events.iter().any(|e| matches!(e, NodeEvent::Restarted))
+}
+
+fn assert_no_task_progress(
+    events: &[NodeEvent],
+    task_id: RemoteTaskId,
+    received_label: &str,
+    accepted_label: &str,
+    completed_label: &str,
+) {
+    let received = has_spawn_received(events, task_id);
+    assert_with_log!(!received, received_label, false, received);
+
+    let accepted = has_spawn_accepted(events, task_id);
+    assert_with_log!(!accepted, accepted_label, false, accepted);
+
+    let completed = has_task_completed(events, task_id);
+    assert_with_log!(!completed, completed_label, false, completed);
+}
+
+fn count_sent(harness: &DistributedHarness, from: &NodeId, to: &NodeId, msg_type: &str) -> usize {
+    harness
+        .trace()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                asupersync::lab::network::HarnessTraceEvent {
+                    kind: HarnessTraceKind::MessageSent {
+                        from: sent_from,
+                        to: sent_to,
+                        msg_type: sent_type,
+                    },
+                    ..
+                } if sent_from == from && sent_to == to && sent_type == msg_type
+            )
+        })
+        .count()
 }
 
 // ============================================================================
@@ -198,11 +241,29 @@ fn partition_blocks_spawn_delivery() {
     harness.run_for(Duration::from_millis(200));
 
     let node_b = harness.node(&b).unwrap();
-    let received = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }));
-    assert_with_log!(!received, "partition blocks spawn", false, received);
+    assert_no_task_progress(
+        node_b.events(),
+        task_id,
+        "partition blocks spawn",
+        "partitioned spawn is never accepted",
+        "partitioned spawn never completes",
+    );
+
+    let running = node_b.running_task_count();
+    assert_with_log!(
+        running == 0,
+        "partitioned spawn leaves no running work behind",
+        0,
+        running
+    );
+
+    let result_count = count_sent(&harness, &b, &a, "ResultDelivery");
+    assert_with_log!(
+        result_count == 0,
+        "partitioned spawn emits no terminal result",
+        0,
+        result_count
+    );
 
     // Verify packets were dropped
     let dropped = harness.network_metrics().packets_dropped;
@@ -262,15 +323,36 @@ fn partition_heal_allows_delivery() {
     harness.run_for(Duration::from_millis(200));
 
     let node_b = harness.node(&b).unwrap();
-    let received_after_heal = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }));
+    let first_task_received = has_spawn_received(node_b.events(), task_id1);
+    assert_with_log!(
+        !first_task_received,
+        "partitioned spawn stays dropped after heal",
+        false,
+        first_task_received
+    );
+
+    let received_after_heal = has_spawn_received(node_b.events(), task_id2);
     assert_with_log!(
         received_after_heal,
         "delivery after heal",
         true,
         received_after_heal
+    );
+
+    let completed_after_heal = has_task_completed(node_b.events(), task_id2);
+    assert_with_log!(
+        completed_after_heal,
+        "post-heal spawn completes",
+        true,
+        completed_after_heal
+    );
+
+    let running = node_b.running_task_count();
+    assert_with_log!(
+        running == 0,
+        "partition-heal scenario drains running work",
+        0,
+        running
     );
 
     test_complete!("partition_heal_allows_delivery");
@@ -332,6 +414,22 @@ fn duplication_handled_by_idempotency() {
         .count();
     assert_with_log!(complete_count == 1, "single completion", 1, complete_count);
 
+    let running = node_b.running_task_count();
+    assert_with_log!(
+        running == 0,
+        "duplicate spawn leaves no running work behind",
+        0,
+        running
+    );
+
+    let result_count = count_sent(&harness, &b, &a, "ResultDelivery");
+    assert_with_log!(
+        result_count >= 1,
+        "deduplicated task still publishes a terminal result",
+        true,
+        result_count >= 1
+    );
+
     test_complete!("duplication_handled_by_idempotency");
 }
 
@@ -358,11 +456,32 @@ fn network_packet_duplication() {
 
     let inbox = net.inbox(h2).unwrap();
     assert_with_log!(inbox.len() == 2, "duplicate delivered", 2, inbox.len());
+    let payloads_preserved = inbox
+        .iter()
+        .all(|packet| packet.payload.as_ref() == b"dup-test");
+    assert_with_log!(
+        payloads_preserved,
+        "duplicate preserves payload bytes",
+        true,
+        payloads_preserved
+    );
     assert_with_log!(
         net.metrics().packets_duplicated == 1,
         "dup metric",
         1,
         net.metrics().packets_duplicated
+    );
+    assert_with_log!(
+        net.metrics().packets_dropped == 0,
+        "duplicate-only network does not drop packets",
+        0,
+        net.metrics().packets_dropped
+    );
+    assert_with_log!(
+        net.metrics().packets_corrupted == 0,
+        "duplicate-only network does not corrupt packets",
+        0,
+        net.metrics().packets_corrupted
     );
 
     test_complete!("network_packet_duplication");
@@ -397,15 +516,40 @@ fn reordering_preserves_delivery() {
         .iter()
         .filter(|e| matches!(e, NodeEvent::SpawnReceived { .. }))
         .count();
-    assert_with_log!(recv_count == 5, "all 5 spawns received", 5, recv_count);
-
-    // Verify reorder events were recorded
-    let reorder_traces = harness
-        .trace()
+    let accept_count = node_b
+        .events()
         .iter()
-        .filter(|e| matches!(e.kind, HarnessTraceKind::FaultInjected(_)))
+        .filter(|e| matches!(e, NodeEvent::SpawnAccepted { .. }))
         .count();
-    info!(reorder_traces, "reorder trace events");
+    let complete_count = node_b
+        .events()
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::TaskCompleted { .. }))
+        .count();
+
+    info!(
+        received = recv_count,
+        accepted = accept_count,
+        completed = complete_count,
+        "reordering results"
+    );
+
+    assert_with_log!(recv_count == 5, "all 5 spawns received", 5, recv_count);
+    assert_with_log!(accept_count == 5, "all 5 spawns accepted", 5, accept_count);
+    assert_with_log!(
+        complete_count == 5,
+        "all 5 spawns complete after reordering",
+        5,
+        complete_count
+    );
+
+    let running = node_b.running_task_count();
+    assert_with_log!(
+        running == 0,
+        "reordering leaves no running work behind",
+        0,
+        running
+    );
 
     test_complete!("reordering_preserves_delivery");
 }
@@ -481,10 +625,7 @@ fn lease_expiry_during_partition() {
 
     // Verify spawn was received
     let node_b = harness.node(&b).unwrap();
-    let received = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }));
+    let received = has_spawn_received(node_b.events(), task_id);
     assert_with_log!(received, "spawn received", true, received);
 
     // Partition + expire leases on B
@@ -504,13 +645,39 @@ fn lease_expiry_during_partition() {
     );
     harness.run_for(Duration::from_millis(50));
 
-    // After lease expiry, B should have no running tasks
+    // Lease expiry should clear the task, avoid reporting a normal completion,
+    // and trigger a failure result path even though the partition prevents
+    // delivery to the origin during this window.
     let node_b = harness.node(&b).unwrap();
+    let completed = has_task_completed(node_b.events(), task_id);
+    assert_with_log!(
+        !completed,
+        "lease expiry does not report normal completion",
+        false,
+        completed
+    );
+
+    let cancelled = has_task_cancelled(node_b.events(), task_id);
+    assert_with_log!(
+        !cancelled,
+        "lease expiry does not masquerade as explicit cancel",
+        false,
+        cancelled
+    );
+
     assert_with_log!(
         node_b.running_task_count() == 0,
         "no running tasks after lease expiry",
         0,
         node_b.running_task_count()
+    );
+
+    let result_count = count_sent(&harness, &b, &a, "ResultDelivery");
+    assert_with_log!(
+        result_count >= 1,
+        "lease expiry emits a failure result",
+        true,
+        result_count >= 1
     );
 
     test_complete!("lease_expiry_during_partition");
@@ -537,18 +704,28 @@ fn cancel_propagation_clean_network() {
     harness.run_for(Duration::from_millis(200));
 
     let node_b = harness.node(&b).unwrap();
-    let cancel_received = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::CancelReceived { .. }));
+    let cancel_received = has_cancel_received(node_b.events(), task_id);
     assert_with_log!(cancel_received, "cancel received", true, cancel_received);
 
     // After cancel + tick, task should complete as cancelled
-    let cancelled = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCancelled { .. }));
+    let cancelled = has_task_cancelled(node_b.events(), task_id);
     assert_with_log!(cancelled, "task cancelled", true, cancelled);
+
+    let running = node_b.running_task_count();
+    assert_with_log!(
+        running == 0,
+        "clean-network cancel drains running work",
+        0,
+        running
+    );
+
+    let result_count = count_sent(&harness, &b, &a, "ResultDelivery");
+    assert_with_log!(
+        result_count >= 1,
+        "clean-network cancel emits a terminal result",
+        true,
+        result_count >= 1
+    );
 
     test_complete!("cancel_propagation_clean_network");
 }
@@ -606,6 +783,14 @@ fn cancel_dropped_by_partition() {
 
     let running = node_b.running_task_count();
     assert_with_log!(running == 1, "task keeps running", 1, running);
+
+    let result_count = count_sent(&harness, &b, &a, "ResultDelivery");
+    assert_with_log!(
+        result_count == 0,
+        "partitioned cancel produces no terminal result yet",
+        0,
+        result_count
+    );
 
     let dropped = harness.network_metrics().packets_dropped > 0;
     assert_with_log!(
@@ -690,12 +875,12 @@ fn crash_restart_lifecycle() {
     let restarted = has_restarted(node_b.events());
     assert_with_log!(restarted, "node restarted", true, restarted);
 
-    let task2_received = has_spawn_received(node_b.events(), task_id2);
-    assert_with_log!(
-        !task2_received,
+    assert_no_task_progress(
+        node_b.events(),
+        task_id2,
         "spawn sent during crash stays dropped after restart",
-        false,
-        task2_received
+        "spawn sent during crash is never accepted",
+        "spawn sent during crash never completes",
     );
 
     // Spawn after restart
@@ -718,6 +903,22 @@ fn crash_restart_lifecycle() {
         "spawn after restart completes",
         true,
         task3_completed
+    );
+
+    let running_after_restart = node_b.running_task_count();
+    assert_with_log!(
+        running_after_restart == 0,
+        "restart recovery drains running work",
+        0,
+        running_after_restart
+    );
+
+    let result_count = count_sent(&harness, &b, &a, "ResultDelivery");
+    assert_with_log!(
+        result_count == 1,
+        "only the post-restart task emits a terminal result",
+        1,
+        result_count
     );
 
     test_complete!("crash_restart_lifecycle");
@@ -783,23 +984,32 @@ fn three_node_partial_partition() {
     harness.inject_spawn(&a, &c, tid_c);
     harness.run_for(Duration::from_millis(300));
 
+    let node_b = harness.node(&b).unwrap();
     // B should receive and complete its spawn
-    let b_received = harness
-        .node(&b)
-        .unwrap()
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }));
+    let b_received = has_spawn_received(node_b.events(), tid_b);
     assert_with_log!(b_received, "B received spawn", true, b_received);
 
+    let b_completed = has_task_completed(node_b.events(), tid_b);
+    assert_with_log!(b_completed, "B completed spawn", true, b_completed);
+
+    let b_running = node_b.running_task_count();
+    assert_with_log!(b_running == 0, "B drained running work", 0, b_running);
+
     // C should NOT receive (partitioned from A)
-    let c_received = harness
-        .node(&c)
-        .unwrap()
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }));
+    let node_c = harness.node(&c).unwrap();
+    let c_received = has_spawn_received(node_c.events(), tid_c);
     assert_with_log!(!c_received, "C blocked by partition", false, c_received);
+
+    let c_completed = has_task_completed(node_c.events(), tid_c);
+    assert_with_log!(
+        !c_completed,
+        "C never completes blocked spawn",
+        false,
+        c_completed
+    );
+
+    let c_running = node_c.running_task_count();
+    assert_with_log!(c_running == 0, "C has no stranded work", 0, c_running);
 
     test_complete!("three_node_partial_partition");
 }
@@ -830,28 +1040,55 @@ fn lossy_network_stress() {
         .iter()
         .filter(|e| matches!(e, NodeEvent::SpawnReceived { .. }))
         .count();
+    let accepted = node_b
+        .events()
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::SpawnAccepted { .. }))
+        .count();
+    let completed = node_b
+        .events()
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::TaskCompleted { .. }))
+        .count();
     let metrics = harness.network_metrics();
 
     info!(
         received = recv_count,
+        accepted,
+        completed,
         sent = metrics.packets_sent,
         dropped = metrics.packets_dropped,
         "lossy network results"
     );
 
-    // Under 10% loss, we expect most but not all to arrive
-    // (some acks may be lost too, causing retransmit scenarios in real systems)
+    // Under 10% loss, we still expect some tasks to be accepted and all
+    // accepted work to resolve without leaking.
     assert_with_log!(
-        recv_count > 0,
-        "at least some spawns arrive",
+        accepted > 0,
+        "at least some spawns are accepted",
         true,
-        recv_count > 0
+        accepted > 0
     );
     assert_with_log!(
         metrics.packets_dropped > 0,
         "some packets dropped",
         true,
         metrics.packets_dropped > 0
+    );
+
+    let running = node_b.running_task_count();
+    assert_with_log!(
+        running == 0,
+        "no lossy-network tasks remain stranded",
+        0,
+        running
+    );
+
+    assert_with_log!(
+        accepted == completed,
+        "all accepted tasks complete under loss",
+        accepted,
+        completed
     );
 
     test_complete!("lossy_network_stress");
@@ -867,27 +1104,48 @@ fn lossy_network_stress() {
 fn wan_conditions_complete_with_delay() {
     init_test("wan_conditions_complete_with_delay");
 
-    let (mut harness, a, b) = harness_with_conditions(53, NetworkConditions::wan());
+    let mut conditions = NetworkConditions::wan();
+    conditions.packet_loss = 0.0;
+
+    let (mut harness, a, b) = harness_with_conditions(53, conditions);
     let task_id = RemoteTaskId::next();
 
     harness.inject_spawn(&a, &b, task_id);
-    // WAN latency is ~50ms + jitter, so give plenty of time
-    harness.run_for(Duration::from_millis(2000));
+    // WAN work has a fixed 100ms runtime, so an early completion would mean
+    // the latency simulation regressed or the test no longer exercises delay.
+    harness.run_for(Duration::from_millis(75));
 
     let node_b = harness.node(&b).unwrap();
-    let received = node_b
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }));
-    // May not arrive if packet_loss hits it (0.1% chance)
+    let completed_early = has_task_completed(node_b.events(), task_id);
+    assert_with_log!(
+        !completed_early,
+        "WAN task not completed during the early delay window",
+        false,
+        completed_early
+    );
+
+    // Packet loss is disabled for this test so it validates WAN delay rather
+    // than vacuously passing when the only spawn is dropped.
+    harness.run_for(Duration::from_millis(1925));
+
+    let node_b = harness.node(&b).unwrap();
+    let received = has_spawn_received(node_b.events(), task_id);
     info!(received, "WAN spawn received");
-    if received {
-        let completed = node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::TaskCompleted { .. }));
-        assert_with_log!(completed, "WAN task completed", true, completed);
-    }
+    assert_with_log!(received, "WAN spawn received", true, received);
+
+    let completed = has_task_completed(node_b.events(), task_id);
+    assert_with_log!(completed, "WAN task completed", true, completed);
+
+    let running = node_b.running_task_count();
+    assert_with_log!(running == 0, "WAN task drains running work", 0, running);
+
+    let result_count = count_sent(&harness, &b, &a, "ResultDelivery");
+    assert_with_log!(
+        result_count == 1,
+        "WAN task emits exactly one terminal result",
+        1,
+        result_count
+    );
 
     test_complete!("wan_conditions_complete_with_delay");
 }
@@ -916,22 +1174,49 @@ fn congested_network_resilience() {
         .iter()
         .filter(|e| matches!(e, NodeEvent::SpawnReceived { .. }))
         .count();
+    let accepted = node_b
+        .events()
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::SpawnAccepted { .. }))
+        .count();
+    let completed = node_b
+        .events()
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::TaskCompleted { .. }))
+        .count();
     let metrics = harness.network_metrics();
 
     info!(
         received = recv_count,
+        accepted,
+        completed,
         total = n_tasks,
         dropped = metrics.packets_dropped,
         duplicated = metrics.packets_duplicated,
         "congested network results"
     );
 
-    // Under congestion, expect some arrivals
+    // Under congestion, we still expect some tasks to make it through.
     assert_with_log!(
-        recv_count > 0,
-        "some tasks arrive under congestion",
+        accepted > 0,
+        "some tasks are accepted under congestion",
         true,
-        recv_count > 0
+        accepted > 0
+    );
+
+    let running = node_b.running_task_count();
+    assert_with_log!(
+        running == 0,
+        "no congested-network tasks remain stranded",
+        0,
+        running
+    );
+
+    assert_with_log!(
+        accepted == completed,
+        "all accepted tasks complete under congestion",
+        accepted,
+        completed
     );
 
     test_complete!("congested_network_resilience");
