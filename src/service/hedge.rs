@@ -563,7 +563,15 @@ where
                             }));
                         }
 
-                        if hedge_future.is_none() && !*slot_held {
+                        if hedge_future.is_none() {
+                            // No hedge in flight. Release any held slot and
+                            // propagate the primary error rather than holding
+                            // a pending slot indefinitely while the hedge
+                            // service may never become ready.
+                            if *slot_held {
+                                stats.release_pending_slot();
+                                *slot_held = false;
+                            }
                             let primary_err = primary_error
                                 .take()
                                 .expect("primary error must exist when primary future is gone");
