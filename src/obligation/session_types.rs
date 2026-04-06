@@ -157,6 +157,7 @@
 use crate::channel::mpsc;
 use crate::cx::Cx;
 use crate::record::ObligationKind;
+use std::future::Future;
 use std::marker::PhantomData;
 
 // ============================================================================
@@ -382,25 +383,34 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
     ///
     /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
     /// to check, or construct with [`new_transport_pair`].
-    pub async fn send_async(mut self, cx: &Cx, value: T) -> Result<Chan<R, S>, SessionError> {
+    pub fn send_async<'a>(
+        mut self,
+        cx: &'a Cx,
+        value: T,
+    ) -> impl Future<Output = Result<Chan<R, S>, SessionError>> + 'a
+    where
+        R: 'a,
+        S: 'a,
+    {
         let transport = self
             .transport
             .take()
             .expect("send_async called on non-transport-backed session channel");
 
-        // Disarm the drop bomb before the await point so that cancellation
-        // (future dropped mid-send) terminates the session cleanly instead of
-        // panicking with "SESSION LEAKED".
+        // Disarm before the future is returned so dropping an unpolled future
+        // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
-        let boxed = Box::new(value) as Box<dyn std::any::Any + std::marker::Send>;
-        if let Err(error) = transport.tx.send(cx, boxed).await {
-            return Err(map_transport_send_error(&error));
-        }
+        async move {
+            let boxed = Box::new(value) as Box<dyn std::any::Any + std::marker::Send>;
+            if let Err(error) = transport.tx.send(cx, boxed).await {
+                return Err(map_transport_send_error(&error));
+            }
 
-        self.transport = Some(transport);
-        self.closed = false;
-        Ok(self.transition())
+            self.transport = Some(transport);
+            self.closed = false;
+            Ok(self.transition())
+        }
     }
 }
 
@@ -426,33 +436,43 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
     ///
     /// Panics if this channel has no transport backing, or if the received
     /// value is not of the expected type (protocol violation).
-    pub async fn recv_async(mut self, cx: &Cx) -> Result<(T, Chan<R, S>), SessionError> {
+    pub fn recv_async<'a>(
+        mut self,
+        cx: &'a Cx,
+    ) -> impl Future<Output = Result<(T, Chan<R, S>), SessionError>> + 'a
+    where
+        R: 'a,
+        S: 'a,
+        T: 'a,
+    {
         let mut transport = self
             .transport
             .take()
             .expect("recv_async called on non-transport-backed session channel");
 
-        // Disarm the drop bomb before the await point so that cancellation
-        // terminates the session cleanly instead of panicking.
+        // Disarm before the future is returned so dropping an unpolled future
+        // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
-        let boxed = match transport.rx.recv(cx).await {
-            Ok(boxed) => boxed,
-            Err(error) => {
-                return Err(map_transport_recv_error(error));
-            }
-        };
+        async move {
+            let boxed = match transport.rx.recv(cx).await {
+                Ok(boxed) => boxed,
+                Err(error) => {
+                    return Err(map_transport_recv_error(error));
+                }
+            };
 
-        let Ok(value) = boxed.downcast::<T>() else {
-            return Err(SessionError::ProtocolViolation {
-                expected: std::any::type_name::<T>(),
-                actual: "unknown (downcast failed)",
-            });
-        };
+            let Ok(value) = boxed.downcast::<T>() else {
+                return Err(SessionError::ProtocolViolation {
+                    expected: std::any::type_name::<T>(),
+                    actual: "unknown (downcast failed)",
+                });
+            };
 
-        self.transport = Some(transport);
-        self.closed = false;
-        Ok((*value, self.transition()))
+            self.transport = Some(transport);
+            self.closed = false;
+            Ok((*value, self.transition()))
+        }
     }
 }
 
@@ -497,24 +517,34 @@ impl<R, A, B> Chan<R, Select<A, B>> {
     ///
     /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
     /// to check, or use [`select_left`](Self::select_left) for pure typestate mode.
-    pub async fn select_left_async(mut self, cx: &Cx) -> Result<Chan<R, A>, SessionError> {
+    pub fn select_left_async<'a>(
+        mut self,
+        cx: &'a Cx,
+    ) -> impl Future<Output = Result<Chan<R, A>, SessionError>> + 'a
+    where
+        R: 'a,
+        A: 'a,
+        B: 'a,
+    {
         let transport = self
             .transport
             .take()
             .expect("select_left_async called on non-transport-backed session channel");
 
-        // Disarm the drop bomb before the await point so that cancellation
-        // terminates the session cleanly instead of panicking.
+        // Disarm before the future is returned so dropping an unpolled future
+        // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
-        let branch = Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>;
-        if let Err(error) = transport.tx.send(cx, branch).await {
-            return Err(map_transport_send_error(&error));
-        }
+        async move {
+            let branch = Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>;
+            if let Err(error) = transport.tx.send(cx, branch).await {
+                return Err(map_transport_send_error(&error));
+            }
 
-        self.transport = Some(transport);
-        self.closed = false;
-        Ok(self.transition())
+            self.transport = Some(transport);
+            self.closed = false;
+            Ok(self.transition())
+        }
     }
 
     /// Select the right branch and notify the peer via transport.
@@ -523,24 +553,34 @@ impl<R, A, B> Chan<R, Select<A, B>> {
     ///
     /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
     /// to check, or use [`select_right`](Self::select_right) for pure typestate mode.
-    pub async fn select_right_async(mut self, cx: &Cx) -> Result<Chan<R, B>, SessionError> {
+    pub fn select_right_async<'a>(
+        mut self,
+        cx: &'a Cx,
+    ) -> impl Future<Output = Result<Chan<R, B>, SessionError>> + 'a
+    where
+        R: 'a,
+        A: 'a,
+        B: 'a,
+    {
         let transport = self
             .transport
             .take()
             .expect("select_right_async called on non-transport-backed session channel");
 
-        // Disarm the drop bomb before the await point so that cancellation
-        // terminates the session cleanly instead of panicking.
+        // Disarm before the future is returned so dropping an unpolled future
+        // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
-        let branch = Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>;
-        if let Err(error) = transport.tx.send(cx, branch).await {
-            return Err(map_transport_send_error(&error));
-        }
+        async move {
+            let branch = Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>;
+            if let Err(error) = transport.tx.send(cx, branch).await {
+                return Err(map_transport_send_error(&error));
+            }
 
-        self.transport = Some(transport);
-        self.closed = false;
-        Ok(self.transition())
+            self.transport = Some(transport);
+            self.closed = false;
+            Ok(self.transition())
+        }
     }
 }
 
@@ -560,40 +600,47 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
     /// Wait for the peer's branch selection via transport.
     ///
     /// Returns the channel in the chosen branch's state.
-    pub async fn offer_async(
+    pub fn offer_async<'a>(
         mut self,
-        cx: &Cx,
-    ) -> Result<Selected<Chan<R, A>, Chan<R, B>>, SessionError> {
+        cx: &'a Cx,
+    ) -> impl Future<Output = Result<Selected<Chan<R, A>, Chan<R, B>>, SessionError>> + 'a
+    where
+        R: 'a,
+        A: 'a,
+        B: 'a,
+    {
         let mut transport = self
             .transport
             .take()
             .expect("offer_async called on non-transport-backed session channel");
 
-        // Disarm the drop bomb before the await point so that cancellation
-        // terminates the session cleanly instead of panicking.
+        // Disarm before the future is returned so dropping an unpolled future
+        // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
-        let boxed = match transport.rx.recv(cx).await {
-            Ok(boxed) => boxed,
-            Err(error) => {
-                return Err(map_transport_recv_error(error));
+        async move {
+            let boxed = match transport.rx.recv(cx).await {
+                Ok(boxed) => boxed,
+                Err(error) => {
+                    return Err(map_transport_recv_error(error));
+                }
+            };
+
+            let Ok(branch) = boxed.downcast::<Branch>() else {
+                return Err(SessionError::ProtocolViolation {
+                    expected: "Branch (Left/Right)",
+                    actual: "unknown (downcast failed)",
+                });
+            };
+
+            self.transport = Some(transport);
+            self.closed = false;
+            let branch = *branch;
+
+            match branch {
+                Branch::Left => Ok(Selected::Left(self.transition())),
+                Branch::Right => Ok(Selected::Right(self.transition())),
             }
-        };
-
-        let Ok(branch) = boxed.downcast::<Branch>() else {
-            return Err(SessionError::ProtocolViolation {
-                expected: "Branch (Left/Right)",
-                actual: "unknown (downcast failed)",
-            });
-        };
-
-        self.transport = Some(transport);
-        self.closed = false;
-        let branch = *branch;
-
-        match branch {
-            Branch::Left => Ok(Selected::Left(self.transition())),
-            Branch::Right => Ok(Selected::Right(self.transition())),
         }
     }
 }
@@ -2104,6 +2151,26 @@ mod tests {
     }
 
     #[test]
+    fn transport_backed_send_async_unpolled_future_drop_does_not_panic() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(3011, ObligationKind::SendPermit, 4);
+        let cx = Cx::for_testing();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let future = sender.send_async(&cx, send_permit::ReserveMsg);
+            drop(future);
+        }));
+
+        receiver.disarm_for_test();
+        assert!(
+            result.is_ok(),
+            "dropping an unpolled send_async future must not trip the session leak drop bomb"
+        );
+    }
+
+    #[test]
     fn transport_backed_recv_async_cancelled_cx_returns_cancelled() {
         let (sender, receiver) = new_transport_pair::<
             send_permit::InitiatorSession<u64>,
@@ -2120,6 +2187,26 @@ mod tests {
             let result = receiver.recv_async(&cx).await;
             assert!(matches!(result, Err(SessionError::Cancelled)));
         });
+    }
+
+    #[test]
+    fn transport_backed_recv_async_unpolled_future_drop_does_not_panic() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(3021, ObligationKind::SendPermit, 4);
+        let cx = Cx::for_testing();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let future = receiver.recv_async(&cx);
+            drop(future);
+        }));
+
+        sender.disarm_for_test();
+        assert!(
+            result.is_ok(),
+            "dropping an unpolled recv_async future must not trip the session leak drop bomb"
+        );
     }
 
     #[test]
@@ -2160,6 +2247,53 @@ mod tests {
     }
 
     #[test]
+    fn transport_backed_select_async_unpolled_future_drop_does_not_panic() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+
+            let (sender_left, receiver_left) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(3031, ObligationKind::SendPermit, 4);
+            let sender_left = sender_left
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver_left) = receiver_left.recv_async(&cx).await.unwrap();
+
+            let left_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let future = sender_left.select_left_async(&cx);
+                drop(future);
+            }));
+            receiver_left.disarm_for_test();
+            assert!(
+                left_result.is_ok(),
+                "dropping an unpolled select_left_async future must not panic"
+            );
+
+            let (sender_right, receiver_right) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(3032, ObligationKind::SendPermit, 4);
+            let sender_right = sender_right
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver_right) = receiver_right.recv_async(&cx).await.unwrap();
+
+            let right_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let future = sender_right.select_right_async(&cx);
+                drop(future);
+            }));
+            receiver_right.disarm_for_test();
+            assert!(
+                right_result.is_ok(),
+                "dropping an unpolled select_right_async future must not panic"
+            );
+        });
+    }
+
+    #[test]
     fn transport_backed_offer_async_cancelled_cx_returns_cancelled() {
         let (sender, receiver) = new_transport_pair::<
             send_permit::InitiatorSession<u64>,
@@ -2182,6 +2316,34 @@ mod tests {
 
             let result = receiver.offer_async(&cancelled_cx).await;
             assert!(matches!(result, Err(SessionError::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn transport_backed_offer_async_unpolled_future_drop_does_not_panic() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let (sender, receiver) = new_transport_pair::<
+                send_permit::InitiatorSession<u64>,
+                send_permit::ResponderSession<u64>,
+            >(3051, ObligationKind::SendPermit, 4);
+
+            let sender = sender
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver) = receiver.recv_async(&cx).await.unwrap();
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let future = receiver.offer_async(&cx);
+                drop(future);
+            }));
+
+            sender.disarm_for_test();
+            assert!(
+                result.is_ok(),
+                "dropping an unpolled offer_async future must not trip the session leak drop bomb"
+            );
         });
     }
 
