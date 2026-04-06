@@ -17,7 +17,8 @@ use std::future::poll_fn;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(4);
@@ -31,12 +32,60 @@ fn listener_now() -> Time {
         .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
+#[derive(Debug, Default)]
+struct AcceptWaiters {
+    waiters: Mutex<Vec<Waker>>,
+}
+
+impl AcceptWaiters {
+    fn register(&self, waker: &Waker) {
+        let mut waiters = self.waiters.lock();
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        waiters.push(waker.clone());
+    }
+
+    fn wake_all(&self) {
+        let waiters = {
+            let mut guard = self.waiters.lock();
+            std::mem::take(&mut *guard)
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+
+    fn wake_others(&self, current: &Waker) {
+        let waiters = {
+            let mut guard = self.waiters.lock();
+            std::mem::take(&mut *guard)
+        };
+        for waiter in waiters {
+            if !waiter.will_wake(current) {
+                waiter.wake();
+            }
+        }
+    }
+}
+
+impl Wake for AcceptWaiters {
+    fn wake(self: Arc<Self>) {
+        self.wake_all();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_all();
+    }
+}
+
 /// A TCP listener.
 #[derive(Debug)]
 pub struct TcpListener {
     registration: Mutex<Option<IoRegistration>>,
     pub(crate) inner: net::TcpListener,
     accept_storm: Mutex<AcceptStormState>,
+    accept_waiters: Arc<AcceptWaiters>,
     time_getter: fn() -> Time,
 }
 
@@ -68,6 +117,7 @@ impl TcpListener {
             inner,
             registration: Mutex::new(None),
             accept_storm: Mutex::new(AcceptStormState::default()),
+            accept_waiters: Arc::new(AcceptWaiters::default()),
             time_getter,
         })
     }
@@ -115,13 +165,18 @@ impl TcpListener {
         match self.inner.accept() {
             Ok((stream, addr)) => {
                 self.reset_accept_storm();
+                self.accept_waiters.wake_others(cx.waker());
                 Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.accept_waiters.register(cx.waker());
                 let storm_backoff = self.note_accept_would_block();
-                let mode = match self.register_interest(cx) {
+                let mode = match self.register_interest() {
                     Ok(mode) => mode,
-                    Err(err) => return Poll::Ready(Err(err)),
+                    Err(err) => {
+                        self.accept_waiters.wake_others(cx.waker());
+                        return Poll::Ready(Err(err));
+                    }
                 };
 
                 // Close the re-arm race for readiness backends that can miss a
@@ -133,12 +188,16 @@ impl TcpListener {
                 match self.inner.accept() {
                     Ok((stream, addr)) => {
                         self.reset_accept_storm();
+                        self.accept_waiters.wake_others(cx.waker());
                         return Poll::Ready(
                             TcpStream::from_std(stream).map(|stream| (stream, addr)),
                         );
                     }
                     Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(err) => return Poll::Ready(Err(err)),
+                    Err(err) => {
+                        self.accept_waiters.wake_others(cx.waker());
+                        return Poll::Ready(Err(err));
+                    }
                 }
 
                 let delay = if mode == InterestRegistrationMode::FallbackPoll {
@@ -149,12 +208,15 @@ impl TcpListener {
                     Duration::ZERO
                 };
 
-                schedule_accept_retry(cx, mode, delay);
+                schedule_accept_retry(mode, delay, &self.accept_waiters);
                 // ReactorArmed: the reactor is re-armed and will wake us on
                 // actual readiness; no sleep needed (unless an accept storm triggered a delay).
                 Poll::Pending
             }
-            Err(e) => Poll::Ready(Err(e)),
+            Err(e) => {
+                self.accept_waiters.wake_others(cx.waker());
+                Poll::Ready(Err(e))
+            }
         }
     }
 
@@ -201,7 +263,7 @@ impl TcpListener {
         Incoming { listener: self }
     }
 
-    fn register_interest(&self, cx: &Context<'_>) -> io::Result<InterestRegistrationMode> {
+    fn register_interest(&self) -> io::Result<InterestRegistrationMode> {
         enum RearmDecision {
             ReactorArmed,
             ClearAndContinue,
@@ -210,10 +272,11 @@ impl TcpListener {
         }
 
         let mut registration = self.registration.lock();
+        let accept_waker = Waker::from(Arc::clone(&self.accept_waiters));
         let decision = registration.as_mut().map(|existing| {
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
-            match existing.rearm(Interest::READABLE, cx.waker()) {
+            match existing.rearm(Interest::READABLE, &accept_waker) {
                 Ok(true) => RearmDecision::ReactorArmed,
                 Ok(false) => RearmDecision::ClearAndContinue,
                 Err(err) if err.kind() == io::ErrorKind::NotConnected => {
@@ -245,7 +308,7 @@ impl TcpListener {
             return Ok(InterestRegistrationMode::FallbackPoll);
         };
 
-        match driver.register(&self.inner, Interest::READABLE, cx.waker().clone()) {
+        match driver.register(&self.inner, Interest::READABLE, accept_waker) {
             Ok(new_reg) => {
                 *registration = Some(new_reg);
                 drop(registration);
@@ -262,21 +325,25 @@ impl TcpListener {
     }
 }
 
-fn schedule_accept_retry(cx: &Context<'_>, mode: InterestRegistrationMode, delay: Duration) {
+fn schedule_accept_retry(
+    mode: InterestRegistrationMode,
+    delay: Duration,
+    accept_waiters: &Arc<AcceptWaiters>,
+) {
     if delay == Duration::ZERO {
         return;
     }
 
     if let Some(timer) = Cx::current().and_then(|current| current.timer_driver()) {
         let deadline = timer.now() + delay;
-        let _ = timer.register(deadline, cx.waker().clone());
+        let _ = timer.register(deadline, Waker::from(Arc::clone(accept_waiters)));
         return;
     }
 
     if mode == InterestRegistrationMode::FallbackPoll {
         // `poll_accept` must never block the executor thread. Without a timer
         // driver, fall back to an immediate retry just like the Unix listener.
-        cx.waker().wake_by_ref();
+        accept_waiters.wake_all();
     }
 }
 
@@ -528,13 +595,14 @@ mod tests {
         let waker = Waker::from(Arc::new(CountingWaker {
             hits: Arc::clone(&hits),
         }));
-        let cx = Context::from_waker(&waker);
+        let waiters = Arc::new(AcceptWaiters::default());
+        waiters.register(&waker);
         let started = Instant::now();
 
         schedule_accept_retry(
-            &cx,
             InterestRegistrationMode::FallbackPoll,
             Duration::from_millis(20),
+            &waiters,
         );
 
         assert!(
@@ -559,13 +627,14 @@ mod tests {
         let waker = Waker::from(Arc::new(CountingWaker {
             hits: Arc::clone(&hits),
         }));
-        let cx = Context::from_waker(&waker);
+        let waiters = Arc::new(AcceptWaiters::default());
+        waiters.register(&waker);
         let started = Instant::now();
 
         schedule_accept_retry(
-            &cx,
             InterestRegistrationMode::ReactorArmed,
             Duration::from_millis(20),
+            &waiters,
         );
 
         assert!(
@@ -577,6 +646,44 @@ mod tests {
             0,
             "reactor-armed accept retry should rely on the reactor instead of self-waking"
         );
+    }
+
+    #[test]
+    fn listener_fanout_wakes_all_pending_accept_waiters() {
+        let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        raw.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let listener = TcpListener::from_std(raw).expect("wrap listener");
+        let hits1 = Arc::new(AtomicUsize::new(0));
+        let hits2 = Arc::new(AtomicUsize::new(0));
+        let waker1 = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits1),
+        }));
+        let waker2 = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits2),
+        }));
+        let mut cx1 = Context::from_waker(&waker1);
+        let mut cx2 = Context::from_waker(&waker2);
+
+        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
+        assert!(matches!(listener.poll_accept(&mut cx2), Poll::Pending));
+
+        listener.accept_waiters.wake_all();
+
+        assert_eq!(hits1.load(Ordering::SeqCst), 1);
+        assert_eq!(hits2.load(Ordering::SeqCst), 1);
     }
 
     #[test]

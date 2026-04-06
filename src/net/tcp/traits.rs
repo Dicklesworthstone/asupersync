@@ -301,15 +301,22 @@ pub trait TcpListenerExt: TcpListenerApi {
     /// This method runs an infinite accept loop and awaits the handler for each
     /// incoming connection. The loop continues until cancelled or an error occurs.
     ///
+    /// # Warning
+    ///
+    /// This method handles connections **sequentially** (it awaits the handler
+    /// before accepting the next connection). It is only suitable for strictly
+    /// serialized protocols or testing. For concurrent servers, use a `Scope`
+    /// to spawn a new task for each accepted connection.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// listener.serve(|stream, addr| async move {
+    /// listener.serve_sequential(|stream, addr| async move {
     ///     println!("Connection from {}", addr);
     ///     // Handle the connection...
     /// }).await;
     /// ```
-    fn serve<F, Fut>(&self, handler: F) -> impl Future<Output = io::Result<()>> + Send
+    fn serve_sequential<F, Fut>(&self, handler: F) -> impl Future<Output = io::Result<()>> + Send
     where
         F: Fn(Self::Stream, SocketAddr) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send + 'static,

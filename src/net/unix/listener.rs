@@ -39,7 +39,58 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
+
+const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(1);
+
+#[derive(Debug, Default)]
+struct AcceptWaiters {
+    waiters: Mutex<Vec<Waker>>,
+}
+
+impl AcceptWaiters {
+    fn register(&self, waker: &Waker) {
+        let mut waiters = self.waiters.lock();
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        waiters.push(waker.clone());
+    }
+
+    fn wake_all(&self) {
+        let waiters = {
+            let mut guard = self.waiters.lock();
+            std::mem::take(&mut *guard)
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+
+    fn wake_others(&self, current: &Waker) {
+        let waiters = {
+            let mut guard = self.waiters.lock();
+            std::mem::take(&mut *guard)
+        };
+        for waiter in waiters {
+            if !waiter.will_wake(current) {
+                waiter.wake();
+            }
+        }
+    }
+}
+
+impl Wake for AcceptWaiters {
+    fn wake(self: Arc<Self>) {
+        self.wake_all();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_all();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SocketFileIdentity {
@@ -135,6 +186,8 @@ where
 pub struct UnixListener {
     /// Reactor registration for I/O events (lazily initialized).
     registration: Mutex<Option<IoRegistration>>,
+    /// Fanout waiter list for concurrent accept futures.
+    accept_waiters: Arc<AcceptWaiters>,
     /// The underlying standard library listener.
     inner: net::UnixListener,
     /// Path to the socket file (for cleanup on drop).
@@ -204,6 +257,7 @@ impl UnixListener {
 
         Ok(Self {
             inner,
+            accept_waiters: Arc::new(AcceptWaiters::default()),
             path: None, // No filesystem path for abstract sockets
             cleanup_identity: None,
             registration: Mutex::new(None), // Lazy registration on first poll
@@ -240,10 +294,13 @@ impl UnixListener {
     pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
         match self.inner.accept() {
             Ok((stream, addr)) => {
+                self.accept_waiters.wake_others(cx.waker());
                 Poll::Ready(UnixStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx) {
+                self.accept_waiters.register(cx.waker());
+                if let Err(err) = self.register_interest() {
+                    self.accept_waiters.wake_others(cx.waker());
                     return Poll::Ready(Err(err));
                 }
 
@@ -252,31 +309,40 @@ impl UnixListener {
                 // and the registration, we might miss the edge-triggered wakeup.
                 match self.inner.accept() {
                     Ok((stream, addr)) => {
+                        self.accept_waiters.wake_others(cx.waker());
                         Poll::Ready(UnixStream::from_std(stream).map(|stream| (stream, addr)))
                     }
                     Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
-                    Err(err) => Poll::Ready(Err(err)),
+                    Err(err) => {
+                        self.accept_waiters.wake_others(cx.waker());
+                        Poll::Ready(Err(err))
+                    }
                 }
             }
-            Err(e) => Poll::Ready(Err(e)),
+            Err(e) => {
+                self.accept_waiters.wake_others(cx.waker());
+                Poll::Ready(Err(e))
+            }
         }
     }
 
     /// Registers interest with the I/O driver for READABLE events.
-    fn register_interest(&self, cx: &Context<'_>) -> io::Result<()> {
+    fn register_interest(&self) -> io::Result<()> {
         let mut registration = self.registration.lock();
+        let accept_waker = Waker::from(Arc::clone(&self.accept_waiters));
 
         if let Some(existing) = registration.as_mut() {
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
-            match existing.rearm(Interest::READABLE, cx.waker()) {
+            match existing.rearm(Interest::READABLE, &accept_waker) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
                     *registration = None;
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                     *registration = None;
-                    crate::net::tcp::stream::fallback_rewake(cx);
+                    drop(registration);
+                    fallback_rewake_waiters(&self.accept_waiters);
                     return Ok(());
                 }
                 Err(err) => return Err(err),
@@ -285,16 +351,16 @@ impl UnixListener {
 
         let Some(current) = Cx::current() else {
             drop(registration);
-            crate::net::tcp::stream::fallback_rewake(cx);
+            fallback_rewake_waiters(&self.accept_waiters);
             return Ok(());
         };
         let Some(driver) = current.io_driver_handle() else {
             drop(registration);
-            crate::net::tcp::stream::fallback_rewake(cx);
+            fallback_rewake_waiters(&self.accept_waiters);
             return Ok(());
         };
 
-        match driver.register(&self.inner, Interest::READABLE, cx.waker().clone()) {
+        match driver.register(&self.inner, Interest::READABLE, accept_waker) {
             Ok(new_reg) => {
                 *registration = Some(new_reg);
                 drop(registration);
@@ -302,12 +368,12 @@ impl UnixListener {
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
                 drop(registration);
-                crate::net::tcp::stream::fallback_rewake(cx);
+                fallback_rewake_waiters(&self.accept_waiters);
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                 drop(registration);
-                crate::net::tcp::stream::fallback_rewake(cx);
+                fallback_rewake_waiters(&self.accept_waiters);
                 Ok(())
             }
             Err(err) => {
@@ -351,6 +417,7 @@ impl UnixListener {
         listener.set_nonblocking(true)?;
 
         Ok(Self {
+            accept_waiters: Arc::new(AcceptWaiters::default()),
             inner: listener,
             path: None, // Don't clean up sockets we didn't create
             cleanup_identity: None,
@@ -404,11 +471,21 @@ impl UnixListener {
         let (inner, cleanup_identity) = finalize_bound_socket(path, inner, configure)?;
 
         Ok(Self {
+            accept_waiters: Arc::new(AcceptWaiters::default()),
             inner,
             path: Some(path.to_path_buf()),
             cleanup_identity,
             registration: Mutex::new(None), // Lazy registration on first poll
         })
+    }
+}
+
+fn fallback_rewake_waiters(accept_waiters: &Arc<AcceptWaiters>) {
+    if let Some(timer) = Cx::current().and_then(|current| current.timer_driver()) {
+        let deadline = timer.now() + FALLBACK_ACCEPT_BACKOFF;
+        let _ = timer.register(deadline, Waker::from(Arc::clone(accept_waiters)));
+    } else {
+        accept_waiters.wake_all();
     }
 }
 
@@ -460,6 +537,7 @@ mod tests {
     use std::io::Write;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
     use tempfile::tempdir;
 
@@ -476,6 +554,20 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct CountingWaker {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -619,6 +711,62 @@ mod tests {
             "incoming should register interest"
         );
         crate::test_complete!("incoming_registers_on_wouldblock");
+    }
+
+    #[test]
+    fn listener_fanout_wakes_all_pending_accept_waiters() {
+        init_test("listener_fanout_wakes_all_pending_accept_waiters");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("listener_fanout.sock");
+
+        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+        std_listener
+            .set_nonblocking(true)
+            .expect("nonblocking failed");
+
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx_cap = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx_cap));
+
+        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+        let hits1 = Arc::new(AtomicUsize::new(0));
+        let hits2 = Arc::new(AtomicUsize::new(0));
+        let waker1 = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits1),
+        }));
+        let waker2 = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits2),
+        }));
+        let mut cx1 = Context::from_waker(&waker1);
+        let mut cx2 = Context::from_waker(&waker2);
+
+        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
+        assert!(matches!(listener.poll_accept(&mut cx2), Poll::Pending));
+
+        let _client1 = net::UnixStream::connect(&path).expect("connect first client");
+        listener.accept_waiters.wake_all();
+
+        assert_eq!(hits1.load(Ordering::SeqCst), 1);
+        assert_eq!(hits2.load(Ordering::SeqCst), 1);
+
+        assert!(matches!(listener.poll_accept(&mut cx2), Poll::Ready(Ok(_))));
+        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
+
+        let _client2 = net::UnixStream::connect(&path).expect("connect second client");
+        listener.accept_waiters.wake_all();
+
+        assert_eq!(hits1.load(Ordering::SeqCst), 2);
+        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Ready(Ok(_))));
+
+        crate::test_complete!("listener_fanout_wakes_all_pending_accept_waiters");
     }
 
     #[test]

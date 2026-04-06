@@ -32,10 +32,57 @@ use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 const VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES: usize = 1024;
 const VIRTUAL_TCP_ACCEPT_QUEUE_CAPACITY: usize = 16;
+
+#[derive(Debug, Default)]
+struct AcceptWaiters {
+    waiters: Mutex<Vec<Waker>>,
+}
+
+impl AcceptWaiters {
+    fn register(&self, waker: &Waker) {
+        let mut waiters = self.waiters.lock();
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        waiters.push(waker.clone());
+    }
+
+    fn wake_all(&self) {
+        let waiters = {
+            let mut guard = self.waiters.lock();
+            std::mem::take(&mut *guard)
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+
+    fn wake_others(&self, current: &Waker) {
+        let waiters = {
+            let mut guard = self.waiters.lock();
+            std::mem::take(&mut *guard)
+        };
+        for waiter in waiters {
+            if !waiter.will_wake(current) {
+                waiter.wake();
+            }
+        }
+    }
+}
+
+impl Wake for AcceptWaiters {
+    fn wake(self: Arc<Self>) {
+        self.wake_all();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_all();
+    }
+}
 
 // =============================================================================
 // VirtualTcpStream
@@ -373,7 +420,6 @@ impl TcpStreamApi for VirtualTcpStream {
 /// Internal state for the virtual listener.
 struct VirtualListenerState {
     connections: VecDeque<(VirtualTcpStream, SocketAddr)>,
-    waker: Option<Waker>,
     closed: bool,
 }
 
@@ -401,6 +447,7 @@ struct VirtualListenerState {
 pub struct VirtualTcpListener {
     addr: SocketAddr,
     state: Arc<Mutex<VirtualListenerState>>,
+    accept_waiters: Arc<AcceptWaiters>,
 }
 
 impl Drop for VirtualTcpListener {
@@ -425,9 +472,9 @@ impl VirtualTcpListener {
             addr,
             state: Arc::new(Mutex::new(VirtualListenerState {
                 connections: VecDeque::with_capacity(VIRTUAL_TCP_ACCEPT_QUEUE_CAPACITY),
-                waker: None,
                 closed: false,
             })),
+            accept_waiters: Arc::new(AcceptWaiters::default()),
         }
     }
 
@@ -436,18 +483,15 @@ impl VirtualTcpListener {
     /// The stream will be returned by the next `accept()` call.
     /// `remote_addr` is the address reported as the peer address.
     pub fn inject_connection(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
-        let waker = {
+        {
             let mut state = self.state.lock();
             if state.closed {
                 // Listener is closed: do not enqueue new virtual connections.
                 return;
             }
             state.connections.push_back((stream, remote_addr));
-            state.waker.take()
-        };
-        if let Some(waker) = waker {
-            waker.wake();
         }
+        self.accept_waiters.wake_all();
     }
 
     /// Returns the number of pending (injected but not yet accepted) connections.
@@ -458,15 +502,12 @@ impl VirtualTcpListener {
 
     /// Close the listener, causing future `accept()` calls to return an error.
     pub fn close(&self) {
-        let waker = {
+        {
             let mut state = self.state.lock();
             state.closed = true;
             state.connections.clear();
-            state.waker.take()
-        };
-        if let Some(waker) = waker {
-            waker.wake();
         }
+        self.accept_waiters.wake_all();
     }
 
     /// Returns a handle that can inject connections from another thread.
@@ -474,6 +515,7 @@ impl VirtualTcpListener {
     pub fn injector(&self) -> VirtualConnectionInjector {
         VirtualConnectionInjector {
             state: Arc::clone(&self.state),
+            accept_waiters: Arc::clone(&self.accept_waiters),
         }
     }
 }
@@ -485,23 +527,21 @@ impl VirtualTcpListener {
 #[derive(Clone)]
 pub struct VirtualConnectionInjector {
     state: Arc<Mutex<VirtualListenerState>>,
+    accept_waiters: Arc<AcceptWaiters>,
 }
 
 impl VirtualConnectionInjector {
     /// Inject a connection into the listener's accept queue.
     pub fn inject(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
-        let waker = {
+        {
             let mut state = self.state.lock();
             if state.closed {
                 // Listener is closed: do not enqueue new virtual connections.
                 return;
             }
             state.connections.push_back((stream, remote_addr));
-            state.waker.take()
-        };
-        if let Some(waker) = waker {
-            waker.wake();
         }
+        self.accept_waiters.wake_all();
     }
 }
 
@@ -524,25 +564,25 @@ impl TcpListenerApi for VirtualTcpListener {
         &self,
     ) -> impl std::future::Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send {
         let state = Arc::clone(&self.state);
+        let accept_waiters = Arc::clone(&self.accept_waiters);
         async move {
             std::future::poll_fn(|cx| {
                 let mut guard = state.lock();
                 if guard.closed {
+                    drop(guard);
+                    accept_waiters.wake_others(cx.waker());
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::NotConnected,
                         "virtual listener closed",
                     )));
                 }
                 if let Some(conn) = guard.connections.pop_front() {
+                    drop(guard);
+                    accept_waiters.wake_others(cx.waker());
                     return Poll::Ready(Ok(conn));
                 }
-                if !guard
-                    .waker
-                    .as_ref()
-                    .is_some_and(|w| w.will_wake(cx.waker()))
-                {
-                    guard.waker = Some(cx.waker().clone());
-                }
+                drop(guard);
+                accept_waiters.register(cx.waker());
                 Poll::Pending
             })
             .await
@@ -552,21 +592,20 @@ impl TcpListenerApi for VirtualTcpListener {
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
         let mut state = self.state.lock();
         if state.closed {
+            drop(state);
+            self.accept_waiters.wake_others(cx.waker());
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "virtual listener closed",
             )));
         }
         if let Some(conn) = state.connections.pop_front() {
+            drop(state);
+            self.accept_waiters.wake_others(cx.waker());
             return Poll::Ready(Ok(conn));
         }
-        if !state
-            .waker
-            .as_ref()
-            .is_some_and(|w| w.will_wake(cx.waker()))
-        {
-            state.waker = Some(cx.waker().clone());
-        }
+        drop(state);
+        self.accept_waiters.register(cx.waker());
         Poll::Pending
     }
 
@@ -757,6 +796,34 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let result = listener.poll_accept(&mut cx);
         assert!(matches!(result, Poll::Pending));
+    }
+
+    #[test]
+    fn virtual_listener_wakes_all_pending_accept_waiters() {
+        let listener = VirtualTcpListener::new(addr("127.0.0.1:8080"));
+        let (hits1, waker1) = count_waker();
+        let (hits2, waker2) = count_waker();
+        let mut cx1 = Context::from_waker(&waker1);
+        let mut cx2 = Context::from_waker(&waker2);
+
+        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
+        assert!(matches!(listener.poll_accept(&mut cx2), Poll::Pending));
+
+        let (_client1, server1) =
+            VirtualTcpStream::pair(addr("127.0.0.1:9000"), addr("127.0.0.1:8080"));
+        listener.inject_connection(server1, addr("127.0.0.1:9000"));
+
+        assert_eq!(hits1.0.load(Ordering::Relaxed), 1);
+        assert_eq!(hits2.0.load(Ordering::Relaxed), 1);
+
+        assert!(matches!(listener.poll_accept(&mut cx2), Poll::Ready(Ok(_))));
+        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
+
+        let (_client2, server2) =
+            VirtualTcpStream::pair(addr("127.0.0.1:9001"), addr("127.0.0.1:8080"));
+        listener.inject_connection(server2, addr("127.0.0.1:9001"));
+
+        assert_eq!(hits1.0.load(Ordering::Relaxed), 2);
     }
 
     #[test]

@@ -318,7 +318,7 @@ impl UnixStreamInner {
         // held across `driver.register()` to prevent a race where both halves
         // concurrently attempt to create a fresh registration for the same fd,
         // causing one to fail with EEXIST from epoll_ctl(ADD).
-        let waker = guard.combined_waker.as_ref().unwrap().clone();
+        let waker = guard.combined_waker.as_ref().expect("combined waker initialized").clone();
         let register_interest = registration_interest(
             guard.read_waker.is_some(),
             guard.write_waker.is_some(),
@@ -382,7 +382,7 @@ impl UnixStreamInner {
         let mut wakers_to_wake = None;
 
         if !clear_registration {
-            let combined = guard.combined_waker.as_ref().unwrap().clone();
+            let combined = guard.combined_waker.as_ref().expect("combined waker initialized").clone();
             let is_some = guard.registration.is_some();
             let rearm_ok = guard
                 .registration
