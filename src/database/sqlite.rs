@@ -972,6 +972,7 @@ impl SqliteConnection {
                 let conn = guard.get()?;
                 conn.busy_timeout(timeout)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                drop(guard);
                 Ok(())
             })();
             let _ = permit.send(result);

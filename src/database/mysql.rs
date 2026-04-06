@@ -589,10 +589,6 @@ impl PacketBuffer {
         }
     }
 
-    fn clear(&mut self) {
-        self.buf.clear();
-    }
-
     fn set_sequence(&mut self, seq: u8) {
         self.sequence = seq;
     }
@@ -603,10 +599,6 @@ impl PacketBuffer {
 
     fn write_bytes(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
-    }
-
-    fn write_u16_le(&mut self, v: u16) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
     fn write_u32_le(&mut self, v: u32) {
@@ -634,12 +626,6 @@ impl PacketBuffer {
             self.buf.push(0xFE);
             self.buf.extend_from_slice(&v.to_le_bytes());
         }
-    }
-
-    /// Write length-encoded string.
-    fn write_lenenc_str(&mut self, s: &str) {
-        self.write_lenenc_int(s.len() as u64);
-        self.buf.extend_from_slice(s.as_bytes());
     }
 
     /// Build one logical packet message with 4-byte headers.
@@ -1032,7 +1018,6 @@ impl MySqlConnectOptions {
 
 /// Initial handshake data from server.
 struct Handshake {
-    protocol_version: u8,
     server_version: String,
     connection_id: u32,
     auth_plugin_data: Vec<u8>,
@@ -1235,7 +1220,6 @@ impl MySqlConnection {
             };
 
         Ok(Handshake {
-            protocol_version,
             server_version,
             connection_id,
             auth_plugin_data,

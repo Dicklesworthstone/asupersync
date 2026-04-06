@@ -379,6 +379,7 @@ impl<M: ConnectionManager> DbPool<M> {
                         return Err(DbPoolError::Full);
                     }
                 }
+                drop(inner);
                 popped
             };
 
@@ -428,6 +429,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     // Roll back total count on failure.
                     let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
+                    drop(inner);
                     return Err(DbPoolError::Connect(e));
                 }
             }
@@ -594,16 +596,13 @@ impl<M: ConnectionManager> DbPool<M> {
             inner.total += 1;
             drop(inner);
 
-            match self.manager.connect() {
-                Ok(conn) => {
-                    self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.return_connection(conn, Instant::now());
-                    created += 1;
-                }
-                Err(_) => {
-                    let mut inner = self.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
-                }
+            if let Ok(conn) = self.manager.connect() {
+                self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                self.return_connection(conn, Instant::now());
+                created += 1;
+            } else {
+                let mut inner = self.inner.lock();
+                inner.total = inner.total.saturating_sub(1);
             }
         }
         created
@@ -619,7 +618,7 @@ impl<M: ConnectionManager> fmt::Debug for DbPool<M> {
             .field("max_size", &self.config.max_size)
             .field("closed", &inner.closed)
             .field("stats", &self.stats)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -1112,7 +1111,7 @@ impl<M: AsyncConnectionManager> fmt::Debug for AsyncDbPool<M> {
             .field("max_size", &self.config.max_size)
             .field("closed", &inner.closed)
             .field("stats", &self.stats)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

@@ -612,7 +612,7 @@ impl<T: ToSql> ToSql for Option<T> {
         self.as_ref().map_or(Ok(IsNull::Yes), |v| v.to_sql(buf))
     }
     fn type_oid(&self) -> u32 {
-        self.as_ref().map_or(0, |v| v.type_oid())
+        self.as_ref().map_or(0, ToSql::type_oid)
     }
     fn format(&self) -> Format {
         match self {
@@ -659,7 +659,7 @@ impl FromSql for i16 {
                 if data.len() < 2 {
                     return Err(PgError::Protocol("int2 requires 2 bytes".into()));
                 }
-                Ok(i16::from_be_bytes([data[0], data[1]]))
+                Ok(Self::from_be_bytes([data[0], data[1]]))
             }
             Format::Text => {
                 let s = std::str::from_utf8(data)
@@ -681,7 +681,7 @@ impl FromSql for i32 {
                 if data.len() < 4 {
                     return Err(PgError::Protocol("int4 requires 4 bytes".into()));
                 }
-                Ok(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+                Ok(Self::from_be_bytes([data[0], data[1], data[2], data[3]]))
             }
             Format::Text => {
                 let s = std::str::from_utf8(data)
@@ -703,7 +703,7 @@ impl FromSql for i64 {
                 if data.len() < 8 {
                     return Err(PgError::Protocol("int8 requires 8 bytes".into()));
                 }
-                Ok(i64::from_be_bytes([
+                Ok(Self::from_be_bytes([
                     data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                 ]))
             }
@@ -727,7 +727,7 @@ impl FromSql for f32 {
                 if data.len() < 4 {
                     return Err(PgError::Protocol("float4 requires 4 bytes".into()));
                 }
-                Ok(f32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+                Ok(Self::from_be_bytes([data[0], data[1], data[2], data[3]]))
             }
             Format::Text => {
                 let s = std::str::from_utf8(data)
@@ -749,7 +749,7 @@ impl FromSql for f64 {
                 if data.len() < 8 {
                     return Err(PgError::Protocol("float8 requires 8 bytes".into()));
                 }
-                Ok(f64::from_be_bytes([
+                Ok(Self::from_be_bytes([
                     data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                 ]))
             }
@@ -780,7 +780,7 @@ impl FromSql for String {
             }
         }
         std::str::from_utf8(data)
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))
     }
     fn accepts(oid: u32) -> bool {
@@ -806,12 +806,13 @@ impl FromSql for Vec<u8> {
             Format::Text => {
                 let s = std::str::from_utf8(data)
                     .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
-                if let Some(hex_str) = s.strip_prefix("\\x") {
-                    hex::decode(hex_str)
-                        .map_err(|e| PgError::Protocol(format!("invalid bytea hex: {e}")))
-                } else {
-                    Ok(data.to_vec())
-                }
+                s.strip_prefix("\\x").map_or_else(
+                    || Ok(data.to_vec()),
+                    |hex_str| {
+                        hex::decode(hex_str)
+                            .map_err(|e| PgError::Protocol(format!("invalid bytea hex: {e}")))
+                    },
+                )
             }
         }
     }
@@ -1732,8 +1733,6 @@ const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
 struct PgConnectionInner {
     /// Transport stream (plain TCP or TLS).
     stream: PgStream,
-    /// Read buffer for incoming messages.
-    read_buf: Vec<u8>,
     /// Server process ID.
     process_id: i32,
     /// Secret key for cancel requests.
@@ -1878,7 +1877,6 @@ impl PgConnection {
         let mut conn = Self {
             inner: PgConnectionInner {
                 stream,
-                read_buf: Vec::with_capacity(8192),
                 process_id: 0,
                 secret_key: 0,
                 parameters: BTreeMap::new(),
@@ -2593,7 +2591,7 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
+        let param_oids: Vec<u32> = params.iter().map(ToSql::type_oid).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
             Ok(p) => p,
             Err(e) => return Outcome::Err(e),
@@ -2681,7 +2679,7 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
+        let param_oids: Vec<u32> = params.iter().map(ToSql::type_oid).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
             Ok(p) => p,
             Err(e) => return Outcome::Err(e),
@@ -3179,27 +3177,31 @@ impl PgConnection {
 
         for i in 0..num_values {
             let len = reader.read_i32()?;
-            if len == -1 {
-                // NULL value
-                values.push(PgValue::Null);
-            } else if len < -1 {
-                return Err(PgError::Protocol(format!(
-                    "negative column length in DataRow: {len}"
-                )));
-            } else {
-                let data = reader.read_bytes(len as usize)?;
-                let col = columns.get(i);
-                let type_oid = col.map_or(oid::TEXT, |c| c.type_oid);
-                let format = col.map_or(0, |c| c.format_code);
+            match len.cmp(&-1) {
+                std::cmp::Ordering::Equal => {
+                    // NULL value
+                    values.push(PgValue::Null);
+                }
+                std::cmp::Ordering::Less => {
+                    return Err(PgError::Protocol(format!(
+                        "negative column length in DataRow: {len}"
+                    )));
+                }
+                std::cmp::Ordering::Greater => {
+                    let data = reader.read_bytes(len as usize)?;
+                    let col = columns.get(i);
+                    let type_oid = col.map_or(oid::TEXT, |c| c.type_oid);
+                    let format = col.map_or(0, |c| c.format_code);
 
-                let value = if format == 0 {
-                    // Text format
-                    self.parse_text_value(data, type_oid)?
-                } else {
-                    // Binary format
-                    self.parse_binary_value(data, type_oid)?
-                };
-                values.push(value);
+                    let value = if format == 0 {
+                        // Text format
+                        self.parse_text_value(data, type_oid)?
+                    } else {
+                        // Binary format
+                        self.parse_binary_value(data, type_oid)?
+                    };
+                    values.push(value);
+                }
             }
         }
 
@@ -3303,25 +3305,25 @@ impl PgConnection {
             oid::BYTEA => PgValue::Bytes(data.to_vec()),
             oid::JSONB => {
                 if data.first() == Some(&1) {
-                    match std::str::from_utf8(&data[1..]) {
-                        Ok(s) => PgValue::Text(s.to_string()),
-                        Err(_) => PgValue::Bytes(data.to_vec()),
-                    }
+                    std::str::from_utf8(&data[1..]).map_or_else(
+                        |_| PgValue::Bytes(data.to_vec()),
+                        |s| PgValue::Text(s.to_string()),
+                    )
                 } else if data.is_empty() {
                     PgValue::Text(String::new())
                 } else {
-                    match std::str::from_utf8(data) {
-                        Ok(s) => PgValue::Text(s.to_string()),
-                        Err(_) => PgValue::Bytes(data.to_vec()),
-                    }
+                    std::str::from_utf8(data).map_or_else(
+                        |_| PgValue::Bytes(data.to_vec()),
+                        |s| PgValue::Text(s.to_string()),
+                    )
                 }
             }
             _ => {
                 // Try to interpret as text
-                match std::str::from_utf8(data) {
-                    Ok(s) => PgValue::Text(s.to_string()),
-                    Err(_) => PgValue::Bytes(data.to_vec()),
-                }
+                std::str::from_utf8(data).map_or_else(
+                    |_| PgValue::Bytes(data.to_vec()),
+                    |s| PgValue::Text(s.to_string()),
+                )
             }
         })
     }
@@ -3546,7 +3548,7 @@ fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Result<Vec
     for &o in param_oids {
         buf.write_i32(o as i32);
     }
-    Ok(buf.build_message(FrontendMessage::Parse as u8)?)
+    buf.build_message(FrontendMessage::Parse as u8)
 }
 
 /// Build a Bind message (Extended Query Protocol).
@@ -3877,7 +3879,6 @@ mod tests {
         PgConnection {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
-                read_buf: Vec::new(),
                 process_id: 0,
                 secret_key: 0,
                 parameters: BTreeMap::new(),
