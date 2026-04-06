@@ -113,7 +113,7 @@ fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> To
 
     // Handle single future case - just await it directly
     if future_count == 1 {
-        let fut = futures.first().unwrap();
+        let fut = futures.first().expect("future_count == 1 guarantees first element exists");
         return quote! {
             (#fut.await,)
         };
@@ -218,7 +218,7 @@ fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -
 
     // Handle single future case - single element array
     if future_count == 1 {
-        let fut = futures.first().unwrap();
+        let fut = futures.first().expect("future_count == 1 guarantees first element exists");
         return quote! {
             [#fut.await]
         };

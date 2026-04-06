@@ -100,6 +100,7 @@ SESSION_*.md
 verify_*.sh
 newfile.txt
 repro_*.rs
+!tests/repro_*.rs
 
 # FastEmbed model caches
 .fastembed_cache/
