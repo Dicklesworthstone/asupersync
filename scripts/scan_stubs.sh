@@ -33,6 +33,20 @@ json_bool() {
     fi
 }
 
+path_is_git_ignored() {
+    local path="$1"
+    local repo_path="$path"
+    if [[ "$repo_path" == "${PROJECT_ROOT}/"* ]]; then
+        repo_path="${repo_path#${PROJECT_ROOT}/}"
+    fi
+
+    if git -C "$PROJECT_ROOT" check-ignore -q -- "$repo_path" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
 record_event() {
     local check_id="$1"
     local status="$2"
@@ -215,12 +229,21 @@ check_stub_allowlist_file_is_valid() {
 }
 
 check_no_stray_binaries_in_src() {
-    local matches
-    matches="$(find "${PROJECT_ROOT}/src" -type f \( -name '*.out' -o -name '*.exe' -o -name '*.o' -o -name '*.so' -o -name '*.dylib' \) -print 2>/dev/null | sort || true)"
+    local matches=""
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        # Stub-resolution closure should be deterministic across worktrees.
+        # Ignore local gitignored scratch outputs, but still fail on real
+        # non-ignored binary artifacts in source-owned trees.
+        if path_is_git_ignored "$path"; then
+            continue
+        fi
+        matches+="${path}"$'\n'
+    done < <(find "${PROJECT_ROOT}/src" -type f \( -name '*.out' -o -name '*.exe' -o -name '*.o' -o -name '*.so' -o -name '*.dylib' \) -print 2>/dev/null | sort || true)
     if [[ -z "$matches" ]]; then
         report_pass "ZR-SCAN-NO-STRAY-BINARIES" "No stray binary artifacts under src/" "src/ tree is source-only"
     else
-        report_fail "ZR-SCAN-NO-STRAY-BINARIES" "Stray binary artifacts under src/" "$matches"
+        report_fail "ZR-SCAN-NO-STRAY-BINARIES" "Stray binary artifacts under src/" "$(printf '%s' "$matches" | sed '/^$/d')"
     fi
 }
 
