@@ -73,7 +73,7 @@ impl std::fmt::Debug for WatchWaiter {
 /// send attempts rather than the ordinary zero-receiver case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError<T> {
-    /// All receivers have been dropped.
+    /// The sender has been dropped or closed.
     Closed(T),
 }
 
@@ -253,8 +253,6 @@ impl<T> Sender<T> {
     /// This atomically updates the value and increments the version number.
     /// All receivers waiting on `changed()` will be woken.
     ///
-    /// # Errors
-    ///
     /// Stores a new latest value for current and future subscribers.
     ///
     /// This preserves the watch cell even when there are no active receivers.
@@ -289,8 +287,6 @@ impl<T> Sender<T> {
     ///
     /// This is more efficient than `borrow()` + modify + `send()` when
     /// the value is large, as it avoids cloning.
-    ///
-    /// # Errors
     ///
     /// Applies an in-place update to the latest value for current and future
     /// subscribers.

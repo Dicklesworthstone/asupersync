@@ -44,8 +44,18 @@ mod tests {
             })
             .collect();
 
-        // Give waiters time to register.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Wait until both waiters are actually queued before releasing.
+        for _ in 0..10_000 {
+            if lock.waiters() == 2 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            lock.waiters(),
+            2,
+            "both waiters should be queued before release"
+        );
 
         // Release the lock so both waiters can proceed.
         drop(guard);

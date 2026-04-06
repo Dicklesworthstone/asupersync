@@ -46,7 +46,7 @@ impl std::fmt::Display for BroadcastStreamRecvError {
 
 impl std::error::Error for BroadcastStreamRecvError {}
 
-impl<T: Clone + Send> Stream for BroadcastStream<T> {
+impl<T: Clone> Stream for BroadcastStream<T> {
     type Item = Result<T, BroadcastStreamRecvError>;
 
     fn poll_next(mut self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -85,6 +85,7 @@ impl<T> Drop for BroadcastStream<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
@@ -224,6 +225,30 @@ mod tests {
         crate::assert_with_log!(second_ready, "second poll has item", true, second_ready);
 
         crate::test_complete!("broadcast_stream_pending_poll_keeps_waker_registration");
+    }
+
+    #[test]
+    fn broadcast_stream_accepts_non_send_items() {
+        init_test("broadcast_stream_accepts_non_send_items");
+        let cx_send: Cx = Cx::for_testing();
+        let cx_recv: Cx = Cx::for_testing();
+        let (tx, rx) = broadcast::channel::<Rc<String>>(4);
+        let payload = Rc::new(String::from("local-only"));
+        tx.send(&cx_send, Rc::clone(&payload))
+            .expect("send local payload");
+
+        let mut stream = BroadcastStream::new(cx_recv, rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let got_local = matches!(
+            poll,
+            Poll::Ready(Some(Ok(value))) if Rc::ptr_eq(&value, &payload)
+        );
+        crate::assert_with_log!(got_local, "non-Send Rc payload is yielded", true, got_local);
+
+        crate::test_complete!("broadcast_stream_accepts_non_send_items");
     }
 
     /// Invariant: BroadcastStreamRecvError::Lagged preserves the count and implements Display/Error.

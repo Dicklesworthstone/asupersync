@@ -38,7 +38,7 @@ impl<T: Clone> WatchStream<T> {
     }
 }
 
-impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
+impl<T: Clone> Stream for WatchStream<T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -74,6 +74,7 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
@@ -318,5 +319,30 @@ mod tests {
             format!("{second:?}")
         );
         crate::test_complete!("watch_stream_pending_poll_retains_waiter_registration");
+    }
+
+    #[test]
+    fn watch_stream_accepts_non_send_non_sync_items() {
+        init_test("watch_stream_accepts_non_send_non_sync_items");
+        let cx: Cx = Cx::for_testing();
+        let payload = Rc::new(String::from("local-only"));
+        let (_tx, rx) = watch::channel(Rc::clone(&payload));
+        let mut stream = WatchStream::new(cx, rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let got_initial = matches!(
+            poll,
+            Poll::Ready(Some(value)) if Rc::ptr_eq(&value, &payload)
+        );
+        crate::assert_with_log!(
+            got_initial,
+            "non-Send/non-Sync Rc payload is yielded",
+            true,
+            got_initial
+        );
+
+        crate::test_complete!("watch_stream_accepts_non_send_non_sync_items");
     }
 }

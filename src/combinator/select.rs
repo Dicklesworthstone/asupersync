@@ -292,7 +292,7 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
             let Some(mut all) = this.futures.take() else {
                 return Poll::Ready(Err(SelectAllDrainError::PolledAfterCompletion));
             };
-            all.remove(idx);
+            all.swap_remove(idx);
             return Poll::Ready(Ok(SelectAllDrainResult {
                 value,
                 winner_index: idx,

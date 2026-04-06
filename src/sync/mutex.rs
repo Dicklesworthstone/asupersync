@@ -230,18 +230,24 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         // Check cancellation
         if let Err(_e) = self.cx.checkpoint() {
             self.completed = true;
-            if let Some(waiter_id) = self.waiter_id.take() {
+            if let Some(waiter_id) = self.waiter_id {
                 let waker_to_wake = {
                     let mut state = self.mutex.state.lock();
-                    if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                        state.waiters.remove(pos);
-                    }
-                    if !state.locked {
-                        state.waiters.front().map(|next| next.waker.clone())
+                    let pos = state.waiters.iter().position(|w| w.id == waiter_id);
+                    let next_waker = if !state.locked {
+                        match pos {
+                            Some(0) => state.waiters.get(1).map(|w| w.waker.clone()),
+                            _ => state.waiters.front().map(|w| w.waker.clone()),
+                        }
                     } else {
                         None
+                    };
+                    if let Some(p) = pos {
+                        state.waiters.remove(p);
                     }
+                    next_waker
                 };
+                self.waiter_id = None;
                 if let Some(waker) = waker_to_wake {
                     waker.wake();
                 }
@@ -253,18 +259,24 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
         if self.mutex.is_poisoned() {
             self.completed = true;
-            let waker_to_wake = if let Some(waiter_id) = self.waiter_id.take() {
-                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                    state.waiters.remove(pos);
-                }
-                if !state.locked {
-                    state.waiters.front().map(|next| next.waker.clone())
+            let waker_to_wake = if let Some(waiter_id) = self.waiter_id {
+                let pos = state.waiters.iter().position(|w| w.id == waiter_id);
+                let next_waker = if !state.locked {
+                    match pos {
+                        Some(0) => state.waiters.get(1).map(|w| w.waker.clone()),
+                        _ => state.waiters.front().map(|w| w.waker.clone()),
+                    }
                 } else {
                     None
+                };
+                if let Some(p) = pos {
+                    state.waiters.remove(p);
                 }
+                next_waker
             } else {
                 None
             };
+            self.waiter_id = None;
             drop(state);
             if let Some(waker) = waker_to_wake {
                 waker.wake();
@@ -335,21 +347,28 @@ impl<T> Drop for LockFuture<'_, '_, T> {
             let waker_to_wake = {
                 let mut state = self.mutex.state.lock();
 
-                // Try to remove from queue
-                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                    state.waiters.remove(pos);
-                }
+                let pos = state.waiters.iter().position(|w| w.id == waiter_id);
 
                 // If the lock is free, pass the baton to the next waiter.
                 // This is safe even if we were not the designated heir, as spurious
                 // wakeups are harmless. We do this unconditionally (without checking
                 // if we were in the queue) because a chain of dropped waiters might
                 // include some that were still in the queue when they dropped.
-                if state.locked {
+                let next_waker = if state.locked {
                     None
                 } else {
-                    state.waiters.front().map(|next| next.waker.clone())
+                    match pos {
+                        Some(0) => state.waiters.get(1).map(|w| w.waker.clone()),
+                        _ => state.waiters.front().map(|w| w.waker.clone()),
+                    }
+                };
+
+                // Try to remove from queue
+                if let Some(p) = pos {
+                    state.waiters.remove(p);
                 }
+
+                next_waker
             };
 
             if let Some(waker) = waker_to_wake {
