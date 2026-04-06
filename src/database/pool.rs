@@ -970,53 +970,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
-    /// Try to acquire without blocking. Returns `None` if no connection available.
-    #[must_use]
-    pub fn try_get(&self) -> Option<AsyncPooledConnection<'_, M>> {
-        let candidate = {
-            let mut inner = self.inner.lock();
-            if inner.closed {
-                return None;
-            }
-            inner.idle.pop_front()
-        };
 
-        if let Some(idle) = candidate {
-            let is_expired = idle.is_expired(&self.config);
-            let is_stale = idle.is_idle_too_long(&self.config);
-
-            if is_expired || is_stale {
-                {
-                    let mut inner = self.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
-                }
-                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                self.manager.disconnect(idle.conn);
-                return None;
-            }
-
-            if self.config.validate_on_checkout {
-                {
-                    let mut inner = self.inner.lock();
-                    if inner.closed {
-                        // Pool was closed while we held the connection outside
-                        // the lock. Disconnect instead of orphaning it.
-                        inner.total = inner.total.saturating_sub(1);
-                        drop(inner);
-                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                        self.manager.disconnect(idle.conn);
-                    } else {
-                        inner.idle.push_front(idle);
-                    }
-                }
-                return None;
-            }
-
-            return self.finish_async_checkout(idle.conn, idle.created_at).ok();
-        }
-
-        None
-    }
 
     fn finish_async_checkout(
         &self,
