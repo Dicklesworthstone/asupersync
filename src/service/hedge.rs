@@ -692,10 +692,16 @@ mod tests {
         Arc::new(NoopWaker).into()
     }
 
-    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    std::thread_local! {
+        static TEST_NOW: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        Time::from_nanos(TEST_NOW.with(|t| t.get()))
+    }
+
+    fn set_test_time(t: u64) {
+        TEST_NOW.with(|now| now.set(t));
     }
 
     #[derive(Debug)]
