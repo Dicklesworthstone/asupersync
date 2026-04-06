@@ -1036,7 +1036,10 @@ mod tests {
         assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
 
         let mut future = hedge.call(7);
-        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        let res = Pin::new(&mut future).poll(&mut cx);
+        if !res.is_pending() {
+            panic!("Expected pending, got {:?}", res);
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         TEST_NOW.store(5, Ordering::SeqCst);

@@ -660,7 +660,7 @@ impl SharedLabHandle {
             let result = guard
                 .handle
                 .as_mut()
-                .unwrap()
+                .expect("handle must exist")
                 .join(&cx)
                 .await
                 .unwrap_or_default();

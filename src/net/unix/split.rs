@@ -283,7 +283,7 @@ impl UnixStreamInner {
             if let Some(reg) = registration.as_mut() {
                 let combined_interest =
                     registration_interest(read_waker.is_some(), write_waker.is_some(), interest);
-                let waker = cached_combined_waker.as_ref().unwrap();
+                let waker = cached_combined_waker.as_ref().expect("combined waker initialized");
                 // Single lock in io_driver: re-arm interest + refresh waker.
                 match reg.rearm(combined_interest, waker) {
                     Ok(true) => early_return = Some(Ok(())),

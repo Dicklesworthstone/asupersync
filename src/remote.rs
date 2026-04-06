@@ -626,11 +626,7 @@ impl Drop for RemoteHandle {
             // must remain runtime-tracked until the distributed lifecycle
             // reaches a terminal state. Clearing it here would orphan the
             // remote task from origin-side quiescence accounting.
-            self.abort_with(
-                self.origin_node.clone(),
-                self.sender_clock.tick(),
-                CancelReason::user("remote handle dropped"),
-            );
+            self.request_cancel(CancelReason::user("remote handle dropped"));
         } else if self.receiver.is_ready() || self.receiver.is_closed() || self.runtime.is_none() {
             self.clear_runtime_state();
         }
@@ -706,6 +702,11 @@ impl RemoteHandle {
         );
 
         let _ = runtime.send_message(&self.node, envelope);
+    }
+
+    #[inline]
+    fn request_cancel(&self, reason: CancelReason) {
+        self.abort_with(self.origin_node.clone(), self.sender_clock.tick(), reason);
     }
 
     #[inline]
@@ -840,7 +841,10 @@ impl RemoteHandle {
         }
 
         if self.should_request_cancel() {
-            self.abort(cx);
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("remote handle close"));
+            self.request_cancel(reason);
         }
 
         match self.receiver.recv_uninterruptible().await {
@@ -926,7 +930,7 @@ impl RemoteHandle {
         let reason = cx
             .cancel_reason()
             .unwrap_or_else(|| CancelReason::user("remote handle abort"));
-        self.abort_with(self.origin_node.clone(), self.sender_clock.tick(), reason);
+        self.request_cancel(reason);
     }
 }
 
@@ -3299,6 +3303,72 @@ mod tests {
             }
             other => unreachable!("expected CancelRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn remote_handle_close_with_plain_context_still_requests_cancel_when_runtime_attached() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let spawn_cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let spawn_cx: Cx = Cx::for_testing_with_remote(spawn_cap);
+        let close_cx: Cx = Cx::for_testing();
+        let expected_reason = CancelReason::deadline();
+        close_cx.set_cancel_reason(expected_reason.clone());
+
+        let mut handle = spawn_remote(
+            &spawn_cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let outcome = {
+            let mut close = std::pin::pin!(handle.close(&close_cx));
+
+            assert!(matches!(
+                std::future::Future::poll(close.as_mut(), &mut task_cx),
+                Poll::Pending
+            ));
+
+            let sent = runtime.sent_messages();
+            assert_eq!(sent.len(), 2);
+            match &sent[1].1.payload {
+                RemoteMessage::CancelRequest(cancel) => {
+                    assert_eq!(cancel.remote_task_id, remote_task_id);
+                    assert_eq!(cancel.origin_node.as_str(), "origin-a");
+                    assert_eq!(cancel.reason, expected_reason);
+                }
+                other => unreachable!("expected CancelRequest, got {other:?}"),
+            }
+
+            runtime.deliver(
+                &spawn_cx,
+                remote_task_id,
+                Ok(RemoteOutcome::Cancelled(CancelReason::user(
+                    "closed remotely",
+                ))),
+            );
+
+            match std::future::Future::poll(close.as_mut(), &mut task_cx) {
+                Poll::Ready(outcome) => outcome,
+                Poll::Pending => panic!("close should drain terminal result"),
+            }
+        };
+
+        assert!(matches!(
+            outcome,
+            Ok(RemoteOutcome::Cancelled(reason)) if reason == CancelReason::user("closed remotely")
+        ));
+        assert_eq!(handle.state(), RemoteTaskState::Cancelled);
+        assert!(runtime.observe_task_state(remote_task_id).is_none());
     }
 
     #[test]
