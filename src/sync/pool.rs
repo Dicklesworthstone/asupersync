@@ -1983,9 +1983,13 @@ mod pool_metrics {
     #[derive(Clone)]
     pub struct PoolMetrics {
         // Gauges (backed by shared state)
+        #[allow(dead_code)]
         size: ObservableGauge<u64>,
+        #[allow(dead_code)]
         active: ObservableGauge<u64>,
+        #[allow(dead_code)]
         idle: ObservableGauge<u64>,
+        #[allow(dead_code)]
         pending: ObservableGauge<u64>,
 
         // Counters

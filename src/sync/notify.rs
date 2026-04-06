@@ -416,15 +416,17 @@ impl Notified<'_> {
                 new_gen != self.initial_generation
             };
 
-            if is_gen_changed {
-                waiters.remove(index);
-                self.waiter_index = None;
-                drop(waiters);
-                return self.mark_done();
-            }
-
             if index < waiters.entries.len() {
-                if waiters.entries[index].notified {
+                let entry_notified = waiters.entries[index].notified;
+
+                if is_gen_changed {
+                    waiters.remove(index);
+                    self.waiter_index = None;
+                    drop(waiters);
+                    return self.mark_done();
+                }
+
+                if entry_notified {
                     waiters.remove(index);
                     drop(waiters);
                     self.waiter_index = None;
@@ -436,22 +438,13 @@ impl Notified<'_> {
                     Some(existing) if existing.will_wake(cx.waker()) => {}
                     Some(existing) => existing.clone_from(cx.waker()),
                     None => {
-                        // This state is unreachable. `waker` is only set to `None` in two cases:
-                        // 1. By `notify_one`/`notify_waiters`, which also set `notified = true`.
-                        //    If `notified` were true, we would have returned `Ready` above.
-                        // 2. By `WaitSlab::remove()`. But `remove()` is only called when we
-                        //    clear `self.waiter_index`, so we couldn't be here with this index.
                         unreachable!(
                             "waker is never None while notified is false for a live Notified future"
                         );
                     }
                 }
             } else {
-                // Entry was popped by tail shrinking. This only happens if our
-                // waker was taken by notify_one/notify_waiters, so we're notified.
-                drop(waiters);
-                self.waiter_index = None;
-                return self.mark_done();
+                unreachable!("waiter entry missing before removal");
             }
         } else if gen_changed {
             return self.mark_done();
