@@ -187,7 +187,7 @@ pub enum ClientIo {
     Tls(TlsStream<TcpStream>),
     /// TLS over an HTTP CONNECT tunnel.
     #[cfg(feature = "tls")]
-    TlsTunnel(Box<TlsStream<HttpConnectTunnel<ClientIo>>>),
+    TlsTunnel(Box<TlsStream<HttpConnectTunnel<Self>>>),
 }
 
 impl AsyncRead for ClientIo {
@@ -844,8 +844,7 @@ impl HttpClient {
     > {
         Box::pin(async move {
             check_cx(cx)?;
-            let resp = self
-                .execute_single(cx, &method, &parsed, &extra_headers, &body)
+            let resp = Box::pin(self.execute_single(cx, &method, &parsed, &extra_headers, &body))
                 .await?;
 
             // Check for redirect

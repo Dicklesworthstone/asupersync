@@ -798,9 +798,9 @@ mod tests {
         let mut fut = output.write_vectored(bufs);
         let mut fut = Pin::new(&mut fut);
         let n = poll_ready(&mut fut).unwrap();
-        // Default implementation writes first non-empty buffer
-        crate::assert_with_log!(n == 6, "bytes written", 6, n);
-        crate::assert_with_log!(output == b"hello ", "output", b"hello ", output);
+        // Vec's write_vectored writes all buffers.
+        crate::assert_with_log!(n == 11, "bytes written", 11, n);
+        crate::assert_with_log!(output == b"hello world", "output", b"hello world", output);
         crate::test_complete!("write_vectored_ok");
     }
 

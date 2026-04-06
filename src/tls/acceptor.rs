@@ -115,7 +115,7 @@ impl TlsAcceptor {
             let negotiated = stream.alpn_protocol().map(<[u8]>::to_vec);
             let ok = negotiated
                 .as_deref()
-                .map_or(false, |p| expected.iter().any(|e| e.as_slice() == p));
+                .is_some_and(|p| expected.iter().any(|e| e.as_slice() == p));
             if !ok {
                 return Err(TlsError::AlpnNegotiationFailed {
                     expected,

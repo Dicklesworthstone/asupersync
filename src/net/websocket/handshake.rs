@@ -84,18 +84,26 @@ fn header_has_token(value: &str, token: &str) -> bool {
 }
 
 fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError> {
-    data.windows(4).position(|w| w == b"\r\n\r\n").map_or_else(
+    let crlf_pos = data
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4);
+    let lf_pos = data.windows(2).position(|w| w == b"\n\n").map(|p| p + 2);
+
+    let split_at = match (crlf_pos, lf_pos) {
+        (Some(c), Some(l)) => Some(std::cmp::min(c, l)),
+        (Some(c), None) => Some(c),
+        (None, Some(l)) => Some(l),
+        (None, None) => None,
+    };
+
+    split_at.map_or_else(
         || {
-            data.windows(2).position(|w| w == b"\n\n").map_or_else(
-                || {
-                    Err(HandshakeError::InvalidRequest(
-                        "incomplete HTTP headers".into(),
-                    ))
-                },
-                |pos| Ok((&data[..pos + 2], &data[pos + 2..])),
-            )
+            Err(HandshakeError::InvalidRequest(
+                "incomplete HTTP headers".into(),
+            ))
         },
-        |pos| Ok((&data[..pos + 4], &data[pos + 4..])),
+        |pos| Ok((&data[..pos], &data[pos..])),
     )
 }
 
@@ -142,24 +150,26 @@ impl WsUrl {
 
         // Parse host and port
         let (host, port) = if host_port.starts_with('[') {
-            if let Some(bracket_end) = host_port.find(']') {
-                // IPv6: [::1]:8080
-                let host = &host_port[1..bracket_end];
-                let port = if host_port.len() > bracket_end + 1
-                    && host_port.as_bytes()[bracket_end + 1] == b':'
-                {
-                    host_port[bracket_end + 2..]
-                        .parse()
-                        .map_err(|_| HandshakeError::InvalidUrl("invalid port".into()))?
-                } else {
-                    default_port
-                };
-                (host.to_string(), port)
-            } else {
-                return Err(HandshakeError::InvalidUrl(
-                    "missing closing bracket for IPv6 address".into(),
-                ));
-            }
+            host_port.find(']').map_or_else(
+                || {
+                    Err(HandshakeError::InvalidUrl(
+                        "missing closing bracket for IPv6 address".into(),
+                    ))
+                },
+                |bracket_end| {
+                    let host = &host_port[1..bracket_end];
+                    let port = if host_port.len() > bracket_end + 1
+                        && host_port.as_bytes()[bracket_end + 1] == b':'
+                    {
+                        host_port[bracket_end + 2..]
+                            .parse()
+                            .map_err(|_| HandshakeError::InvalidUrl("invalid port".into()))?
+                    } else {
+                        default_port
+                    };
+                    Ok((host.to_string(), port))
+                },
+            )?
         } else if host_port.matches(':').count() > 1 {
             // Unbracketed IPv6 address - cannot safely have a port (ambiguous)
             (host_port.to_string(), default_port)
@@ -1315,6 +1325,28 @@ mod tests {
         .expect_err("missing blank line must be treated as an incomplete response");
 
         assert!(matches!(err, HandshakeError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn test_split_http_header_block_prefers_earliest_complete_terminator() {
+        let data = b"GET /chat HTTP/1.1\n\
+Host: example.com\n\
+Upgrade: websocket\n\
+Connection: Upgrade\n\
+\n\
+body-prefix\r\n\r\nstill-body";
+
+        let (header, trailing) = split_http_header_block(data).unwrap();
+
+        assert_eq!(
+            header,
+            b"GET /chat HTTP/1.1\n\
+Host: example.com\n\
+Upgrade: websocket\n\
+Connection: Upgrade\n\
+\n"
+        );
+        assert_eq!(trailing, b"body-prefix\r\n\r\nstill-body");
     }
 
     #[test]

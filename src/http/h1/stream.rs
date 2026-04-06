@@ -511,6 +511,9 @@ impl ChunkedEncoder {
     }
 
     /// Encodes a data chunk into the chunked format.
+    ///
+    /// Empty data is a no-op — the zero-length chunk is reserved as the
+    /// stream terminator and must only be emitted by [`encode_final`].
     #[must_use]
     pub fn encode_chunk(data: &[u8]) -> BytesMut {
         let mut buf = BytesMut::with_capacity(data.len() + 32);
@@ -519,33 +522,28 @@ impl ChunkedEncoder {
     }
 
     fn encode_chunk_into(data: &[u8], dst: &mut BytesMut) {
+        if data.is_empty() {
+            return;
+        }
         // Write hex size directly into a stack buffer to avoid a heap allocation per chunk.
         let mut buf = [0u8; 18]; // max u64 hex = 16 digits + "\r\n"
         let n = {
-            let len = data.len();
-            if len == 0 {
-                buf[0] = b'0';
-                buf[1] = b'\r';
-                buf[2] = b'\n';
-                3
-            } else {
-                let mut v = len;
-                let mut pos = 0;
-                while v > 0 {
-                    let digit = (v & 0xF) as u8;
-                    buf[pos] = if digit < 10 {
-                        b'0' + digit
-                    } else {
-                        b'A' + digit - 10
-                    };
-                    pos += 1;
-                    v >>= 4;
-                }
-                buf[..pos].reverse();
-                buf[pos] = b'\r';
-                buf[pos + 1] = b'\n';
-                pos + 2
+            let mut v = data.len();
+            let mut pos = 0;
+            while v > 0 {
+                let digit = (v & 0xF) as u8;
+                buf[pos] = if digit < 10 {
+                    b'0' + digit
+                } else {
+                    b'A' + digit - 10
+                };
+                pos += 1;
+                v >>= 4;
             }
+            buf[..pos].reverse();
+            buf[pos] = b'\r';
+            buf[pos + 1] = b'\n';
+            pos + 2
         };
         dst.extend_from_slice(&buf[..n]);
         dst.extend_from_slice(data);
@@ -568,6 +566,14 @@ impl ChunkedEncoder {
         dst.extend_from_slice(b"0\r\n");
         if let Some(trailers) = trailers {
             for (name, value) in trailers.iter() {
+                let Ok(value_str) = value.to_str() else {
+                    continue;
+                };
+                // Match the non-streaming HTTP/1 encoder: malformed trailer
+                // fields must not reach the wire.
+                if validate_header_field(name.as_str(), value_str).is_err() {
+                    continue;
+                }
                 dst.extend_from_slice(name.as_str().as_bytes());
                 dst.extend_from_slice(b": ");
                 dst.extend_from_slice(value.as_bytes());
@@ -1233,6 +1239,27 @@ mod tests {
         let final_chunk = encoder.encode_final(Some(&trailers));
         let expected = b"0\r\nx-checksum: abc123\r\n\r\n";
         assert_eq!(final_chunk.as_ref(), expected);
+    }
+
+    #[test]
+    fn chunked_encoder_skips_invalid_trailer_fields() {
+        let mut encoder = ChunkedEncoder::new();
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            crate::http::body::HeaderName::from_static("x-safe"),
+            crate::http::body::HeaderValue::from_static("ok"),
+        );
+        trailers.insert(
+            crate::http::body::HeaderName::from_string("x-bad\r\ninjected: nope"),
+            crate::http::body::HeaderValue::from_static("bad"),
+        );
+        trailers.insert(
+            crate::http::body::HeaderName::from_static("x-bad-value"),
+            crate::http::body::HeaderValue::from_bytes(b"oops\r\nInjected: nope"),
+        );
+
+        let final_chunk = encoder.encode_final(Some(&trailers));
+        assert_eq!(final_chunk.as_ref(), b"0\r\nx-safe: ok\r\n\r\n");
     }
 
     #[test]

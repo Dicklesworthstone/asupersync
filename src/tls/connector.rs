@@ -106,7 +106,7 @@ impl TlsConnector {
             let negotiated = stream.alpn_protocol().map(<[u8]>::to_vec);
             let ok = negotiated
                 .as_deref()
-                .map_or(false, |p| expected.iter().any(|e| e.as_slice() == p));
+                .is_some_and(|p| expected.iter().any(|e| e.as_slice() == p));
             if !ok {
                 return Err(TlsError::AlpnNegotiationFailed {
                     expected,
@@ -263,12 +263,13 @@ impl TlsConnectorBuilder {
         if let Ok(cert_file) = cert_file {
             let path = std::path::Path::new(&cert_file);
             if path.exists() {
-                let _added = self.load_pem_file(path);
+                #[allow(unused_variables)]
+                let added = self.load_pem_file(path);
                 #[cfg(feature = "tracing-integration")]
-                if _added > 0 {
+                if added > 0 {
                     tracing::debug!(
                         path = %cert_file,
-                        count = _added,
+                        count = added,
                         "Loaded CA certificates from SSL_CERT_FILE"
                     );
                 }
@@ -278,14 +279,15 @@ impl TlsConnectorBuilder {
         if let Ok(cert_dir) = std::env::var("SSL_CERT_DIR") {
             let dir = std::path::Path::new(&cert_dir);
             if dir.is_dir() {
-                let mut _added = 0usize;
+                #[allow(unused_mut, unused_variables)]
+                let mut added = 0usize;
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.filter_map(Result::ok) {
                         let path = entry.path();
                         if path.is_file() {
                             if let Some(ext) = path.extension() {
                                 if ext == "pem" || ext == "crt" || ext == "cer" {
-                                    _added += self.load_pem_file(&path);
+                                    added += self.load_pem_file(&path);
                                 }
                             }
                         } else if path.is_dir() {
@@ -294,10 +296,10 @@ impl TlsConnectorBuilder {
                     }
                 }
                 #[cfg(feature = "tracing-integration")]
-                if _added > 0 {
+                if added > 0 {
                     tracing::debug!(
                         path = %cert_dir,
-                        count = _added,
+                        count = added,
                         "Loaded CA certificates from SSL_CERT_DIR"
                     );
                 }

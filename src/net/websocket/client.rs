@@ -837,13 +837,18 @@ async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<(V
         buf.extend_from_slice(&temp[..n]);
 
         // Split at the header boundary so trailing bytes (part of the first
-        // WebSocket frame) are not lost.
-        if let Some(split_at) = buf
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .map(|pos| pos + 4)
-            .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|pos| pos + 2))
-        {
+        // WebSocket frame) are not lost. We must find the *earliest* terminator.
+        let crlf_pos = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+        let lf_pos = buf.windows(2).position(|w| w == b"\n\n").map(|p| p + 2);
+
+        let split_at = match (crlf_pos, lf_pos) {
+            (Some(c), Some(l)) => Some(std::cmp::min(c, l)),
+            (Some(c), None) => Some(c),
+            (None, Some(l)) => Some(l),
+            (None, None) => None,
+        };
+
+        if let Some(split_at) = split_at {
             let trailing = buf[split_at..].to_vec();
             buf.truncate(split_at);
             return Ok((buf, trailing));

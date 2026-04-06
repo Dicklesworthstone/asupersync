@@ -41,6 +41,7 @@
 //! ```
 
 use std::convert::Infallible;
+use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -330,6 +331,15 @@ pub struct CircuitBreakerMiddleware<H> {
     time_getter: fn() -> Time,
 }
 
+#[derive(Debug)]
+struct HandlerServerError(Response);
+
+impl fmt::Display for HandlerServerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "server error: {}", self.0.status.as_u16())
+    }
+}
+
 impl<H: Handler> CircuitBreakerMiddleware<H> {
     /// Wrap a handler with a circuit breaker.
     #[must_use]
@@ -389,7 +399,7 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
         let result = self.breaker.call(now, || {
             let resp = self.inner.call(req);
             if resp.status.is_server_error() {
-                Err(format!("server error: {}", resp.status.as_u16()))
+                Err(HandlerServerError(resp))
             } else {
                 Ok(resp)
             }
@@ -409,10 +419,10 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
                     b"Service Unavailable: circuit breaker half-open, max probes active".to_vec(),
                 )
             }
-            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Inner(err_msg)) => {
-                // The handler produced a 5xx response; the circuit breaker recorded
-                // it as a failure. Reconstruct a 500 response.
-                Response::new(StatusCode::INTERNAL_SERVER_ERROR, err_msg.into_bytes())
+            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Inner(err)) => {
+                // Preserve the original server-error response while still counting
+                // it as a breaker failure.
+                err.0
             }
         }
     }
@@ -1782,7 +1792,23 @@ mod tests {
         let mw = CircuitBreakerMiddleware::new(FnHandler::new(error_handler), policy);
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(String::from_utf8_lossy(&resp.body).contains("server error"));
+        assert_eq!(resp.body.as_ref(), b"fail");
+    }
+
+    #[test]
+    fn circuit_breaker_preserves_original_server_error_status_and_body() {
+        fn bad_gateway_handler() -> Response {
+            Response::new(StatusCode::BAD_GATEWAY, b"upstream gateway failed".to_vec())
+        }
+
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 10,
+            ..Default::default()
+        };
+        let mw = CircuitBreakerMiddleware::new(FnHandler::new(bad_gateway_handler), policy);
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.body.as_ref(), b"upstream gateway failed");
     }
 
     #[test]
