@@ -872,26 +872,49 @@ impl<T> RequestSink<T> {
     where
         T: Send + 'static,
     {
+        if self.on_send.is_none() {
+            let closed = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let closed = state.closed;
+                if !closed {
+                    state.last_message = Some(Box::new(message));
+                    state.sent_count = state.sent_count.saturating_add(1);
+                }
+                drop(state);
+                closed
+            };
+            if closed {
+                return Err(Status::failed_precondition(
+                    "cannot send after request sink is closed",
+                ));
+            }
+            return Ok(());
+        }
+
+        let closed = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closed
+        };
+        if closed {
+            return Err(Status::failed_precondition(
+                "cannot send after request sink is closed",
+            ));
+        }
+        if let Some(hook) = self.on_send.as_mut() {
+            hook(message)?;
+        }
         {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.closed {
-                return Err(Status::failed_precondition(
-                    "cannot send after request sink is closed",
-                ));
-            }
             state.sent_count = state.sent_count.saturating_add(1);
-            if self.on_send.is_none() {
-                state.last_message = Some(Box::new(message));
-                drop(state);
-                return Ok(());
-            }
-        }
-
-        if let Some(hook) = self.on_send.as_mut() {
-            hook(message)?;
         }
         Ok(())
     }
@@ -1673,6 +1696,43 @@ mod tests {
             close_count.load(Ordering::SeqCst),
             1,
             "close hook should run exactly once"
+        );
+    }
+
+    #[test]
+    fn request_sink_failed_send_hook_does_not_increment_sent_count() {
+        let mut sink = RequestSink::with_hooks(
+            Some(Box::new(|_: u32| {
+                Err(Status::internal("send hook rejected the message"))
+            })),
+            None,
+        );
+
+        let error = futures_lite::future::block_on(sink.send(7))
+            .expect_err("failing send hook must reject the message");
+        assert_eq!(error.code(), crate::grpc::Code::Internal);
+
+        {
+            let state = lock_unpoisoned(&sink.state);
+            assert_eq!(
+                state.sent_count, 0,
+                "failed sends must not be counted as successfully sent",
+            );
+            drop(state);
+        }
+    }
+
+    #[test]
+    fn request_sink_successful_send_hook_increments_sent_count() {
+        let mut sink = RequestSink::with_hooks(Some(Box::new(|_: u32| Ok(()))), None);
+
+        futures_lite::future::block_on(sink.send(7))
+            .expect("successful send hook should accept the message");
+
+        assert_eq!(
+            lock_unpoisoned(&sink.state).sent_count,
+            1,
+            "successful sends must be counted"
         );
     }
 
