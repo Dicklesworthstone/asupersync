@@ -113,6 +113,10 @@ where
         let response_future = std::future::poll_fn(|task_cx| {
             let _cx_guard = asupersync::Cx::set_current(Some(cx.clone()));
 
+            if cx.is_cancel_requested() {
+                return Poll::Ready(Err(BridgeError::Cancelled));
+            }
+
             match svc.poll_ready(task_cx) {
                 Poll::Ready(Ok(())) => {
                     // SAFETY: request is Some until first Ready, and poll_fn

@@ -249,13 +249,12 @@ impl<A: Actor> ActorHandle<A> {
 
     /// Signals the actor to stop gracefully.
     ///
-    /// Sets the actor state to `Stopping` and requests cancellation so the
-    /// actor loop will exit after the current message finishes processing.
-    /// The actor will call `on_stop` before returning.
+    /// Sets the actor state to `Stopping`. The actor will continue processing
+    /// any currently buffered messages in its mailbox. Once the mailbox is
+    /// empty, the actor loop will exit and call `on_stop` before returning.
     ///
-    /// This is identical to [`abort`](Self::abort) — both request cancellation
-    /// and set the Stopping state. A future improvement could differentiate
-    /// them by having `stop()` drain buffered messages first.
+    /// Unlike [`abort`](Self::abort), this does NOT immediately request
+    /// cancellation, allowing the actor to drain pending work.
     pub fn stop(&self) {
         self.state.store(ActorState::Stopping);
         self.sender.wake_receiver();

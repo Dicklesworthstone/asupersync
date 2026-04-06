@@ -885,7 +885,7 @@ impl<S: GenServer> GenServerHandle<S> {
         }
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let reply_permit = reply_tx.reserve(cx);
+        let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
         let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
@@ -899,7 +899,7 @@ impl<S: GenServer> GenServerHandle<S> {
                 mpsc::SendError::Disconnected(v) | mpsc::SendError::Full(v) => (v, false),
             };
             if let Envelope::Call { reply_permit, .. } = envelope {
-                let _aborted = reply_permit.abort();
+                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
             }
             if was_cancelled {
                 cx.trace("gen_server::call_send_cancelled");
@@ -1270,7 +1270,7 @@ impl<S: GenServer> GenServerRef<S> {
         }
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let reply_permit = reply_tx.reserve(cx);
+        let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
         let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
@@ -1282,7 +1282,7 @@ impl<S: GenServer> GenServerRef<S> {
                 mpsc::SendError::Disconnected(v) | mpsc::SendError::Full(v) => (v, false),
             };
             if let Envelope::Call { reply_permit, .. } = envelope {
-                let _aborted = reply_permit.abort();
+                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
             }
             if was_cancelled {
                 cx.trace("gen_server::call_send_cancelled");
@@ -1560,7 +1560,7 @@ async fn run_gen_server_loop<S: GenServer>(
                 request: _,
                 reply_permit,
             } => {
-                let _aborted = reply_permit.abort();
+                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
                 cx.trace("gen_server::drain_abort_call");
             }
             Envelope::Cast { msg } => {
