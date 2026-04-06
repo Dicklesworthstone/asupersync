@@ -354,6 +354,47 @@ fn attached_remote_handle_close_requests_cancel_and_drains_terminal_result() {
 }
 
 #[test]
+fn attached_remote_handle_close_after_completion_drains_result_without_cancel() {
+    let seed = 4305;
+    let conditions = NetworkConditions::local();
+    init_test(
+        "attached_remote_handle_close_after_completion_drains_result_without_cancel",
+        seed,
+        &conditions,
+    );
+
+    let (mut h, origin, worker) = harness_two(seed, conditions);
+    let cap = h.node(&origin).expect("origin node").create_cap();
+    let cx = Cx::for_testing().with_remote_cap(cap);
+    let mut handle = spawn_remote(
+        &cx,
+        worker.clone(),
+        ComputationName::new("test-computation"),
+        asupersync::remote::RemoteInput::empty(),
+    )
+    .expect("spawn_remote");
+
+    h.run_for(Duration::from_millis(200));
+    assert_eq!(handle.state(), RemoteTaskState::Completed);
+
+    let outcome = futures_lite::future::block_on(handle.close(&cx)).expect("close outcome");
+    assert!(matches!(
+        outcome,
+        asupersync::remote::RemoteOutcome::Success(_)
+    ));
+    assert_eq!(handle.state(), RemoteTaskState::Completed);
+    assert_eq!(
+        count_sent(&h, &origin, &worker, "CancelRequest"),
+        0,
+        "close should not emit a late cancel once the terminal result is already buffered"
+    );
+    assert!(
+        count_sent(&h, &worker, &origin, "ResultDelivery") >= 1,
+        "worker should have already delivered the terminal result"
+    );
+}
+
+#[test]
 fn dropping_attached_remote_handle_requests_cancel_for_live_remote_task() {
     let seed = 4304;
     let conditions = NetworkConditions::local();

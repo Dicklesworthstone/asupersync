@@ -436,7 +436,9 @@ impl SimNode {
 
         if let Some(tx) = tx {
             let cx = Cx::for_testing();
-            let _ = tx.send(&cx, Ok(outcome));
+            if tx.send(&cx, Ok(outcome)).is_err() {
+                self.pending_results.lock().remove(&remote_task_id);
+            }
         }
     }
 
@@ -1430,6 +1432,46 @@ mod tests {
             handle.try_join(),
             Err(RemoteError::PolledAfterCompletion)
         ));
+    }
+
+    #[test]
+    fn dropped_handle_terminal_delivery_clears_pending_state_after_disconnected_send() {
+        let (mut harness, a, b) = setup_harness();
+        let cap = harness.node(&a).unwrap().create_cap();
+        let cx = Cx::for_testing().with_remote_cap(cap);
+        let handle = crate::spawn_remote(
+            &cx,
+            b,
+            crate::ComputationName::new("compute"),
+            crate::remote::RemoteInput::empty(),
+        )
+        .expect("spawn");
+
+        harness.run_for(Duration::from_millis(15));
+        let remote_task_id = handle.remote_task_id();
+        drop(handle);
+
+        harness
+            .nodes
+            .get_mut(&a)
+            .expect("origin node")
+            .handle_result(ResultDelivery {
+                remote_task_id,
+                outcome: RemoteOutcome::Success(vec![]),
+                execution_time: Duration::ZERO,
+            });
+
+        assert!(
+            harness
+                .nodes
+                .get(&a)
+                .expect("origin node")
+                .pending_results
+                .lock()
+                .get(&remote_task_id)
+                .is_none(),
+            "terminal delivery into a dropped handle should clear pending bookkeeping"
+        );
     }
 
     #[test]

@@ -620,22 +620,19 @@ impl Drop for RemoteHandle {
 
         let observed_state = self.observed_state();
         self.state = observed_state;
-        match observed_state {
-            RemoteTaskState::Pending | RemoteTaskState::Running => {
-                // A dropped live handle should request remote cancellation, but it
-                // must remain runtime-tracked until the distributed lifecycle
-                // reaches a terminal state. Clearing it here would orphan the
-                // remote task from origin-side quiescence accounting.
-                self.abort_with(
-                    self.origin_node.clone(),
-                    self.sender_clock.tick(),
-                    CancelReason::user("remote handle dropped"),
-                );
-            }
-            RemoteTaskState::Cancelled
-            | RemoteTaskState::Completed
-            | RemoteTaskState::Failed
-            | RemoteTaskState::LeaseExpired => self.clear_runtime_state(),
+        let should_cancel = self.should_request_cancel();
+        if should_cancel {
+            // A dropped live handle should request remote cancellation, but it
+            // must remain runtime-tracked until the distributed lifecycle
+            // reaches a terminal state. Clearing it here would orphan the
+            // remote task from origin-side quiescence accounting.
+            self.abort_with(
+                self.origin_node.clone(),
+                self.sender_clock.tick(),
+                CancelReason::user("remote handle dropped"),
+            );
+        } else if self.receiver.is_ready() || self.receiver.is_closed() || self.runtime.is_none() {
+            self.clear_runtime_state();
         }
     }
 }
@@ -679,6 +676,13 @@ impl RemoteHandle {
     }
 
     #[inline]
+    fn closed_transport_error(state: RemoteTaskState) -> RemoteError {
+        RemoteError::TransportError(format!(
+            "remote result channel closed after task reached terminal state {state}"
+        ))
+    }
+
+    #[inline]
     fn clear_runtime_state(&self) {
         if let Some(runtime) = &self.runtime {
             runtime.clear_task_state(self.remote_task_id);
@@ -713,6 +717,27 @@ impl RemoteHandle {
     }
 
     #[inline]
+    fn has_buffered_terminal_result(&self) -> bool {
+        self.completed || self.receiver.is_ready()
+    }
+
+    #[inline]
+    fn should_request_cancel(&self) -> bool {
+        // A closed result channel only means the sender disappeared; it does
+        // not prove the remote lifecycle reached a terminal state. We only
+        // suppress cancellation once the terminal result is buffered locally
+        // or already consumed.
+        if self.has_buffered_terminal_result() {
+            return false;
+        }
+
+        matches!(
+            self.observed_state(),
+            RemoteTaskState::Pending | RemoteTaskState::Running
+        )
+    }
+
+    #[inline]
     fn finish_result(
         &mut self,
         result: Result<RemoteOutcome, RemoteError>,
@@ -734,6 +759,9 @@ impl RemoteHandle {
         self.clear_runtime_state();
         match observed_state {
             RemoteTaskState::LeaseExpired => RemoteError::LeaseExpired,
+            RemoteTaskState::Completed | RemoteTaskState::Failed => {
+                Self::closed_transport_error(observed_state)
+            }
             _ => RemoteError::Cancelled(Self::closed_reason()),
         }
     }
@@ -811,7 +839,9 @@ impl RemoteHandle {
             return Err(RemoteError::PolledAfterCompletion);
         }
 
-        self.abort(cx);
+        if self.should_request_cancel() {
+            self.abort(cx);
+        }
 
         match self.receiver.recv_uninterruptible().await {
             Ok(result) => self.finish_result(result),
@@ -889,11 +919,14 @@ impl RemoteHandle {
         if cap.runtime().is_none() {
             return;
         }
+        if !self.should_request_cancel() {
+            return;
+        }
 
         let reason = cx
             .cancel_reason()
             .unwrap_or_else(|| CancelReason::user("remote handle abort"));
-        self.abort_with(cap.local_node().clone(), cx.logical_tick(), reason);
+        self.abort_with(self.origin_node.clone(), self.sender_clock.tick(), reason);
     }
 }
 
@@ -2247,6 +2280,15 @@ pub enum OriginAckOutcome {
     Rejected(OriginSession<OriginRejected>),
 }
 
+/// Outcome of a late spawn acknowledgement after the origin already sent cancel.
+pub enum OriginCancelAckOutcome {
+    /// Spawn was accepted before the cancel arrived; keep waiting for the
+    /// terminal result under the existing cancel-sent state.
+    Accepted(OriginSession<OriginCancelSent>),
+    /// Spawn was rejected; the session terminates immediately.
+    Rejected(OriginSession<OriginRejected>),
+}
+
 impl OriginSession<OriginSpawned> {
     /// Receive the spawn acknowledgement and transition to running or rejected.
     pub fn recv_spawn_ack(self, ack: &SpawnAck) -> Result<OriginAckOutcome, RemoteProtocolError> {
@@ -2299,6 +2341,18 @@ impl OriginSession<OriginRunning> {
 }
 
 impl OriginSession<OriginCancelSent> {
+    /// Receive a late spawn acknowledgement after sending cancel before ack.
+    pub fn recv_spawn_ack(
+        self,
+        ack: &SpawnAck,
+    ) -> Result<OriginCancelAckOutcome, RemoteProtocolError> {
+        self.ensure_id(ack.remote_task_id)?;
+        match ack.status {
+            SpawnAckStatus::Accepted => Ok(OriginCancelAckOutcome::Accepted(self)),
+            SpawnAckStatus::Rejected(_) => Ok(OriginCancelAckOutcome::Rejected(self.transition())),
+        }
+    }
+
     /// Receive the terminal result after cancellation.
     pub fn recv_result(
         self,
@@ -2488,6 +2542,12 @@ impl RemoteSession<RemoteRunning> {
 }
 
 impl RemoteSession<RemoteCancelReceived> {
+    /// Send a lease renewal heartbeat while cancellation is draining.
+    pub fn send_lease_renewal(self, renewal: &LeaseRenewal) -> Result<Self, RemoteProtocolError> {
+        self.ensure_id(renewal.remote_task_id)?;
+        Ok(self)
+    }
+
     /// Send the terminal result after cancellation.
     pub fn send_result(
         self,
@@ -2714,7 +2774,9 @@ mod tests {
                 .lock()
                 .remove(&task_id)
                 .expect("pending remote task");
-            let _ = tx.send(cx, result);
+            if tx.send(cx, result).is_err() {
+                self.states.lock().remove(&task_id);
+            }
         }
 
         fn sent_messages(&self) -> Vec<(NodeId, MessageEnvelope<RemoteMessage>)> {
@@ -2832,6 +2894,53 @@ mod tests {
                 assert_eq!(req.remote_task_id, handle.remote_task_id());
                 assert_eq!(req.origin_node.as_str(), "origin-a");
                 assert_eq!(req.reason, CancelReason::user("remote handle abort"));
+            }
+            other => unreachable!("expected CancelRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_handle_abort_uses_handle_origin_even_with_different_caller_cap() {
+        let runtime = Arc::new(CaptureRuntime::default());
+        let spawn_cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let spawn_cx: Cx = Cx::for_testing_with_remote(spawn_cap);
+
+        let handle = spawn_remote(
+            &spawn_cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let abort_cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-b"))
+            .with_runtime(runtime.clone());
+        let abort_cx: Cx = Cx::for_testing_with_remote(abort_cap);
+        let expected_reason = CancelReason::deadline();
+        abort_cx.set_cancel_reason(expected_reason.clone());
+
+        handle.abort(&abort_cx);
+
+        let (destination, envelope, spawn_time) = {
+            let sent = runtime.sent.lock();
+            assert_eq!(sent.len(), 2);
+            (
+                sent[1].0.clone(),
+                sent[1].1.clone(),
+                lamport_raw(&sent[0].1.sender_time),
+            )
+        };
+        assert_eq!(destination.as_str(), "worker-1");
+        assert_eq!(envelope.sender.as_str(), "origin-a");
+        assert!(lamport_raw(&envelope.sender_time) > spawn_time);
+        match &envelope.payload {
+            RemoteMessage::CancelRequest(req) => {
+                assert_eq!(req.remote_task_id, handle.remote_task_id());
+                assert_eq!(req.origin_node.as_str(), "origin-a");
+                assert_eq!(req.reason, expected_reason);
             }
             other => unreachable!("expected CancelRequest, got {other:?}"),
         }
@@ -3085,7 +3194,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_handle_close_sends_cancel_and_drains_runtime_result() {
+    fn remote_handle_close_skips_cancel_when_runtime_result_is_already_buffered() {
         let runtime = Arc::new(LifecycleRuntime::default());
         let cap = RemoteCap::new()
             .with_local_node(NodeId::new("origin-a"))
@@ -3108,6 +3217,7 @@ mod tests {
                 "closed remotely",
             ))),
         );
+        runtime.mark_state(handle.remote_task_id(), RemoteTaskState::Running);
 
         let outcome = futures_lite::future::block_on(handle.close(&cx)).expect("close");
         assert!(matches!(outcome, RemoteOutcome::Cancelled(_)));
@@ -3119,16 +3229,11 @@ mod tests {
         );
 
         let sent = runtime.sent_messages();
-        assert_eq!(sent.len(), 2);
-        assert_eq!(sent[1].0.as_str(), "worker-1");
-        assert!(lamport_raw(&sent[1].1.sender_time) > lamport_raw(&sent[0].1.sender_time));
-        match &sent[1].1.payload {
-            RemoteMessage::CancelRequest(cancel) => {
-                assert_eq!(cancel.remote_task_id, handle.remote_task_id());
-                assert_eq!(cancel.origin_node.as_str(), "origin-a");
-            }
-            other => unreachable!("expected CancelRequest, got {other:?}"),
-        }
+        assert_eq!(
+            sent.len(),
+            1,
+            "ready terminal result should not trigger a late cancel"
+        );
     }
 
     #[test]
@@ -3224,6 +3329,107 @@ mod tests {
     }
 
     #[test]
+    fn remote_handle_join_closed_channel_reports_transport_error_for_failed_state() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::Failed);
+        runtime.close_sender_preserving_state(remote_task_id);
+
+        let err = futures_lite::future::block_on(handle.join(&cx))
+            .expect_err("closed terminal failed channel should surface a transport error");
+        assert!(matches!(
+            err,
+            RemoteError::TransportError(msg) if msg.contains("Failed")
+        ));
+        assert_eq!(handle.state(), RemoteTaskState::Failed);
+        assert!(runtime.observe_task_state(remote_task_id).is_none());
+    }
+
+    #[test]
+    fn remote_handle_try_join_closed_channel_reports_transport_error_for_completed_state() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::Completed);
+        runtime.close_sender_preserving_state(remote_task_id);
+
+        let err = handle
+            .try_join()
+            .expect_err("closed terminal completed channel should surface a transport error");
+        assert!(matches!(
+            err,
+            RemoteError::TransportError(msg) if msg.contains("Completed")
+        ));
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
+        assert!(runtime.observe_task_state(remote_task_id).is_none());
+    }
+
+    #[test]
+    fn remote_handle_close_closed_channel_still_requests_cancel_for_live_runtime_task() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+        runtime.close_sender_preserving_state(remote_task_id);
+
+        let err = futures_lite::future::block_on(handle.close(&cx))
+            .expect_err("closed live channel should still fail the close");
+        assert_eq!(err, RemoteError::Cancelled(RemoteHandle::closed_reason()));
+        assert_eq!(handle.state(), RemoteTaskState::Cancelled);
+        assert!(runtime.observe_task_state(remote_task_id).is_none());
+
+        let sent = runtime.sent_messages();
+        assert_eq!(
+            sent.len(),
+            2,
+            "close should still send a best-effort cancel when the runtime still observes a live remote task"
+        );
+        match &sent[1].1.payload {
+            RemoteMessage::CancelRequest(cancel) => {
+                assert_eq!(cancel.remote_task_id, remote_task_id);
+            }
+            other => unreachable!("expected CancelRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn remote_handle_drop_cancels_live_runtime_task_but_preserves_runtime_state() {
         let runtime = Arc::new(LifecycleRuntime::default());
         let cap = RemoteCap::new()
@@ -3298,6 +3504,210 @@ mod tests {
             sent.len(),
             1,
             "terminal drop should not send an extra cancel"
+        );
+    }
+
+    #[test]
+    fn remote_handle_abort_skips_cancel_when_terminal_result_is_already_buffered() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.deliver(
+            &cx,
+            remote_task_id,
+            Ok(RemoteOutcome::Success(vec![7, 8, 9])),
+        );
+        runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+
+        handle.abort(&cx);
+
+        let sent = runtime.sent_messages();
+        assert_eq!(
+            sent.len(),
+            1,
+            "buffered terminal result should suppress late cancel"
+        );
+
+        let outcome = handle.try_join().expect("result").expect("outcome");
+        assert!(matches!(outcome, RemoteOutcome::Success(_)));
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
+    }
+
+    #[test]
+    fn remote_handle_drop_skips_cancel_when_terminal_result_is_buffered_but_state_is_stale() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let remote_task_id = {
+            let handle = spawn_remote(
+                &cx,
+                NodeId::new("worker-1"),
+                ComputationName::new("encode_block"),
+                RemoteInput::new(vec![1, 2, 3]),
+            )
+            .expect("spawn_remote should succeed");
+
+            let remote_task_id = handle.remote_task_id();
+            runtime.deliver(
+                &cx,
+                remote_task_id,
+                Ok(RemoteOutcome::Success(vec![7, 8, 9])),
+            );
+            runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+            remote_task_id
+        };
+
+        assert!(
+            runtime.observe_task_state(remote_task_id).is_none(),
+            "dropping with a buffered terminal result should clear runtime bookkeeping even if observed state was stale"
+        );
+        let sent = runtime.sent_messages();
+        assert_eq!(
+            sent.len(),
+            1,
+            "stale running state must not trigger a late drop cancel"
+        );
+    }
+
+    #[test]
+    fn remote_handle_drop_preserves_terminal_runtime_state_until_sender_settles() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let remote_task_id = {
+            let handle = spawn_remote(
+                &cx,
+                NodeId::new("worker-1"),
+                ComputationName::new("encode_block"),
+                RemoteInput::new(vec![1, 2, 3]),
+            )
+            .expect("spawn_remote should succeed");
+
+            let remote_task_id = handle.remote_task_id();
+            runtime.mark_state(remote_task_id, RemoteTaskState::Completed);
+            remote_task_id
+        };
+
+        assert_eq!(
+            runtime.observe_task_state(remote_task_id),
+            Some(RemoteTaskState::Completed),
+            "dropping after the runtime observes a terminal state must preserve bookkeeping until the terminal sender settles"
+        );
+
+        runtime.deliver(
+            &cx,
+            remote_task_id,
+            Ok(RemoteOutcome::Success(vec![7, 8, 9])),
+        );
+
+        assert!(
+            runtime.observe_task_state(remote_task_id).is_none(),
+            "once the terminal sender settles into a dropped receiver, runtime bookkeeping should clear"
+        );
+        let sent = runtime.sent_messages();
+        assert_eq!(
+            sent.len(),
+            1,
+            "terminal drop should not emit a late cancel while waiting for sender cleanup"
+        );
+    }
+
+    #[test]
+    fn remote_handle_abort_closed_channel_still_requests_cancel_for_live_runtime_task() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+        runtime.close_sender_preserving_state(remote_task_id);
+
+        handle.abort(&cx);
+
+        let sent = runtime.sent_messages();
+        assert_eq!(
+            sent.len(),
+            2,
+            "explicit abort should still fence a live remote task even if the result sender already disappeared"
+        );
+        match &sent[1].1.payload {
+            RemoteMessage::CancelRequest(cancel) => {
+                assert_eq!(cancel.remote_task_id, remote_task_id);
+            }
+            other => unreachable!("expected CancelRequest, got {other:?}"),
+        }
+        assert_eq!(
+            runtime.observe_task_state(remote_task_id),
+            Some(RemoteTaskState::Running)
+        );
+    }
+
+    #[test]
+    fn remote_handle_drop_closed_channel_still_requests_cancel_for_live_runtime_task() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let remote_task_id = {
+            let handle = spawn_remote(
+                &cx,
+                NodeId::new("worker-1"),
+                ComputationName::new("encode_block"),
+                RemoteInput::new(vec![1, 2, 3]),
+            )
+            .expect("spawn_remote should succeed");
+
+            let remote_task_id = handle.remote_task_id();
+            runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+            runtime.close_sender_preserving_state(remote_task_id);
+            remote_task_id
+        };
+
+        let sent = runtime.sent_messages();
+        assert_eq!(
+            sent.len(),
+            2,
+            "dropping a live handle must still request cancel even if the result sender already disappeared"
+        );
+        match &sent[1].1.payload {
+            RemoteMessage::CancelRequest(cancel) => {
+                assert_eq!(cancel.remote_task_id, remote_task_id);
+            }
+            other => unreachable!("expected CancelRequest, got {other:?}"),
+        }
+        assert_eq!(
+            runtime.observe_task_state(remote_task_id),
+            Some(RemoteTaskState::Running)
         );
     }
 
@@ -3768,6 +4178,45 @@ mod tests {
     }
 
     #[test]
+    fn origin_session_cancel_before_ack_then_late_accept_flow() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let origin = OriginSession::<OriginInit>::new(rtid);
+        let req = test_spawn_request(&cx, rtid);
+        let origin = origin.send_spawn(&req).unwrap();
+        let origin = origin.send_cancel(&test_cancel(rtid)).unwrap();
+        let ack = test_ack_accepted(rtid);
+        let outcome = origin.recv_spawn_ack(&ack).unwrap();
+        assert!(matches!(outcome, OriginCancelAckOutcome::Accepted(_)));
+        let origin = match outcome {
+            OriginCancelAckOutcome::Accepted(session) => session,
+            OriginCancelAckOutcome::Rejected(_) => return,
+        };
+        let result = test_result(
+            rtid,
+            RemoteOutcome::Cancelled(CancelReason::user("cancelled")),
+        );
+        let origin = origin.recv_result(&result).unwrap();
+        assert_eq!(origin.remote_task_id(), rtid);
+    }
+
+    #[test]
+    fn origin_session_cancel_before_ack_then_late_reject_flow() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let origin = OriginSession::<OriginInit>::new(rtid);
+        let req = test_spawn_request(&cx, rtid);
+        let origin = origin.send_spawn(&req).unwrap();
+        let origin = origin.send_cancel(&test_cancel(rtid)).unwrap();
+        let ack = test_ack_rejected(rtid);
+        let outcome = origin.recv_spawn_ack(&ack).unwrap();
+        assert!(matches!(outcome, OriginCancelAckOutcome::Rejected(_)));
+        if let OriginCancelAckOutcome::Rejected(session) = outcome {
+            assert_eq!(session.remote_task_id(), rtid);
+        }
+    }
+
+    #[test]
     fn origin_session_reject_flow() {
         let cx: Cx = Cx::for_testing();
         let rtid = RemoteTaskId::next();
@@ -3791,6 +4240,21 @@ mod tests {
         let remote = remote.recv_spawn(&req).unwrap();
         let remote = remote.recv_cancel(&test_cancel(rtid)).unwrap();
         let remote = remote.send_ack_accepted(&test_ack_accepted(rtid)).unwrap();
+        let result = test_result(rtid, RemoteOutcome::Cancelled(CancelReason::user("done")));
+        let remote = remote.send_result(&result).unwrap();
+        assert_eq!(remote.remote_task_id(), rtid);
+    }
+
+    #[test]
+    fn remote_session_cancelled_running_flow_allows_renewal_before_result() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let remote = RemoteSession::<RemoteInit>::new(rtid);
+        let req = test_spawn_request(&cx, rtid);
+        let remote = remote.recv_spawn(&req).unwrap();
+        let remote = remote.send_ack_accepted(&test_ack_accepted(rtid)).unwrap();
+        let remote = remote.recv_cancel(&test_cancel(rtid)).unwrap();
+        let remote = remote.send_lease_renewal(&test_renewal(rtid)).unwrap();
         let result = test_result(rtid, RemoteOutcome::Cancelled(CancelReason::user("done")));
         let remote = remote.send_result(&result).unwrap();
         assert_eq!(remote.remote_task_id(), rtid);
