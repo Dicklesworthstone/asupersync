@@ -214,7 +214,7 @@ fn e2e_dp_02_pool_exhaustion_backpressure() {
 
     test_section!("Attempt acquire when full → should get Full error");
     let result = pool.try_get();
-    assert!(matches!(result, None), "pool should be full");
+    assert!(result.is_none(), "pool should be full");
     tracing::info!(correlation_id = %cid, "correctly rejected: pool full");
 
     test_section!("Return one → acquire succeeds");

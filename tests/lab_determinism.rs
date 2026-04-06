@@ -1017,7 +1017,10 @@ fn run_io_cancel_scenario(seed: u64) -> (bool, usize, usize, u64) {
     // Model an in-flight I/O operation owned by runtime infrastructure rather than the user task.
     // If we tie the obligation to `task_id` and allow the task to complete, the runtime will
     // correctly flag it as a leaked obligation (no task may complete while still holding one).
-    let io_holder = asupersync::types::TaskId::new_for_test(99, 0);
+    let (io_holder, _io_handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create io holder task");
     let mut io_op = IoOp::submit(
         &mut runtime.state,
         io_holder,
@@ -1105,7 +1108,10 @@ fn test_lab_io_quiescence_waits_for_obligation() {
     // Model an in-flight I/O operation owned by runtime infrastructure rather than the user task.
     // If we tie the obligation to `task_id` and allow the task to complete, the runtime will
     // correctly flag it as a leaked obligation (no task may complete while still holding one).
-    let io_holder = asupersync::types::TaskId::new_for_test(99, 0);
+    let (io_holder, _io_handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create io holder task");
     let mut io_op = IoOp::submit(
         &mut runtime.state,
         io_holder,
@@ -1127,6 +1133,7 @@ fn test_lab_io_quiescence_waits_for_obligation() {
     );
 
     let _ = io_op.complete(&mut runtime.state).expect("complete io op");
+    runtime.scheduler.lock().schedule(io_holder, 0);
     let steps = runtime.run_until_quiescent();
 
     test_section!("verify_quiescence");

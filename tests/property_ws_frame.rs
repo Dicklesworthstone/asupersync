@@ -10,6 +10,9 @@ use asupersync::codec::{Decoder, Encoder};
 use asupersync::net::websocket::{CloseCode, Frame, FrameCodec, Opcode, WsError, apply_mask};
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
+use proptest::{prop_assert, prop_assert_eq, proptest, prop_oneof};
+use proptest::strategy::Strategy;
+use proptest as prop;
 
 // ============================================================================
 // Arbitrary Generators

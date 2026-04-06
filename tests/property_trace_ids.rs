@@ -9,6 +9,8 @@ use asupersync::trace::distributed::id::{SymbolSpanId, TraceId};
 use asupersync::util::DetRng;
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
+use proptest::{prop_assert, prop_assert_eq, proptest};
+use proptest::strategy::Strategy;
 
 // ============================================================================
 // Arbitrary Generators

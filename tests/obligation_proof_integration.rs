@@ -27,6 +27,8 @@ use asupersync::obligation::separation_logic::SeparationLogicVerifier;
 use asupersync::record::ObligationKind;
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 use proptest::prelude::*;
+use proptest::{prop_assert, prop_assert_eq, proptest, prop_oneof};
+use proptest::strategy::Strategy;
 
 // ============================================================================
 // Helper constructors

@@ -9,6 +9,8 @@ use asupersync::types::cancel::{CancelKind, CancelReason};
 use asupersync::types::outcome::{Outcome, PanicPayload, Severity, join_outcomes};
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
+use proptest::{prop_assert, prop_assert_eq, proptest, prop_oneof};
+use proptest::strategy::Strategy;
 use std::sync::Arc;
 use std::task::{Wake, Waker};
 use std::time::Duration;

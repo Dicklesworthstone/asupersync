@@ -49,6 +49,8 @@ use common::coverage::InvariantTracker;
 use common::*;
 use proptest::collection::SizeRange;
 use proptest::prelude::*;
+use proptest::{prop_assert, proptest, prop_oneof};
+use proptest::strategy::Strategy;
 use proptest::strategy::{NewTree, ValueTree};
 use proptest::test_runner::{RngSeed, TestRunner};
 use serde::{Deserialize, Serialize};

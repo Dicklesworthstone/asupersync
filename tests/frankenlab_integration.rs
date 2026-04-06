@@ -22,6 +22,8 @@ use asupersync::lab::scenario::{
 use asupersync::lab::scenario_runner::ScenarioRunner;
 use common::*;
 use proptest::prelude::*;
+use proptest::{prop_assert, prop_assert_eq, proptest, prop_oneof};
+use proptest::strategy::Strategy;
 use std::collections::BTreeMap;
 use std::path::Path;
 
