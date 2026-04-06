@@ -12,7 +12,7 @@ This fixture is executed through:
 - `scripts/validate_rust_browser_consumer.sh`
 
 The validation script:
-- builds the nested Rust crate through a local `wasm-pack build ...` invocation whose internal cargo calls are routed through `rch exec -- cargo ...`
+- builds the nested Rust crate through a local `wasm-pack build ...` invocation whose internal cargo calls are routed through `rch exec -- env CARGO_TARGET_DIR=<isolated-work-dir> cargo ...`
 - stages the generated `pkg/` output next to the copied frontend consumer
 - runs a Vite bundle check against the resulting browser artifacts
 - mirrors `browser-run.json` into `summary.json`, including `service_worker_fail_closed_reason_code`, `shared_worker_fail_closed_reason_code`, and `downgrade_reason_code`, so the synthetic unsupported-worker evidence stays visible in the top-level QA artifact

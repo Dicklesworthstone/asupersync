@@ -4915,16 +4915,74 @@ fn h2_closure_packet_dependency_status_alignment() {
         !risk_register.is_empty(),
         "residual_risk_register must include at least one explicit residual risk"
     );
+    let canonical_issue_statuses = beads_latest_status_by_id();
+    let mut risks_by_id = BTreeMap::new();
     for risk in risk_register {
+        let risk_id = risk["risk_id"]
+            .as_str()
+            .expect("each residual risk must include risk_id");
+        let owner_bead_id = risk["owner_bead_id"]
+            .as_str()
+            .expect("each residual risk must include owner_bead_id");
+        let risk_status = risk["status"]
+            .as_str()
+            .expect("each residual risk must include status");
         assert!(
-            risk["owner_bead_id"].as_str().is_some(),
-            "each residual risk must include owner_bead_id"
+            canonical_issue_statuses.contains_key(owner_bead_id),
+            "residual risk owner bead {owner_bead_id} must exist in canonical Beads state"
         );
-        assert!(
-            risk["status"].as_str().is_some(),
-            "each residual risk must include status"
+        let upstream_active_leaf_bead_ids = risk["upstream_active_leaf_bead_ids"]
+            .as_array()
+            .expect("each residual risk must include upstream_active_leaf_bead_ids");
+        for leaf_bead_id in upstream_active_leaf_bead_ids {
+            let leaf_bead_id = leaf_bead_id
+                .as_str()
+                .expect("upstream_active_leaf_bead_ids entries must be strings");
+            assert!(
+                canonical_issue_statuses.contains_key(leaf_bead_id),
+                "upstream active leaf bead {leaf_bead_id} must exist in canonical Beads state"
+            );
+        }
+        risks_by_id.insert(
+            risk_id.to_string(),
+            (
+                risk_status.to_string(),
+                owner_bead_id.to_string(),
+                upstream_active_leaf_bead_ids
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .expect("upstream_active_leaf_bead_ids entries must be strings")
+                            .to_string()
+                    })
+                    .collect::<BTreeSet<_>>(),
+            ),
         );
     }
+    let (risk_status, owner_bead_id, upstream_active_leaf_bead_ids) = risks_by_id
+        .get("RQ-H2-R2")
+        .expect("residual_risk_register must retain the open Track-G blocker risk");
+    assert_eq!(
+        risk_status, "open",
+        "RQ-H2-R2 must remain open while final Track-G / Track-E convergence is unfinished"
+    );
+    assert_eq!(
+        owner_bead_id, "asupersync-2cyx5",
+        "RQ-H2-R2 must remain owned by the active Track-G blocker"
+    );
+    assert_eq!(
+        upstream_active_leaf_bead_ids,
+        &BTreeSet::from([String::from("asupersync-36m6p")]),
+        "RQ-H2-R2 must machine-link the active upstream Track-E blocker leaf"
+    );
+    let (_, _, upstream_active_leaf_bead_ids) = risks_by_id
+        .get("RQ-H2-R1")
+        .expect("residual_risk_register must retain the historical dossier drift risk");
+    assert!(
+        upstream_active_leaf_bead_ids.is_empty(),
+        "RQ-H2-R1 should not name any active upstream blocker leaves once the dossier drift is mitigated"
+    );
     let follow_up_ownership = artifact["follow_up_ownership"]
         .as_array()
         .expect("follow_up_ownership must be an array");
@@ -5008,12 +5066,14 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
         "artifacts/raptorq_replay_catalog_v1.json",
         "follow_up_ownership",
+        "upstream_active_leaf_bead_ids",
         "track_signoff_owner",
         "packet_curator",
         "residual_risk_register",
         "go_no_go_decision",
         "E4",
         "F8",
+        "asupersync-36m6p",
         "rch exec --",
     ] {
         assert!(

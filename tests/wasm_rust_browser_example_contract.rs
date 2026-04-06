@@ -148,10 +148,11 @@ fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
         "CRATE_DIR=\"${FIXTURE_DIR}/crate\"",
         "WORK_DIR=\"$(mktemp -d \"${RUN_DIR}/work.XXXXXX\")\"",
         "CARGO_WRAPPER=\"${WORK_DIR}/cargo-rch\"",
+        "TARGET_DIR=\"${WORK_DIR}/target\"",
         "PKG_DIR=\"${WORK_DIR}/pkg\"",
         "BROWSER_RUN_FILE=\"${RUN_DIR}/browser-run.json\"",
         "cat > \"${CARGO_WRAPPER}\" <<EOF",
-        "exec rch exec -- cargo \"\\$@\"",
+        "exec rch exec -- env CARGO_TARGET_DIR=\"${TARGET_DIR}\" cargo \"\\$@\"",
         "CARGO=\"${CARGO_WRAPPER}\" wasm-pack build",
         "cp -R \"${PKG_DIR}/.\" \"${CONSUMER_DIR}/pkg/\"",
         "npm install",
@@ -203,8 +204,9 @@ fn browser_core_build_script_exists_and_offloads_wasm_builds_via_rch() {
         "WRAPPER_ROOT=\"${REPO_ROOT}/target/browser-core-build\"",
         "WORK_DIR=\"$(mktemp -d \"${WRAPPER_ROOT}/${PROFILE}.XXXXXX\")\"",
         "CARGO_WRAPPER=\"${WORK_DIR}/cargo-rch\"",
+        "TARGET_DIR=\"${WORK_DIR}/target\"",
         "cat > \"${CARGO_WRAPPER}\" <<EOF",
-        "exec \"${RCH_BIN}\" exec -- cargo \"\\$@\"",
+        "exec \"${RCH_BIN}\" exec -- env CARGO_TARGET_DIR=\"${TARGET_DIR}\" cargo \"\\$@\"",
         "CARGO=\"${CARGO_WRAPPER}\" wasm-pack build",
     ] {
         assert!(

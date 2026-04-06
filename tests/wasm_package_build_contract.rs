@@ -267,6 +267,16 @@ fn build_browser_core_artifacts_script_exists() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("wasm-pack build"), "must invoke wasm-pack");
     assert!(
+        content.contains(
+            "exec \"${RCH_BIN}\" exec -- env CARGO_TARGET_DIR=\"${TARGET_DIR}\" cargo \"\\$@\""
+        ),
+        "must route browser-core cargo invocations through rch with an isolated target dir"
+    );
+    assert!(
+        content.contains("TARGET_DIR=\"${WORK_DIR}/target\""),
+        "must pin a per-run target dir for remote browser-core builds"
+    );
+    assert!(
         content.contains("abi-metadata.json"),
         "must generate abi-metadata.json"
     );
