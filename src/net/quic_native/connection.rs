@@ -489,7 +489,7 @@ impl NativeQuicConnection {
                 congestion_window: self.transport.congestion_window_bytes(),
             });
         }
-        let pn = self.next_packet_number(space);
+        let pn = self.next_packet_number(space)?;
         self.transport.on_packet_sent(SentPacketMeta {
             space,
             packet_number: pn,
@@ -648,15 +648,20 @@ impl NativeQuicConnection {
         Ok(())
     }
 
-    fn next_packet_number(&mut self, space: PacketNumberSpace) -> u64 {
+    fn next_packet_number(&mut self, space: PacketNumberSpace) -> Result<u64, NativeQuicConnectionError> {
         let idx = match space {
             PacketNumberSpace::Initial => 0,
             PacketNumberSpace::Handshake => 1,
             PacketNumberSpace::ApplicationData => 2,
         };
         let out = self.next_packet_numbers[idx];
-        self.next_packet_numbers[idx] = self.next_packet_numbers[idx].saturating_add(1);
-        out
+        if out >= (1 << 62) - 1 {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "packet number limit reached; connection must be closed",
+            ));
+        }
+        self.next_packet_numbers[idx] = out + 1;
+        Ok(out)
     }
 }
 

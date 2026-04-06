@@ -220,6 +220,20 @@ impl Default for LossRecovery {
 }
 
 impl LossRecovery {
+    pub fn discard_space(&mut self, space: PacketNumberSpace) {
+        let mut retained = VecDeque::with_capacity(self.sent_packets.len());
+        while let Some(pkt) = self.sent_packets.pop_front() {
+            if pkt.space == space {
+                if pkt.in_flight {
+                    self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
+                }
+            } else {
+                retained.push_back(pkt);
+            }
+        }
+        self.sent_packets = retained;
+    }
+
     fn on_packet_sent(&mut self, packet: SentPacketMeta) {
         if packet.in_flight {
             self.bytes_in_flight = self.bytes_in_flight.saturating_add(packet.bytes);
@@ -266,6 +280,10 @@ impl LossRecovery {
         // congestion_recovery_start_time) must not contribute to cwnd growth.
         let mut acked_bytes_for_growth: u64 = 0;
 
+        let mut largest_newly_acked_time: Option<u64> = None;
+        let mut largest_newly_acked_pn: Option<u64> = None;
+        let mut any_ack_eliciting_newly_acked = false;
+
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
             let acked = pkt.space == space
@@ -285,15 +303,31 @@ impl LossRecovery {
                         acked_bytes_for_growth = acked_bytes_for_growth.saturating_add(pkt.bytes);
                     }
                 }
-                let sample = now_micros.saturating_sub(pkt.time_sent_micros);
+                
+                if largest_newly_acked_pn.is_none_or(|pn| pkt.packet_number > pn) {
+                    largest_newly_acked_pn = Some(pkt.packet_number);
+                    largest_newly_acked_time = Some(pkt.time_sent_micros);
+                }
                 if pkt.ack_eliciting {
-                    self.rtt.update(sample, ack_delay_micros);
+                    any_ack_eliciting_newly_acked = true;
                 }
             } else {
                 retained.push_back(pkt);
             }
         }
         self.sent_packets = retained;
+
+        if any_ack_eliciting_newly_acked && largest_newly_acked_pn == Some(local_largest_acked) {
+            if let Some(time_sent) = largest_newly_acked_time {
+                let sample = now_micros.saturating_sub(time_sent);
+                let effective_ack_delay = if space == PacketNumberSpace::ApplicationData {
+                    ack_delay_micros
+                } else {
+                    0
+                };
+                self.rtt.update(sample, effective_ack_delay);
+            }
+        }
 
         // Packet-threshold loss detection (kPacketThreshold = 3)
         let mut survivors = VecDeque::with_capacity(self.sent_packets.len());
@@ -524,6 +558,11 @@ impl QuicTransportMachine {
         {
             self.state = QuicConnectionState::Closed;
         }
+    }
+
+    /// Discard all packets and in-flight tracking for a given space.
+    pub fn discard_space(&mut self, space: PacketNumberSpace) {
+        self.recovery.discard_space(space);
     }
 
     /// Track packet transmission.
