@@ -388,13 +388,18 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
             .take()
             .expect("send_async called on non-transport-backed session channel");
 
+        // Disarm the drop bomb before the await point so that cancellation
+        // (future dropped mid-send) terminates the session cleanly instead of
+        // panicking with "SESSION LEAKED".
+        self.closed = true;
+
         let boxed = Box::new(value) as Box<dyn std::any::Any + std::marker::Send>;
         if let Err(error) = transport.tx.send(cx, boxed).await {
-            self.closed = true;
             return Err(map_transport_send_error(&error));
         }
 
         self.transport = Some(transport);
+        self.closed = false;
         Ok(self.transition())
     }
 }
@@ -427,16 +432,18 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
             .take()
             .expect("recv_async called on non-transport-backed session channel");
 
+        // Disarm the drop bomb before the await point so that cancellation
+        // terminates the session cleanly instead of panicking.
+        self.closed = true;
+
         let boxed = match transport.rx.recv(cx).await {
             Ok(boxed) => boxed,
             Err(error) => {
-                self.closed = true;
                 return Err(map_transport_recv_error(error));
             }
         };
 
         let Ok(value) = boxed.downcast::<T>() else {
-            self.closed = true;
             return Err(SessionError::ProtocolViolation {
                 expected: std::any::type_name::<T>(),
                 actual: "unknown (downcast failed)",
@@ -444,6 +451,7 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
         };
 
         self.transport = Some(transport);
+        self.closed = false;
         Ok((*value, self.transition()))
     }
 }
@@ -495,13 +503,17 @@ impl<R, A, B> Chan<R, Select<A, B>> {
             .take()
             .expect("select_left_async called on non-transport-backed session channel");
 
+        // Disarm the drop bomb before the await point so that cancellation
+        // terminates the session cleanly instead of panicking.
+        self.closed = true;
+
         let branch = Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>;
         if let Err(error) = transport.tx.send(cx, branch).await {
-            self.closed = true;
             return Err(map_transport_send_error(&error));
         }
 
         self.transport = Some(transport);
+        self.closed = false;
         Ok(self.transition())
     }
 
@@ -517,13 +529,17 @@ impl<R, A, B> Chan<R, Select<A, B>> {
             .take()
             .expect("select_right_async called on non-transport-backed session channel");
 
+        // Disarm the drop bomb before the await point so that cancellation
+        // terminates the session cleanly instead of panicking.
+        self.closed = true;
+
         let branch = Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>;
         if let Err(error) = transport.tx.send(cx, branch).await {
-            self.closed = true;
             return Err(map_transport_send_error(&error));
         }
 
         self.transport = Some(transport);
+        self.closed = false;
         Ok(self.transition())
     }
 }
@@ -553,16 +569,18 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
             .take()
             .expect("offer_async called on non-transport-backed session channel");
 
+        // Disarm the drop bomb before the await point so that cancellation
+        // terminates the session cleanly instead of panicking.
+        self.closed = true;
+
         let boxed = match transport.rx.recv(cx).await {
             Ok(boxed) => boxed,
             Err(error) => {
-                self.closed = true;
                 return Err(map_transport_recv_error(error));
             }
         };
 
         let Ok(branch) = boxed.downcast::<Branch>() else {
-            self.closed = true;
             return Err(SessionError::ProtocolViolation {
                 expected: "Branch (Left/Right)",
                 actual: "unknown (downcast failed)",
@@ -570,6 +588,7 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
         };
 
         self.transport = Some(transport);
+        self.closed = false;
         let branch = *branch;
 
         match branch {
