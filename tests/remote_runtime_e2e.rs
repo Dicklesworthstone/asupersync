@@ -41,6 +41,9 @@ use asupersync::remote::{
 };
 use asupersync::types::Time;
 use common::*;
+use std::future::Future;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -159,6 +162,18 @@ fn count_sent(h: &DistributedHarness, from: &NodeId, to: &NodeId, msg_type: &str
     })
 }
 
+fn noop_waker() -> Waker {
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    Waker::from(Arc::new(NoopWake))
+}
+
 // ===========================================================================
 // SPAWN / ACK / COMPLETE LIFECYCLE
 // ===========================================================================
@@ -264,6 +279,132 @@ fn attached_remote_handle_observes_ack_before_result() {
         asupersync::remote::RemoteOutcome::Success(_)
     ));
     assert_eq!(handle.state(), RemoteTaskState::Completed);
+}
+
+#[test]
+fn attached_remote_handle_close_requests_cancel_and_drains_terminal_result() {
+    let seed = 4303;
+    let conditions = NetworkConditions::local();
+    init_test(
+        "attached_remote_handle_close_requests_cancel_and_drains_terminal_result",
+        seed,
+        &conditions,
+    );
+
+    let (mut h, origin, worker) = harness_two(seed, conditions);
+    let cap = h.node(&origin).expect("origin node").create_cap();
+    let cx = Cx::for_testing().with_remote_cap(cap);
+    let mut handle = spawn_remote(
+        &cx,
+        worker.clone(),
+        ComputationName::new("test-computation"),
+        asupersync::remote::RemoteInput::empty(),
+    )
+    .expect("spawn_remote");
+
+    h.run_for(Duration::from_millis(15));
+    assert_eq!(handle.state(), RemoteTaskState::Running);
+
+    let remote_task_id = handle.remote_task_id();
+    let waker = noop_waker();
+    let mut task_cx = Context::from_waker(&waker);
+
+    let outcome = {
+        let mut close = std::pin::pin!(handle.close(&cx));
+
+        assert!(matches!(
+            Future::poll(close.as_mut(), &mut task_cx),
+            Poll::Pending
+        ));
+
+        h.run_for(Duration::from_millis(50));
+
+        match Future::poll(close.as_mut(), &mut task_cx) {
+            Poll::Ready(outcome) => outcome,
+            Poll::Pending => panic!("close should drain once the cancel result arrives"),
+        }
+    }
+    .expect("close outcome");
+
+    assert!(matches!(
+        outcome,
+        asupersync::remote::RemoteOutcome::Cancelled(_)
+    ));
+    assert_eq!(handle.state(), RemoteTaskState::Cancelled);
+    assert!(
+        count_sent(&h, &origin, &worker, "CancelRequest") >= 1,
+        "close should drive a transport cancel request once the harness pumps the origin outbox"
+    );
+    assert!(
+        count_sent(&h, &worker, &origin, "ResultDelivery") >= 1,
+        "worker should return a terminal result after close-driven cancellation"
+    );
+
+    let worker_events = h.node(&worker).expect("worker node").events();
+    assert!(
+        worker_events.iter().any(
+            |e| matches!(e, NodeEvent::CancelReceived { task_id } if *task_id == remote_task_id)
+        )
+    );
+    assert!(
+        worker_events.iter().any(
+            |e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == remote_task_id)
+        )
+    );
+}
+
+#[test]
+fn dropping_attached_remote_handle_requests_cancel_for_live_remote_task() {
+    let seed = 4304;
+    let conditions = NetworkConditions::local();
+    init_test(
+        "dropping_attached_remote_handle_requests_cancel_for_live_remote_task",
+        seed,
+        &conditions,
+    );
+
+    let (mut h, origin, worker) = harness_two(seed, conditions);
+    let cap = h.node(&origin).expect("origin node").create_cap();
+    let cx = Cx::for_testing().with_remote_cap(cap);
+
+    let remote_task_id = {
+        let handle = spawn_remote(
+            &cx,
+            worker.clone(),
+            ComputationName::new("test-computation"),
+            asupersync::remote::RemoteInput::empty(),
+        )
+        .expect("spawn_remote");
+
+        h.run_for(Duration::from_millis(15));
+        assert_eq!(handle.state(), RemoteTaskState::Running);
+        let remote_task_id = handle.remote_task_id();
+        drop(handle);
+        remote_task_id
+    };
+
+    h.run_for(Duration::from_millis(50));
+
+    assert!(
+        count_sent(&h, &origin, &worker, "CancelRequest") >= 1,
+        "dropping a live handle should still drive a transport cancel request"
+    );
+    assert!(
+        count_sent(&h, &worker, &origin, "ResultDelivery") >= 1,
+        "worker should still publish a terminal result after drop-driven cancellation"
+    );
+
+    let worker_events = h.node(&worker).expect("worker node").events();
+    assert!(
+        worker_events.iter().any(
+            |e| matches!(e, NodeEvent::CancelReceived { task_id } if *task_id == remote_task_id)
+        )
+    );
+    assert!(
+        worker_events.iter().any(
+            |e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == remote_task_id)
+        )
+    );
 }
 
 #[test]

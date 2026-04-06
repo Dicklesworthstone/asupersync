@@ -900,6 +900,12 @@ impl<Caps> Cx<Caps> {
         self.handles.logical_clock.now()
     }
 
+    /// Returns a clone of the task's logical clock handle.
+    #[must_use]
+    pub(crate) fn logical_clock_handle(&self) -> LogicalClockHandle {
+        self.handles.logical_clock.clone()
+    }
+
     /// Records a local logical event and returns the updated time.
     #[must_use]
     pub fn logical_tick(&self) -> LogicalTime {
