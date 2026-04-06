@@ -691,11 +691,11 @@ impl TraceRecorder {
             return None;
         }
 
-        let metadata = self.metadata.clone().unwrap();
+        let metadata = self.metadata.clone().expect("metadata must exist");
         let events = self
             .events
             .replace(VecDeque::with_capacity(self.config.initial_capacity))
-            .unwrap();
+            .expect("events must exist");
 
         let trace = ReplayTrace {
             metadata: metadata.clone(),

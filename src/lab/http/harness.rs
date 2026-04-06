@@ -165,7 +165,7 @@ impl TestHarness {
             let resp = self.send_traced(Request::new("GET", paths[idx]));
             responses[idx] = Some(resp);
         }
-        responses.into_iter().map(|r| r.unwrap()).collect()
+        responses.into_iter().map(|r| r.expect("response should be present")).collect()
     }
 
     /// Advance virtual time by the given duration.

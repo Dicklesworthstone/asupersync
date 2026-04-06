@@ -790,7 +790,7 @@ impl Reactor for LabReactor {
             // Pop events that are due
             while let Some(te) = inner.pending.peek() {
                 if te.time <= inner.time {
-                    let te = inner.pending.pop().unwrap();
+                    let te = inner.pending.pop().expect("pending timer array is empty");
                     if inner.sockets.contains_key(&te.event.token) {
                         ready_events.push(te);
                     }

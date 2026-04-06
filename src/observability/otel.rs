@@ -583,11 +583,13 @@ impl MetricsExporter for InMemoryExporter {
 #[derive(Clone)]
 pub struct OtelMetrics {
     // Task metrics
+    #[allow(dead_code)]
     tasks_active: ObservableGauge<u64>,
     tasks_spawned: Counter<u64>,
     tasks_completed: Counter<u64>,
     task_duration: Histogram<f64>,
     // Region metrics
+    #[allow(dead_code)]
     regions_active: ObservableGauge<u64>,
     regions_created: Counter<u64>,
     regions_closed: Counter<u64>,
@@ -605,6 +607,7 @@ pub struct OtelMetrics {
     checkpoint_interval: Histogram<f64>,
     task_stuck_detected: Counter<u64>,
     // Obligation metrics
+    #[allow(dead_code)]
     obligations_active: ObservableGauge<u64>,
     obligations_created: Counter<u64>,
     obligations_discharged: Counter<u64>,

@@ -692,7 +692,7 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
 pub struct Form<T>(pub T);
 
 #[allow(clippy::implicit_hasher)]
-impl FromRequest for Form<HashMap<String, String>> {
+impl<T: DeserializeOwned> FromRequest for Form<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
         let limit = req
             .extensions
@@ -721,7 +721,16 @@ impl FromRequest for Form<HashMap<String, String>> {
         let body_str = std::str::from_utf8(req.body.as_ref())
             .map_err(|e| ExtractionError::bad_request(format!("invalid UTF-8 body: {e}")))?;
 
-        Ok(Self(parse_urlencoded(body_str)))
+        let parsed = parse_urlencoded(body_str);
+
+        if parsed.len() == 1
+            && let Some(first) = parsed.values().next()
+            && let Some(value) = deserialize_single_value::<T>(first)
+        {
+            return Ok(Self(value));
+        }
+
+        deserialize_from_string_map(&parsed, "form data").map(Self)
     }
 }
 

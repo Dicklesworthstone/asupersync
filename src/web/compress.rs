@@ -176,6 +176,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
         // Apply compression.
         resp.body = compressed.into();
+        resp.remove_header("content-length");
         resp.set_header("content-encoding", encoding.as_token().to_string());
         append_vary_token(&mut resp, "accept-encoding");
 

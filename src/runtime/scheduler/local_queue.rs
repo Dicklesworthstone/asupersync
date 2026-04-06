@@ -276,7 +276,7 @@ impl Stealer {
             let task_id = src[i];
             if let Some(record) = arena.get(task_id.arena_index()) {
                 if !record.is_local() {
-                    let task = src.remove(i).unwrap();
+                    let task = src.remove(i).expect("index must be valid within array bounds");
                     dest.push_back(task);
                     stolen += 1;
                     continue; // Skip incrementing i because elements shifted left

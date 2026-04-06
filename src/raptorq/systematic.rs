@@ -415,7 +415,7 @@ impl ConstraintMatrix {
                     }
                 }
                 if let Some(fc) = first_col {
-                    if best.is_none() || deg < best.unwrap().2 {
+                    if best.is_none() || deg < best.expect("best solution must exist").2 {
                         best = Some((r, fc, deg));
                         if deg == 1 {
                             break; // Can't do better than degree 1

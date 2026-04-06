@@ -96,8 +96,8 @@ where
         }
 
         if this.queued1.is_some() && this.queued2.is_some() {
-            let item1 = this.queued1.take().unwrap();
-            let item2 = this.queued2.take().unwrap();
+            let item1 = this.queued1.take().expect("queued1 should have item");
+            let item2 = this.queued2.take().expect("queued2 should have item");
             Poll::Ready(Some((item1, item2)))
         } else {
             Poll::Pending

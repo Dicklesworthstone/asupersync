@@ -1114,7 +1114,7 @@ impl NoAliasingProver {
         }
 
         // Transition: atomically update holder.
-        self.ghost.active.get_mut(&obligation).unwrap().holder = transfer.to;
+        self.ghost.active.get_mut(&obligation).expect("obligation must be active").holder = transfer.to;
 
         // Post: verify single ownership.
         let count = self.ghost.holder_count(obligation);

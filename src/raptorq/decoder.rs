@@ -1374,7 +1374,7 @@ impl InactivationDecoder {
                     .copied()
                     .collect();
                 for (col, eq_coef) in &solved_terms {
-                    let solution = state.solved[*col].as_ref().unwrap();
+                    let solution = state.solved[*col].as_ref().expect("solution must exist");
                     gf256_addmul_slice(&mut state.rhs[idx], solution, *eq_coef);
                     if let Ok(pos) = state.equations[idx]
                         .terms

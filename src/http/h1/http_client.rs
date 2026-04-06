@@ -1826,6 +1826,11 @@ fn parse_host_port(authority: &str, default_port: u16) -> Result<(String, u16), 
         )));
     }
 
+    if authority.matches(':').count() > 1 {
+        // Unbracketed IPv6 address: ambiguous port parsing, treat entire authority as host
+        return Ok((authority.to_owned(), default_port));
+    }
+
     if let Some((host, port_str)) = authority.rsplit_once(':') {
         let port = port_str
             .parse::<u16>()

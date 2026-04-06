@@ -193,7 +193,7 @@ impl EProcess {
         assert!(
             config.validate().is_ok(),
             "EProcessConfig validation failed: {}",
-            config.validate().unwrap_err()
+            config.validate().expect_err("expected e-process config validation to fail")
         );
         Self {
             invariant: invariant.to_owned(),

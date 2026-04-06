@@ -379,8 +379,7 @@ impl ObligationTracker {
             "Active: {}  |  Potential Leaks: {}  |  Age Warnings: {}",
             summary.total_active, summary.potential_leaks, summary.age_warnings
         )
-        .unwrap();
-        output.push_str(&"-".repeat(60));
+        .expect("write should not fail on String");        output.push_str(&"-".repeat(60));
         output.push('\n');
 
         // Type breakdown
@@ -396,7 +395,7 @@ impl ObligationTracker {
                 type_summary.count,
                 type_summary.oldest_age.as_secs_f64()
             )
-            .unwrap();
+            .expect("write should not fail on String");
         }
 
         // Potential leaks section
@@ -412,9 +411,10 @@ impl ObligationTracker {
                     &mut output,
                     "  {type_name} held by {holder_task:?} for {age_secs:.1}s"
                 )
-                .unwrap();
+                .expect("write should not fail on String");
                 if let Some(desc) = &leak.description {
-                    writeln!(&mut output, "    -> {desc}").unwrap();
+                    writeln!(&mut output, "    -> {desc}")
+                        .expect("write should not fail on String");
                 }
             }
         }
@@ -688,3 +688,4 @@ mod tests {
         assert_eq!(obligations[0].age, Duration::from_secs(8));
     }
 }
+

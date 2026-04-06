@@ -261,6 +261,7 @@ fn generate_bash_completions<W: Write, C: Completable>(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn generate_zsh_completions<W: Write, C: Completable>(
     completable: &C,
     writer: &mut W,

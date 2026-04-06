@@ -798,7 +798,7 @@ impl TaskInspector {
         writeln!(&mut output, "Region:        {:?}", task.region_id).unwrap();
         writeln!(&mut output, "Age:           {:.3}s", task.age.as_secs_f64()).unwrap();
         writeln!(&mut output, "Poll count:    {}", task.poll_count).unwrap();
-        writeln!(&mut output, "Polls left:    {}", task.polls_remaining).unwrap();
+        writeln!(&mut output, "Polls left:    {}", task.polls_remaining).expect("write should not fail on String");
         writeln!(&mut output, "Wake pending:  {}", task.wake_pending).unwrap();
 
         if !task.obligations.is_empty() {
@@ -806,7 +806,7 @@ impl TaskInspector {
             output.push('\n');
             output.push_str("Obligations:\n");
             for ob_id in &task.obligations {
-                writeln!(&mut output, "  {ob_id:?}").unwrap();
+                writeln!(&mut output, "  {ob_id:?}").expect("write should not fail on String");
             }
         }
 
@@ -815,7 +815,7 @@ impl TaskInspector {
             output.push('\n');
             output.push_str("Waiters:\n");
             for waiter_id in &task.waiters {
-                writeln!(&mut output, "  {waiter_id:?}").unwrap();
+                writeln!(&mut output, "  {waiter_id:?}").expect("write should not fail on String");
             }
         }
 

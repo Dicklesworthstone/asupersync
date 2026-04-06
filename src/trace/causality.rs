@@ -143,8 +143,8 @@ impl CausalOrderVerifier {
                 let (idx_a, ev_a) = window[0];
                 let (idx_b, ev_b) = window[1];
 
-                let lt_a = ev_a.logical_time.as_ref().unwrap();
-                let lt_b = ev_b.logical_time.as_ref().unwrap();
+                let lt_a = ev_a.logical_time.as_ref().expect("logical_time must exist");
+                let lt_b = ev_b.logical_time.as_ref().expect("logical_time must exist");
 
                 match causal_order(lt_a, lt_b) {
                     CausalOrder::After | CausalOrder::Concurrent | CausalOrder::Equal => {
@@ -183,8 +183,8 @@ impl CausalOrderVerifier {
                 {
                     // Wake/Schedule must happen after spawn
                     if let Some(&(spawn_idx, spawn_ev)) = spawn_events.get(&task_id) {
-                        let spawn_lt = spawn_ev.logical_time.as_ref().unwrap();
-                        let current_lt = event.logical_time.as_ref().unwrap();
+                        let spawn_lt = spawn_ev.logical_time.as_ref().expect("logical_time must exist");
+                        let current_lt = event.logical_time.as_ref().expect("logical_time must exist");
 
                         match causal_order(spawn_lt, current_lt) {
                             CausalOrder::After | CausalOrder::Equal | CausalOrder::Concurrent => {

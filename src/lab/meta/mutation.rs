@@ -345,7 +345,7 @@ fn mutation_obligation_leak(harness: &mut MetaHarness) {
         .runtime
         .state
         .region(region)
-        .unwrap()
+        .expect("region must exist to be mutated")
         .set_state(crate::record::region::RegionState::Closed);
     harness
         .oracles

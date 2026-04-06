@@ -399,10 +399,10 @@ impl RegionHeap {
         self.stats.reclaimed += reclaimed_count;
         self.stats.live = 0;
         self.stats.bytes_live = 0;
-
-        self.slots.clear();
+        
         self.free_head = None;
-        self.len = 0;
+        self.len = 0; // Set to 0 before clear to prevent double-subtraction in Drop if a destructor panics.
+        self.slots.clear();
     }
 }
 

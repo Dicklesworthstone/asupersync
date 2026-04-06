@@ -1832,7 +1832,7 @@ fn xor_chunk_32_in_place(dst: &mut [u8], src: &[u8]) {
 #[inline]
 fn xor_chunk_8_in_place(dst: &mut [u8], src: &[u8]) {
     let d_arr: [u8; 8] = dst.try_into().unwrap();
-    let s_arr: [u8; 8] = src.try_into().unwrap();
+    let s_arr: [u8; 8] = src.try_into().expect("slice must be 8 bytes");
     let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(s_arr);
     dst.copy_from_slice(&result.to_ne_bytes());
 }
@@ -2332,7 +2332,7 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], _nib: &NibbleTables, table
     let mut d_chunks = dst.chunks_exact_mut(8);
     let mut s_chunks = src.chunks_exact(8);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
-        let d_word = u64::from_ne_bytes(d_chunk[..].try_into().unwrap());
+        let d_word = u64::from_ne_bytes(d_chunk[..].try_into().expect("slice must be 8 bytes"));
         let s_word = u64::from_ne_bytes([
             table[s_chunk[0] as usize],
             table[s_chunk[1] as usize],
@@ -2400,8 +2400,8 @@ fn addmul_with_table_wide2(
             table[s_chunk_b[6] as usize],
             table[s_chunk_b[7] as usize],
         ];
-        let d_arr_a: [u8; 8] = d_chunk_a[..].try_into().unwrap();
-        let d_arr_b: [u8; 8] = d_chunk_b[..].try_into().unwrap();
+        let d_arr_a: [u8; 8] = d_chunk_a[..].try_into().expect("slice must be 8 bytes");
+        let d_arr_b: [u8; 8] = d_chunk_b[..].try_into().expect("slice must be 8 bytes");
         d_chunk_a.copy_from_slice(
             &(u64::from_ne_bytes(d_arr_a) ^ u64::from_ne_bytes(t_a)).to_ne_bytes(),
         );
@@ -2449,7 +2449,7 @@ fn addmul_with_table_scalar(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
             table[s_chunk[6] as usize],
             table[s_chunk[7] as usize],
         ];
-        let d_arr: [u8; 8] = d_chunk[..].try_into().unwrap();
+        let d_arr: [u8; 8] = d_chunk[..].try_into().expect("slice must be 8 bytes");
         let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(t);
         d_chunk.copy_from_slice(&result.to_ne_bytes());
     }

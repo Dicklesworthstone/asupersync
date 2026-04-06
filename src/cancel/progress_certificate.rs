@@ -467,7 +467,7 @@ impl ProgressCertificate {
         assert!(
             config.validate().is_ok(),
             "ProgressConfig validation failed: {}",
-            config.validate().unwrap_err()
+            config.validate().expect_err("expected validation to fail")
         );
         Self {
             observations: Vec::new(),
