@@ -208,7 +208,7 @@ impl TokenSlab {
             let index = self.entries.len() as u32;
             #[cfg(target_pointer_width = "32")]
             assert!(
-                index <= 0xFF_FFFF,
+                index < 0xFF_FFFF,
                 "TokenSlab capacity exceeded 16.7M entries on 32-bit platform"
             );
             #[cfg(target_pointer_width = "64")]

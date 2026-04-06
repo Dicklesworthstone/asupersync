@@ -3635,9 +3635,29 @@ fn complete_task<T>(state: &Arc<Mutex<JoinState<T>>>, output: std::thread::Resul
     }
 }
 
+struct ThreadWaker {
+    thread: std::thread::Thread,
+    woken: std::sync::atomic::AtomicBool,
+}
+
+impl Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.woken.store(true, std::sync::atomic::Ordering::Release);
+        self.thread.unpark();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, std::sync::atomic::Ordering::Release);
+        self.thread.unpark();
+    }
+}
+
 fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     let thread = std::thread::current();
-    let waker = Waker::from(Arc::new(ThreadWaker(thread)));
+    let thread_waker = Arc::new(ThreadWaker {
+        thread,
+        woken: std::sync::atomic::AtomicBool::new(false),
+    });
+    let waker = Waker::from(Arc::clone(&thread_waker));
     let mut cx = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     let mut polls = 0u32;
@@ -3645,44 +3665,40 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     let mut consecutive_budget_exhaustions: u32 = 0;
 
     loop {
+        // Clear the woken flag BEFORE polling. This tracks if the future
+        // wakes itself during the poll or immediately after.
+        thread_waker.woken.store(false, std::sync::atomic::Ordering::Relaxed);
+
         match future.as_mut().poll(&mut cx) {
             Poll::Ready(output) => return output,
             Poll::Pending => {
-                polls = polls.saturating_add(1);
-                if polls >= budget {
-                    // Budget exhausted: the future keeps returning Pending despite
-                    // being woken.  Use exponential backoff sleep to prevent a
-                    // tight spin loop (yield_now is nearly a no-op on idle
-                    // systems and was the root cause of runaway CPU usage).
-                    consecutive_budget_exhaustions =
-                        consecutive_budget_exhaustions.saturating_add(1);
-                    let backoff_ms = match consecutive_budget_exhaustions {
-                        1 => 1,
-                        2 => 5,
-                        _ => 25,
-                    };
-                    std::thread::sleep(Duration::from_millis(backoff_ms));
-                    polls = 0;
+                if thread_waker.woken.load(std::sync::atomic::Ordering::Acquire) {
+                    // The future was woken without parking. This indicates a spin.
+                    polls = polls.saturating_add(1);
+                    if polls >= budget {
+                        // Budget exhausted: the future keeps returning Pending despite
+                        // immediate wakeups. Use exponential backoff sleep to prevent a
+                        // tight spin loop.
+                        consecutive_budget_exhaustions =
+                            consecutive_budget_exhaustions.saturating_add(1);
+                        let backoff_ms = match consecutive_budget_exhaustions {
+                            1 => 1,
+                            2 => 5,
+                            _ => 25,
+                        };
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
+                        polls = 0;
+                    }
                 } else {
-                    // Park until woken.  Do NOT reset consecutive_budget_exhaustions
-                    // here: thread::park() can return instantly when an unpark token
-                    // is already pending (common during waker storms), so a reset
-                    // would defeat the exponential backoff.
+                    // Not woken. We can safely park. The task is yielding to the OS,
+                    // so it is NOT in a tight spin loop. We must reset the spin counters
+                    // to prevent penalizing long-lived futures that genuinely wait.
+                    polls = 0;
+                    consecutive_budget_exhaustions = 0;
                     std::thread::park();
                 }
             }
         }
-    }
-}
-
-struct ThreadWaker(std::thread::Thread);
-
-impl Wake for ThreadWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
     }
 }
 

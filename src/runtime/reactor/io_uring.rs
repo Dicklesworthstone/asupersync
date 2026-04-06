@@ -346,23 +346,27 @@ mod imp {
                         info.active_poll_user_data = None;
                     }
 
-                    if let Some(errno) = completion_errno(res) {
-                        if is_poll_cancellation_errno(errno) {
-                            None
-                        } else if is_terminal_fd_errno(errno) {
-                            let stale_user_data = remove_registration_poll_ops(&mut state, token);
-                            state.registrations.remove(&token);
-                            for poll_user_data in stale_user_data {
-                                let _ = self.submit_poll_remove(poll_user_data);
+                    completion_errno(res).map_or_else(
+                        || {
+                            let interest = poll_mask_to_interest(res as u32);
+                            (!interest.is_empty()).then_some(Event::new(token, interest))
+                        },
+                        |errno| {
+                            if is_poll_cancellation_errno(errno) {
+                                None
+                            } else if is_terminal_fd_errno(errno) {
+                                let stale_user_data =
+                                    remove_registration_poll_ops(&mut state, token);
+                                state.registrations.remove(&token);
+                                for poll_user_data in stale_user_data {
+                                    let _ = self.submit_poll_remove(poll_user_data);
+                                }
+                                None
+                            } else {
+                                Some(Event::errored(token))
                             }
-                            None
-                        } else {
-                            Some(Event::errored(token))
-                        }
-                    } else {
-                        let interest = poll_mask_to_interest(res as u32);
-                        (!interest.is_empty()).then_some(Event::new(token, interest))
-                    }
+                        },
+                    )
                 };
 
                 if let Some(event) = action {

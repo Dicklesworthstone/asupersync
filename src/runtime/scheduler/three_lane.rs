@@ -2202,19 +2202,19 @@ impl ThreeLaneWorker {
         }
 
         // ── PHASE 3: Fast ready paths (no PriorityScheduler lock) ────
-        // Check lock-free fast_queue first (O(1) atomic pop), then
-        // local_ready which requires a try_lock.
-        if let Some(task) = self.fast_queue.pop() {
-            self.cancel_streak = 0;
-            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
-            self.preemption_metrics.ready_dispatches += 1;
-            return Some(self.finish_dispatch(task));
-        }
+        // Check local_ready first (highest priority: non-stealable local tasks),
+        // then lock-free fast_queue (O(1) atomic pop).
         let local_ready_task = self
             .local_ready
             .try_lock()
             .and_then(|mut queue| queue.pop());
         if let Some(task) = local_ready_task {
+            self.cancel_streak = 0;
+            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
+            self.preemption_metrics.ready_dispatches += 1;
+            return Some(self.finish_dispatch(task));
+        }
+        if let Some(task) = self.fast_queue.pop() {
             self.cancel_streak = 0;
             self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
             self.preemption_metrics.ready_dispatches += 1;
