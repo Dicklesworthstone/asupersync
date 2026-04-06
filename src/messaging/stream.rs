@@ -95,20 +95,6 @@ pub struct StreamState {
     pub lifecycle: StreamLifecycle,
 }
 
-impl StreamState {
-    fn new(created_at: Time) -> Self {
-        Self {
-            msg_count: 0,
-            byte_count: 0,
-            first_seq: 0,
-            last_seq: 0,
-            consumer_count: 0,
-            created_at,
-            lifecycle: StreamLifecycle::Open,
-        }
-    }
-}
-
 /// Lifecycle state for a region-owned stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StreamLifecycle {
@@ -1154,7 +1140,7 @@ impl<B: StorageBackend> Stream<B> {
             payload,
             published_at: permit.published_at,
         };
-        let _ = record.payload_len()?;
+        let payload_len = record.payload_len()?;
 
         self.storage.append(record.clone())?;
         self.record_dedup(
@@ -1165,8 +1151,15 @@ impl<B: StorageBackend> Stream<B> {
         );
         self.next_seq = self.next_seq.saturating_add(1);
         permit.committed_seq = Some(record.seq);
+
+        self.state.msg_count = self.state.msg_count.saturating_add(1);
+        self.state.byte_count = self.state.byte_count.saturating_add(payload_len);
+        if self.state.first_seq == 0 {
+            self.state.first_seq = record.seq;
+        }
+        self.state.last_seq = record.seq;
+
         self.enforce_retention(permit.published_at)?;
-        self.rebuild_state()?;
         Ok(record)
     }
 
@@ -1301,48 +1294,87 @@ impl<B: StorageBackend> Stream<B> {
             return Ok(());
         }
 
-        let mut truncated = false;
-        loop {
-            let snapshot = self.storage.snapshot()?;
-            let Some(oldest) = snapshot.records.first() else {
-                if truncated {
-                    self.rebuild_dedup_index_from_storage_snapshot(&snapshot);
-                }
-                return Ok(());
-            };
+        let mut repaired_desync = false;
+        while self.state.msg_count > 0 {
+            let over_msg_limit =
+                self.config.max_msgs != 0 && self.state.msg_count > self.config.max_msgs;
+            let over_byte_limit =
+                self.config.max_bytes != 0 && self.state.byte_count > self.config.max_bytes;
 
-            let msg_count = u64::try_from(snapshot.records.len()).map_err(|_| {
-                StreamError::PayloadTooLarge {
-                    bytes: snapshot.records.len(),
-                }
-            })?;
-            let byte_count = snapshot.records.iter().try_fold(0_u64, |acc, record| {
-                record.payload_len().map(|len| acc.saturating_add(len))
-            })?;
             let max_age_nanos = self
                 .config
                 .max_age
                 .map(|age| u64::try_from(age.as_nanos()).unwrap_or(u64::MAX));
 
-            let over_msg_limit = self.config.max_msgs != 0 && msg_count > self.config.max_msgs;
-            let over_byte_limit = self.config.max_bytes != 0 && byte_count > self.config.max_bytes;
-            let over_age_limit =
-                max_age_nanos.is_some_and(|limit| now.duration_since(oldest.published_at) > limit);
+            let mut oldest_published_at = None;
+            if max_age_nanos.is_some() {
+                if let Some(oldest) = self.storage.get(self.state.first_seq)? {
+                    oldest_published_at = Some(oldest.published_at);
+                } else if !repaired_desync {
+                    // The incremental counters fell out of sync with storage.
+                    // Rebuild from the authoritative snapshot and retry once
+                    // instead of silently leaving the stream over budget.
+                    self.resync_from_storage()?;
+                    repaired_desync = true;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            let over_age_limit = match (max_age_nanos, oldest_published_at) {
+                (Some(limit), Some(published_at)) => now.duration_since(published_at) > limit,
+                _ => false,
+            };
 
             if !(over_msg_limit || over_byte_limit || over_age_limit) {
-                if truncated {
-                    self.rebuild_dedup_index_from_storage_snapshot(&snapshot);
-                }
                 return Ok(());
             }
 
-            let _removed = self.storage.truncate_through(oldest.seq)?;
-            truncated = true;
+            let removed = self.storage.truncate_through(self.state.first_seq)?;
+            if removed.is_empty() {
+                if !repaired_desync {
+                    self.resync_from_storage()?;
+                    repaired_desync = true;
+                    continue;
+                }
+                break;
+            }
+            repaired_desync = false;
+
+            for record in removed {
+                let payload_len = record.payload_len()?;
+                self.state.msg_count = self.state.msg_count.saturating_sub(1);
+                self.state.byte_count = self.state.byte_count.saturating_sub(payload_len);
+                self.state.first_seq = record.seq.saturating_add(1);
+
+                let key = (
+                    record.subject.as_str().to_owned(),
+                    Self::payload_hash(&record.payload),
+                );
+                if self
+                    .dedup_index
+                    .get(&key)
+                    .is_some_and(|(_, existing_seq)| *existing_seq == record.seq)
+                {
+                    self.dedup_index.remove(&key);
+                }
+            }
+
+            if self.state.msg_count == 0 {
+                self.state.first_seq = 0;
+                self.state.last_seq = 0;
+            } else if self.state.first_seq > self.state.last_seq {
+                self.state.first_seq = self.state.last_seq;
+            }
         }
+        Ok(())
     }
 
-    fn rebuild_state(&mut self) -> Result<(), StreamError> {
-        let snapshot = self.storage.snapshot()?;
+    fn rebuild_state_from_snapshot(
+        &mut self,
+        snapshot: &StorageSnapshot,
+    ) -> Result<(), StreamError> {
         self.state.msg_count =
             u64::try_from(snapshot.records.len()).map_err(|_| StreamError::PayloadTooLarge {
                 bytes: snapshot.records.len(),
@@ -1353,6 +1385,13 @@ impl<B: StorageBackend> Stream<B> {
         self.state.first_seq = snapshot.records.first().map_or(0, |record| record.seq);
         self.state.last_seq = snapshot.records.last().map_or(0, |record| record.seq);
         self.state.consumer_count = self.consumer_ids.len();
+        Ok(())
+    }
+
+    fn resync_from_storage(&mut self) -> Result<(), StreamError> {
+        let snapshot = self.storage.snapshot()?;
+        self.rebuild_state_from_snapshot(&snapshot)?;
+        self.rebuild_dedup_index_from_storage_snapshot(&snapshot);
         Ok(())
     }
 
@@ -1462,6 +1501,38 @@ mod tests {
             InMemoryStorageBackend::default(),
         )
         .expect("create test stream")
+    }
+
+    #[derive(Debug, Default)]
+    struct TruncateSkipsOnceBackend {
+        inner: InMemoryStorageBackend,
+        skip_next_truncate: bool,
+    }
+
+    impl StorageBackend for TruncateSkipsOnceBackend {
+        fn append(&mut self, record: StreamRecord) -> Result<(), StreamError> {
+            self.inner.append(record)
+        }
+
+        fn get(&self, seq: u64) -> Result<Option<StreamRecord>, StreamError> {
+            self.inner.get(seq)
+        }
+
+        fn range(&self, seqs: RangeInclusive<u64>) -> Result<Vec<StreamRecord>, StreamError> {
+            self.inner.range(seqs)
+        }
+
+        fn truncate_through(&mut self, through_seq: u64) -> Result<Vec<StreamRecord>, StreamError> {
+            if self.skip_next_truncate {
+                self.skip_next_truncate = false;
+                return Ok(Vec::new());
+            }
+            self.inner.truncate_through(through_seq)
+        }
+
+        fn snapshot(&self) -> Result<StorageSnapshot, StreamError> {
+            self.inner.snapshot()
+        }
     }
 
     #[test]
@@ -2525,6 +2596,53 @@ mod tests {
                 .expect("get retained third")
                 .map(|record| record.payload),
             Some(b"same".to_vec())
+        );
+    }
+
+    #[test]
+    fn retention_recovers_after_transient_noop_truncate() {
+        let config = StreamConfig {
+            retention: RetentionPolicy::Limits,
+            max_msgs: 1,
+            ..StreamConfig::default()
+        };
+        let mut stream = Stream::new(
+            "retention-repair-stream",
+            test_region(1),
+            Time::from_secs(0),
+            config,
+            TruncateSkipsOnceBackend {
+                inner: InMemoryStorageBackend::default(),
+                skip_next_truncate: true,
+            },
+        )
+        .expect("create stream");
+
+        stream
+            .append(
+                Subject::new("fabric.default"),
+                b"first".to_vec(),
+                Time::from_secs(1),
+            )
+            .expect("append first");
+        stream
+            .append(
+                Subject::new("fabric.default"),
+                b"second".to_vec(),
+                Time::from_secs(2),
+            )
+            .expect("append second should recover after transient truncate no-op");
+
+        assert_eq!(stream.state().msg_count, 1);
+        assert_eq!(stream.state().first_seq, 2);
+        assert_eq!(stream.state().last_seq, 2);
+        assert!(stream.get(1).expect("first removed").is_none());
+        assert_eq!(
+            stream
+                .get(2)
+                .expect("second retained")
+                .map(|record| record.payload),
+            Some(b"second".to_vec())
         );
     }
 

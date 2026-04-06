@@ -736,7 +736,7 @@ impl KafkaConsumer {
 
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
-            let assignment_list: Vec<TopicPartitionOffset> = assignments.iter().cloned().collect();
+            let assignment_list: Vec<TopicPartitionOffset> = assignments.to_vec();
             crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 if assignment_list.is_empty() {

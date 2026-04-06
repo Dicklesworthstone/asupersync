@@ -356,7 +356,6 @@ fn pattern_covers_segments(granted: &[SubjectToken], requested: &[SubjectToken])
     match (granted.split_first(), requested.split_first()) {
         (Some((SubjectToken::Tail, _)), Some(_)) | (None, None) => true,
         (None, Some(_))
-        | (Some((SubjectToken::Tail, _)), None)
         | (Some(_), None)
         | (
             Some((SubjectToken::Literal(_), _)),
