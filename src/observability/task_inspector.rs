@@ -723,7 +723,7 @@ impl TaskInspector {
         highlight_stuck_tasks: bool,
     ) -> String {
         let mut output = String::new();
-        writeln!(&mut output, "Task Inspector").unwrap();
+        writeln!(&mut output, "Task Inspector").expect("expected");
         writeln!(
             &mut output,
             "Total: {}  |  Running: {}  |  Cancelling: {}  |  Completed: {}  |  Stuck: {}",
@@ -733,13 +733,13 @@ impl TaskInspector {
             summary.completed,
             summary.stuck_count
         )
-        .unwrap();
+        .expect("expected");
         output.push_str(&"-".repeat(70));
         output.push('\n');
 
         output.push_str("By Region:\n");
         for (region_id, count) in &summary.by_region {
-            writeln!(&mut output, "  {region_id:?}: {count} tasks").unwrap();
+            writeln!(&mut output, "  {region_id:?}: {count} tasks").expect("expected");
         }
 
         if highlight_stuck_tasks && !stuck.is_empty() {
@@ -756,7 +756,7 @@ impl TaskInspector {
                     &mut output,
                     "  {id:?} in {region_id:?} - {state} for {age_secs:.1}s, {poll_count} polls"
                 )
-                .unwrap();
+                .expect("expected");
             }
         }
 
@@ -785,21 +785,21 @@ impl TaskInspector {
 
         let Some(task) = self.inspect_task(task_id) else {
             let mut output = String::new();
-            writeln!(&mut output, "Task {task_id:?} not found").unwrap();
+            writeln!(&mut output, "Task {task_id:?} not found").expect("expected");
             return console.print(&RawText(&output));
         };
 
         let mut output = String::new();
-        writeln!(&mut output, "Task Inspector: {task_id:?}").unwrap();
+        writeln!(&mut output, "Task Inspector: {task_id:?}").expect("expected");
         output.push_str(&"-".repeat(50));
         output.push('\n');
-        writeln!(&mut output, "State:         {}", task.state.name()).unwrap();
-        writeln!(&mut output, "Phase:         {:?}", task.phase).unwrap();
-        writeln!(&mut output, "Region:        {:?}", task.region_id).unwrap();
-        writeln!(&mut output, "Age:           {:.3}s", task.age.as_secs_f64()).unwrap();
-        writeln!(&mut output, "Poll count:    {}", task.poll_count).unwrap();
+        writeln!(&mut output, "State:         {}", task.state.name()).expect("expected");
+        writeln!(&mut output, "Phase:         {:?}", task.phase).expect("expected");
+        writeln!(&mut output, "Region:        {:?}", task.region_id).expect("expected");
+        writeln!(&mut output, "Age:           {:.3}s", task.age.as_secs_f64()).expect("expected");
+        writeln!(&mut output, "Poll count:    {}", task.poll_count).expect("expected");
         writeln!(&mut output, "Polls left:    {}", task.polls_remaining).expect("write should not fail on String");
-        writeln!(&mut output, "Wake pending:  {}", task.wake_pending).unwrap();
+        writeln!(&mut output, "Wake pending:  {}", task.wake_pending).expect("expected");
 
         if !task.obligations.is_empty() {
             output.push_str(&"-".repeat(50));

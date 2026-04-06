@@ -373,7 +373,7 @@ impl ObligationTracker {
 
         // Build output string
         let mut output = String::new();
-        writeln!(&mut output, "Obligation Tracker").unwrap();
+        writeln!(&mut output, "Obligation Tracker").expect("expected");
         writeln!(
             &mut output,
             "Active: {}  |  Potential Leaks: {}  |  Age Warnings: {}",

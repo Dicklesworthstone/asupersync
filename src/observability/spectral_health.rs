@@ -410,11 +410,18 @@ fn power_iteration_largest(
     for _ in 0..thresholds.max_iterations {
         laplacian.laplacian_multiply(&x, &mut y);
         let new_eigenvalue = dot(&x, &y);
-        normalize(&mut y);
+        let y_norm = dot(&y, &y).sqrt();
 
-        if (new_eigenvalue - eigenvalue).abs() < thresholds.convergence_tolerance {
-            return (new_eigenvalue.max(0.0), y);
+        if (new_eigenvalue - eigenvalue).abs() < thresholds.convergence_tolerance || y_norm <= f64::EPSILON {
+            let eigenvector = if y_norm > f64::EPSILON {
+                normalize(&mut y);
+                y
+            } else {
+                x
+            };
+            return (new_eigenvalue.max(0.0), eigenvector);
         }
+        normalize(&mut y);
 
         eigenvalue = new_eigenvalue;
         std::mem::swap(&mut x, &mut y);
@@ -485,14 +492,20 @@ fn find_fiedler(
         project_out_constant(&mut y);
 
         let new_eigenvalue_m = dot(&x, &y);
-        normalize(&mut y);
+        let y_norm = dot(&y, &y).sqrt();
 
         iterations = iter + 1;
-        if (new_eigenvalue_m - eigenvalue_m).abs() < thresholds.convergence_tolerance {
-            // lambda_2 = sigma - eigenvalue_of_M
+        if (new_eigenvalue_m - eigenvalue_m).abs() < thresholds.convergence_tolerance || y_norm <= f64::EPSILON {
             let fiedler = (sigma - new_eigenvalue_m).max(0.0);
-            return (fiedler, y, iterations);
+            let fiedler_vector = if y_norm > f64::EPSILON {
+                normalize(&mut y);
+                y
+            } else {
+                x
+            };
+            return (fiedler, fiedler_vector, iterations);
         }
+        normalize(&mut y);
 
         eigenvalue_m = new_eigenvalue_m;
         std::mem::swap(&mut x, &mut y);
