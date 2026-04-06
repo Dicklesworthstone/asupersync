@@ -377,10 +377,9 @@ impl SimNode {
     fn handle_spawn_ack(&self, ack: SpawnAck) {
         let rejected = {
             let mut pending = self.pending_results.lock();
-            pending.get_mut(&ack.remote_task_id).and_then(|entry| {
-                entry.tx.as_ref()?;
-
-                match ack.status {
+            pending
+                .get_mut(&ack.remote_task_id)
+                .and_then(|entry| match ack.status {
                     SpawnAckStatus::Accepted => {
                         if entry.state == RemoteTaskState::Pending {
                             entry.state = RemoteTaskState::Running;
@@ -388,11 +387,13 @@ impl SimNode {
                         None
                     }
                     SpawnAckStatus::Rejected(reason) => {
+                        if entry.state != RemoteTaskState::Pending {
+                            return None;
+                        }
                         entry.state = RemoteTaskState::Failed;
                         entry.tx.take().map(|tx| (tx, reason))
                     }
-                }
-            })
+                })
         };
 
         if let Some((tx, reason)) = rejected {
@@ -421,6 +422,7 @@ impl SimNode {
         let tx = {
             let mut pending = self.pending_results.lock();
             pending.get_mut(&remote_task_id).and_then(|entry| {
+                let tx = entry.tx.take()?;
                 entry.state = match &outcome {
                     RemoteOutcome::Success(_) => RemoteTaskState::Completed,
                     RemoteOutcome::Cancelled(_) => RemoteTaskState::Cancelled,
@@ -428,7 +430,7 @@ impl SimNode {
                         RemoteTaskState::Failed
                     }
                 };
-                entry.tx.take()
+                Some(tx)
             })
         };
 
@@ -1321,9 +1323,10 @@ mod tests {
         let (mut harness, a, b) = setup_harness();
         let cap = harness.node(&a).unwrap().create_cap();
         let cx = Cx::for_testing().with_remote_cap(cap);
+        let assigned_node = b.clone();
         let mut handle = crate::spawn_remote(
             &cx,
-            b.clone(),
+            b,
             crate::ComputationName::new("compute"),
             crate::remote::RemoteInput::empty(),
         )
@@ -1338,7 +1341,7 @@ mod tests {
             .handle_spawn_ack(SpawnAck {
                 remote_task_id: handle.remote_task_id(),
                 status: SpawnAckStatus::Rejected(SpawnRejectReason::CapacityExceeded),
-                assigned_node: b,
+                assigned_node,
             });
 
         assert_eq!(handle.state(), RemoteTaskState::Failed);
@@ -1348,6 +1351,85 @@ mod tests {
             RemoteError::SpawnRejected(SpawnRejectReason::CapacityExceeded)
         );
         assert_eq!(handle.state(), RemoteTaskState::Failed);
+    }
+
+    #[test]
+    fn late_rejected_spawn_ack_does_not_clobber_running_remote_handle() {
+        let (mut harness, a, b) = setup_harness();
+        let cap = harness.node(&a).unwrap().create_cap();
+        let cx = Cx::for_testing().with_remote_cap(cap);
+        let assigned_node = b.clone();
+        let mut handle = crate::spawn_remote(
+            &cx,
+            b,
+            crate::ComputationName::new("compute"),
+            crate::remote::RemoteInput::empty(),
+        )
+        .expect("spawn");
+
+        harness.run_for(Duration::from_millis(15));
+        assert_eq!(handle.state(), RemoteTaskState::Running);
+
+        harness
+            .nodes
+            .get_mut(&a)
+            .expect("origin node")
+            .handle_spawn_ack(SpawnAck {
+                remote_task_id: handle.remote_task_id(),
+                status: SpawnAckStatus::Rejected(SpawnRejectReason::CapacityExceeded),
+                assigned_node,
+            });
+
+        assert_eq!(handle.state(), RemoteTaskState::Running);
+        assert!(matches!(handle.try_join(), Ok(None)));
+
+        harness.run_for(Duration::from_millis(200));
+        let outcome = handle
+            .try_join()
+            .expect("result available")
+            .expect("remote outcome");
+        assert!(matches!(outcome, RemoteOutcome::Success(_)));
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
+    }
+
+    #[test]
+    fn duplicate_terminal_result_does_not_overwrite_completed_state() {
+        let (mut harness, a, b) = setup_harness();
+        let cap = harness.node(&a).unwrap().create_cap();
+        let cx = Cx::for_testing().with_remote_cap(cap);
+        let mut handle = crate::spawn_remote(
+            &cx,
+            b,
+            crate::ComputationName::new("compute"),
+            crate::remote::RemoteInput::empty(),
+        )
+        .expect("spawn");
+
+        harness.run_for(Duration::from_millis(200));
+        let outcome = handle
+            .try_join()
+            .expect("result available")
+            .expect("remote outcome");
+        assert!(matches!(outcome, RemoteOutcome::Success(_)));
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
+
+        harness
+            .nodes
+            .get_mut(&a)
+            .expect("origin node")
+            .handle_result(ResultDelivery {
+                remote_task_id: handle.remote_task_id(),
+                outcome: RemoteOutcome::Cancelled(crate::types::CancelReason::user(
+                    "protocol violation",
+                )),
+                execution_time: Duration::ZERO,
+            });
+
+        assert_eq!(handle.state(), RemoteTaskState::Completed);
+        assert!(matches!(
+            handle.try_join(),
+            Err(RemoteError::PolledAfterCompletion)
+        ));
     }
 
     #[test]

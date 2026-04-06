@@ -304,6 +304,28 @@ impl<S> RateLimit<S> {
     where
         S: Service<Request>,
     {
+        if self.reservations.reserved_tokens > 0 {
+            let mut reservation_restore_guard = ExistingReservationGuard::new(
+                Arc::clone(&self.state),
+                &mut self.reservations.reserved_tokens,
+                self.rate,
+                self.period.is_zero(),
+                true,
+            );
+
+            return match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
+                Poll::Ready(Ok(())) => {
+                    reservation_restore_guard.defuse();
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Pending => {
+                    reservation_restore_guard.defuse();
+                    Poll::Pending
+                }
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            };
+        }
+
         let next_deadline = {
             let mut state = self.state.lock();
             Self::refill_state_locked(&mut state, self.rate, self.period, now);
@@ -489,6 +511,51 @@ impl ReservedTokenGuard {
 impl Drop for ReservedTokenGuard {
     fn drop(&mut self) {
         if self.armed {
+            let mut state = self.state.lock();
+            let max_tokens = if self.zero_period {
+                self.rate.max(1)
+            } else {
+                self.rate
+            };
+            state.tokens = state.tokens.saturating_add(1).min(max_tokens);
+        }
+    }
+}
+
+struct ExistingReservationGuard<'a> {
+    state: Arc<Mutex<SharedRateLimitState>>,
+    reserved_tokens: &'a mut u64,
+    rate: u64,
+    zero_period: bool,
+    armed: bool,
+}
+
+impl<'a> ExistingReservationGuard<'a> {
+    fn new(
+        state: Arc<Mutex<SharedRateLimitState>>,
+        reserved_tokens: &'a mut u64,
+        rate: u64,
+        zero_period: bool,
+        armed: bool,
+    ) -> Self {
+        Self {
+            state,
+            reserved_tokens,
+            rate,
+            zero_period,
+            armed,
+        }
+    }
+
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ExistingReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.reserved_tokens = self.reserved_tokens.saturating_sub(1);
             let mut state = self.state.lock();
             let max_tokens = if self.zero_period {
                 self.rate.max(1)
@@ -699,6 +766,30 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Default)]
+    struct ReadyThenErrorService {
+        returned_ready_once: bool,
+    }
+
+    impl Service<()> for ReadyThenErrorService {
+        type Response = ();
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<(), &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.returned_ready_once {
+                Poll::Ready(Err("inner error"))
+            } else {
+                self.returned_ready_once = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            ready(Ok(()))
+        }
+    }
+
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
     fn test_time() -> Time {
@@ -744,7 +835,7 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Each poll_ready should consume a token
+        // Each poll_ready → call cycle should consume a token from the shared bucket.
         for expected in (1..=5).rev() {
             let result = svc.poll_ready(&mut cx);
             let ok = matches!(result, Poll::Ready(Ok(())));
@@ -756,6 +847,9 @@ mod tests {
                 expected - 1,
                 available
             );
+            // Consume the reservation so the next poll_ready can acquire a fresh token.
+            let mut future = svc.call(42);
+            let _ = Pin::new(&mut future).poll(&mut cx);
         }
         crate::test_complete!("tokens_consumed_on_ready");
     }
@@ -767,12 +861,14 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // First call succeeds
+        // First poll_ready + call cycle consumes the sole token.
         let result = svc.poll_ready(&mut cx);
         let ok = matches!(result, Poll::Ready(Ok(())));
         crate::assert_with_log!(ok, "first ready", true, ok);
+        let mut future = svc.call(42);
+        let _ = Pin::new(&mut future).poll(&mut cx);
 
-        // Second call should be pending (no tokens)
+        // Second poll_ready should be pending (no tokens left in shared bucket).
         let result = svc.poll_ready(&mut cx);
         let pending = result.is_pending();
         crate::assert_with_log!(pending, "pending", true, pending);
@@ -982,6 +1078,60 @@ mod tests {
             svc.reserved_tokens()
         );
         crate::test_complete!("poll_ready_with_time_propagates_inner_error");
+    }
+
+    #[test]
+    fn reserved_poll_ready_error_restores_token_and_clears_reservation() {
+        init_test("reserved_poll_ready_error_restores_token_and_clears_reservation");
+        let mut svc = RateLimit::new(ReadyThenErrorService::default(), 1, Duration::from_secs(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = svc.poll_ready_with_time::<()>(Time::ZERO, &mut cx);
+        let first_ok = matches!(first, Poll::Ready(Ok(())));
+        crate::assert_with_log!(first_ok, "first ready", true, first_ok);
+        crate::assert_with_log!(
+            svc.available_tokens() == 0,
+            "available after reservation",
+            0,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 1,
+            "reserved after first ready",
+            1,
+            svc.reserved_tokens()
+        );
+
+        let second = svc.poll_ready_with_time::<()>(Time::ZERO, &mut cx);
+        let second_err = matches!(
+            second,
+            Poll::Ready(Err(RateLimitError::Inner("inner error")))
+        );
+        crate::assert_with_log!(second_err, "second ready error", true, second_err);
+        crate::assert_with_log!(
+            svc.available_tokens() == 1,
+            "available after reserved-path error",
+            1,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(
+            svc.reserved_tokens() == 0,
+            "reserved cleared after reserved-path error",
+            0,
+            svc.reserved_tokens()
+        );
+
+        let mut future = svc.call(());
+        let result = Pin::new(&mut future).poll(&mut cx);
+        let not_ready = matches!(result, Poll::Ready(Err(RateLimitError::NotReady)));
+        crate::assert_with_log!(
+            not_ready,
+            "call requires a fresh successful poll_ready after error",
+            true,
+            not_ready
+        );
+        crate::test_complete!("reserved_poll_ready_error_restores_token_and_clears_reservation");
     }
 
     #[test]
@@ -1475,11 +1625,13 @@ mod tests {
         let mut svc =
             RateLimit::with_time_getter(EchoService, 1, Duration::from_secs(1), test_time);
 
-        // Set time to 0 and consume the single token.
+        // Set time to 0, consume the single token via poll_ready + call.
         TEST_NOW.store(0, Ordering::SeqCst);
         let first = svc.poll_ready(&mut cx);
         let ok = matches!(first, Poll::Ready(Ok(())));
         crate::assert_with_log!(ok, "first ready", true, ok);
+        let mut future = svc.call(42);
+        let _ = Pin::new(&mut future).poll(&mut cx);
 
         // Now tokens are exhausted. poll_ready should return Pending.
         let second = svc.poll_ready(&mut cx);

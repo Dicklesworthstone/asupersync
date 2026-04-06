@@ -96,6 +96,13 @@ pub enum DecodingProgressUpdateError {
         /// The total number of symbols needed to complete decoding.
         needed: u32,
     },
+    /// Reported progress moved backwards from the previously observed count.
+    SymbolsReceivedRegressed {
+        /// The previously recorded number of symbols received.
+        previous: u32,
+        /// The newly reported number of symbols received.
+        attempted: u32,
+    },
 }
 
 impl std::fmt::Display for DecodingProgressUpdateError {
@@ -110,6 +117,13 @@ impl std::fmt::Display for DecodingProgressUpdateError {
             Self::SymbolsReceivedExceedsNeeded { received, needed } => write!(
                 f,
                 "symbols_received ({received}) exceeds symbols_needed ({needed})"
+            ),
+            Self::SymbolsReceivedRegressed {
+                previous,
+                attempted,
+            } => write!(
+                f,
+                "symbols_received regressed from {previous} to {attempted}"
             ),
         }
     }
@@ -275,7 +289,7 @@ impl SymbolObligation {
     /// Updates decoding progress.
     ///
     /// Returns an error when called for a non-decoding obligation or when the
-    /// provided count exceeds the decode target.
+    /// provided count exceeds the decode target or moves backwards.
     pub fn update_decoding_progress(
         &mut self,
         symbols_received: u32,
@@ -290,6 +304,12 @@ impl SymbolObligation {
                 return Err(DecodingProgressUpdateError::SymbolsReceivedExceedsNeeded {
                     received: symbols_received,
                     needed: symbols_needed,
+                });
+            }
+            if symbols_received < *count {
+                return Err(DecodingProgressUpdateError::SymbolsReceivedRegressed {
+                    previous: *count,
+                    attempted: symbols_received,
                 });
             }
             *count = symbols_received;
@@ -917,6 +937,36 @@ mod tests {
         } = ob.symbol_kind()
         {
             assert_eq!(*symbols_received, 0);
+        }
+    }
+
+    // Test 11d: Decoding progress must not move backwards.
+    #[test]
+    fn test_decoding_progress_update_rejects_regression() {
+        let (oid, tid, rid) = test_ids();
+        let object_id = ObjectId::new_for_test(8);
+        let window = EpochWindow {
+            start: EpochId(1),
+            end: EpochId(2),
+        };
+
+        let mut ob = SymbolObligation::decoding(oid, tid, rid, object_id, 6, window, Time::ZERO);
+        assert!(ob.update_decoding_progress(4).is_ok());
+
+        let result = ob.update_decoding_progress(2);
+        assert_eq!(
+            result,
+            Err(DecodingProgressUpdateError::SymbolsReceivedRegressed {
+                previous: 4,
+                attempted: 2,
+            })
+        );
+
+        if let SymbolObligationKind::DecodingInProgress {
+            symbols_received, ..
+        } = ob.symbol_kind()
+        {
+            assert_eq!(*symbols_received, 4);
         }
     }
 

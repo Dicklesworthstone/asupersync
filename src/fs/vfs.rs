@@ -1,7 +1,8 @@
 //! Virtual File System abstraction.
 //!
 //! Provides `Vfs` and `VfsFile` traits that abstract filesystem operations,
-//! enabling both real Unix I/O (`UnixVfs`) and in-memory testing (`MemoryVfs`).
+//! enabling real Unix I/O via [`UnixVfs`] and alternate implementations for tests
+//! or embedded environments.
 //!
 //! # Design
 //!
@@ -33,9 +34,9 @@ use std::task::{Context, Poll};
 /// An open file handle on a virtual filesystem.
 ///
 /// Implementors must provide async read, write, seek, metadata, sync, and
-/// truncation. The poll-based `AsyncRead`/`AsyncWrite`/`AsyncSeek` impls are
-/// accessed through [`VfsFile::as_async_read`] etc., or by pinning the
-/// concrete type directly.
+/// truncation. The poll-based `AsyncRead`/`AsyncWrite`/`AsyncSeek` impls can be
+/// used directly via the async I/O extension traits in [`crate::io`] or by
+/// pinning the concrete type directly.
 pub trait VfsFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Unpin {
     /// Queries metadata about the open file.
     fn metadata(&self) -> impl Future<Output = io::Result<Metadata>> + Send;
@@ -60,8 +61,8 @@ pub trait VfsFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Unpin {
 /// A virtual filesystem namespace.
 ///
 /// All paths are interpreted relative to the implementation's root. For
-/// `UnixVfs`, this is the real filesystem. Future implementations (e.g.
-/// `MemoryVfs`) can use an in-memory tree.
+/// `UnixVfs`, this is the real filesystem. Other implementations can back the
+/// namespace with an alternate storage layer.
 pub trait Vfs: Send + Sync {
     /// The concrete file handle type returned by [`open`](Vfs::open).
     type File: VfsFile;
@@ -333,7 +334,7 @@ impl Vfs for UnixVfs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::{AsyncReadExt, AsyncWriteExt};
+    use crate::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
     use tempfile::tempdir;
 
     fn init_test(name: &str) {
@@ -492,11 +493,14 @@ mod tests {
             file.write_all(b"0123456789").await.unwrap();
             drop(file);
 
-            // Re-open, read all, verify
+            // Re-open, seek into the file, and verify the cursor moves correctly.
             let mut file = vfs.open_read(&path).await.unwrap();
-            let mut all = String::new();
-            file.read_to_string(&mut all).await.unwrap();
-            crate::assert_with_log!(all == "0123456789", "full read", "0123456789", all);
+            let pos = file.seek(SeekFrom::Start(3)).await.unwrap();
+            crate::assert_with_log!(pos == 3, "seek position", 3u64, pos);
+
+            let mut tail = String::new();
+            file.read_to_string(&mut tail).await.unwrap();
+            crate::assert_with_log!(tail == "3456789", "tail read", "3456789", tail);
         });
         crate::test_complete!("unix_vfs_file_seek");
     }
