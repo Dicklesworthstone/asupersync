@@ -1169,6 +1169,44 @@ impl RedisClient {
     }
 }
 
+/// Guard that discards a pooled Redis connection on drop unless defused.
+/// Prevents a desynced connection from being returned to the pool when
+/// a future is cancelled mid-protocol-exchange.
+struct DiscardOnDropGuard {
+    conn: Option<PooledResource<RedisConnection>>,
+}
+
+impl DiscardOnDropGuard {
+    fn new(conn: PooledResource<RedisConnection>) -> Self {
+        Self { conn: Some(conn) }
+    }
+
+    fn defuse(mut self) -> PooledResource<RedisConnection> {
+        self.conn.take().expect("guard already defused")
+    }
+}
+
+impl std::ops::Deref for DiscardOnDropGuard {
+    type Target = RedisConnection;
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("guard defused")
+    }
+}
+
+impl std::ops::DerefMut for DiscardOnDropGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn.as_mut().expect("guard defused")
+    }
+}
+
+impl Drop for DiscardOnDropGuard {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            conn.discard();
+        }
+    }
+}
+
 /// A Redis command pipeline.
 ///
 /// Pipelines batch multiple commands onto a *single* connection, sending the
@@ -1214,6 +1252,11 @@ impl Pipeline<'_> {
             return Err(e);
         }
 
+        // Wrap in a guard that discards the connection if dropped mid-protocol-
+        // exchange (e.g. by task cancellation). This prevents a desynced
+        // connection from being returned to the pool.
+        let mut conn = DiscardOnDropGuard::new(conn);
+
         // Write all commands in one go to reduce syscalls.
         let total_len: usize = self.encoded.iter().map(Vec::len).sum();
         let mut combined = Vec::with_capacity(total_len);
@@ -1222,12 +1265,12 @@ impl Pipeline<'_> {
         }
 
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
+
         if let Err(e) = conn.stream.write_all(&combined).await {
-            conn.discard();
+            // Guard drop will discard the connection.
             return Err(RedisError::Io(e));
         }
         if let Err(e) = conn.stream.flush().await {
-            conn.discard();
             return Err(RedisError::Io(e));
         }
 
@@ -1235,20 +1278,17 @@ impl Pipeline<'_> {
         for _ in 0..self.encoded.len() {
             let resp = match conn.read_response(cx).await {
                 Ok(resp) => resp,
-                Err(e) => {
-                    conn.discard();
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             };
             match resp {
-                RespValue::Error(msg) => {
-                    conn.discard();
-                    return Err(RedisError::Redis(msg));
-                }
+                RespValue::Error(msg) => return Err(RedisError::Redis(msg)),
                 other => out.push(other),
             }
         }
 
+        // Protocol exchange complete — defuse the guard to return the
+        // connection to the pool instead of discarding it.
+        let _ = conn.defuse();
         Ok(out)
     }
 }
