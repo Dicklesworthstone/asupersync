@@ -904,9 +904,7 @@ mod tests {
             .on_publish_committed(Subject::new("orders.created"), t(10));
 
         let events = Arc::new(Mutex::new(Vec::new()));
-        let recorder = EventRecorder {
-            events: events.clone(),
-        };
+        let recorder = EventRecorder { events };
         let subscriber = tracing_subscriber::registry().with(recorder);
 
         let report = tracing::subscriber::with_default(subscriber, || suite.report(t(20)));

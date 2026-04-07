@@ -805,10 +805,12 @@ mod tests {
 
         let result = CertificateVerifier::verify(&cert, &events);
         assert!(!result.valid);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "event_count" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "event_count" && !c.passed)
+        );
     }
 
     #[test]
@@ -821,10 +823,12 @@ mod tests {
         // Fix event count to match.
         let result = CertificateVerifier::verify(&cert, &events);
         assert!(!result.valid);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "event_hash" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "event_hash" && !c.passed)
+        );
     }
 
     #[test]
@@ -847,10 +851,12 @@ mod tests {
 
         let result = CertificateVerifier::verify(&cert, &events);
         assert!(!result.valid);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "event_hash" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "event_hash" && !c.passed)
+        );
     }
 
     #[test]
@@ -864,10 +870,12 @@ mod tests {
 
         let result = CertificateVerifier::verify(&cert, &events);
         assert!(!result.valid);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "no_violations" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "no_violations" && !c.passed)
+        );
     }
 
     #[test]

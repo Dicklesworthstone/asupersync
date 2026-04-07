@@ -3299,22 +3299,22 @@ mod tests {
         buf.write_lenenc_int(0);
         assert_eq!(buf.buf, vec![0]);
 
-        buf.clear();
+        buf.buf.clear();
         buf.write_lenenc_int(250);
         assert_eq!(buf.buf, vec![250]);
 
         // 2-byte encoding: 251..65535
-        buf.clear();
+        buf.buf.clear();
         buf.write_lenenc_int(256);
         assert_eq!(buf.buf[0], 0xFC);
 
         // 3-byte encoding: 65536..16777215
-        buf.clear();
+        buf.buf.clear();
         buf.write_lenenc_int(70_000);
         assert_eq!(buf.buf[0], 0xFD);
 
         // 8-byte encoding: >= 16777216
-        buf.clear();
+        buf.buf.clear();
         buf.write_lenenc_int(20_000_000);
         assert_eq!(buf.buf[0], 0xFE);
     }

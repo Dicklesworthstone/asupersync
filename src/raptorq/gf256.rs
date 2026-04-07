@@ -1807,26 +1807,26 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
 
 #[inline]
 fn xor_chunk_32_in_place(dst: &mut [u8], src: &[u8]) {
-    let mut d_words = [
+    let mut dst_parts = [
         u64::from_ne_bytes(dst[0..8].try_into().expect("expected")),
         u64::from_ne_bytes(dst[8..16].try_into().expect("expected")),
         u64::from_ne_bytes(dst[16..24].try_into().expect("expected")),
         u64::from_ne_bytes(dst[24..32].try_into().expect("expected")),
     ];
-    let s_words = [
+    let xor_parts = [
         u64::from_ne_bytes(src[0..8].try_into().expect("expected")),
         u64::from_ne_bytes(src[8..16].try_into().expect("expected")),
         u64::from_ne_bytes(src[16..24].try_into().expect("expected")),
         u64::from_ne_bytes(src[24..32].try_into().expect("expected")),
     ];
-    d_words[0] ^= s_words[0];
-    d_words[1] ^= s_words[1];
-    d_words[2] ^= s_words[2];
-    d_words[3] ^= s_words[3];
-    dst[0..8].copy_from_slice(&d_words[0].to_ne_bytes());
-    dst[8..16].copy_from_slice(&d_words[1].to_ne_bytes());
-    dst[16..24].copy_from_slice(&d_words[2].to_ne_bytes());
-    dst[24..32].copy_from_slice(&d_words[3].to_ne_bytes());
+    dst_parts[0] ^= xor_parts[0];
+    dst_parts[1] ^= xor_parts[1];
+    dst_parts[2] ^= xor_parts[2];
+    dst_parts[3] ^= xor_parts[3];
+    dst[0..8].copy_from_slice(&dst_parts[0].to_ne_bytes());
+    dst[8..16].copy_from_slice(&dst_parts[1].to_ne_bytes());
+    dst[16..24].copy_from_slice(&dst_parts[2].to_ne_bytes());
+    dst[24..32].copy_from_slice(&dst_parts[3].to_ne_bytes());
 }
 
 #[inline]
