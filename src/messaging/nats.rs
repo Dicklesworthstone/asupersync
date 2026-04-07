@@ -717,6 +717,11 @@ impl NatsClient {
         }
     }
 
+    fn remove_local_subscription(&self, sid: u64) {
+        let mut subs = self.state.subscriptions.lock();
+        subs.remove(&sid);
+    }
+
     /// Try to parse a complete message from the buffer.
     fn try_parse_message(&mut self) -> Result<Option<NatsMessage>, NatsError> {
         let buf = self.read_buf.available();
@@ -912,11 +917,18 @@ impl NatsClient {
             )));
         }
 
+        // Mark disconnected before the multi-part write so that if this
+        // future is dropped mid-write, the connection is not reused in a
+        // desynchronized state (partial PUB command on the wire).
+        self.connected = false;
+
         let cmd = format!("PUB {subject} {}\r\n", payload.len());
         self.stream.write_all(cmd.as_bytes()).await?;
         self.stream.write_all(payload).await?;
         self.stream.write_all(b"\r\n").await?;
         self.stream.flush().await?;
+
+        self.connected = true;
 
         // Handle any pending server messages (like PING)
         self.handle_pending_messages(cx).await?;
@@ -948,12 +960,18 @@ impl NatsClient {
             )));
         }
 
+        // Mark disconnected before the multi-part write so that if this
+        // future is dropped mid-write, the connection is not reused in a
+        // desynchronized state (partial PUB command on the wire).
+        self.connected = false;
+
         let cmd = format!("PUB {subject} {reply_to} {}\r\n", payload.len());
         self.stream.write_all(cmd.as_bytes()).await?;
         self.stream.write_all(payload).await?;
         self.stream.write_all(b"\r\n").await?;
         self.stream.flush().await?;
 
+        self.connected = true;
         Ok(())
     }
 
@@ -1092,12 +1110,17 @@ impl NatsClient {
             defused: false,
         };
 
+        // Mark disconnected before write so partial command on cancellation
+        // prevents further use of the desynchronized stream.
+        self.connected = false;
+
         // Send SUB command. The guard prevents a leaked sender on write failure
         // or cancellation.
         let cmd = format!("SUB {subject} {sid}\r\n");
         self.stream.write_all(cmd.as_bytes()).await?;
         self.stream.flush().await?;
 
+        self.connected = true;
         guard.defused = true;
 
         cx.trace(&format!("nats: subscribed to {subject} (sid={sid})"));
@@ -1145,12 +1168,16 @@ impl NatsClient {
             defused: false,
         };
 
+        // Mark disconnected before write to prevent reuse on partial write.
+        self.connected = false;
+
         // Send SUB command. Clean up the subscription entry on write failure
         // or cancellation (same as subscribe()).
         let cmd = format!("SUB {subject} {queue_group} {sid}\r\n");
         self.stream.write_all(cmd.as_bytes()).await?;
         self.stream.flush().await?;
 
+        self.connected = true;
         guard.defused = true;
 
         Ok(Subscription {
@@ -1166,15 +1193,18 @@ impl NatsClient {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         // Remove from local state
-        {
-            let mut subs = self.state.subscriptions.lock();
-            subs.remove(&sid);
+        self.remove_local_subscription(sid);
+
+        if !self.connected {
+            return Err(NatsError::NotConnected);
         }
 
-        // Send UNSUB command
+        // Send UNSUB command. Mark disconnected to prevent reuse on partial write.
+        self.connected = false;
         let cmd = format!("UNSUB {sid}\r\n");
         self.stream.write_all(cmd.as_bytes()).await?;
         self.stream.flush().await?;
+        self.connected = true;
 
         Ok(())
     }
@@ -1182,6 +1212,15 @@ impl NatsClient {
     /// Send PING and wait for PONG.
     pub async fn ping(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+        if !self.connected {
+            return Err(NatsError::NotConnected);
+        }
+
+        // Mark disconnected before write+read so that if this future is
+        // dropped mid-exchange, the connection is not reused in a
+        // desynchronized state.
+        self.connected = false;
 
         self.stream.write_all(b"PING\r\n").await?;
         self.stream.flush().await?;
@@ -1192,7 +1231,10 @@ impl NatsClient {
 
             if let Some(msg) = self.try_parse_message()? {
                 match msg {
-                    NatsMessage::Pong => return Ok(()),
+                    NatsMessage::Pong => {
+                        self.connected = true;
+                        return Ok(());
+                    }
                     NatsMessage::Err(e) => return Err(NatsError::Server(e)),
                     NatsMessage::Ping => {
                         self.stream.write_all(b"PONG\r\n").await?;
@@ -1399,6 +1441,23 @@ mod tests {
         assert_eq!(parts.first().copied(), Some("PUB"));
         assert_eq!(parts.len(), 4, "request publish must include reply-to");
         parts[3].parse().expect("parse PUB payload length")
+    }
+
+    fn read_optional_protocol_line(reader: &mut BufReader<std::net::TcpStream>) -> Option<String> {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => None,
+            Ok(_) => Some(line),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                None
+            }
+            Err(err) => panic!("read protocol line: {err}"),
+        }
     }
 
     #[test]
@@ -1768,6 +1827,101 @@ mod tests {
         assert!(
             unsubscribe.starts_with("UNSUB "),
             "timeout cleanup must unsubscribe, got {unsubscribe:?}"
+        );
+    }
+
+    #[test]
+    fn unsubscribe_on_disconnected_client_skips_wire_write() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("set read timeout");
+            let mut reader = BufReader::new(stream);
+            read_optional_protocol_line(&mut reader)
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let state = Arc::new(SharedState::new());
+            let sid = 41;
+            let (tx, _rx) = mpsc::channel(8);
+            state.subscriptions.lock().insert(
+                sid,
+                SubscriptionState {
+                    subject: "svc.echo".to_string(),
+                    sender: tx,
+                },
+            );
+
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::clone(&state),
+                next_sid: AtomicU64::new(1),
+                connected: false,
+            };
+
+            let err = client
+                .unsubscribe(&cx, sid)
+                .await
+                .expect_err("disconnected unsubscribe must fail closed");
+            assert!(matches!(err, NatsError::NotConnected));
+            assert!(
+                !state.subscriptions.lock().contains_key(&sid),
+                "local subscription must still be removed"
+            );
+        });
+
+        let line = server.join().expect("server join");
+        assert!(
+            line.is_none(),
+            "disconnected unsubscribe must not emit UNSUB, got {line:?}"
+        );
+    }
+
+    #[test]
+    fn ping_on_disconnected_client_skips_wire_write() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("set read timeout");
+            let mut reader = BufReader::new(stream);
+            read_optional_protocol_line(&mut reader)
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: false,
+            };
+
+            let err = client
+                .ping(&cx)
+                .await
+                .expect_err("disconnected ping must fail closed");
+            assert!(matches!(err, NatsError::NotConnected));
+        });
+
+        let line = server.join().expect("server join");
+        assert!(
+            line.is_none(),
+            "disconnected ping must not emit wire bytes, got {line:?}"
         );
     }
 
