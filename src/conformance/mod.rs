@@ -460,7 +460,7 @@ struct LabConformanceSessionGuard {
 impl Drop for LabConformanceSessionGuard {
     fn drop(&mut self) {
         let prev = self.prev.take();
-        CURRENT_LAB_CONFORMANCE_SESSION.with(|slot| {
+        let _ = CURRENT_LAB_CONFORMANCE_SESSION.try_with(|slot| {
             *slot.borrow_mut() = prev;
         });
     }

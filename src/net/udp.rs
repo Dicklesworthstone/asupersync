@@ -44,10 +44,10 @@ fn browser_udp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[inline]
-fn empty_datagram_recv_from_buffer_error() -> io::Error {
+fn empty_udp_receive_buffer_error(op: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "UdpSocket::recv_from requires a non-empty buffer",
+        format!("UdpSocket::{op} requires a non-empty buffer"),
     )
 }
 
@@ -213,7 +213,7 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         if buf.is_empty() {
-            return Poll::Ready(Err(empty_datagram_recv_from_buffer_error()));
+            return Poll::Ready(Err(empty_udp_receive_buffer_error("recv_from")));
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -283,6 +283,11 @@ impl UdpSocket {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
+        if buf.is_empty() {
+            return Poll::Ready(Err(empty_udp_receive_buffer_error("recv")));
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         match self.inner.recv(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -317,6 +322,11 @@ impl UdpSocket {
         {
             let _ = (self, cx, buf);
             return browser_udp_poll_unsupported("UdpSocket::poll_peek_from");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if buf.is_empty() {
+            return Poll::Ready(Err(empty_udp_receive_buffer_error("peek_from")));
         }
 
         #[cfg(not(target_arch = "wasm32"))]
