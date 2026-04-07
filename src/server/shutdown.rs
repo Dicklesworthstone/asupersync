@@ -186,10 +186,13 @@ impl ShutdownSignal {
 
     pub(crate) async fn wait_until(&self, deadline: Time) {
         match &self.state.time_source {
+            ShutdownTimeSource::TimerDriver(driver) => {
+                Sleep::with_timer_driver(deadline, driver.clone()).await;
+            }
             ShutdownTimeSource::Custom(time_getter) => {
                 Sleep::with_time_getter(deadline, *time_getter).await;
             }
-            _ => {
+            ShutdownTimeSource::WallClock => {
                 sleep_until(deadline).await;
             }
         }
@@ -588,6 +591,81 @@ mod tests {
             stats.duration
         );
         crate::test_complete!("new_captures_timer_driver_from_current_context");
+    }
+
+    #[test]
+    fn wait_until_uses_captured_timer_driver_without_ambient_context() {
+        init_test("wait_until_uses_captured_timer_driver_without_ambient_context");
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&virtual_clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(7, 1),
+            TaskId::new_for_test(9, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver.clone()),
+            None,
+        );
+
+        let signal = {
+            let _guard = Cx::set_current(Some(cx));
+            ShutdownSignal::new()
+        };
+        let _no_cx = Cx::set_current(None);
+
+        let waker = std::task::Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+        let deadline = Time::from_secs(12);
+        let mut wait = std::pin::pin!(signal.wait_until(deadline));
+
+        let first_poll = std::future::Future::poll(wait.as_mut(), &mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "wait is pending before deadline",
+            true,
+            first_poll.is_pending()
+        );
+        crate::assert_with_log!(
+            timer_driver.pending_count() == 1,
+            "captured timer driver owns registration",
+            1,
+            timer_driver.pending_count()
+        );
+
+        virtual_clock.advance(1_000_000_000);
+        let fired_before_deadline = timer_driver.process_timers();
+        crate::assert_with_log!(
+            fired_before_deadline == 0,
+            "timer does not fire before deadline",
+            0,
+            fired_before_deadline
+        );
+
+        virtual_clock.advance(1_000_000_000);
+        let fired_at_deadline = timer_driver.process_timers();
+        crate::assert_with_log!(
+            fired_at_deadline == 1,
+            "captured timer driver fires at deadline",
+            1,
+            fired_at_deadline
+        );
+
+        let second_poll = std::future::Future::poll(wait.as_mut(), &mut task_cx);
+        crate::assert_with_log!(
+            second_poll.is_ready(),
+            "wait becomes ready after captured timer fires",
+            true,
+            second_poll.is_ready()
+        );
+        crate::assert_with_log!(
+            timer_driver.pending_count() == 0,
+            "registration clears after completion",
+            0,
+            timer_driver.pending_count()
+        );
+        crate::test_complete!("wait_until_uses_captured_timer_driver_without_ambient_context");
     }
 
     #[test]

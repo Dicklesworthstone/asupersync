@@ -176,6 +176,11 @@ pub struct Sleep {
     /// Optional time getter for standalone use.
     /// When None, uses a default mechanism (currently instant check).
     pub(crate) time_getter: Option<fn() -> Time>,
+    /// Optional explicit timer driver for capability-bound waits.
+    ///
+    /// When present, polling does not consult `Cx::current()` for timer
+    /// registration or time reads.
+    bound_timer_driver: Option<TimerDriverHandle>,
     /// Whether this sleep has been polled at least once.
     /// Used for tracing/debugging.
     polled: std::sync::atomic::AtomicBool,
@@ -208,6 +213,7 @@ impl Sleep {
         Self {
             deadline,
             time_getter: None,
+            bound_timer_driver: None,
             polled: std::sync::atomic::AtomicBool::new(false),
             completed: std::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
@@ -258,6 +264,31 @@ impl Sleep {
         Self {
             deadline,
             time_getter: Some(time_getter),
+            bound_timer_driver: None,
+            polled: std::sync::atomic::AtomicBool::new(false),
+            completed: std::sync::atomic::AtomicBool::new(false),
+            ready: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(SleepState {
+                waker: None,
+                fallback: None,
+                zombie_fallbacks: Vec::new(),
+                timer_handle: None,
+                timer_driver: None,
+            })),
+        }
+    }
+
+    /// Creates a `Sleep` that is permanently bound to an explicit timer driver.
+    ///
+    /// This preserves capability-correct timing when the creator needs the
+    /// future to keep using the captured driver even if it is later polled
+    /// outside that creator's ambient `Cx`.
+    #[must_use]
+    pub(crate) fn with_timer_driver(deadline: Time, timer_driver: TimerDriverHandle) -> Self {
+        Self {
+            deadline,
+            time_getter: None,
+            bound_timer_driver: Some(timer_driver),
             polled: std::sync::atomic::AtomicBool::new(false),
             completed: std::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),
@@ -430,12 +461,19 @@ impl Future for Sleep {
 
     #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Try to get time from timer driver first (most efficient path)
-        let (timer_driver, trace) = Cx::current().map_or_else(
+        // Prefer an explicitly bound timer driver; otherwise use the ambient
+        // runtime driver when one exists.
+        let (ambient_timer_driver, trace) = Cx::current().map_or_else(
             || (None, None),
             |current| (current.timer_driver(), current.trace_buffer()),
         );
-        let now = if self.time_getter.is_some() {
+        let timer_driver = self
+            .bound_timer_driver
+            .clone()
+            .or_else(|| ambient_timer_driver.clone());
+        let now = if let Some(timer) = self.bound_timer_driver.as_ref() {
+            timer.now()
+        } else if self.time_getter.is_some() {
             self.current_time()
         } else {
             timer_driver
@@ -665,6 +703,7 @@ impl Clone for Sleep {
         Self {
             deadline: self.deadline,
             time_getter: self.time_getter,
+            bound_timer_driver: self.bound_timer_driver.clone(),
             polled: std::sync::atomic::AtomicBool::new(false), // Fresh clone hasn't been polled
             completed: std::sync::atomic::AtomicBool::new(false),
             ready: Arc::new(AtomicBool::new(false)),

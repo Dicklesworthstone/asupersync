@@ -509,6 +509,10 @@ impl<H: Handler> Handler for RateLimitMiddleware<H> {
                 )
                 .header("retry-after", format!("{secs}"))
             }
+            Err(crate::combinator::rate_limit::RateLimitError::QueueIdExhausted) => Response::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                b"Service Unavailable: rate limiter queue exhausted".to_vec(),
+            ),
             Err(crate::combinator::rate_limit::RateLimitError::Inner(never)) => match never {},
         }
     }

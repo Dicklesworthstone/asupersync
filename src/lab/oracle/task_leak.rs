@@ -80,9 +80,47 @@ impl TaskLeakOracle {
         Self::default()
     }
 
+    fn record_leaked_tasks(
+        &mut self,
+        region: RegionId,
+        region_close_time: Time,
+        leaked_tasks: impl IntoIterator<Item = TaskId>,
+    ) {
+        if let Some(existing) = self
+            .violations
+            .iter_mut()
+            .find(|violation| violation.region == region)
+        {
+            for task in leaked_tasks {
+                if !existing.leaked_tasks.contains(&task) {
+                    existing.leaked_tasks.push(task);
+                }
+            }
+            existing.leaked_tasks.sort();
+            return;
+        }
+
+        let mut leaked_tasks: Vec<TaskId> = leaked_tasks.into_iter().collect();
+        leaked_tasks.sort();
+
+        if !leaked_tasks.is_empty() {
+            self.violations.push(TaskLeakViolation {
+                region,
+                leaked_tasks,
+                region_close_time,
+            });
+        }
+    }
+
     /// Records a task spawn event.
     pub fn on_spawn(&mut self, task: TaskId, region: RegionId, _time: Time) {
         self.tasks_by_region.entry(region).or_default().insert(task);
+
+        if let Some(&region_close_time) = self.region_closes.get(&region) {
+            // A post-close spawn is itself a structured-concurrency violation,
+            // even if the task later completes.
+            self.record_leaked_tasks(region, region_close_time, [task]);
+        }
     }
 
     /// Records a task completion event.
@@ -105,13 +143,7 @@ impl TaskLeakOracle {
             .collect();
         leaked.sort();
 
-        if !leaked.is_empty() {
-            self.violations.push(TaskLeakViolation {
-                region,
-                leaked_tasks: leaked,
-                region_close_time: time,
-            });
-        }
+        self.record_leaked_tasks(region, time, leaked);
     }
 
     /// Verifies the invariant holds.
@@ -445,6 +477,75 @@ mod tests {
             violation.region_close_time
         );
         crate::test_complete!("completion_after_close_still_violates");
+    }
+
+    #[test]
+    fn task_spawned_after_region_close_is_violation_even_if_it_completes_later() {
+        init_test("task_spawned_after_region_close_is_violation_even_if_it_completes_later");
+        let mut oracle = TaskLeakOracle::new();
+
+        oracle.on_region_close(region(0), t(100));
+        oracle.on_spawn(task(1), region(0), t(110));
+        oracle.on_complete(task(1), t(120));
+
+        let violation = oracle
+            .check(t(120))
+            .expect_err("task spawned after region close must be reported as a leak");
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.leaked_tasks == vec![task(1)],
+            "leaked_tasks",
+            vec![task(1)],
+            violation.leaked_tasks
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(100),
+            "close_time",
+            t(100),
+            violation.region_close_time
+        );
+        crate::test_complete!(
+            "task_spawned_after_region_close_is_violation_even_if_it_completes_later"
+        );
+    }
+
+    #[test]
+    fn post_close_spawns_merge_into_existing_region_violation() {
+        init_test("post_close_spawns_merge_into_existing_region_violation");
+        let mut oracle = TaskLeakOracle::new();
+
+        oracle.on_spawn(task(1), region(0), t(10));
+        oracle.on_region_close(region(0), t(100));
+        oracle.on_spawn(task(2), region(0), t(110));
+        oracle.on_complete(task(2), t(120));
+
+        let violation = oracle
+            .check(t(120))
+            .expect_err("post-close spawns should be merged into the region's leak record");
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.leaked_tasks == vec![task(1), task(2)],
+            "leaked_tasks",
+            vec![task(1), task(2)],
+            violation.leaked_tasks
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(100),
+            "close_time",
+            t(100),
+            violation.region_close_time
+        );
+        crate::test_complete!("post_close_spawns_merge_into_existing_region_violation");
     }
 
     #[test]

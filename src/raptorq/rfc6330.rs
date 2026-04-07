@@ -291,6 +291,12 @@ pub fn next_prime_ge(n: usize) -> usize {
     candidate
 }
 
+fn require_rfc_u32(name: &str, value: usize) -> u32 {
+    u32::try_from(value).unwrap_or_else(|error| {
+        panic!("{name} must fit in u32 for RFC 6330 tuple arithmetic (got {value}): {error}")
+    })
+}
+
 fn is_prime(n: usize) -> bool {
     if n < 2 {
         return false;
@@ -329,24 +335,28 @@ pub fn tuple(
         "P1 must equal smallest prime >= P (expected {expected_pi_modulus}, got {pi_modulus})"
     );
 
-    let mut linear_factor = 53_591u32.wrapping_add(997u32.wrapping_mul(systematic_index as u32));
+    let systematic_index_u32 = require_rfc_u32("J", systematic_index);
+    let lt_width_u32 = require_rfc_u32("W", lt_width);
+    let pi_modulus_u32 = require_rfc_u32("P1", pi_modulus);
+
+    let mut linear_factor = 53_591u32.wrapping_add(997u32.wrapping_mul(systematic_index_u32));
     if linear_factor.is_multiple_of(2) {
         linear_factor = linear_factor.wrapping_add(1);
     }
-    let constant_offset = 10_267u32.wrapping_mul((systematic_index as u32).wrapping_add(1));
+    let constant_offset = 10_267u32.wrapping_mul(systematic_index_u32.wrapping_add(1));
     let random_input = constant_offset.wrapping_add(encoding_symbol_id.wrapping_mul(linear_factor));
 
     let degree_input = rand(random_input, 0, 1 << 20);
     let lt_degree = deg(degree_input);
-    let lt_step = 1 + rand(random_input, 1, (lt_width as u32) - 1) as usize;
-    let lt_start = rand(random_input, 2, lt_width as u32) as usize;
+    let lt_step = 1 + rand(random_input, 1, lt_width_u32 - 1) as usize;
+    let lt_start = rand(random_input, 2, lt_width_u32) as usize;
     let pi_degree = if lt_degree < 4 {
         2 + rand(encoding_symbol_id, 3, 2) as usize
     } else {
         2
     };
-    let pi_step = 1 + rand(encoding_symbol_id, 4, (pi_modulus as u32) - 1) as usize;
-    let pi_start = rand(encoding_symbol_id, 5, pi_modulus as u32) as usize;
+    let pi_step = 1 + rand(encoding_symbol_id, 4, pi_modulus_u32 - 1) as usize;
+    let pi_start = rand(encoding_symbol_id, 5, pi_modulus_u32) as usize;
 
     LtTuple {
         d: lt_degree,
@@ -655,6 +665,28 @@ mod tests {
         assert!(
             result.is_err(),
             "tuple should reject composite P1 values instead of silently drifting"
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn tuple_rejects_oversized_width_before_u32_truncation() {
+        let too_wide = (u32::MAX as usize) + 1;
+        let result = std::panic::catch_unwind(|| tuple(5, too_wide, 17, 17, 0));
+        assert!(
+            result.is_err(),
+            "tuple should fail closed when W exceeds RFC 6330 u32 arithmetic"
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn tuple_rejects_oversized_systematic_index_before_u32_truncation() {
+        let too_large_j = (u32::MAX as usize) + 1;
+        let result = std::panic::catch_unwind(|| tuple(too_large_j, 17, 10, 11, 0));
+        assert!(
+            result.is_err(),
+            "tuple should fail closed when J exceeds RFC 6330 u32 arithmetic"
         );
     }
 

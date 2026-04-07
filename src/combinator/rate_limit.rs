@@ -193,6 +193,10 @@ enum RejectionReason {
 /// Result of a queue entry: None = waiting, Some(Ok(())) = granted, Some(Err(reason)) = rejected.
 type QueueEntryResult = Option<Result<(), RejectionReason>>;
 
+/// Out-of-band ID returned by `enqueue` when the caller acquired tokens
+/// immediately and therefore has no queue entry to track.
+const IMMEDIATE_ACQUIRE_SENTINEL: u64 = u64::MAX;
+
 /// Entry in the waiting queue.
 #[derive(Debug)]
 struct QueueEntry {
@@ -401,6 +405,42 @@ impl RateLimiter {
         }
     }
 
+    /// Allocate a queue entry ID while reserving `IMMEDIATE_ACQUIRE_SENTINEL`
+    /// for the fast-path return from `enqueue`.
+    ///
+    /// Queue entry IDs are externally visible handles used by `check_entry()`
+    /// and `cancel_entry()`. Reusing an ID after wrap would let a stale caller
+    /// alias a later waiter and observe or cancel the wrong entry, so the
+    /// allocator fails closed when the ID space is exhausted.
+    fn allocate_entry_id(&self, queue: &VecDeque<QueueEntry>) -> Result<u64, RateLimitError<()>> {
+        let mut current = self.next_id.load(Ordering::Relaxed);
+
+        loop {
+            let mut candidate = current;
+            while candidate != IMMEDIATE_ACQUIRE_SENTINEL
+                && queue.iter().any(|entry| entry.id == candidate)
+            {
+                candidate = candidate.saturating_add(1);
+            }
+
+            if candidate == IMMEDIATE_ACQUIRE_SENTINEL {
+                return Err(RateLimitError::QueueIdExhausted);
+            }
+
+            let next = candidate.saturating_add(1);
+
+            match self.next_id.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(candidate),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     fn refund_tokens(&self, cost: u32) {
         if cost == 0 {
             return;
@@ -531,12 +571,13 @@ impl RateLimiter {
     /// Enqueue a waiting operation.
     ///
     /// Returns `Ok(entry_id)` if enqueued, `Err(RateLimitExceeded)` if rate exceeded
-    /// and policy is Reject.
+    /// and policy is Reject, or `Err(QueueIdExhausted)` if the queue-handle
+    /// ID space has been exhausted and the limiter must fail closed.
     #[allow(clippy::cast_precision_loss, clippy::significant_drop_tightening)]
     pub fn enqueue(&self, cost: u32, now: Time) -> Result<u64, RateLimitError<()>> {
         // Fast path: try immediate acquisition
         if self.try_acquire(cost, now) {
-            return Ok(u64::MAX); // Special sentinel meaning "already acquired"
+            return Ok(IMMEDIATE_ACQUIRE_SENTINEL); // Already acquired
         }
 
         if cost > self.policy.burst {
@@ -566,7 +607,7 @@ impl RateLimiter {
         };
 
         let mut queue = self.wait_queue.write();
-        let entry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let entry_id = self.allocate_entry_id(&queue)?;
 
         queue.push_back(QueueEntry {
             id: entry_id,
@@ -713,7 +754,7 @@ impl RateLimiter {
     #[allow(clippy::option_if_let_else, clippy::significant_drop_tightening)]
     pub fn check_entry(&self, entry_id: u64, now: Time) -> Result<bool, RateLimitError<()>> {
         // Special sentinel for already acquired
-        if entry_id == u64::MAX {
+        if entry_id == IMMEDIATE_ACQUIRE_SENTINEL {
             return Ok(true);
         }
 
@@ -746,7 +787,7 @@ impl RateLimiter {
 
     /// Cancel a queued entry.
     pub fn cancel_entry(&self, entry_id: u64, now: Time) {
-        if entry_id == u64::MAX {
+        if entry_id == IMMEDIATE_ACQUIRE_SENTINEL {
             return; // Special sentinel, nothing to cancel
         }
 
@@ -980,6 +1021,12 @@ pub enum RateLimitError<E> {
     /// Rate limit exceeded (reject strategy).
     RateLimitExceeded,
 
+    /// Waiting entry ID space exhausted.
+    ///
+    /// This is fail-closed: queue IDs are not reused because stale handles
+    /// would otherwise be able to alias later waiters after wraparound.
+    QueueIdExhausted,
+
     /// Timed out waiting for rate limit.
     Timeout {
         /// How long we waited.
@@ -997,6 +1044,7 @@ impl<E: fmt::Display> fmt::Display for RateLimitError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
+            Self::QueueIdExhausted => write!(f, "rate limit queue ID space exhausted"),
             Self::Timeout { waited } => write!(f, "rate limit timeout after {waited:?}"),
             Self::Cancelled => write!(f, "cancelled while waiting for rate limit"),
             Self::Inner(e) => write!(f, "{e}"),
@@ -1564,7 +1612,7 @@ mod tests {
 
         // Should succeed immediately and return sentinel
         let result = rl.enqueue(1, now);
-        assert_eq!(result, Ok(u64::MAX));
+        assert_eq!(result, Ok(IMMEDIATE_ACQUIRE_SENTINEL));
     }
 
     #[test]
@@ -1585,7 +1633,89 @@ mod tests {
         // Enqueue should succeed and return a real ID
         let result = rl.enqueue(1, now);
         assert!(result.is_ok());
-        assert_ne!(result.unwrap(), u64::MAX);
+        assert_ne!(result.unwrap(), IMMEDIATE_ACQUIRE_SENTINEL);
+    }
+
+    #[test]
+    fn queued_entry_ids_fail_closed_when_id_space_exhausts() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_secs(1),
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now), "first token should be consumed");
+
+        let first_live_id = rl
+            .enqueue(1, now)
+            .expect("first queued entry should be accepted");
+        assert_eq!(first_live_id, 0);
+
+        let last_real_id = rl
+            .enqueue(1, now)
+            .expect("queue entry before wrap should be accepted");
+        assert_eq!(last_real_id, 1);
+
+        rl.next_id
+            .store(IMMEDIATE_ACQUIRE_SENTINEL - 1, Ordering::Relaxed);
+
+        let edge_id = rl
+            .enqueue(1, now)
+            .expect("queue entry at wrap edge should be accepted");
+        assert_eq!(edge_id, IMMEDIATE_ACQUIRE_SENTINEL - 1);
+
+        let exhausted = rl.enqueue(1, now);
+        assert_eq!(
+            exhausted,
+            Err(RateLimitError::QueueIdExhausted),
+            "allocator must fail closed instead of reusing queue IDs after exhaustion"
+        );
+        assert_ne!(edge_id, IMMEDIATE_ACQUIRE_SENTINEL);
+        assert_ne!(edge_id, first_live_id);
+        assert_ne!(edge_id, last_real_id);
+    }
+
+    #[test]
+    fn stale_queue_handle_cannot_alias_later_waiter_after_exhaustion() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_secs(1),
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now), "first token should be consumed");
+
+        let stale_id = rl
+            .enqueue(1, now)
+            .expect("first queued entry should be accepted");
+        assert_eq!(stale_id, 0);
+        rl.cancel_entry(stale_id, now);
+
+        rl.next_id
+            .store(IMMEDIATE_ACQUIRE_SENTINEL - 1, Ordering::Relaxed);
+
+        let live_id = rl
+            .enqueue(1, now)
+            .expect("last queue ID before exhaustion should still be usable");
+        assert_eq!(live_id, IMMEDIATE_ACQUIRE_SENTINEL - 1);
+
+        assert_eq!(
+            rl.enqueue(1, now),
+            Err(RateLimitError::QueueIdExhausted),
+            "new waiters must not reuse a stale external handle after exhaustion"
+        );
+
+        rl.cancel_entry(stale_id, now);
+        assert!(
+            matches!(rl.check_entry(live_id, now), Ok(false)),
+            "stale handle cancellation must not affect the later waiter"
+        );
     }
 
     #[test]
@@ -2013,6 +2143,9 @@ mod tests {
     fn error_display() {
         let exceeded: RateLimitError<&str> = RateLimitError::RateLimitExceeded;
         assert!(exceeded.to_string().contains("exceeded"));
+
+        let exhausted: RateLimitError<&str> = RateLimitError::QueueIdExhausted;
+        assert!(exhausted.to_string().contains("queue ID space exhausted"));
 
         let timeout: RateLimitError<&str> = RateLimitError::Timeout {
             waited: Duration::from_millis(100),

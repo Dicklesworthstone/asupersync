@@ -1928,6 +1928,7 @@ mod tests {
     // Decision ledger tests
     // ========================================================================
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_exact_has_algorithm_selected() {
         let events = [
@@ -1959,6 +1960,7 @@ mod tests {
         assert!(is_valid_linear_extension(&poset, &ledger.result.schedule));
     }
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_greedy_records_choices() {
         let events: Vec<TraceEvent> = (0u32..10)
@@ -1994,6 +1996,7 @@ mod tests {
         assert_eq!(ledger.result.switch_count, plain.switch_count);
     }
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_beam_records_prunes() {
         let events: Vec<TraceEvent> = (0u32..15)
@@ -2025,6 +2028,7 @@ mod tests {
         assert!(is_valid_linear_extension(&poset, &ledger.result.schedule));
     }
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_deterministic() {
         let events: Vec<TraceEvent> = (0u32..12)
@@ -2049,6 +2053,7 @@ mod tests {
         assert_eq!(ledger1.summary(), ledger2.summary());
     }
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_summary_is_readable() {
         let events = [
@@ -2269,6 +2274,7 @@ mod tests {
     // Additional decision ledger tests
     // =========================================================================
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_empty_trace() {
         let poset = make_poset(&[]);
@@ -2278,6 +2284,7 @@ mod tests {
         assert!(ledger.result.schedule.is_empty());
     }
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_single_event() {
         let events = [TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1))];
@@ -2287,6 +2294,7 @@ mod tests {
         assert_eq!(ledger.result.schedule, vec![0]);
     }
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_greedy_shows_owner_match() {
         // Chain of same-owner events followed by different owner
@@ -2319,6 +2327,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-internals")]
     #[test]
     fn ledger_result_matches_normalize() {
         // Ledger result must match plain normalize for all config presets

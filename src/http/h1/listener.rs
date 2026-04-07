@@ -121,6 +121,14 @@ fn default_listener_time_getter() -> Time {
         .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
+fn shutdown_signal_for_time_getter(time_getter: fn() -> Time) -> ShutdownSignal {
+    if std::ptr::fn_addr_eq(time_getter, default_listener_time_getter as fn() -> Time) {
+        ShutdownSignal::new()
+    } else {
+        ShutdownSignal::with_time_getter(time_getter)
+    }
+}
+
 /// Configuration for the HTTP/1.1 listener.
 #[derive(Debug, Clone)]
 pub struct Http1ListenerConfig {
@@ -226,7 +234,7 @@ where
         config: Http1ListenerConfig,
     ) -> io::Result<Self> {
         let tcp_listener = TcpListener::bind(addr).await?;
-        let shutdown_signal = ShutdownSignal::with_time_getter(config.time_getter);
+        let shutdown_signal = shutdown_signal_for_time_getter(config.time_getter);
         let connection_manager = ConnectionManager::with_time_getter(
             config.max_connections,
             shutdown_signal.clone(),
@@ -250,7 +258,7 @@ where
         handler: F,
         config: Http1ListenerConfig,
     ) -> Self {
-        let shutdown_signal = ShutdownSignal::with_time_getter(config.time_getter);
+        let shutdown_signal = shutdown_signal_for_time_getter(config.time_getter);
         let connection_manager = ConnectionManager::with_time_getter(
             config.max_connections,
             shutdown_signal.clone(),
@@ -551,6 +559,7 @@ fn should_retry_after_spawn_failure(err: &SpawnError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use crate::http::h1::types::Response;
     use crate::io::AsyncWriteExt;
     use crate::record::RegionLimits;
@@ -558,6 +567,8 @@ mod tests {
     use crate::runtime::yield_now;
     use crate::sync::Notify;
     use crate::test_utils::init_test_logging;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
     use std::sync::Arc;
 
     thread_local! {
@@ -848,6 +859,41 @@ mod tests {
             assert_eq!(
                 listener.shutdown_signal().drain_deadline(),
                 Some(Time::from_secs(10))
+            );
+        });
+    }
+
+    #[test]
+    fn default_listener_shutdown_signal_captures_timer_driver() {
+        crate::test_utils::run_test(|| async {
+            let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+            let timer_driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&virtual_clock));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(41, 1),
+                TaskId::new_for_test(42, 1),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer_driver),
+                None,
+            );
+
+            let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+            let listener = {
+                let _guard = Cx::set_current(Some(cx));
+                Http1Listener::from_listener(
+                    tcp,
+                    |_req| async { Response::new(200, "OK", Vec::new()) },
+                    Http1ListenerConfig::default(),
+                )
+            };
+
+            let _no_cx = Cx::set_current(None);
+            assert!(listener.begin_drain());
+            assert_eq!(
+                listener.shutdown_signal().drain_deadline(),
+                Some(Time::from_secs(40))
             );
         });
     }

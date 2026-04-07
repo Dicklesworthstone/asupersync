@@ -215,31 +215,37 @@ impl DeadlineMonotoneOracle {
 
     /// Records a budget update event for a region.
     ///
-    /// Re-checks deadline monotonicity against the parent.
+    /// Re-checks deadline monotonicity against the parent and any existing
+    /// children of the updated region.
     /// Note: Deadlines should only get tighter, never extended.
     pub fn on_budget_update(&mut self, region: RegionId, budget: &Budget, time: Time) {
         let new_deadline = budget.deadline;
 
-        if let Some(entry) = self.regions.get_mut(&region) {
-            // Check against parent if we have one
-            if let Some(parent_id) = entry.parent {
-                if let Some(parent_entry) = self.regions.get(&parent_id).cloned() {
-                    self.record_violation_if_needed(
-                        region,
-                        new_deadline,
-                        parent_id,
-                        parent_entry.deadline,
-                        time,
-                    );
-                }
-            }
-
-            // Also need to re-get the entry since we had to drop the borrow
+        let Some(parent_id) = self.regions.get(&region).and_then(|entry| entry.parent) else {
             if let Some(entry) = self.regions.get_mut(&region) {
                 entry.deadline = new_deadline;
                 entry.timestamp = time;
             }
+            self.check_existing_children(region, new_deadline, time);
+            return;
+        };
+
+        if let Some(parent_entry) = self.regions.get(&parent_id).cloned() {
+            self.record_violation_if_needed(
+                region,
+                new_deadline,
+                parent_id,
+                parent_entry.deadline,
+                time,
+            );
         }
+
+        if let Some(entry) = self.regions.get_mut(&region) {
+            entry.deadline = new_deadline;
+            entry.timestamp = time;
+        }
+
+        self.check_existing_children(region, new_deadline, time);
     }
 
     /// Records a parent's deadline being tightened.
@@ -829,6 +835,54 @@ mod tests {
             violation.parent_deadline
         );
         crate::test_complete!("parent_deadline_tightened_causes_child_violation");
+    }
+
+    #[test]
+    fn parent_budget_update_rechecks_existing_children() {
+        init_test("parent_budget_update_rechecks_existing_children");
+        let mut oracle = DeadlineMonotoneOracle::new();
+
+        oracle.on_region_create(region(0), None, &budget_with_deadline(t(1000)), t(0));
+        oracle.on_region_create(
+            region(1),
+            Some(region(0)),
+            &budget_with_deadline(t(800)),
+            t(0),
+        );
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+
+        oracle.on_budget_update(region(0), &budget_with_deadline(t(500)), t(10));
+
+        let violation = oracle
+            .check()
+            .expect_err("parent budget updates must re-check existing children");
+        crate::assert_with_log!(
+            violation.child == region(1),
+            "violation child",
+            region(1),
+            violation.child
+        );
+        crate::assert_with_log!(
+            violation.child_deadline == Some(t(800)),
+            "child deadline",
+            Some(t(800)),
+            violation.child_deadline
+        );
+        crate::assert_with_log!(
+            violation.parent == region(0),
+            "parent",
+            region(0),
+            violation.parent
+        );
+        crate::assert_with_log!(
+            violation.parent_deadline == Some(t(500)),
+            "parent deadline",
+            Some(t(500)),
+            violation.parent_deadline
+        );
+        crate::test_complete!("parent_budget_update_rechecks_existing_children");
     }
 
     // =========================================================================
