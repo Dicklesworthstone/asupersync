@@ -2350,7 +2350,9 @@ mod tests {
                 | (usize::from(header[1]) << 8)
                 | (usize::from(header[2]) << 16);
             let mut payload = vec![0u8; payload_len];
-            stream.read_exact(&mut payload).expect("read command payload");
+            stream
+                .read_exact(&mut payload)
+                .expect("read command payload");
             assert_eq!(payload[0], command::COM_QUERY);
 
             let mut packet = PacketBuffer::new();
