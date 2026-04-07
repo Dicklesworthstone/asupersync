@@ -8,7 +8,7 @@
 
 use super::capability::FabricCapability;
 use super::class::{AckKind, DeliveryClass};
-use super::control::MembershipRecord;
+use super::control::{MembershipRecord, MembershipState};
 use super::explain::{DataPlaneDecisionKind, ExplainDecisionSpec, ExplainPlan};
 use super::ir::{CostVector, RetentionPolicy, SubjectFamily};
 use super::policy::SemanticServiceClass;
@@ -6222,6 +6222,138 @@ pub struct DiscoveryNegotiationPolicy {
     pub lease_ttl_millis: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DiscoverySessionFingerprintMaterial {
+    local_node: NodeId,
+    peer_node: NodeId,
+    bootstrap_key: String,
+    policy_version: u64,
+    credential_subject: NodeId,
+    credential_issuer: NodeId,
+    credential_membership_epoch: u64,
+    credential_signature: String,
+    advertised_capabilities: Vec<String>,
+    admitted_capabilities: Vec<String>,
+    supported_policy_versions: Vec<u64>,
+    resource_budget: (u64, u32, u16),
+    interest_summary: Vec<(String, u64)>,
+    stewardship_leases: Vec<(CellId, NodeId, ControlEpoch, u64)>,
+    recent_control_epochs: Vec<(CellId, ControlEpoch)>,
+    advisory_membership: Option<(u64, MembershipState, u64, u16)>,
+    suggested_cells: Vec<CellId>,
+    viewer_capabilities: Vec<String>,
+    lease_ttl_millis: u64,
+}
+
+impl DiscoverySessionFingerprintMaterial {
+    #[allow(clippy::result_large_err)]
+    fn new(
+        local_node: &NodeId,
+        hello: &DiscoveryHello,
+        policy: &DiscoveryNegotiationPolicy,
+        policy_version: u64,
+    ) -> Result<Self, DiscoveryError> {
+        let bootstrap_key = hello.bootstrap.replay_key()?;
+        Ok(Self {
+            local_node: local_node.clone(),
+            peer_node: hello.node_id.clone(),
+            bootstrap_key,
+            policy_version,
+            credential_subject: hello.credential.subject.clone(),
+            credential_issuer: hello.credential.issuer.clone(),
+            credential_membership_epoch: hello.credential.membership_epoch,
+            credential_signature: hello.credential.signature.clone(),
+            advertised_capabilities: canonical_discovery_capability_keys(&hello.capability_set),
+            admitted_capabilities: canonical_discovery_capability_keys(
+                &hello.credential.admitted_capabilities,
+            ),
+            supported_policy_versions: hello.supported_policy_versions.iter().copied().collect(),
+            resource_budget: (
+                hello.resource_budget.storage_bytes_available,
+                hello.resource_budget.uplink_kib_per_sec,
+                hello.resource_budget.repair_slots,
+            ),
+            interest_summary: canonical_discovery_interest_summary(&hello.interest_summary),
+            stewardship_leases: canonical_discovery_stewardship_leases(&hello.stewardship_leases),
+            recent_control_epochs: canonical_discovery_control_epochs(&hello.recent_control_epochs),
+            advisory_membership: hello
+                .advisory_hints
+                .membership
+                .as_ref()
+                .map(discovery_membership_hint_key),
+            suggested_cells: canonical_discovery_suggested_cells(
+                &hello.advisory_hints.suggested_cells,
+            ),
+            viewer_capabilities: canonical_discovery_capability_keys(&policy.viewer_capabilities),
+            lease_ttl_millis: policy.lease_ttl_millis.max(1),
+        })
+    }
+}
+
+fn canonical_discovery_capability_keys(capabilities: &[FabricCapability]) -> Vec<String> {
+    let mut keys = capabilities
+        .iter()
+        .map(render_fabric_capability)
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn canonical_discovery_interest_summary(
+    entries: &[DiscoveryInterestSummaryEntry],
+) -> Vec<(String, u64)> {
+    let mut summary = entries
+        .iter()
+        .map(|entry| (entry.subject.canonical_key(), entry.subscribers))
+        .collect::<Vec<_>>();
+    summary.sort();
+    summary
+}
+
+fn canonical_discovery_stewardship_leases(
+    leases: &[DiscoveryStewardLeaseView],
+) -> Vec<(CellId, NodeId, ControlEpoch, u64)> {
+    let mut keys = leases
+        .iter()
+        .map(|lease| {
+            (
+                lease.cell_id,
+                lease.lease.holder.clone(),
+                lease.lease.control_epoch,
+                lease.lease.fence_generation,
+            )
+        })
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn canonical_discovery_control_epochs(
+    epochs: &[DiscoveryControlEpochView],
+) -> Vec<(CellId, ControlEpoch)> {
+    let mut keys = epochs
+        .iter()
+        .map(|epoch| (epoch.cell_id, epoch.control_epoch))
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn discovery_membership_hint_key(record: &MembershipRecord) -> (u64, MembershipState, u64, u16) {
+    (
+        record.version(),
+        record.state(),
+        record.last_heartbeat_unix_ms(),
+        record.load_per_mille(),
+    )
+}
+
+fn canonical_discovery_suggested_cells(cells: &[CellId]) -> Vec<CellId> {
+    let mut sorted = cells.to_vec();
+    sorted.sort();
+    sorted
+}
+
 /// Stable replay identifier for one typed discovery session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DiscoverySessionId(u128);
@@ -6231,29 +6363,13 @@ impl DiscoverySessionId {
     fn for_handshake(
         local_node: &NodeId,
         hello: &DiscoveryHello,
+        policy: &DiscoveryNegotiationPolicy,
         policy_version: u64,
     ) -> Result<Self, DiscoveryError> {
-        let bootstrap_key = hello.bootstrap.replay_key()?;
-        let lower = stable_hash((
-            "fabric::discovery",
-            local_node.as_str(),
-            hello.node_id.as_str(),
-            bootstrap_key.as_str(),
-            policy_version,
-            hello.credential.issuer.as_str(),
-            hello.credential.membership_epoch,
-            hello.credential.signature.as_str(),
-        ));
-        let upper = stable_hash((
-            "fabric::discovery:v2",
-            local_node.as_str(),
-            hello.node_id.as_str(),
-            bootstrap_key.as_str(),
-            policy_version,
-            hello.credential.issuer.as_str(),
-            hello.credential.membership_epoch,
-            hello.credential.signature.as_str(),
-        ));
+        let material =
+            DiscoverySessionFingerprintMaterial::new(local_node, hello, policy, policy_version)?;
+        let lower = stable_hash(("fabric::discovery", &material));
+        let upper = stable_hash(("fabric::discovery:v2", &material));
         Ok(Self((u128::from(upper) << 64) | u128::from(lower)))
     }
 
@@ -6393,7 +6509,8 @@ impl DiscoverySession {
                 node: hello.node_id.clone(),
             })?;
 
-        let session_id = DiscoverySessionId::for_handshake(&local_node, hello, policy_version)?;
+        let session_id =
+            DiscoverySessionId::for_handshake(&local_node, hello, policy, policy_version)?;
         let peer_interest_advertisements =
             hello.interest_advertisements_for(&policy.viewer_capabilities, session_id);
         let authoritative_stewardship = hello.authoritative_stewardship();
@@ -8573,6 +8690,66 @@ mod tests {
         assert_ne!(
             session_v1.peer_interest_advertisements,
             session_v2.peer_interest_advertisements
+        );
+    }
+
+    #[test]
+    fn discovery_session_id_changes_when_handshake_material_changes_without_rotating_credential() {
+        let hello_v1 = discovery_hello(
+            "peer-d2",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![discovery_interest("tenant.alpha.orders.>", 5)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut hello_v2 = hello_v1.clone();
+        hello_v2.resource_budget.repair_slots += 1;
+
+        let policy = discovery_policy(Vec::new());
+        let session_v1 = DiscoverySession::establish(NodeId::new("local-a"), &hello_v1, &policy)
+            .expect("session v1");
+        let session_v2 = DiscoverySession::establish(NodeId::new("local-a"), &hello_v2, &policy)
+            .expect("session v2");
+
+        assert_ne!(
+            session_v1.session_id, session_v2.session_id,
+            "distinct hello transcripts must not collapse to the same session id under a reused credential"
+        );
+        assert_ne!(
+            session_v1.peer_interest_advertisements, session_v2.peer_interest_advertisements,
+            "session-scoped blinding must rotate when the discovery transcript changes"
+        );
+    }
+
+    #[test]
+    fn discovery_session_id_changes_when_local_negotiation_policy_changes() {
+        let hello = discovery_hello(
+            "peer-d3",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![subscribe_capability("tenant.alpha.>")],
+            vec![discovery_interest("tenant.alpha.orders.>", 5)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let policy_v1 = discovery_policy(Vec::new());
+        let mut policy_v2 = policy_v1.clone();
+        policy_v2.lease_ttl_millis = 45_000;
+
+        let session_v1 = DiscoverySession::establish(NodeId::new("local-a"), &hello, &policy_v1)
+            .expect("session v1");
+        let session_v2 = DiscoverySession::establish(NodeId::new("local-a"), &hello, &policy_v2)
+            .expect("session v2");
+
+        assert_ne!(
+            session_v1.session_id, session_v2.session_id,
+            "local negotiation policy changes must produce a distinct discovery session id"
+        );
+        assert_ne!(
+            session_v1.lease_obligation, session_v2.lease_obligation,
+            "lease obligation identity must track the effective local policy"
         );
     }
 
