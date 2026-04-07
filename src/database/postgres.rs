@@ -3042,7 +3042,7 @@ impl PgConnection {
 
         let mut buf = MessageBuffer::new();
         buf.write_cstring("ROLLBACK");
-        let msg = buf.build_message(b'Q')?;
+        let msg = buf.build_message(FrontendMessage::Query as u8)?;
 
         if let Err(e) = self.write_all(&msg).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -3561,6 +3561,7 @@ impl PgConnection {
             }
             let (msg_type, data) = self.read_message().await?;
             if msg_type == b'Z' {
+                self.inner.closed = false;
                 if !data.is_empty() {
                     self.inner.transaction_status = data[0];
                 }
@@ -4303,7 +4304,7 @@ mod tests {
         let mut buf = MessageBuffer::new();
         buf.write_byte(b'Q');
         buf.write_cstring("SELECT 1");
-        let msg = buf.build_message(b'Q').unwrap();
+        let msg = buf.build_message(FrontendMessage::Query as u8).unwrap();
         // byte 0: msg type 'Q'
         assert_eq!(msg[0], b'Q');
         // bytes 1-4: length = body_len + 4
