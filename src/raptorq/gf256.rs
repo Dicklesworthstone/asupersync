@@ -1777,7 +1777,8 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
         if src_a.len().min(src_b.len()) < 32 {
-            gf256_add_slices2_scalar(dst_a, src_a, dst_b, src_b);
+            (dispatch.add_slice)(dst_a, src_a);
+            (dispatch.add_slice)(dst_b, src_b);
             return;
         }
         // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
@@ -1791,7 +1792,8 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
         if src_a.len().min(src_b.len()) < 16 {
-            gf256_add_slices2_scalar(dst_a, src_a, dst_b, src_b);
+            (dispatch.add_slice)(dst_a, src_a);
+            (dispatch.add_slice)(dst_b, src_b);
             return;
         }
         // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
