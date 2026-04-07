@@ -412,7 +412,9 @@ fn power_iteration_largest(
         let new_eigenvalue = dot(&x, &y);
         let y_norm = dot(&y, &y).sqrt();
 
-        if (new_eigenvalue - eigenvalue).abs() < thresholds.convergence_tolerance || y_norm <= f64::EPSILON {
+        if (new_eigenvalue - eigenvalue).abs() < thresholds.convergence_tolerance
+            || y_norm <= f64::EPSILON
+        {
             let eigenvector = if y_norm > f64::EPSILON {
                 normalize(&mut y);
                 y
@@ -495,7 +497,9 @@ fn find_fiedler(
         let y_norm = dot(&y, &y).sqrt();
 
         iterations = iter + 1;
-        if (new_eigenvalue_m - eigenvalue_m).abs() < thresholds.convergence_tolerance || y_norm <= f64::EPSILON {
+        if (new_eigenvalue_m - eigenvalue_m).abs() < thresholds.convergence_tolerance
+            || y_norm <= f64::EPSILON
+        {
             let fiedler = (sigma - new_eigenvalue_m).max(0.0);
             let fiedler_vector = if y_norm > f64::EPSILON {
                 normalize(&mut y);

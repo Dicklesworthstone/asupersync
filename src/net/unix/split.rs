@@ -233,6 +233,7 @@ impl std::fmt::Debug for UnixStreamInner {
 }
 
 impl UnixStreamInner {
+    #[allow(clippy::too_many_lines)]
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let mut guard = self.state.lock();
 

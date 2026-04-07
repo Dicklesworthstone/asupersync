@@ -25,17 +25,17 @@
 //! })
 //!
 //! // With budget
-//! scope!(cx, budget: Budget::deadline(Duration::from_secs(5)), {
+//! scope!(cx, budget: Budget::with_deadline_secs(5), {
 //!     // body
 //! })
 //!
 //! // With name and budget
-//! scope!(cx, "handler", budget: Budget::deadline(Duration::from_secs(5)), {
+//! scope!(cx, "handler", budget: Budget::with_deadline_secs(5), {
 //!     // body
 //! })
 //!
 //! // Options can be combined
-//! scope!(cx, "handler", state: &mut state, budget: Budget::deadline(Duration::from_secs(5)), {
+//! scope!(cx, "handler", state: &mut state, budget: Budget::with_deadline_secs(5), {
 //!     let _child = spawn!(async { 42 });
 //! })
 //! ```
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn test_parse_budget_scope() {
         let input: proc_macro2::TokenStream =
-            quote! { cx, budget: Budget::deadline(Duration::from_secs(5)), { let x = 1; } };
+            quote! { cx, budget: Budget::with_deadline_secs(5), { let x = 1; } };
         let parsed: ScopeInput = syn::parse2(input).unwrap();
         assert!(parsed.name.is_none());
         assert!(parsed.budget.is_some());

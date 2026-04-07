@@ -2321,7 +2321,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// This is used by the `scope!` macro when a budget is specified:
     /// ```ignore
-    /// scope!(cx, budget: Budget::deadline(Duration::from_secs(5)), {
+    /// scope!(cx, budget: Budget::with_deadline_secs(5), {
     ///     // body
     /// })
     /// ```

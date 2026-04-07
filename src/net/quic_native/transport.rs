@@ -303,7 +303,7 @@ impl LossRecovery {
                         acked_bytes_for_growth = acked_bytes_for_growth.saturating_add(pkt.bytes);
                     }
                 }
-                
+
                 if largest_newly_acked_pn.is_none_or(|pn| pkt.packet_number > pn) {
                     largest_newly_acked_pn = Some(pkt.packet_number);
                     largest_newly_acked_time = Some(pkt.time_sent_micros);

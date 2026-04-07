@@ -798,7 +798,8 @@ impl TaskInspector {
         writeln!(&mut output, "Region:        {:?}", task.region_id).expect("expected");
         writeln!(&mut output, "Age:           {:.3}s", task.age.as_secs_f64()).expect("expected");
         writeln!(&mut output, "Poll count:    {}", task.poll_count).expect("expected");
-        writeln!(&mut output, "Polls left:    {}", task.polls_remaining).expect("write should not fail on String");
+        writeln!(&mut output, "Polls left:    {}", task.polls_remaining)
+            .expect("write should not fail on String");
         writeln!(&mut output, "Wake pending:  {}", task.wake_pending).expect("expected");
 
         if !task.obligations.is_empty() {

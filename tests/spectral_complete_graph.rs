@@ -1,12 +1,14 @@
 //! Spectral decomposition test for complete graphs.
-use asupersync::observability::spectral_health::{DependencyLaplacian, SpectralThresholds, compute_spectral_decomposition};
+use asupersync::observability::spectral_health::{
+    DependencyLaplacian, SpectralThresholds, compute_spectral_decomposition,
+};
 
 #[test]
 fn test_complete_graph() {
     let n = 4;
     let mut edges = Vec::new();
     for i in 0..n {
-        for j in i+1..n {
+        for j in i + 1..n {
             edges.push((i, j));
         }
     }
@@ -20,6 +22,11 @@ fn test_complete_graph() {
         decomp.fiedler_value
     );
     // The Fiedler vector should be a unit vector
-    let norm = decomp.fiedler_vector.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let norm = decomp
+        .fiedler_vector
+        .iter()
+        .map(|v| v * v)
+        .sum::<f64>()
+        .sqrt();
     assert!((norm - 1.0).abs() < 1e-5, "Norm is {norm}, expected 1.0");
 }

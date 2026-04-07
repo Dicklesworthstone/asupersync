@@ -648,7 +648,10 @@ impl NativeQuicConnection {
         Ok(())
     }
 
-    fn next_packet_number(&mut self, space: PacketNumberSpace) -> Result<u64, NativeQuicConnectionError> {
+    fn next_packet_number(
+        &mut self,
+        space: PacketNumberSpace,
+    ) -> Result<u64, NativeQuicConnectionError> {
         let idx = match space {
             PacketNumberSpace::Initial => 0,
             PacketNumberSpace::Handshake => 1,

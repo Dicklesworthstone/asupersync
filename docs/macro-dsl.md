@@ -214,7 +214,7 @@ let value = race!(cx, timeout: Duration::from_secs(2), {
 
 ```rust,ignore
 scope!(cx, state: &mut state, {
-    scope!(cx, budget: Budget::deadline(Duration::from_secs(5)), {
+    scope!(cx, budget: Budget::with_deadline_secs(5), {
         // inner work with tighter budget
     });
 })
