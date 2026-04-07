@@ -766,18 +766,24 @@ All three support prepared statements, transactions, and connection reuse. SQLit
 
 ## Remote Runtime and Distributed Coordination
 
-Asupersync's distributed runtime primitives are designed around the same invariants as local execution: explicit ownership, explicit cancellation, and deterministic state transitions.
+Asupersync's distributed runtime surface is designed around the same
+invariants as local execution: explicit ownership, explicit cancellation, and
+deterministic state transitions. Today the core crate ships the protocol,
+capability, lease, idempotency, and saga contracts for remote work, while the
+full transport-backed remote lifecycle is still being finalized under Track F.
 
 | Primitive | Location | Runtime Behavior |
 |-----------|----------|------------------|
-| Named remote spawn | `src/remote.rs` | `spawn_remote` executes named computations (no closure shipping) under `RemoteCap` |
+| Named remote spawn | `src/remote.rs` | `spawn_remote` creates a region-owned `RemoteHandle`; attached runtimes send protocol messages, while missing runtimes fail closed to an explicit deterministic fallback |
 | Lease obligations | `src/remote.rs` | Leases are obligation-backed and participate in region close/quiescence |
 | Idempotency store | `src/remote.rs` | Deduplicates spawn retries with TTL-bounded records and conflict detection |
 | Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
-| Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow |
+| Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
 
-The transport surface is deliberately separated from protocol state machines, so message semantics can be tested independently of network backend details.
+The transport surface is deliberately separated from protocol state machines,
+so message semantics can be tested independently of network backend details
+while the transport-backed spawn/result/cancel/close path continues to mature.
 
 ---
 
@@ -1451,7 +1457,7 @@ and known limitations.
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR schedule exploration | ✅ Implemented |
-| Distributed runtime (remote tasks, sagas, leases, recovery) | ✅ Implemented |
+| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; transport-backed remote lifecycle still in progress |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (Lean coverage artifacts + TLA+ export) | ✅ Implemented |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
