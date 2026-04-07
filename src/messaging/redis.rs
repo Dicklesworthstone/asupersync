@@ -1364,7 +1364,11 @@ impl Transaction {
                 self.queued_commands = self.queued_commands.saturating_add(1);
                 Ok(())
             }
-            RespValue::Error(msg) => Err(RedisError::Redis(msg)),
+            RespValue::Error(msg) => {
+                self.conn = Some(conn.defuse());
+                self.finished = false;
+                Err(RedisError::Redis(msg))
+            }
             other => Err(RedisError::Protocol(format!(
                 "queued command expected +QUEUED, got {other:?}"
             ))),
@@ -1393,6 +1397,10 @@ impl Transaction {
                 Err(RedisError::Redis(
                     "EXEC returned null (WATCH condition failed)".to_string(),
                 ))
+            }
+            RespValue::Error(msg) => {
+                conn.return_to_pool();
+                Err(RedisError::Redis(msg))
             }
             other => Err(RedisError::Protocol(format!(
                 "EXEC expected array reply, got {other:?}"

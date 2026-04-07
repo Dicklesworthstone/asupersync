@@ -1917,6 +1917,8 @@ impl MySqlConnection {
         buf.write_byte(command::COM_PING);
         let packet = buf.build_packet();
 
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
         }
@@ -1929,8 +1931,17 @@ impl MySqlConnection {
         self.inner.sequence = seq.wrapping_add(1);
 
         match data.first() {
-            Some(0x00) => Outcome::Ok(()),
-            Some(0xFF) => Outcome::Err(Self::parse_error(&data)),
+            Some(0x00) => {
+                self.inner.closed = false;
+                Outcome::Ok(())
+            }
+            Some(0xFF) => {
+                let err = Self::parse_error(&data);
+                if matches!(&err, MySqlError::Server { .. }) {
+                    self.inner.closed = false;
+                }
+                Outcome::Err(err)
+            }
             _ => Outcome::Err(MySqlError::Protocol("unexpected ping response".to_string())),
         }
     }
