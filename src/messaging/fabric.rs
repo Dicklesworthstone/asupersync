@@ -34,10 +34,10 @@ use crate::remote::NodeId;
 #[cfg(test)]
 use crate::security::AuthenticatedSymbol;
 use crate::security::{AuthKey, AuthenticationTag};
+#[cfg(test)]
+use crate::types::SymbolId;
 use crate::types::resource::{PoolConfig, SymbolPool};
-use crate::types::{
-    DEFAULT_SYMBOL_SIZE, ObjectId, ObjectParams, ObligationId, Symbol, SymbolId, Time,
-};
+use crate::types::{DEFAULT_SYMBOL_SIZE, ObjectId, ObjectParams, ObligationId, Symbol, Time};
 use crate::util::DetHasher;
 use franken_decision::{
     DecisionAuditEntry, DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior,
@@ -488,19 +488,6 @@ impl FabricState {
             self.push_decision(cx, decision);
         }
         Ok(routed)
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn publish_message(
-        &mut self,
-        cx: &Cx,
-        subject: &Subject,
-        payload: Vec<u8>,
-        delivery_class: DeliveryClass,
-    ) -> Result<(), AsupersyncError> {
-        let prepared = self.prepare_publish_message(cx, subject, payload, delivery_class)?;
-        self.apply_prepared_publish(cx, prepared);
-        Ok(())
     }
 
     #[allow(clippy::result_large_err)]
@@ -3551,14 +3538,6 @@ impl ControlEpoch {
             policy_revision,
         }
     }
-
-    #[must_use]
-    const fn bump_policy(self) -> Self {
-        Self {
-            cell_epoch: self.cell_epoch,
-            policy_revision: self.policy_revision + 1,
-        }
-    }
 }
 
 /// Lease proving that one steward currently owns authoritative append rights.
@@ -4155,6 +4134,7 @@ impl SegmentWindow {
         }
     }
 
+    #[cfg(test)]
     const fn contains(self, sequence: u64) -> bool {
         self.start_sequence <= sequence && sequence <= self.end_sequence
     }
@@ -4503,20 +4483,23 @@ impl RecoverableDataCapsule {
 enum DataCapsuleError {
     #[error("payload of {bytes} bytes exceeds the bounded data-capsule envelope")]
     PayloadTooLarge { bytes: usize },
-    #[error("durable segment requires {required} holders but only {available} were available")]
-    InsufficientRepairHolders { required: usize, available: usize },
     #[error("payload requires unsupported source-symbol count {count}")]
     TooManySourceSymbols { count: usize },
     #[error("raptorq encoding failed: {0}")]
     Encoding(String),
+    #[cfg(test)]
     #[error("raptorq decoding failed: {0}")]
     Decoding(String),
+    #[cfg(test)]
     #[error("decoder rejected a retained symbol: {reason}")]
     DecodingRejected { reason: String },
+    #[cfg(test)]
     #[error("no retained holder can serve segment window {window}")]
     NoAvailableHolders { window: SegmentWindow },
+    #[cfg(test)]
     #[error("no durable segment retained sequence {sequence}")]
     MissingSegment { sequence: u64 },
+    #[cfg(test)]
     #[error("symbol authentication failed for holder `{holder}` symbol `{symbol_id}`")]
     AuthenticationFailed { holder: NodeId, symbol_id: SymbolId },
 }

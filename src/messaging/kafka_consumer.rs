@@ -324,6 +324,7 @@ struct ConsumerState {
     assigned_partitions: BTreeSet<(String, i32)>,
     committed_offsets: BTreeMap<(String, i32), i64>,
     positions: BTreeMap<(String, i32), i64>,
+    #[cfg(not(feature = "kafka"))]
     poll_cursor: usize,
     rebalance_generation: u64,
     last_revoked_partitions: BTreeSet<(String, i32)>,

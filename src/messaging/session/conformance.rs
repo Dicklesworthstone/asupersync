@@ -81,19 +81,6 @@ struct AnnotatedLocalBranch {
     continuation: AnnotatedLocalType,
 }
 
-impl AnnotatedLocalBranch {
-    fn into_check_record(
-        self,
-        role: RoleName,
-        expectation: ConformanceExpectation,
-        observed: ConformanceObserved,
-        observed_at: Option<Time>,
-    ) -> ConformanceCheckRecord {
-        self.metadata
-            .into_check_record(role, self.path, expectation, observed, observed_at)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AnnotatedLocalType {
     Send {
