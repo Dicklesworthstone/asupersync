@@ -408,15 +408,18 @@ impl RaceConnections {
 
             let mut i = 0;
             while i < self.in_flight.len() {
+                // We use `.as_mut()` on the pinned in_flight future to poll it.
                 if let Poll::Ready(res) = Pin::new(&mut self.in_flight[i]).poll(cx) {
                     made_progress = true;
-                    std::mem::drop(self.in_flight.remove(i));
+                    // Remove the completed future. The elements shift left, so we do NOT increment `i`.
+                    drop(self.in_flight.remove(i));
                     match res {
                         Ok(stream) => {
                             return self.finish(Ok(stream));
                         }
                         Err(e) => {
                             self.last_error = Some(e);
+                            // If an attempt fails, start the next one immediately (RFC 8305 5.4).
                             if self.addrs.len() > 0 {
                                 self.start_next(now);
                             }

@@ -262,44 +262,36 @@ mod tests {
     }
 
     #[test]
-    fn test_listen_reuseaddr_unsupported() {
-        init_test("test_listen_reuseaddr_unsupported");
+    fn test_listen_with_reuseaddr() {
+        init_test("test_listen_with_reuseaddr");
         let socket = TcpSocket::new_v4().expect("new_v4");
         socket
             .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .expect("bind");
         socket.set_reuseaddr(true).expect("set_reuseaddr");
-        let err = socket
+        let listener = socket
             .listen(128)
-            .expect_err("reuseaddr should be unsupported");
-        crate::assert_with_log!(
-            err.kind() == io::ErrorKind::Unsupported,
-            "reuseaddr unsupported",
-            io::ErrorKind::Unsupported,
-            err.kind()
-        );
-        crate::test_complete!("test_listen_reuseaddr_unsupported");
+            .expect("listen with reuseaddr should succeed");
+        let addr = listener.local_addr().expect("local_addr");
+        crate::assert_with_log!(addr.port() > 0, "bound port", true, addr.port() > 0);
+        crate::test_complete!("test_listen_with_reuseaddr");
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_listen_reuseport_unsupported() {
-        init_test("test_listen_reuseport_unsupported");
+    fn test_listen_with_reuseport() {
+        init_test("test_listen_with_reuseport");
         let socket = TcpSocket::new_v4().expect("new_v4");
         socket
             .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .expect("bind");
         socket.set_reuseport(true).expect("set_reuseport");
-        let err = socket
+        let listener = socket
             .listen(128)
-            .expect_err("reuseport should be unsupported");
-        crate::assert_with_log!(
-            err.kind() == io::ErrorKind::Unsupported,
-            "reuseport unsupported",
-            io::ErrorKind::Unsupported,
-            err.kind()
-        );
-        crate::test_complete!("test_listen_reuseport_unsupported");
+            .expect("listen with reuseport should succeed");
+        let addr = listener.local_addr().expect("local_addr");
+        crate::assert_with_log!(addr.port() > 0, "bound port", true, addr.port() > 0);
+        crate::test_complete!("test_listen_with_reuseport");
     }
 
     #[test]
