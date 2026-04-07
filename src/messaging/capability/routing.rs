@@ -189,6 +189,11 @@ impl RoutingProgram {
         }
         let source_pattern =
             SubjectPattern::parse(plan.source_pattern.as_str()).expect("validated morphism plan");
+        ensure_literal_source_anchor(&source_pattern).map_err(|()| {
+            RoutingProgramCompileError::NonLiteralSourcePatternAnchor {
+                pattern: source_pattern.as_str().to_owned(),
+            }
+        })?;
 
         Ok(Self {
             name: plan.name.clone(),
@@ -473,6 +478,12 @@ pub enum RoutingProgramCompileError {
         /// Program name from the plan.
         program: String,
     },
+    /// Prefix rewrites require a source pattern with a literal anchor.
+    #[error("routing program source pattern `{pattern}` must start with a literal segment")]
+    NonLiteralSourcePatternAnchor {
+        /// Source pattern compiled into the program.
+        pattern: String,
+    },
 }
 
 /// Runtime failures while authorizing a route.
@@ -559,6 +570,13 @@ fn ensure_literal_only_prefix(pattern: &SubjectPattern) -> Result<(), SubjectPat
         }
     }
     Ok(())
+}
+
+fn ensure_literal_source_anchor(pattern: &SubjectPattern) -> Result<(), ()> {
+    match pattern.segments().first() {
+        Some(SubjectToken::Literal(_)) => Ok(()),
+        Some(SubjectToken::One | SubjectToken::Tail) | None => Err(()),
+    }
 }
 
 fn leading_literal_prefix(pattern: &SubjectPattern) -> Vec<String> {
@@ -664,6 +682,22 @@ mod tests {
             RoutingProgramCompileError::NonLiteralTargetPrefix {
                 prefix: "federated.>".to_owned(),
                 source: SubjectPatternError::LiteralOnlyPatternRequired("federated.>".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn compile_export_program_rejects_source_pattern_without_literal_anchor() {
+        let mut plan = export_plan();
+        plan.source_pattern = IrSubjectPattern::new("*.orders.created");
+
+        let error = RoutingProgram::compile_export(&plan, RoutingOperationKind::Publish)
+            .expect_err("wildcard-leading source patterns must fail closed");
+
+        assert_eq!(
+            error,
+            RoutingProgramCompileError::NonLiteralSourcePatternAnchor {
+                pattern: "*.orders.created".to_owned(),
             }
         );
     }
