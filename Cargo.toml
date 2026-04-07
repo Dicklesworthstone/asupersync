@@ -265,6 +265,7 @@ flate2 = "1.1"
 [[bench]]
 name = "phase0_baseline"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "timer_wheel"
@@ -285,10 +286,12 @@ harness = false
 [[bench]]
 name = "scheduler_benchmark"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "cancel_trace_bench"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "raptorq_benchmark"
@@ -301,26 +304,32 @@ harness = false
 [[bench]]
 name = "cancel_drain_bench"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "geodesic_benchmark"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "homology_benchmark"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "golden_output"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "spork_baseline"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "methodology_baselines"
 harness = false
+required-features = ["test-internals"]
 
 [[bench]]
 name = "load_balancer_benchmark"
@@ -329,11 +338,16 @@ harness = false
 [[bench]]
 name = "fabric_bench"
 harness = false
-required-features = ["messaging-fabric"]
+required-features = ["messaging-fabric", "test-internals"]
 
 [[bench]]
 name = "scheduler_browser_bench"
 harness = false
+required-features = ["test-internals"]
+
+[[example]]
+name = "spork_minimal_supervised_app"
+required-features = ["test-internals"]
 
 [profile.release]
 opt-level = 3
