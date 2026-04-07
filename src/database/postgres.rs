@@ -2640,6 +2640,11 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
+        // Mark closed before the protocol exchange so that if this future is
+        // dropped mid-write or mid-read, the connection stays closed and
+        // prevents protocol desynchronization.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
         }
@@ -2722,6 +2727,11 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
+        // Mark closed before the protocol exchange so that if this future is
+        // dropped mid-write or mid-read, the connection stays closed and
+        // prevents protocol desynchronization.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
         }
@@ -2781,6 +2791,9 @@ impl PgConnection {
         combined.extend_from_slice(&describe);
         combined.extend_from_slice(&sync);
 
+        // Mark closed before the protocol exchange to prevent desync on cancel.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
         }
@@ -2817,6 +2830,8 @@ impl PgConnection {
                 }
                 b'n' => { /* NoData — statement returns no columns */ }
                 b'Z' => {
+                    // ReadyForQuery — protocol exchange completed cleanly.
+                    self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }
@@ -2882,6 +2897,9 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
+        // Mark closed before the protocol exchange to prevent desync on cancel.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
         }
@@ -2929,6 +2947,9 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
+        // Mark closed before the protocol exchange to prevent desync on cancel.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
         }
@@ -2965,6 +2986,9 @@ impl PgConnection {
         combined.extend_from_slice(&close);
         combined.extend_from_slice(&sync);
 
+        // Mark closed before the protocol exchange to prevent desync on cancel.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
         }
@@ -2981,6 +3005,8 @@ impl PgConnection {
             match msg_type {
                 b'3' => { /* CloseComplete */ }
                 b'Z' => {
+                    // ReadyForQuery — protocol exchange completed cleanly.
+                    self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }
@@ -3462,6 +3488,8 @@ impl PgConnection {
                 }
                 b'C' | b's' => { /* CommandComplete / PortalSuspended */ }
                 b'Z' => {
+                    // ReadyForQuery — protocol exchange completed cleanly.
+                    self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }
@@ -3506,6 +3534,8 @@ impl PgConnection {
                 }
                 b'T' | b'D' | b'n' | b's' => { /* skip */ }
                 b'Z' => {
+                    // ReadyForQuery — protocol exchange completed cleanly.
+                    self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }
