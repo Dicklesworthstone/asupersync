@@ -817,10 +817,15 @@ impl RemoteHandle {
         }
     }
 
-    /// Returns true if the remote result is ready.
+    /// Returns true if a terminal remote result has been buffered locally.
+    ///
+    /// A merely closed result channel does not count as finished here. The
+    /// sender may have disappeared before the remote lifecycle reached a
+    /// terminal state, and callers still need `close()` / `abort()` to fence
+    /// and drain the remote task in that case.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.completed || self.receiver.is_ready() || self.receiver.is_closed()
+        self.completed || self.receiver.is_ready()
     }
 
     /// Requests cancellation and drains the remote lifecycle to a terminal state.
@@ -3738,6 +3743,43 @@ mod tests {
             runtime.observe_task_state(remote_task_id),
             Some(RemoteTaskState::Running)
         );
+    }
+
+    #[test]
+    fn remote_handle_is_finished_stays_false_for_closed_channel_while_runtime_task_is_live() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+        runtime.close_sender_preserving_state(remote_task_id);
+
+        assert!(
+            !handle.is_finished(),
+            "closed result channel without a buffered terminal result must not look finished"
+        );
+        assert_eq!(handle.state(), RemoteTaskState::Running);
+
+        let err = futures_lite::future::block_on(handle.close(&cx))
+            .expect_err("closed live channel should still fail the close");
+        assert_eq!(err, RemoteError::Cancelled(RemoteHandle::closed_reason()));
+        assert!(
+            handle.is_finished(),
+            "close should transition the handle to a terminal state"
+        );
+        assert_eq!(handle.state(), RemoteTaskState::Cancelled);
+        assert!(runtime.observe_task_state(remote_task_id).is_none());
     }
 
     #[test]
