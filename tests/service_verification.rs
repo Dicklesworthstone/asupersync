@@ -442,14 +442,17 @@ fn svc_verify_009_rate_limit_consumption() {
     // Consume all 3 tokens
     let r = rl.poll_ready_with_time(now, &mut cx);
     assert!(matches!(r, Poll::Ready(Ok(()))));
+    let _ = rl.call(());
     assert_eq!(rl.available_tokens(), 2);
 
     let r = rl.poll_ready_with_time(now, &mut cx);
     assert!(matches!(r, Poll::Ready(Ok(()))));
+    let _ = rl.call(());
     assert_eq!(rl.available_tokens(), 1);
 
     let r = rl.poll_ready_with_time(now, &mut cx);
     assert!(matches!(r, Poll::Ready(Ok(()))));
+    let _ = rl.call(());
     assert_eq!(rl.available_tokens(), 0);
 
     // Fourth should be pending (no tokens)
@@ -472,7 +475,9 @@ fn svc_verify_010_rate_limit_refill() {
 
     // Consume both tokens at t=1s
     let _ = rl.poll_ready_with_time(Time::from_secs(1), &mut cx);
+    let _ = rl.call(());
     let _ = rl.poll_ready_with_time(Time::from_secs(1), &mut cx);
+    let _ = rl.call(());
     assert_eq!(rl.available_tokens(), 0);
 
     // Should be pending at t=1.5s (within same period)
@@ -499,10 +504,12 @@ fn svc_verify_011_rate_limit_bucket_cap() {
 
     // Consume 1 token at t=1s
     let _ = rl.poll_ready_with_time(Time::from_secs(1), &mut cx);
+    let _ = rl.call(());
     assert_eq!(rl.available_tokens(), 4);
 
     // Wait many periods (t=100s). Tokens should cap at 5 (rate), not accumulate
     let _ = rl.poll_ready_with_time(Time::from_secs(100), &mut cx);
+    let _ = rl.call(());
     // After refill + 1 consumption, should be at most rate-1
     let tokens = rl.available_tokens();
     assert!(tokens <= 5, "tokens should not exceed rate: got {tokens}");
