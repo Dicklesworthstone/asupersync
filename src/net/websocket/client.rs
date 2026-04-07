@@ -616,10 +616,13 @@ where
     /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
         if self.close_handshake.state() == CloseState::CloseReceived {
-            if !self.write_buf.is_empty() {
-                self.flush_write_buf().await?;
-            }
+            self.flush_write_buf().await?;
             self.close_handshake.mark_response_sent();
+            return Ok(());
+        }
+
+        if self.close_handshake.state() == CloseState::CloseSent {
+            self.flush_write_buf().await?;
             return Ok(());
         }
 
@@ -1703,6 +1706,59 @@ mod tests {
             assert_eq!(
                 ws.io.written, expected,
                 "retrying close must finish the original close frame without appending a second one"
+            );
+        });
+    }
+
+    #[test]
+    fn close_retry_flushes_partially_sent_close_without_second_close() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x23, 0x45, 0x67, 0x89]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            let peer_close = encode_server_frame(Frame::close(Some(1000), None));
+            let mut ws = WebSocket::from_upgraded_with_entropy(
+                TestIo::with_read_data(peer_close).with_partial_first_write(1),
+                WebSocketConfig::default(),
+                Arc::clone(&entropy),
+            );
+            let expected =
+                encode_client_frame_with_entropy(&Frame::close(Some(1001), None), entropy.as_ref());
+            let mut cancelled_close = Box::pin(ws.close(&cx, CloseReason::going_away()));
+            let waker = std::task::Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_close.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "close should park after partially writing the initiated close frame"
+            );
+            drop(cancelled_close);
+
+            assert_eq!(
+                ws.close_state(),
+                CloseState::CloseSent,
+                "cancelling close after a partial write must keep the handshake in CloseSent"
+            );
+            assert!(
+                !ws.write_buf.is_empty(),
+                "the initiated close tail must remain buffered after partial I/O"
+            );
+            assert_eq!(
+                ws.io.written,
+                expected[..1].to_vec(),
+                "only the committed close-frame prefix should hit the transport before retry"
+            );
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("retrying close should flush the durable close tail and finish");
+
+            assert!(
+                ws.is_closed(),
+                "the peer close should complete the handshake"
+            );
+            assert_eq!(
+                ws.io.written, expected,
+                "retrying close must finish the original close frame without appending another"
             );
         });
     }

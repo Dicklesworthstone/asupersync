@@ -624,13 +624,18 @@ where
 
     /// Internal: initiate close without waiting.
     async fn initiate_close(&self, reason: CloseReason) -> Result<(), WsError> {
-        let pending_response = {
+        let close_state = {
             let shared = self.shared.lock();
-            shared.close_handshake.state() == CloseState::CloseReceived
+            shared.close_handshake.state()
         };
-        if pending_response {
+        if close_state == CloseState::CloseReceived {
             flush_write_buf(&self.shared).await?;
             self.shared.lock().close_handshake.mark_response_sent();
+            return Ok(());
+        }
+
+        if close_state == CloseState::CloseSent {
+            flush_write_buf(&self.shared).await?;
             return Ok(());
         }
 
@@ -1430,6 +1435,66 @@ mod tests {
                 ws.io.written, expected,
                 "retrying close must finish the original split close frame without appending a second one"
             );
+        });
+    }
+
+    #[test]
+    fn close_retry_flushes_partially_sent_close_without_second_close() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(vec![]).with_partial_first_write(1),
+                WebSocketConfig::default(),
+            );
+            let (_read, mut write) = ws.split();
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0xD2, 0x10, 0x44, 0x9A]));
+            write.shared.lock().entropy = Arc::clone(&entropy);
+            let expected =
+                encode_client_frame_with_entropy(&Frame::close(Some(1001), None), entropy.as_ref());
+            let mut cancelled_close = Box::pin(write.close(CloseReason::going_away()));
+            let waker = Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_close.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "close should park after partially writing the initiated split close frame"
+            );
+            drop(cancelled_close);
+
+            assert_eq!(
+                write.close_state(),
+                CloseState::CloseSent,
+                "cancelling split close after a partial write must keep the handshake in CloseSent"
+            );
+            assert!(
+                !write.shared.lock().write_buf.is_empty(),
+                "the initiated split close tail must remain buffered after partial I/O"
+            );
+            {
+                let guard = write.shared.lock();
+                assert_eq!(
+                    guard.io.written,
+                    expected[..1].to_vec(),
+                    "only the committed split close prefix should hit the transport before retry"
+                );
+            }
+
+            write
+                .close(CloseReason::going_away())
+                .await
+                .expect("retrying close should flush the durable split close tail");
+
+            assert_eq!(
+                write.close_state(),
+                CloseState::CloseSent,
+                "split close retries should flush bytes without inventing a peer response"
+            );
+            {
+                let guard = write.shared.lock();
+                assert_eq!(
+                    guard.io.written, expected,
+                    "retrying split close must finish the original close frame without appending another"
+                );
+            }
         });
     }
 

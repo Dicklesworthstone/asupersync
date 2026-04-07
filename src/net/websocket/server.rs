@@ -519,6 +519,11 @@ where
             return Ok(());
         }
 
+        if self.close_handshake.state() == CloseState::CloseSent {
+            self.flush_write_buf().await?;
+            return Ok(());
+        }
+
         if let Some(frame) = self.close_handshake.initiate(reason) {
             self.send_frame(frame).await?;
         }
@@ -555,18 +560,25 @@ where
     async fn write_buf_to_io(&mut self, buf: &mut BytesMut) -> Result<(), WsError> {
         use std::future::poll_fn;
 
-        while !buf.is_empty() {
-            let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &buf[..])).await?;
-            if n == 0 {
-                return Err(WsError::Io(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "write returned 0",
-                )));
-            }
-            let _ = buf.split_to(n);
+        if buf.is_empty() {
+            return Ok(());
         }
 
-        // Ensure the underlying I/O stream is flushed
+        let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &buf[..])).await?;
+        if n == 0 {
+            return Err(WsError::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write returned 0",
+            )));
+        }
+        let _ = buf.split_to(n);
+
+        if !buf.is_empty() {
+            self.write_buf.extend_from_slice(&buf[..]);
+            buf.clear();
+            return self.flush_write_buf().await;
+        }
+
         poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
 
         Ok(())
@@ -684,12 +696,23 @@ mod tests {
     use std::sync::Arc;
     use std::task::Poll;
 
+    enum WriteBehavior {
+        Immediate,
+        PendingFirst,
+        PartialThenPending(PartialWriteStage),
+    }
+
+    enum PartialWriteStage {
+        WritePrefix(usize),
+        PendingTail,
+    }
+
     struct TestIo {
         read_data: Vec<u8>,
         read_pos: usize,
         written: Vec<u8>,
         fail_writes: bool,
-        pending_first_write: bool,
+        write_behavior: WriteBehavior,
         pending_first_flush: bool,
         flush_calls: usize,
     }
@@ -705,7 +728,7 @@ mod tests {
                 read_pos: 0,
                 written: Vec::new(),
                 fail_writes: false,
-                pending_first_write: false,
+                write_behavior: WriteBehavior::Immediate,
                 pending_first_flush: false,
                 flush_calls: 0,
             }
@@ -717,7 +740,13 @@ mod tests {
         }
 
         fn with_pending_first_write(mut self) -> Self {
-            self.pending_first_write = true;
+            self.write_behavior = WriteBehavior::PendingFirst;
+            self
+        }
+
+        fn with_partial_first_write(mut self, len: usize) -> Self {
+            self.write_behavior =
+                WriteBehavior::PartialThenPending(PartialWriteStage::WritePrefix(len));
             self
         }
 
@@ -771,10 +800,20 @@ mod tests {
                     "synthetic write failure",
                 )));
             }
-            if self.pending_first_write {
-                self.pending_first_write = false;
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
+            match std::mem::replace(&mut self.write_behavior, WriteBehavior::Immediate) {
+                WriteBehavior::Immediate => {}
+                WriteBehavior::PendingFirst
+                | WriteBehavior::PartialThenPending(PartialWriteStage::PendingTail) => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                WriteBehavior::PartialThenPending(PartialWriteStage::WritePrefix(len)) => {
+                    let to_write = len.min(buf.len());
+                    self.written.extend_from_slice(&buf[..to_write]);
+                    self.write_behavior =
+                        WriteBehavior::PartialThenPending(PartialWriteStage::PendingTail);
+                    return Poll::Ready(Ok(to_write));
+                }
             }
             self.written.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
@@ -1090,6 +1129,57 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_send_after_partial_write_preserves_tail_for_later_flush() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::new().with_partial_first_write(1),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            let cancelled = Message::text("cancelled");
+            let delivered = Message::text("delivered");
+            let expected_cancelled = encode_server_frame(Frame::from(cancelled.clone()));
+            let expected_delivered = encode_server_frame(Frame::from(delivered.clone()));
+            let mut cancelled_send = Box::pin(ws.send(&cx, cancelled));
+            let waker = std::task::Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_send.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "send should park after the first byte is written and the remainder is buffered"
+            );
+            drop(cancelled_send);
+
+            assert!(
+                !ws.write_buf.is_empty(),
+                "after any byte hits the wire, the unwritten tail must stay durable"
+            );
+            assert_eq!(
+                ws.io.written,
+                expected_cancelled[..1].to_vec(),
+                "the transport should contain only the committed prefix before retry"
+            );
+
+            ws.send(&cx, delivered)
+                .await
+                .expect("later sends should flush the durable tail first");
+
+            assert_eq!(
+                ws.io.written,
+                [expected_cancelled, expected_delivered].concat(),
+                "retrying send must finish the first server frame before appending the second"
+            );
+        });
+    }
+
+    #[test]
     fn close_after_cancelled_recv_flushes_pending_echo_without_second_close() {
         future::block_on(async {
             let accept = AcceptResponse {
@@ -1185,7 +1275,10 @@ mod tests {
                 .await
                 .expect("close should retry the deferred transport flush");
 
-            assert!(ws.is_closed(), "retrying the deferred flush must close the handshake");
+            assert!(
+                ws.is_closed(),
+                "retrying the deferred flush must close the handshake"
+            );
             assert_eq!(
                 ws.io.written,
                 encode_server_frame(Frame::close(Some(1000), None)),
@@ -1194,6 +1287,63 @@ mod tests {
             assert_eq!(
                 ws.io.flush_calls, 2,
                 "close should retry the deferred transport flush once"
+            );
+        });
+    }
+
+    #[test]
+    fn close_retry_flushes_partially_sent_close_without_second_close() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let peer_close = encode_client_frame(Frame::close(Some(1000), None));
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(peer_close).with_partial_first_write(1),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            let expected = encode_server_frame(Frame::close(Some(1001), None));
+            let mut cancelled_close = Box::pin(ws.close(&cx, CloseReason::going_away()));
+            let waker = std::task::Waker::from(Arc::new(NoopWake));
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(cancelled_close.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "close should park after partially writing the initiated close frame"
+            );
+            drop(cancelled_close);
+
+            assert_eq!(
+                ws.close_handshake.state(),
+                CloseState::CloseSent,
+                "cancelling close after a partial write must keep the handshake in CloseSent"
+            );
+            assert!(
+                !ws.write_buf.is_empty(),
+                "the initiated close tail must remain buffered after partial I/O"
+            );
+            assert_eq!(
+                ws.io.written,
+                expected[..1].to_vec(),
+                "only the committed close-frame prefix should hit the transport before retry"
+            );
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("retrying close should flush the durable close tail and finish");
+
+            assert!(
+                ws.is_closed(),
+                "the peer close should complete the handshake"
+            );
+            assert_eq!(
+                ws.io.written, expected,
+                "retrying close must finish the original server close frame without appending another"
             );
         });
     }
