@@ -396,6 +396,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_unroll == 0 and
                     .selected_tuning_prefetch_distance == 0 and
                     .selected_tuning_fusion_shape == "unknown" and
+                    .rejected_tuning_candidate_ids == "none" and
                     .command_bundle == "rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives" and
                     .decision_artifact_id == "manual_env_override_unbacked" and
                     .decision_role == "runtime_override_not_canonical_profile_selection" and
@@ -420,6 +421,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_tile_bytes >= 1 and
                     .selected_tuning_unroll >= 1 and
                     .selected_tuning_fusion_shape != "unknown" and
+                    .rejected_tuning_candidate_ids != "none" and
                     .command_bundle == "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives" and
                     .decision_artifact_id != "manual_env_override_unbacked" and
                     .decision_role != "runtime_override_not_canonical_profile_selection" and
