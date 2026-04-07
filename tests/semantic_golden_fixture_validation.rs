@@ -18,9 +18,9 @@ use asupersync::lab::{
 use asupersync::spork::prelude::AppSpec;
 #[cfg(feature = "test-internals")]
 use asupersync::test_logging::{ReproManifest, TestContext};
+use serde_json::Value;
 #[cfg(feature = "test-internals")]
 use serde_json::json;
-use serde_json::Value;
 #[cfg(feature = "test-internals")]
 use std::collections::BTreeMap;
 use std::collections::HashMap;

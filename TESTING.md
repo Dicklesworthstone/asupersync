@@ -108,6 +108,18 @@ Naming rules:
   `artifacts/<contract>_events.ndjson` unless they are already part of an
   existing suite root.
 
+The canonical stub-resolution runner (`scripts/verify_stub_resolution.sh`)
+additionally owns two stable suite-root discovery manifests under
+`target/e2e-results/stub-resolution/`:
+
+- `latest.json`: pointer to the newest attempted stub-resolution run
+- `latest_success.json`: pointer to the newest passing stub-resolution run
+
+Both manifests must remain machine-readable and must point at the per-run
+`summary.json`, `validation_stages.ndjson`, `scenarios.ndjson`, and scan summary
+so Z2/Z3 closeout can consume the current evidence bundle mechanically instead
+of scraping bead comments.
+
 ### RCH Execution Policy
 
 All cargo-heavy validation for Track-Z work must follow this policy:

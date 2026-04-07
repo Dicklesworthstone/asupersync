@@ -34,7 +34,7 @@ use asupersync::obligation::graded::{GradedObligation, GradedScope, Resolution};
 use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
-use asupersync::util::{ArenaIndex, DetHasher};
+use asupersync::util::DetHasher;
 use common::init_test_logging;
 use std::hash::{Hash, Hasher};
 
@@ -43,11 +43,11 @@ use std::hash::{Hash, Hasher};
 // ============================================================================
 
 fn task(n: u32) -> TaskId {
-    TaskId::from_arena(ArenaIndex::new(n, 0))
+    TaskId::new_for_test(n, 0)
 }
 
 fn region(n: u32) -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(n, 0))
+    RegionId::new_for_test(n, 0)
 }
 
 fn t(nanos: u64) -> Time {

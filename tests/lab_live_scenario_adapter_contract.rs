@@ -6,14 +6,14 @@
 
 mod common;
 
+use asupersync::lab::DrainStatus;
+use asupersync::lab::replay::{
+    DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
+};
 #[cfg(feature = "test-internals")]
 use asupersync::lab::{
     ChaosSection, LabSection, NetworkSection, Scenario, ScenarioRunner, SporkScenarioConfig,
     SporkScenarioRunner, SporkScenarioSpec,
-};
-use asupersync::lab::DrainStatus;
-use asupersync::lab::replay::{
-    DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
 };
 use asupersync::lab::{
     DualRunHarness, DualRunScenarioIdentity, LiveRunResult, NormalizedSemantics, SeedPlan,
@@ -27,9 +27,9 @@ use asupersync::spork::prelude::AppSpec;
 #[cfg(feature = "test-internals")]
 use asupersync::test_logging::{LIVE_CURRENT_THREAD_ADAPTER, ReproManifest, TestContext};
 #[cfg(feature = "test-internals")]
-use serde_json::json;
-#[cfg(feature = "test-internals")]
 use serde_json::Value;
+#[cfg(feature = "test-internals")]
+use serde_json::json;
 #[cfg(feature = "test-internals")]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

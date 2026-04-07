@@ -24,7 +24,7 @@ use asupersync::runtime::scheduler::ThreeLaneWorker;
 use asupersync::runtime::scheduler::three_lane::PreemptionMetrics;
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::{ArenaIndex, DetHasher};
+use asupersync::util::DetHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -37,7 +37,7 @@ fn task(index: u32, generation: u32) -> TaskId {
 }
 
 fn region() -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(0, 0))
+    RegionId::new_for_test(0, 0)
 }
 
 fn setup_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {

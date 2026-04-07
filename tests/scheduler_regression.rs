@@ -9,14 +9,32 @@
 //! Note: these tests require --release for meaningful numbers.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
+use asupersync::record::task::TaskRecord;
+use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue, Parker, Scheduler};
-use asupersync::types::{TaskId, Time};
+use asupersync::sync::ContendedMutex;
+use asupersync::types::{Budget, RegionId, TaskId, Time};
 use serde::Deserialize;
 
 fn task(id: u32) -> TaskId {
     TaskId::new_for_test(id, 0)
+}
+
+fn region() -> RegionId {
+    RegionId::new_for_test(0, 0)
+}
+
+fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
+    let mut state = RuntimeState::new();
+    for i in 0..=max_task_id {
+        let record = TaskRecord::new(task(i), region(), Budget::INFINITE);
+        let idx = state.insert_task(record);
+        assert_eq!(idx.index(), i);
+    }
+    Arc::new(ContendedMutex::new("runtime_state", state))
 }
 
 /// Throughput regression: schedule+pop 10K tasks must complete in < 50ms.
@@ -46,7 +64,7 @@ fn regression_throughput_10k_schedule_pop() {
 /// Local queue regression: push+pop 100K items in < 100ms.
 #[test]
 fn regression_local_queue_100k() {
-    let queue = LocalQueue::new_for_test(99_999);
+    let queue = LocalQueue::new(setup_runtime_state(99_999));
     let start = Instant::now();
 
     for i in 0..100_000u32 {

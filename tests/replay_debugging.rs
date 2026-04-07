@@ -4,6 +4,7 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
+#[cfg(feature = "test-internals")]
 use asupersync::test_logging::{load_repro_manifest, replay_context_from_manifest};
 use asupersync::trace::{
     Breakpoint, CompactTaskId, ReplayError, ReplayEvent, ReplayMode, ReplayTrace, TraceMetadata,
@@ -386,6 +387,7 @@ fn loaded_trace_verifies_against_itself() {
 /// End-to-end test: record a trace, save a ReproManifest, reload it, and
 /// verify the replay produces the same events.
 #[test]
+#[cfg(feature = "test-internals")]
 fn failure_triage_capture_manifest_replay_roundtrip() {
     init_test("failure_triage_capture_manifest_replay_roundtrip");
 
@@ -502,6 +504,7 @@ fn failure_triage_capture_manifest_replay_roundtrip() {
 
 /// Test that a ReproManifest roundtrips through write + load preserving all fields.
 #[test]
+#[cfg(feature = "test-internals")]
 fn manifest_write_load_preserves_all_fields() {
     init_test("manifest_write_load_preserves_all_fields");
     let mut manifest = ReproManifest::new(0xCAFE_BABE, "full_field_test", false);
@@ -562,6 +565,7 @@ fn manifest_write_load_preserves_all_fields() {
 
 /// Test that replay_context_from_manifest produces a valid context for re-execution.
 #[test]
+#[cfg(feature = "test-internals")]
 fn replay_context_reproduces_with_same_seed() {
     init_test("replay_context_reproduces_with_same_seed");
 

@@ -9,7 +9,7 @@ mod common;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::obligation::ledger::{LedgerStats, ObligationLedger};
 use asupersync::obligation::session_types::{
-    Branch, End, Initiator, Select, Selected, Send, SessionError, SessionProof, delegation, lease,
+    Branch, End, Initiator, Select, Selected, Send, SessionProof, delegation, lease,
     new_transport_pair, send_permit, session_protocol_adoption_specs, two_phase,
 };
 use asupersync::record::{ObligationAbortReason, ObligationKind};
@@ -1393,9 +1393,11 @@ fn transport_send_permit_abort_integration() {
     });
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn transport_peer_closed_returns_session_error() {
     use asupersync::cx::Cx;
+    use asupersync::obligation::session_types::SessionError;
 
     let (sender, receiver) = new_transport_pair::<
         send_permit::InitiatorSession<u64>,
@@ -1458,16 +1460,47 @@ fn transport_is_transport_backed_discriminator() {
     let (ps, pr) = send_permit::new_session::<u32>(1);
     assert!(!ps.is_transport_backed());
     assert!(!pr.is_transport_backed());
-    ps.disarm_for_test();
-    pr.disarm_for_test();
+    let ps = ps.send(send_permit::ReserveMsg);
+    let ps = ps.select_right();
+    let ps = ps.send(send_permit::AbortMsg);
+    let (_, pr) = pr.recv(send_permit::ReserveMsg);
+    match pr.offer(Branch::Right) {
+        Selected::Right(ch) => {
+            let (_, ch) = ch.recv(send_permit::AbortMsg);
+            ch.close();
+        }
+        Selected::Left(_) => panic!("expected Abort branch"),
+    }
+    ps.close();
 
     // Transport-backed sessions report transport
     let (ts, tr) = new_transport_pair::<
         send_permit::InitiatorSession<u32>,
         send_permit::ResponderSession<u32>,
     >(2, ObligationKind::SendPermit, 4);
-    assert!(ts.is_transport_backed());
-    assert!(tr.is_transport_backed());
-    ts.disarm_for_test();
-    tr.disarm_for_test();
+    futures_lite::future::block_on(async {
+        use asupersync::cx::Cx;
+
+        assert!(ts.is_transport_backed());
+        assert!(tr.is_transport_backed());
+
+        let cx = Cx::for_testing();
+        let ts = ts
+            .send_async(&cx, send_permit::ReserveMsg)
+            .await
+            .expect("reserve");
+        let (_, tr) = tr.recv_async(&cx).await.expect("recv reserve");
+        let ts = ts.select_right_async(&cx).await.expect("select abort");
+        let tr = match tr.offer_async(&cx).await.expect("offer") {
+            Selected::Right(ch) => ch,
+            Selected::Left(_) => panic!("expected Abort branch"),
+        };
+        let ts = ts
+            .send_async(&cx, send_permit::AbortMsg)
+            .await
+            .expect("send abort");
+        let (_, tr) = tr.recv_async(&cx).await.expect("recv abort");
+        ts.close();
+        tr.close();
+    });
 }

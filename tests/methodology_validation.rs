@@ -253,7 +253,7 @@ fn golden_checksum_determinism() {
     }
     let mut output = String::new();
     while let Some(id) = sched.pop() {
-        write!(output, "{},", id.arena_index().index()).unwrap();
+        write!(output, "{id},").unwrap();
     }
 
     // Hash should be stable
@@ -274,7 +274,7 @@ fn golden_checksum_determinism() {
     }
     let mut output2 = String::new();
     while let Some(id) = sched2.pop() {
-        write!(output2, "{},", id.arena_index().index()).unwrap();
+        write!(output2, "{id},").unwrap();
     }
 
     let hash2 = {

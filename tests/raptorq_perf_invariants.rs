@@ -93,7 +93,9 @@ const RAPTORQ_H2_CLOSURE_PACKET_JSON: &str =
 const RAPTORQ_BENCH_RS: &str = include_str!("../benches/raptorq_benchmark.rs");
 const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
 const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
+#[cfg(feature = "test-internals")]
 const REPLAY_SEED_SWEEP_ID: &str = "replay:rq-u-seed-sweep-structured-v1";
+#[cfg(feature = "test-internals")]
 const REPLAY_SEED_SWEEP_SCENARIO: &str = "RQ-U-SEED-SWEEP-STRUCTURED";
 
 // ============================================================================
@@ -193,10 +195,12 @@ fn build_decode_received(
     received
 }
 
+#[cfg(feature = "test-internals")]
 use asupersync::raptorq::test_log_schema::{
     UNIT_LOG_SCHEMA_VERSION, UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry,
 };
 
+#[cfg(feature = "test-internals")]
 fn replay_log_context(replay_ref: &str, scenario_id: &str, seed: u64, outcome: &str) -> String {
     UnitLogEntry::new(
         scenario_id,
@@ -794,6 +798,7 @@ fn overhead_with_extra_repair() {
 /// Logs seed, k, loss, peeling/inactivation stats for regression triage.
 #[test]
 #[allow(clippy::too_many_lines)]
+#[cfg(feature = "test-internals")]
 fn seed_sweep_structured_logging() {
     let k = 16;
     let symbol_size = 32;
@@ -5302,6 +5307,7 @@ fn cross_parameter_roundtrip_sweep() {
 /// Validate that unit log entries produced by the seed sweep conform to the
 /// canonical schema contract (asupersync-vca9g / D7).
 #[test]
+#[cfg(feature = "test-internals")]
 fn unit_log_schema_contract() {
     use asupersync::raptorq::test_log_schema::validate_unit_log_json;
 
@@ -5361,6 +5367,7 @@ fn unit_log_schema_contract() {
 
 /// Validate that failure entries also conform to the schema contract.
 #[test]
+#[cfg(feature = "test-internals")]
 fn unit_log_schema_contract_failure_entry() {
     use asupersync::raptorq::test_log_schema::validate_unit_log_json;
 
@@ -5861,6 +5868,7 @@ fn g7_runtime_governance_output_populated_after_decode() {
 
 /// G7 invariant: runtime governance telemetry survives unit-log serialization.
 #[test]
+#[cfg(feature = "test-internals")]
 fn g7_unit_log_schema_accepts_runtime_governance_payload() {
     use asupersync::raptorq::test_log_schema::validate_unit_log_json;
 

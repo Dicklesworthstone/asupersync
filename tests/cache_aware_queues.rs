@@ -108,7 +108,7 @@ use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusivePriorityHeap, LocalQueue, PriorityScheduler,
 };
 use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::{Arena, ArenaIndex, CACHE_LINE_SIZE, CachePadded};
+use asupersync::util::{Arena, CACHE_LINE_SIZE, CachePadded};
 
 fn init_test(test_name: &str) {
     common::init_test_logging();
@@ -116,11 +116,17 @@ fn init_test(test_name: &str) {
 }
 
 fn region() -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(0, 0))
+    RegionId::new_for_test(0, 0)
 }
 
 fn task(n: u32) -> TaskId {
-    TaskId::from_arena(ArenaIndex::new(n, 0))
+    TaskId::new_for_test(n, 0)
+}
+
+fn task_number(id: TaskId, max_exclusive: u32) -> u32 {
+    (0..max_exclusive)
+        .find(|&n| task(n) == id)
+        .unwrap_or_else(|| panic!("task id {id:?} not found in 0..{max_exclusive}"))
 }
 
 fn setup_arena(count: u32) -> Arena<TaskRecord> {
@@ -135,7 +141,14 @@ fn setup_arena(count: u32) -> Arena<TaskRecord> {
 }
 
 fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
-    LocalQueue::test_state(max_task_id)
+    let mut state = RuntimeState::new();
+    for id in 0..=max_task_id {
+        let task_id = task(id);
+        let record = TaskRecord::new(task_id, region(), Budget::INFINITE);
+        let idx = state.insert_task(record);
+        debug_assert_eq!(idx.index(), id);
+    }
+    Arc::new(ContendedMutex::new("runtime_state", state))
 }
 
 // =============================================================================
@@ -253,7 +266,7 @@ fn intrusive_heap_priority_ordering() {
     let mut prev_priority = u8::MAX;
     let mut pop_order = Vec::new();
     while let Some(t) = heap.pop(&mut arena) {
-        let idx = t.arena_index().index();
+        let idx = task_number(t, priorities.len() as u32);
         // Find the priority for this task
         let prio = priorities.iter().find(|(id, _)| *id == idx).unwrap().1;
         pop_order.push((idx, prio));
@@ -293,7 +306,7 @@ fn intrusive_heap_fifo_within_priority() {
             popped == task(i),
             &format!("FIFO order at position {i}"),
             i,
-            popped.arena_index().index()
+            task_number(popped, 10)
         );
     }
 
@@ -363,7 +376,7 @@ fn intrusive_heap_reuse_after_pop() {
         popped == task(1),
         "popped highest",
         1,
-        popped.arena_index().index()
+        task_number(popped, 2)
     );
 
     // Re-push task 1 with different priority
@@ -376,7 +389,7 @@ fn intrusive_heap_reuse_after_pop() {
         first == task(0),
         "task 0 has higher priority now",
         0,
-        first.arena_index().index()
+        task_number(first, 2)
     );
 
     let second = heap.pop(&mut arena).unwrap();
@@ -384,7 +397,7 @@ fn intrusive_heap_reuse_after_pop() {
         second == task(1),
         "task 1 (re-pushed)",
         1,
-        second.arena_index().index()
+        task_number(second, 2)
     );
 
     test_complete!("intrusive_heap_reuse_after_pop");
@@ -476,7 +489,7 @@ fn concurrent_multi_stealer_no_loss() {
     let owner = std::thread::spawn(move || {
         barrier_owner.wait();
         while let Some(t) = queue_owner.pop() {
-            counts_owner[t.arena_index().index() as usize]
+            counts_owner[task_number(t, task_count as u32) as usize]
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::thread::yield_now();
         }
@@ -491,7 +504,7 @@ fn concurrent_multi_stealer_no_loss() {
         stealers.push(std::thread::spawn(move || {
             barrier.wait();
             while let Some(t) = stealer.steal() {
-                counts[t.arena_index().index() as usize]
+                counts[task_number(t, task_count as u32) as usize]
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 std::thread::yield_now();
             }

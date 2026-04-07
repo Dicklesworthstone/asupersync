@@ -392,3 +392,30 @@ fn probe_17_stub_ratchet_assets_are_audited() {
 
     eprintln!("[PASS] Canonical stub-ratchet assets are recorded in audit_index.jsonl");
 }
+
+// ── Probe 18: Stub-resolution runner publishes stable latest manifests ──
+
+#[test]
+fn probe_18_stub_resolution_runner_publishes_stable_latest_manifests() {
+    let script = read_source("scripts/verify_stub_resolution.sh");
+    assert!(
+        script.contains("latest.json"),
+        "verify_stub_resolution.sh must publish a stable latest.json pointer"
+    );
+    assert!(
+        script.contains("latest_success.json"),
+        "verify_stub_resolution.sh must publish a stable latest_success.json pointer"
+    );
+    assert!(
+        script.contains("stub-resolution-suite-pointer-v1"),
+        "verify_stub_resolution.sh must version the stable suite pointer manifest"
+    );
+
+    let testing = read_source("TESTING.md");
+    assert!(
+        testing.contains("latest.json") && testing.contains("latest_success.json"),
+        "TESTING.md must document the stable stub-resolution manifest contract"
+    );
+
+    eprintln!("[PASS] Stub-resolution runner publishes stable latest manifests");
+}

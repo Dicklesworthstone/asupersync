@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+#![cfg(feature = "test-internals")]
 //! Obligation Lifecycle E2E Tests + Logging (bd-275by).
 //!
 //! End-to-end tests exercising two-phase channels, obligation tokens, and

@@ -749,6 +749,7 @@ fn gf256_alpha_powers() {
 // E2E: EncodingPipeline/DecodingPipeline + proof artifacts (bd-15c5)
 // ============================================================================
 
+#[cfg(feature = "test-internals")]
 mod pipeline_e2e {
     use super::*;
     use asupersync::config::EncodingConfig;
@@ -1488,6 +1489,7 @@ mod pipeline_e2e {
 // Differential Harness Against Independent Reference Decode (bd-136cm / D2)
 // ============================================================================
 
+#[cfg(feature = "test-internals")]
 mod differential_harness {
     use super::*;
     use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
@@ -1890,6 +1892,7 @@ mod differential_harness {
 // Every test uses fixed seeds for full reproducibility.
 // ============================================================================
 
+#[cfg(feature = "test-internals")]
 mod metamorphic_property {
     use super::*;
     use asupersync::raptorq::rfc6330::rand;
@@ -2645,6 +2648,7 @@ mod metamorphic_property {
 // Stress/Soak E2E deterministic profiles (bd-mztvq / D8)
 // ============================================================================
 
+#[cfg(feature = "test-internals")]
 mod stress_soak_e2e {
     use super::*;
     use asupersync::raptorq::test_log_schema::{

@@ -37,9 +37,14 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::lab::runtime::InvariantViolation;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::net::{TcpListener, TcpStream};
+use asupersync::runtime::IoOp;
+#[cfg(feature = "test-internals")]
 use asupersync::runtime::reactor::{Interest, LabReactor, Token};
-use asupersync::runtime::{IoDriverHandle, IoOp, Reactor};
-use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
+#[cfg(feature = "test-internals")]
+use asupersync::runtime::{IoDriverHandle, Reactor};
+use asupersync::types::{Budget, CancelReason, Outcome};
+#[cfg(feature = "test-internals")]
+use asupersync::types::{RegionId, TaskId};
 use common::*;
 use futures_lite::future::block_on;
 use std::future::Future;
@@ -72,6 +77,7 @@ fn init_test(test_name: &str) {
 }
 
 /// Create a lab reactor with Cx context for testing.
+#[cfg(feature = "test-internals")]
 fn setup_test_cx() -> (Arc<LabReactor>, impl Drop) {
     let reactor = Arc::new(LabReactor::new());
     let reactor_dyn: Arc<dyn Reactor> = Arc::clone(&reactor) as Arc<dyn Reactor>;
@@ -296,6 +302,7 @@ fn io_cancel_004_cancel_during_connect() {
 /// Verifies that dropping a stream normally cleans up its registration.
 #[cfg(unix)]
 #[test]
+#[cfg(feature = "test-internals")]
 fn io_cancel_005_registration_cleanup_on_drop() {
     init_test("io_cancel_005_registration_cleanup_on_drop");
 
@@ -575,6 +582,7 @@ fn io_cancel_008_multiple_concurrent_cancel() {
 
 /// Verifies that the reactor's registration count tracks correctly.
 #[test]
+#[cfg(feature = "test-internals")]
 fn io_cancel_registration_count_tracking() {
     init_test("io_cancel_registration_count_tracking");
 
@@ -627,6 +635,7 @@ fn io_cancel_registration_count_tracking() {
 
 /// Verifies that poll_read properly handles WouldBlock by registering interest.
 #[test]
+#[cfg(feature = "test-internals")]
 fn io_cancel_wouldblock_registers_interest() {
     init_test("io_cancel_wouldblock_registers_interest");
 
@@ -779,8 +788,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
 
     let pending_before = runtime
         .state
-        .regions
-        .get(region.arena_index())
+        .region(region)
         .expect("region")
         .pending_obligations();
     assert!(
@@ -790,11 +798,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
 
     let cancel_reason = CancelReason::shutdown();
     {
-        let region_record = runtime
-            .state
-            .regions
-            .get(region.arena_index())
-            .expect("region");
+        let region_record = runtime.state.region(region).expect("region");
         assert!(
             region_record.begin_close(Some(cancel_reason.clone())),
             "begin_close should succeed"
@@ -808,7 +812,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
     if let Some(task) = runtime.state.task_mut(task_id) {
         task.complete(Outcome::Cancelled(cancel_reason));
     }
-    if let Some(region_record) = runtime.state.regions.get(region.arena_index()) {
+    if let Some(region_record) = runtime.state.region(region) {
         region_record.remove_task(task_id);
         runtime.state.remove_task(task_id);
     }
@@ -818,12 +822,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
         !can_close_with_pending,
         "region close should wait for io obligations"
     );
-    let state_with_pending = runtime
-        .state
-        .regions
-        .get(region.arena_index())
-        .expect("region")
-        .state();
+    let state_with_pending = runtime.state.region(region).expect("region").state();
     assert_eq!(
         state_with_pending,
         asupersync::record::region::RegionState::Finalizing,
@@ -834,7 +833,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
 
     // `abort_obligation` triggers `advance_region_state`, so the region should now be closed
     // and reclaimed from the arena.
-    let region_exists = runtime.state.regions.get(region.arena_index()).is_some();
+    let region_exists = runtime.state.region(region).is_some();
     assert!(
         !region_exists,
         "region should be closed and reclaimed after io obligations resolve"

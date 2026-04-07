@@ -17,14 +17,35 @@ mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::obligation::{ObligationAbortReason, ObligationKind};
+use asupersync::record::task::TaskRecord;
+use asupersync::runtime::TaskTable;
 use asupersync::runtime::scheduler::local_queue::LocalQueue;
-use asupersync::types::{Budget, CancelReason};
+use asupersync::sync::ContendedMutex;
+use asupersync::types::{Budget, CancelReason, RegionId, TaskId};
 use common::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 fn init() {
     init_test_logging();
+}
+
+fn region() -> RegionId {
+    RegionId::new_for_test(0, 0)
+}
+
+fn task(id: u32) -> TaskId {
+    TaskId::new_for_test(id, 0)
+}
+
+fn setup_task_table(max_task_id: u32) -> Arc<ContendedMutex<TaskTable>> {
+    let mut tasks = TaskTable::new();
+    for id in 0..=max_task_id {
+        let record = TaskRecord::new(task(id), region(), Budget::INFINITE);
+        let idx = tasks.insert_task(record);
+        assert_eq!(idx.index(), id);
+    }
+    Arc::new(ContendedMutex::new("task_table", tasks))
 }
 
 fn setup_trace_replay_scenario(runtime: &mut LabRuntime) {
@@ -223,12 +244,12 @@ fn sharding_trace_replay_determinism() {
 #[test]
 fn local_queue_task_table_push_pop_lifo() {
     init();
-    let tasks = LocalQueue::test_task_table(10);
+    let tasks = setup_task_table(10);
     let queue = LocalQueue::new_with_task_table(tasks);
 
-    let t0 = asupersync::types::TaskId::new_for_test(0, 0);
-    let t1 = asupersync::types::TaskId::new_for_test(1, 0);
-    let t2 = asupersync::types::TaskId::new_for_test(2, 0);
+    let t0 = task(0);
+    let t1 = task(1);
+    let t2 = task(2);
 
     queue.push(t0);
     queue.push(t1);
@@ -244,13 +265,13 @@ fn local_queue_task_table_push_pop_lifo() {
 #[test]
 fn local_queue_task_table_steal_fifo() {
     init();
-    let tasks = LocalQueue::test_task_table(10);
+    let tasks = setup_task_table(10);
     let queue = LocalQueue::new_with_task_table(Arc::clone(&tasks));
     let stealer = queue.stealer();
 
-    let t0 = asupersync::types::TaskId::new_for_test(0, 0);
-    let t1 = asupersync::types::TaskId::new_for_test(1, 0);
-    let t2 = asupersync::types::TaskId::new_for_test(2, 0);
+    let t0 = task(0);
+    let t1 = task(1);
+    let t2 = task(2);
 
     queue.push(t0);
     queue.push(t1);
@@ -266,12 +287,10 @@ fn local_queue_task_table_steal_fifo() {
 #[test]
 fn local_queue_task_table_push_many() {
     init();
-    let tasks = LocalQueue::test_task_table(10);
+    let tasks = setup_task_table(10);
     let queue = LocalQueue::new_with_task_table(tasks);
 
-    let ids: Vec<_> = (0..5)
-        .map(|i| asupersync::types::TaskId::new_for_test(i, 0))
-        .collect();
+    let ids: Vec<_> = (0..5).map(task).collect();
     queue.push_many(&ids);
 
     // Pop all (LIFO)
@@ -288,12 +307,12 @@ fn local_queue_task_table_push_many() {
 #[test]
 fn local_queue_task_table_steal_batch() {
     init();
-    let tasks = LocalQueue::test_task_table(10);
+    let tasks = setup_task_table(10);
     let src = LocalQueue::new_with_task_table(Arc::clone(&tasks));
     let dst = LocalQueue::new_with_task_table(Arc::clone(&tasks));
 
     for i in 0..6 {
-        src.push(asupersync::types::TaskId::new_for_test(i, 0));
+        src.push(task(i));
     }
 
     let stolen = src.stealer().steal_batch(&dst);
@@ -316,7 +335,7 @@ fn local_queue_task_table_steal_batch() {
 #[test]
 fn local_queue_task_table_empty_operations() {
     init();
-    let tasks = LocalQueue::test_task_table(10);
+    let tasks = setup_task_table(10);
     let queue = LocalQueue::new_with_task_table(Arc::clone(&tasks));
     let stealer = queue.stealer();
 
@@ -335,7 +354,7 @@ fn local_queue_task_table_concurrent_push_steal() {
     use std::thread;
     init();
 
-    let tasks = LocalQueue::test_task_table(200);
+    let tasks = setup_task_table(200);
     let queue = LocalQueue::new_with_task_table(Arc::clone(&tasks));
     let stealer = queue.stealer();
     let barrier = Arc::new(Barrier::new(2));
@@ -357,7 +376,7 @@ fn local_queue_task_table_concurrent_push_steal() {
 
     barrier.wait();
     for i in 0..total_tasks {
-        queue.push(asupersync::types::TaskId::new_for_test(i as u32, 0));
+        queue.push(task(i as u32));
     }
 
     // Pop remaining from owner

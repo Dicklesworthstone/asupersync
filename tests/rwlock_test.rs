@@ -19,11 +19,7 @@ fn noop_waker() -> Waker {
 
 #[test]
 fn test_rwlock_writer_turn_stolen_by_readers_when_queued_writer_drops() {
-    let cx = Cx::new(
-        asupersync::types::RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
-        asupersync::types::TaskId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
-        asupersync::types::Budget::INFINITE,
-    );
+    let cx = Cx::for_testing();
     let lock = Arc::new(RwLock::new(0_u32));
 
     let mut fut_a = lock.write(&cx);

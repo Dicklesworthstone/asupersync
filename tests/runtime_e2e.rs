@@ -9,26 +9,36 @@
 #[macro_use]
 mod common;
 
+#[cfg(feature = "test-internals")]
 use asupersync::channel::mpsc;
+#[cfg(feature = "test-internals")]
 use asupersync::channel::session::{tracked_channel, tracked_oneshot};
 use asupersync::cx::Cx;
 use asupersync::error::ErrorKind;
+#[cfg(feature = "test-internals")]
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
+#[cfg(feature = "test-internals")]
 use asupersync::obligation::graded::{GradedScope, SendPermit};
+#[cfg(feature = "test-internals")]
 use asupersync::record::task::TaskState;
 use asupersync::record::{
     AdmissionError, AdmissionKind, ObligationAbortReason, ObligationKind, RegionLimits,
 };
 use asupersync::runtime::state::RuntimeState;
 use asupersync::runtime::{global_alloc_count, yield_now};
+#[cfg(feature = "test-internals")]
 use asupersync::test_logging::TestHarness;
+#[cfg(feature = "test-internals")]
 use asupersync::trace::replayer::TraceReplayer;
-use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId, Time};
+use asupersync::types::{Budget, CancelReason, RegionId, TaskId, Time};
+#[cfg(feature = "test-internals")]
+use asupersync::types::{CancelKind, Outcome};
 use common::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "test-internals")]
 use std::time::Duration;
 
 static ALLOC_TEST_GUARD: Mutex<()> = Mutex::new(());
@@ -84,6 +94,7 @@ fn spawn_cancellable_loop(
     task_id
 }
 
+#[cfg(feature = "test-internals")]
 fn collect_replay_failure_artifacts(
     harness: &mut TestHarness,
     runtime: &mut LabRuntime,
@@ -259,6 +270,7 @@ fn e2e_cancellation_storm() {
 // Cancellation Stress Suite (bd-jj62v)
 // ============================================================================
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_cancellation_storm_with_chaos_replay() {
     let seed = 0x00C0_FFEE_u64;
@@ -318,6 +330,7 @@ fn e2e_cancellation_storm_with_chaos_replay() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_timeout_cascade_with_replay() {
     let seed = 0x51A7_F00Du64;
@@ -414,6 +427,7 @@ fn e2e_timeout_cascade_with_replay() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_race_loser_cancellation_drain() {
     let seed = 0xFACE_FEED_u64;
@@ -507,6 +521,7 @@ fn e2e_race_loser_cancellation_drain() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_finalizer_heavy_cancel_workload() {
     let seed = 0xF17E_BA5Eu64;
@@ -809,6 +824,7 @@ fn e2e_trace_captures_events() {
 // bd-21f9: Structured Concurrency — Nested Regions (TestHarness)
 // ============================================================================
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_nested_region_create_teardown() {
     let mut harness = TestHarness::new("e2e_nested_region_create_teardown");
@@ -857,6 +873,7 @@ fn e2e_nested_region_create_teardown() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_cancellation_propagates_through_region_tree() {
     let mut harness = TestHarness::new("e2e_cancellation_propagates_through_region_tree");
@@ -906,6 +923,7 @@ fn e2e_cancellation_propagates_through_region_tree() {
     assert!(summary.passed);
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_obligation_lifecycle() {
     let mut harness = TestHarness::new("e2e_obligation_lifecycle");
@@ -949,6 +967,7 @@ fn e2e_obligation_lifecycle() {
     assert!(summary.passed);
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_obligation_abort_on_cancel() {
     let mut harness = TestHarness::new("e2e_obligation_abort_on_cancel");
@@ -1015,11 +1034,7 @@ fn e2e_leak_regression_obligations_and_heap_limits() {
     let baseline_allocs = global_alloc_count();
     tracing::info!(baseline_allocs, "baseline global alloc count");
     {
-        let region = runtime
-            .state
-            .regions
-            .get(root.arena_index())
-            .expect("region missing");
+        let region = runtime.state.region(root).expect("region missing");
         let idx1 = region.heap_alloc(10u64).expect("heap alloc 1");
         let idx2 = region.heap_alloc(20u64).expect("heap alloc 2");
         tracing::info!(idx1 = ?idx1, idx2 = ?idx2, "heap alloc indices");
@@ -1131,6 +1146,7 @@ fn e2e_leak_regression_obligations_and_heap_limits() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_budget_poll_quota_enforcement() {
     let mut harness = TestHarness::new("e2e_budget_poll_quota_enforcement");
@@ -1166,6 +1182,7 @@ fn e2e_budget_poll_quota_enforcement() {
     assert!(summary.passed);
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_complex_workload_quiescence() {
     let mut harness = TestHarness::new("e2e_complex_workload_quiescence");
@@ -1217,6 +1234,7 @@ fn e2e_complex_workload_quiescence() {
     assert!(summary.passed);
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_deterministic_nested_regions() {
     let mut harness = TestHarness::new("e2e_deterministic_nested_regions");
@@ -1251,6 +1269,7 @@ fn e2e_deterministic_nested_regions() {
     assert!(summary.passed);
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_report_aggregation() {
     init_test("e2e_report_aggregation");
@@ -1709,6 +1728,7 @@ fn e2e_deterministic_cancel_storm() {
 // Obligation lifecycle E2E (bd-275by)
 // ============================================================================
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_obligation_tracked_channel_commit() {
     let seed = 0xC0FF_EE17u64;
@@ -1786,6 +1806,7 @@ fn e2e_obligation_tracked_channel_commit() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_obligation_tracked_oneshot_abort() {
     let seed = 0xAB0F_700Du64;
@@ -1864,6 +1885,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_obligation_cancel_mid_reserve() {
     let seed = 0xCA11_BA5Eu64;
@@ -1942,6 +1964,7 @@ fn e2e_obligation_cancel_mid_reserve() {
     );
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn e2e_obligation_token_leak_detection() {
     let seed = 0x1EA5E_u64;
