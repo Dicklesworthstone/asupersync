@@ -227,7 +227,7 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 ///     primary_service.fetch().await,
 ///     backup_service.fetch().await,
 /// });
-/// // One completed, the other was cancelled and drained
+/// // One completed; the loser was cancelled by drop but not drained.
 /// ```
 #[proc_macro]
 pub fn race(input: TokenStream) -> TokenStream {

@@ -313,7 +313,7 @@ These modules use `parking_lot` (OS futex-based) for internal locking. Core logi
 - **Public API:** `Saga`, `Lease`, `IdempotencyStore`, `RemoteCap`, `spawn_remote`
 - **OS deps:** `parking_lot` (1 use)
 - **Browser classification:** OPTIONAL — distributed task coordination
-- **Notes:** Phase 0 stubs for most operations
+- **Notes:** Transport-agnostic remote lifecycle contract with deterministic fail-closed fallback when no remote runtime is attached; browser builds should treat it as an optional coordination surface, not proof of a shipped transport backend
 
 ### service/ — Service Trait and Middleware
 - **Lines:** 5,711 | **Files:** 9

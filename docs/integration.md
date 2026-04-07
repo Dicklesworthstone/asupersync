@@ -1745,7 +1745,9 @@ The runtime already includes hook points for integrating the protocol:
 - `src/remote.rs`: `RemoteTransport` trait (`send`, `try_recv`)
 - `src/remote.rs`: `MessageEnvelope` + `RemoteMessage` types
 - `src/remote.rs`: `trace_events::*` constants for structured tracing
-- `src/lab/network/harness.rs`: `encode_message` / `decode_message` placeholder codec
+- `src/lab/network/harness.rs`: `encode_message` / `decode_message` deterministic
+  lab-only envelope store used as the simulated-network codec (not the
+  production wire format)
 
 These locations are the intended integration points for the real transport
 and wire codec.
