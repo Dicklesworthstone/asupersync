@@ -944,14 +944,17 @@ impl RedisClient {
 
     /// Execute a raw command (byte args).
     pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
-        let mut conn = self.acquire(cx).await?;
+        let mut conn = DiscardOnDropGuard::new(self.acquire(cx).await?);
         match conn.exec(cx, args).await {
-            Ok(resp) => Ok(resp),
-            Err(e @ RedisError::Redis(_)) => Err(e),
-            Err(e) => {
-                conn.discard();
+            Ok(resp) => {
+                conn.return_to_pool();
+                Ok(resp)
+            }
+            Err(e @ RedisError::Redis(_)) => {
+                conn.return_to_pool();
                 Err(e)
             }
+            Err(e) => Err(e),
         }
     }
 
@@ -1124,29 +1127,33 @@ impl RedisClient {
     }
 
     /// WATCH keys for optimistic transactions.
-    pub async fn watch(&self, cx: &Cx, keys: &[&str]) -> Result<(), RedisError> {
+    ///
+    /// Redis WATCH state is bound to a single connection. This pooled client
+    /// cannot guarantee that a later `MULTI`/`EXEC` sequence runs on the same
+    /// socket, so exposing WATCH as a successful one-shot command would be
+    /// misleading.
+    pub fn watch(&self, _cx: &Cx, keys: &[&str]) -> Result<(), RedisError> {
         if keys.is_empty() {
             return Err(RedisError::Protocol(
                 "WATCH requires at least one key".to_string(),
             ));
         }
 
-        let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
-        args.push(b"WATCH");
-        for key in keys {
-            args.push(key.as_bytes());
-        }
-        let resp = self.cmd_bytes(cx, &args).await?;
-        expect_ok_response(&resp, "WATCH")
+        Err(RedisError::Protocol(
+            "WATCH is unsupported on pooled RedisClient because watch state is connection-scoped; use a dedicated connection/session API"
+                .to_string(),
+        ))
     }
 
-    /// Clear all watched keys on the connection selected for this command.
+    /// Clear all watched keys on the current connection.
     ///
-    /// This mirrors Redis command semantics but does not guarantee the call is
-    /// made on the same pooled connection previously used for `WATCH`.
-    pub async fn unwatch(&self, cx: &Cx) -> Result<(), RedisError> {
-        let resp = self.cmd_bytes(cx, &[b"UNWATCH"]).await?;
-        expect_ok_response(&resp, "UNWATCH")
+    /// This pooled client cannot guarantee which connection would receive the
+    /// command, so `UNWATCH` is rejected for the same reason as [`Self::watch`].
+    pub fn unwatch(&self, _cx: &Cx) -> Result<(), RedisError> {
+        Err(RedisError::Protocol(
+            "UNWATCH is unsupported on pooled RedisClient because watch state is connection-scoped; use a dedicated connection/session API"
+                .to_string(),
+        ))
     }
 
     /// Start a Redis transaction using `MULTI`/`EXEC`.
@@ -1184,6 +1191,10 @@ impl DiscardOnDropGuard {
     fn defuse(mut self) -> PooledResource<RedisConnection> {
         self.conn.take().expect("guard already defused")
     }
+
+    fn return_to_pool(self) {
+        self.defuse().return_to_pool();
+    }
 }
 
 impl std::ops::Deref for DiscardOnDropGuard {
@@ -1202,6 +1213,10 @@ impl std::ops::DerefMut for DiscardOnDropGuard {
 impl Drop for DiscardOnDropGuard {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            // Fail closed: once a protocol exchange is abandoned, force the
+            // transport down before discarding so the peer promptly observes
+            // EOF/RST instead of leaving a half-live socket around.
+            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
             conn.discard();
         }
     }
@@ -1244,18 +1259,10 @@ impl Pipeline<'_> {
 
     /// Execute the pipeline and return all responses.
     pub async fn exec(self, cx: &Cx) -> Result<Vec<RespValue>, RedisError> {
-        let mut conn = self.client.acquire(cx).await?;
+        let mut conn = DiscardOnDropGuard::new(self.client.acquire(cx).await?);
 
         // Ensure AUTH/SELECT have been run on this connection.
-        if let Err(e) = conn.ensure_initialized(cx).await {
-            conn.discard();
-            return Err(e);
-        }
-
-        // Wrap in a guard that discards the connection if dropped mid-protocol-
-        // exchange (e.g. by task cancellation). This prevents a desynced
-        // connection from being returned to the pool.
-        let mut conn = DiscardOnDropGuard::new(conn);
+        conn.ensure_initialized(cx).await?;
 
         // Write all commands in one go to reduce syscalls.
         let total_len: usize = self.encoded.iter().map(Vec::len).sum();
@@ -1288,7 +1295,7 @@ impl Pipeline<'_> {
 
         // Protocol exchange complete — defuse the guard to return the
         // connection to the pool instead of discarding it.
-        let _ = conn.defuse();
+        conn.return_to_pool();
         Ok(out)
     }
 }
@@ -1305,42 +1312,16 @@ pub struct Transaction {
 
 impl Transaction {
     async fn begin(client: &RedisClient, cx: &Cx) -> Result<Self, RedisError> {
-        let mut conn = client.acquire(cx).await?;
-        if let Err(e) = conn.ensure_initialized(cx).await {
-            conn.discard();
-            return Err(e);
-        }
-
-        let resp = match conn.exec_no_init(cx, &[b"MULTI"]).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                conn.discard();
-                return Err(e);
-            }
-        };
-        if let Err(e) = expect_ok_response(&resp, "MULTI") {
-            conn.discard();
-            return Err(e);
-        }
+        let mut conn = DiscardOnDropGuard::new(client.acquire(cx).await?);
+        conn.ensure_initialized(cx).await?;
+        let resp = conn.exec_no_init(cx, &[b"MULTI"]).await?;
+        expect_ok_response(&resp, "MULTI")?;
 
         Ok(Self {
-            conn: Some(conn),
+            conn: Some(conn.defuse()),
             queued_commands: 0,
             finished: false,
         })
-    }
-
-    fn conn_mut(&mut self) -> Result<&mut PooledResource<RedisConnection>, RedisError> {
-        self.conn
-            .as_mut()
-            .ok_or_else(|| RedisError::Protocol("transaction already finished".to_string()))
-    }
-
-    fn discard_connection(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            conn.discard();
-        }
-        self.finished = true;
     }
 
     /// Number of commands queued so far.
@@ -1366,34 +1347,27 @@ impl Transaction {
             ));
         }
 
-        if let Err(e) = self.conn_mut()?.write_command(cx, args).await {
-            self.discard_connection();
-            return Err(e);
-        }
+        self.finished = true;
+        let conn = self
+            .conn
+            .take()
+            .ok_or_else(|| RedisError::Protocol("transaction already finished".to_string()))?;
+        let mut conn = DiscardOnDropGuard::new(conn);
 
-        let resp = match self.conn_mut()?.read_response(cx).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                self.discard_connection();
-                return Err(e);
-            }
-        };
+        conn.write_command(cx, args).await?;
+        let resp = conn.read_response(cx).await?;
 
         match resp {
             RespValue::SimpleString(s) if s == "QUEUED" => {
+                self.conn = Some(conn.defuse());
+                self.finished = false;
                 self.queued_commands = self.queued_commands.saturating_add(1);
                 Ok(())
             }
-            RespValue::Error(msg) => {
-                self.discard_connection();
-                Err(RedisError::Redis(msg))
-            }
-            other => {
-                self.discard_connection();
-                Err(RedisError::Protocol(format!(
-                    "queued command expected +QUEUED, got {other:?}"
-                )))
-            }
+            RespValue::Error(msg) => Err(RedisError::Redis(msg)),
+            other => Err(RedisError::Protocol(format!(
+                "queued command expected +QUEUED, got {other:?}"
+            ))),
         }
     }
 
@@ -1401,48 +1375,43 @@ impl Transaction {
     ///
     /// Returns all command replies in queue order.
     pub async fn exec(mut self, cx: &Cx) -> Result<Vec<RespValue>, RedisError> {
-        let mut conn = self.conn.take().ok_or_else(|| {
+        let conn = self.conn.take().ok_or_else(|| {
             RedisError::Protocol("cannot EXEC: transaction already finished".to_string())
         })?;
         self.finished = true;
+        let mut conn = DiscardOnDropGuard::new(conn);
 
-        let resp = match conn.exec_no_init(cx, &[b"EXEC"]).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                conn.discard();
-                return Err(e);
-            }
-        };
+        let resp = conn.exec_no_init(cx, &[b"EXEC"]).await?;
 
         match resp {
-            RespValue::Array(Some(values)) => Ok(values),
-            RespValue::Array(None) => Err(RedisError::Redis(
-                "EXEC returned null (WATCH condition failed)".to_string(),
-            )),
-            other => {
-                conn.discard();
-                Err(RedisError::Protocol(format!(
-                    "EXEC expected array reply, got {other:?}"
-                )))
+            RespValue::Array(Some(values)) => {
+                conn.return_to_pool();
+                Ok(values)
             }
+            RespValue::Array(None) => {
+                conn.return_to_pool();
+                Err(RedisError::Redis(
+                    "EXEC returned null (WATCH condition failed)".to_string(),
+                ))
+            }
+            other => Err(RedisError::Protocol(format!(
+                "EXEC expected array reply, got {other:?}"
+            ))),
         }
     }
 
     /// Abort the transaction with `DISCARD`.
     pub async fn discard(mut self, cx: &Cx) -> Result<(), RedisError> {
-        let mut conn = self.conn.take().ok_or_else(|| {
+        let conn = self.conn.take().ok_or_else(|| {
             RedisError::Protocol("cannot DISCARD: transaction already finished".to_string())
         })?;
         self.finished = true;
+        let mut conn = DiscardOnDropGuard::new(conn);
 
-        let resp = match conn.exec_no_init(cx, &[b"DISCARD"]).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                conn.discard();
-                return Err(e);
-            }
-        };
-        expect_ok_response(&resp, "DISCARD")
+        let resp = conn.exec_no_init(cx, &[b"DISCARD"]).await?;
+        expect_ok_response(&resp, "DISCARD")?;
+        conn.return_to_pool();
+        Ok(())
     }
 }
 
@@ -1454,6 +1423,7 @@ impl Drop for Transaction {
         if let Some(conn) = self.conn.take() {
             // We cannot issue async DISCARD in Drop. Discarding the pooled
             // connection ensures transaction state does not leak to future users.
+            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
             conn.discard();
         }
         self.finished = true;
@@ -1889,9 +1859,55 @@ impl RedisPubSub {
 mod tests {
     use super::*;
     use crate::test_utils::{assert_completes_within, run_test_with_cx};
+    use std::future::Future;
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::task::{Context, Poll, Wake, Waker};
     use std::thread;
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn poll_once<F>(mut fut: Pin<&mut F>) -> Poll<F::Output>
+    where
+        F: Future + ?Sized,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        fut.as_mut().poll(&mut cx)
+    }
+
+    fn drive_until_signal<F>(mut fut: Pin<&mut F>, signal: &mpsc::Receiver<()>, label: &str)
+    where
+        F: Future + ?Sized,
+    {
+        for _ in 0..200 {
+            if signal.try_recv().is_ok() {
+                return;
+            }
+
+            match poll_once(fut.as_mut()) {
+                Poll::Pending => {}
+                Poll::Ready(_) => {
+                    panic!("{label} unexpectedly completed before server-side signal");
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!("{label} never reached the expected in-flight state");
+    }
 
     fn read_resp_frame(stream: &mut std::net::TcpStream) -> RespValue {
         let mut buf = Vec::new();
@@ -1939,6 +1955,18 @@ mod tests {
             .collect();
         let expected: Vec<Vec<u8>> = expected.iter().map(|arg| arg.to_vec()).collect();
         assert_eq!(actual, expected, "unexpected RESP command");
+    }
+
+    fn pooled_client_without_acquire() -> RedisClient {
+        let factory: RedisFactory = Box::new(|| {
+            Box::pin(async {
+                panic!("test should fail before acquiring a pooled Redis connection");
+            })
+        });
+        RedisClient {
+            config: RedisConfig::default(),
+            pool: GenericPool::new(factory, PoolConfig::with_max_size(1)),
+        }
     }
 
     #[test]
@@ -2219,6 +2247,26 @@ mod tests {
         let cfg = RedisConfig::from_url("redis://myhost").unwrap();
         assert_eq!(cfg.host, "myhost");
         assert_eq!(cfg.port, 6379);
+    }
+
+    #[test]
+    fn watch_rejects_pooled_client_api() {
+        let client = pooled_client_without_acquire();
+        run_test_with_cx(move |cx| async move {
+            let err = client
+                .watch(&cx, &["k1"])
+                .expect_err("WATCH must fail closed");
+            assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("connection-scoped")));
+        });
+    }
+
+    #[test]
+    fn unwatch_rejects_pooled_client_api() {
+        let client = pooled_client_without_acquire();
+        run_test_with_cx(move |cx| async move {
+            let err = client.unwatch(&cx).expect_err("UNWATCH must fail closed");
+            assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("connection-scoped")));
+        });
     }
 
     #[test]
@@ -2523,6 +2571,142 @@ mod tests {
     }
 
     #[test]
+    fn cmd_cancellation_discards_pooled_connection() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (first_ping_tx, first_ping_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first_stream, _) = listener.accept().expect("accept first client");
+            first_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set first read timeout");
+
+            let first_ping = read_resp_frame(&mut first_stream);
+            assert_resp_command(first_ping, &[b"PING"]);
+            first_ping_tx.send(()).expect("signal first ping");
+
+            let mut probe = [0u8; 1];
+            match first_stream.read(&mut probe) {
+                Ok(0) => {}
+                Ok(n) => panic!(
+                    "expected first connection to close after cancellation, read {n} extra byte(s)"
+                ),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("first connection remained open after cancellation")
+                }
+                Err(e) => panic!("read first connection after cancellation: {e}"),
+            }
+
+            let (mut second_stream, _) = listener.accept().expect("accept second client");
+            second_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set second read timeout");
+            let second_ping = read_resp_frame(&mut second_stream);
+            assert_resp_command(second_ping, &[b"PING"]);
+            second_stream
+                .write_all(&RespValue::SimpleString("PONG".to_string()).encode())
+                .expect("write second ping response");
+            second_stream.flush().expect("flush second ping response");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let client =
+                RedisClient::connect(&cx, &format!("redis://{}:{}/0", addr.ip(), addr.port()))
+                    .await
+                    .expect("create redis client");
+
+            {
+                let mut ping = Box::pin(client.ping(&cx));
+                drive_until_signal(ping.as_mut(), &first_ping_rx, "redis ping command");
+            }
+
+            client.ping(&cx).await.expect("second ping should succeed");
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn transaction_begin_cancellation_discards_pooled_connection() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (first_multi_tx, first_multi_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first_stream, _) = listener.accept().expect("accept first client");
+            first_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set first read timeout");
+
+            let first_multi = read_resp_frame(&mut first_stream);
+            assert_resp_command(first_multi, &[b"MULTI"]);
+            first_multi_tx.send(()).expect("signal first multi");
+
+            let mut probe = [0u8; 1];
+            match first_stream.read(&mut probe) {
+                Ok(0) => {}
+                Ok(n) => panic!(
+                    "expected first transaction connection to close after cancellation, read {n} extra byte(s)"
+                ),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("first transaction connection remained open after cancellation")
+                }
+                Err(e) => panic!("read first transaction connection after cancellation: {e}"),
+            }
+
+            let (mut second_stream, _) = listener.accept().expect("accept second client");
+            second_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set second read timeout");
+
+            let second_multi = read_resp_frame(&mut second_stream);
+            assert_resp_command(second_multi, &[b"MULTI"]);
+            second_stream
+                .write_all(&RespValue::SimpleString("OK".to_string()).encode())
+                .expect("write MULTI response");
+            second_stream.flush().expect("flush MULTI response");
+
+            let discard = read_resp_frame(&mut second_stream);
+            assert_resp_command(discard, &[b"DISCARD"]);
+            second_stream
+                .write_all(&RespValue::SimpleString("OK".to_string()).encode())
+                .expect("write DISCARD response");
+            second_stream.flush().expect("flush DISCARD response");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let client =
+                RedisClient::connect(&cx, &format!("redis://{}:{}/0", addr.ip(), addr.port()))
+                    .await
+                    .expect("create redis client");
+
+            {
+                let mut begin = Box::pin(client.transaction(&cx));
+                drive_until_signal(begin.as_mut(), &first_multi_rx, "redis transaction begin");
+            }
+
+            let tx = client
+                .transaction(&cx)
+                .await
+                .expect("second transaction should succeed");
+            tx.discard(&cx)
+                .await
+                .expect("second transaction should discard cleanly");
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
     fn resp_decode_rejects_excessive_nesting() {
         // Build a deeply nested array: *1\r\n repeated 100 times, then :0\r\n
         let mut buf = Vec::new();
@@ -2603,5 +2787,89 @@ mod tests {
     #[test]
     fn zero_ttl_is_allowed_for_pexpire() {
         assert_eq!(ttl_millis_rounded_up(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn dropped_transaction_queue_future_fails_closed_and_discards_connection() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (queued_seen_tx, queued_seen_rx) = mpsc::channel();
+        let (conn_closed_tx, conn_closed_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept transaction client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set transaction read timeout");
+
+            let multi = read_resp_frame(&mut stream);
+            assert_resp_command(multi, &[b"MULTI"]);
+            stream.write_all(b"+OK\r\n").expect("write MULTI response");
+            stream.flush().expect("flush MULTI response");
+
+            let queued = read_resp_frame(&mut stream);
+            assert_resp_command(queued, &[b"SET", b"key", b"value"]);
+            queued_seen_tx
+                .send(())
+                .expect("signal queued command arrival");
+
+            let mut probe = [0u8; 1];
+            match stream.read(&mut probe) {
+                Ok(0) => conn_closed_tx
+                    .send(())
+                    .expect("signal dropped transaction connection"),
+                Ok(n) => panic!(
+                    "dropped queued transaction command left the connection open; read {n} byte(s)"
+                ),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("dropped queued transaction command did not close the connection")
+                }
+                Err(e) => panic!("probe transaction connection after dropped queued command: {e}"),
+            }
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+            let mut tx = client.transaction(&cx).await.expect("start transaction");
+
+            {
+                let mut queued = Box::pin(tx.cmd(&cx, &["SET", "key", "value"]));
+                drive_until_signal(
+                    queued.as_mut(),
+                    &queued_seen_rx,
+                    "redis queued transaction command",
+                );
+            }
+
+            conn_closed_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("dropped queued transaction command should discard the connection");
+
+            let err = tx
+                .cmd(&cx, &["GET", "key"])
+                .await
+                .expect_err("transaction should fail closed after a dropped queued command");
+            match err {
+                RedisError::Protocol(message) => {
+                    assert!(
+                        message.contains("after transaction completion"),
+                        "unexpected transaction failure message: {message}"
+                    );
+                }
+                other => {
+                    panic!("expected protocol failure after dropped queued command, got {other:?}")
+                }
+            }
+        });
+
+        server.join().expect("server join");
     }
 }
