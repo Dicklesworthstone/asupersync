@@ -1001,8 +1001,6 @@ enum FrontendMessage {
     Describe = b'D',
     /// Execute message.
     Execute = b'E',
-    /// Flush message.
-    Flush = b'H',
     /// Parse message.
     Parse = b'P',
     /// Simple query.
@@ -1016,6 +1014,7 @@ enum FrontendMessage {
 }
 
 /// Backend (server) message types.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum BackendMessage {
@@ -1072,6 +1071,7 @@ impl MessageBuffer {
         }
     }
 
+    #[cfg(test)]
     fn clear(&mut self) {
         self.buf.clear();
     }
@@ -1132,6 +1132,7 @@ impl MessageBuffer {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn into_inner(self) -> Vec<u8> {
         self.buf
     }
@@ -1214,8 +1215,6 @@ impl<'a> MessageReader<'a> {
 
 /// SCRAM-SHA-256 authentication state machine.
 struct ScramAuth {
-    /// Username.
-    username: String,
     /// Password.
     password: String,
     /// Client nonce.
@@ -1245,7 +1244,6 @@ impl ScramAuth {
         let client_first_bare = format!("n={escaped_username},r={client_nonce}");
 
         Self {
-            username: username.to_string(),
             password: password.to_string(),
             client_nonce,
             full_nonce: None,
@@ -2149,7 +2147,7 @@ impl PgConnection {
         })?;
         buf.write_i32(client_first_len);
         buf.write_bytes(&client_first);
-        let msg = buf.build_message(b'p')?;
+        let msg = buf.build_message(FrontendMessage::Password as u8)?;
         self.write_all(&msg).await?;
 
         if cx.is_cancel_requested() {
@@ -2182,7 +2180,7 @@ impl PgConnection {
         let client_final = scram.process_server_first(server_first)?;
         let mut buf = MessageBuffer::new();
         buf.write_bytes(&client_final);
-        let msg = buf.build_message(b'p')?;
+        let msg = buf.build_message(FrontendMessage::Password as u8)?;
         self.write_all(&msg).await?;
 
         if cx.is_cancel_requested() {
@@ -2245,7 +2243,7 @@ impl PgConnection {
     async fn send_password(&mut self, password: &str) -> Result<(), PgError> {
         let mut buf = MessageBuffer::new();
         buf.write_cstring(password);
-        let msg = buf.build_message(b'p')?;
+        let msg = buf.build_message(FrontendMessage::Password as u8)?;
         self.write_all(&msg).await?;
         Ok(())
     }
@@ -2333,7 +2331,7 @@ impl PgConnection {
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
-        let msg = match buf.build_message(b'Q') {
+        let msg = match buf.build_message(FrontendMessage::Query as u8) {
             Ok(m) => m,
             Err(e) => return Outcome::Err(e),
         };
@@ -2459,7 +2457,7 @@ impl PgConnection {
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
-        let msg = match buf.build_message(b'Q') {
+        let msg = match buf.build_message(FrontendMessage::Query as u8) {
             Ok(m) => m,
             Err(e) => return Outcome::Err(e),
         };
@@ -2561,7 +2559,7 @@ impl PgConnection {
         }
 
         // Send Terminate message
-        let msg = [b'X', 0, 0, 0, 4]; // Type + length (4)
+        let msg = [FrontendMessage::Terminate as u8, 0, 0, 0, 4]; // Type + length (4)
         let _ = self.write_all(&msg).await;
 
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
