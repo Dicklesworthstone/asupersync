@@ -391,6 +391,47 @@ fn gen_resp_loop(body: &SessionBody) -> TokenStream2 {
 // Module generation
 // ============================================================================
 
+fn gen_transport_constructor(
+    tp_clause: &TokenStream2,
+    ob_extra_param: &TokenStream2,
+    ob_expr: &TokenStream2,
+) -> TokenStream2 {
+    quote! {
+        /// Create a transport-backed initiator/responder session pair.
+        pub fn new_session_with_transport #tp_clause (
+            channel_id: u64,
+            #ob_extra_param
+            buffer: usize,
+        ) -> (
+            Chan<Initiator, InitiatorSession #tp_clause>,
+            Chan<Responder, ResponderSession #tp_clause>,
+        ) {
+            let (tx_i2r, rx_i2r) =
+                crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+            let (tx_r2i, rx_r2i) =
+                crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+            (
+                Chan::new_with_transport(
+                    channel_id,
+                    #ob_expr,
+                    SessionTransport {
+                        tx: tx_i2r,
+                        rx: rx_r2i,
+                    },
+                ),
+                Chan::new_with_transport(
+                    channel_id,
+                    #ob_expr,
+                    SessionTransport {
+                        tx: tx_r2i,
+                        rx: rx_i2r,
+                    },
+                ),
+            )
+        }
+    }
+}
+
 fn generate_protocol(def: &ProtocolDef) -> TokenStream2 {
     let mod_name = &def.name;
     let tp = &def.type_params;
@@ -439,6 +480,7 @@ fn generate_protocol(def: &ProtocolDef) -> TokenStream2 {
 
     let initiator_type = gen_init(&def.body, tp);
     let responder_type = gen_resp(&def.body, tp);
+    let transport_constructor = gen_transport_constructor(&tp_clause, &ob_extra_param, &ob_expr);
 
     let loop_code = extract_loop_body(&def.body).map_or_else(
         || quote! {},
@@ -474,12 +516,13 @@ fn generate_protocol(def: &ProtocolDef) -> TokenStream2 {
         #[allow(unused_imports, missing_docs)]
         #[allow(clippy::type_complexity)]
         pub mod #mod_name {
-            use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
+            use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send, SessionTransport};
             use crate::record::ObligationKind;
 
             #(#msg_structs)*
 
             #loop_code
+            #transport_constructor
 
             /// Initiator's session type.
             pub type InitiatorSession #tp_clause = #initiator_type;
@@ -768,6 +811,24 @@ mod tests {
         assert!(
             !code.contains("InitiatorLoop"),
             "should not have loop type: {code}"
+        );
+    }
+
+    #[test]
+    fn gen_transport_constructor() {
+        let def = parse_ok(quote! {
+            proto for SendPermit {
+                send Foo => end
+            }
+        });
+        let code = generate_protocol(&def).to_string();
+        assert!(
+            code.contains("new_session_with_transport"),
+            "missing transport constructor: {code}"
+        );
+        assert!(
+            code.contains("Chan :: new_with_transport"),
+            "transport constructor should wire transport-backed channels: {code}"
         );
     }
 

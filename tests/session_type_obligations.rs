@@ -1307,6 +1307,86 @@ fn two_phase_abort_msg_reason_preserved() {
 // ============================================================================
 
 #[test]
+fn send_permit_transport_constructor_is_available_and_works() {
+    use asupersync::cx::Cx;
+
+    let (sender, receiver) = send_permit::new_session_with_transport::<String>(950, 8);
+    assert!(sender.is_transport_backed());
+    assert!(receiver.is_transport_backed());
+    assert_eq!(sender.obligation_kind(), ObligationKind::SendPermit);
+    assert_eq!(receiver.obligation_kind(), ObligationKind::SendPermit);
+
+    futures_lite::future::block_on(async {
+        let cx = Cx::for_testing();
+
+        let sender = sender
+            .send_async(&cx, send_permit::ReserveMsg)
+            .await
+            .expect("reserve");
+        let (_, receiver) = receiver.recv_async(&cx).await.expect("recv reserve");
+
+        let sender = sender.select_left_async(&cx).await.expect("select left");
+        let receiver = match receiver.offer_async(&cx).await.expect("offer") {
+            Selected::Left(ch) => ch,
+            Selected::Right(_) => panic!("expected Send branch"),
+        };
+
+        let sender = sender
+            .send_async(&cx, "macro-generated transport".to_string())
+            .await
+            .expect("send payload");
+        let (payload, receiver) = receiver.recv_async(&cx).await.expect("recv payload");
+        assert_eq!(payload, "macro-generated transport");
+
+        let sender_proof = sender.close();
+        let receiver_proof = receiver.close();
+        assert_eq!(sender_proof.channel_id, 950);
+        assert_eq!(receiver_proof.channel_id, 950);
+    });
+}
+
+#[test]
+fn lease_transport_constructor_is_available_and_works() {
+    use asupersync::cx::Cx;
+
+    let (holder, resource) = lease::new_session_with_transport(951, 8);
+    assert!(holder.is_transport_backed());
+    assert!(resource.is_transport_backed());
+    assert_eq!(holder.obligation_kind(), ObligationKind::Lease);
+    assert_eq!(resource.obligation_kind(), ObligationKind::Lease);
+
+    futures_lite::future::block_on(async {
+        let cx = Cx::for_testing();
+
+        let holder = holder
+            .send_async(&cx, lease::AcquireMsg)
+            .await
+            .expect("send acquire");
+        let (_, resource) = resource.recv_async(&cx).await.expect("recv acquire");
+
+        let holder = holder
+            .select_right_async(&cx)
+            .await
+            .expect("select release");
+        let resource = match resource.offer_async(&cx).await.expect("offer") {
+            Selected::Right(ch) => ch,
+            Selected::Left(_) => panic!("expected Release branch"),
+        };
+
+        let holder = holder
+            .send_async(&cx, lease::ReleaseMsg)
+            .await
+            .expect("send release");
+        let (_, resource) = resource.recv_async(&cx).await.expect("recv release");
+
+        let holder_proof = holder.close();
+        let resource_proof = resource.close();
+        assert_eq!(holder_proof.channel_id, 951);
+        assert_eq!(resource_proof.channel_id, 951);
+    });
+}
+
+#[test]
 fn transport_send_permit_commit_integration() {
     use asupersync::cx::Cx;
 
