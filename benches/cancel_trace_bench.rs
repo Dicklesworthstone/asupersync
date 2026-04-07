@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Benchmark suite for cancellation protocol and trace analysis.
 //!
 //! Covers four categories required by bd-2972:

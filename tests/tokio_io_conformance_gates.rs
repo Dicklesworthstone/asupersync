@@ -25,6 +25,11 @@
 #[macro_use]
 mod common;
 
+mod asupersync {
+    pub use crate::test_complete;
+    pub use ::asupersync::*;
+}
+
 use common::*;
 use std::collections::HashSet;
 

@@ -19,6 +19,8 @@
 //!   Graded type tests:    src/obligation/graded.rs
 //!   Commutativity tests:  tests/repro_leak_check_commutativity.rs
 
+mod common;
+
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::obligation::graded::{GradedObligation, GradedScope, Resolution};
 use asupersync::obligation::marking::{MarkingAnalyzer, MarkingEvent, MarkingEventKind};
@@ -26,8 +28,8 @@ use asupersync::obligation::{BodyBuilder, LeakChecker};
 use asupersync::observability::resource_accounting::ResourceAccounting;
 use asupersync::record::region::{AdmissionKind, RegionLimits};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
-use asupersync::test_utils::init_test_logging;
 use asupersync::types::{Budget, ObligationId, RegionId, TaskId, Time};
+use common::init_test_logging;
 
 // ===========================================================================
 // HELPERS

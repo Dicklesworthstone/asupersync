@@ -10,6 +10,14 @@
 //! 5. Behavioral contracts for copy/split/lines/buf/stream-adapters
 //! 6. Obligation-leak-free invariant
 
+#[macro_use]
+mod common;
+
+mod asupersync {
+    pub use crate::test_complete;
+    pub use ::asupersync::*;
+}
+
 use std::collections::HashSet;
 
 // ── Artifact loading ────────────────────────────────────────────────────
@@ -22,8 +30,8 @@ fn parse_json() -> serde_json::Value {
 }
 
 fn init_test(name: &str) {
-    asupersync::test_utils::init_test_logging();
-    asupersync::test_phase!(name);
+    common::init_test_logging();
+    test_phase!(name);
 }
 
 // ════════════════════════════════════════════════════════════════════════

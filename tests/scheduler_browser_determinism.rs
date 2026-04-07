@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Browser scheduler determinism regression tests.
 //!
 //! These tests validate browser-specific scheduling invariants:

@@ -4,10 +4,17 @@
 //! These tests verify that the scheduler's fairness properties work correctly
 //! by checking observable outcomes (task completion) rather than internal state.
 
+#[macro_use]
+mod common;
+
+mod asupersync {
+    pub use crate::{assert_with_log, test_complete, test_section};
+    pub use ::asupersync::*;
+}
+
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::sync::ContendedMutex;
-use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, TaskId, Time};
 use std::sync::Arc;
@@ -17,8 +24,8 @@ use std::time::Duration;
 const MAX_CONSECUTIVE_CANCEL: usize = 16;
 
 fn init_test(name: &str) {
-    init_test_logging();
-    asupersync::test_phase!(name);
+    common::init_test_logging();
+    test_phase!(name);
 }
 
 #[test]

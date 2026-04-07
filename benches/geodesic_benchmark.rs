@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Geodesic normalization benchmark suite.
 //!
 //! Measures normalization performance across trace sizes and algorithms:

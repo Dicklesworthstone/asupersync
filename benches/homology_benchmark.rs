@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Homology scoring overhead benchmarks for Asupersync (bd-2528).
 //!
 //! Profiles the persistent homology pipeline used by `TopologyExplorer` to

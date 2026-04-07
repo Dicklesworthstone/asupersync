@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! FABRIC hot-path performance benchmarks.
 //!
 //! Criterion benchmarks for subject routing, CRDT merge, morphism

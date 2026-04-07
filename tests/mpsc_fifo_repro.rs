@@ -2,17 +2,11 @@
 
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
-use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::ArenaIndex;
 use std::thread;
 use std::time::Duration;
 
 fn test_cx() -> Cx {
-    Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
+    Cx::for_testing()
 }
 
 #[test]

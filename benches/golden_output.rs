@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Golden-output benchmark harness for Asupersync.
 //!
 //! Combines performance measurement with behavioral correctness verification.
@@ -269,6 +270,14 @@ fn task(id: u32) -> TaskId {
     TaskId::new_for_test(id, 0)
 }
 
+fn task_index(id: TaskId) -> u32 {
+    id.to_string()
+        .strip_prefix('T')
+        .expect("task display prefix")
+        .parse()
+        .expect("task display index")
+}
+
 // =============================================================================
 // SCHEDULER GOLDEN SCENARIOS
 // =============================================================================
@@ -285,7 +294,7 @@ fn scenario_priority_lane_ordering(count: u32) -> String {
     // Pop all and record order
     let mut output = String::new();
     while let Some(id) = sched.pop() {
-        write!(output, "{},", id.arena_index().index()).expect("write");
+        write!(output, "{},", task_index(id)).expect("write");
     }
     output
 }
@@ -303,7 +312,7 @@ fn scenario_mixed_cancel_ready_timed(count: u32) -> String {
     }
     let mut output = String::new();
     while let Some(id) = sched.pop() {
-        write!(output, "{},", id.arena_index().index()).expect("write");
+        write!(output, "{},", task_index(id)).expect("write");
     }
     output
 }
@@ -317,7 +326,7 @@ fn scenario_global_inject_pop(count: u32) -> String {
     let mut output = String::new();
     for _ in 0..count {
         if let Some(id) = gq.pop() {
-            write!(output, "{},", id.arena_index().index()).expect("write");
+            write!(output, "{},", task_index(id)).expect("write");
         }
     }
     output

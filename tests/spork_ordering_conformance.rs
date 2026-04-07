@@ -95,8 +95,8 @@ fn test_sys_msg_batch_ordering() {
         },
     ) = (&sorted[1], &sorted[2])
     {
-        assert_eq!(n1.monitored.arena_index().index(), 2);
-        assert_eq!(n2.monitored.arena_index().index(), 99);
+        assert_eq!(n1.monitored, TaskId::new_for_test(2, 0));
+        assert_eq!(n2.monitored, TaskId::new_for_test(99, 0));
     } else {
         panic!("Unexpected message types at index 1 and 2");
     }

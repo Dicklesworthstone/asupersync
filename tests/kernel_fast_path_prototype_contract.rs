@@ -310,6 +310,7 @@ fn downstream_beads_stay_in_aa_track_namespace() {
 // -- Functional: Local queue push/pop/steal --
 
 #[test]
+#[cfg(feature = "test-internals")]
 fn functional_local_queue_push_pop_round_trip() {
     use asupersync::runtime::scheduler::local_queue::LocalQueue;
     use asupersync::types::TaskId;
@@ -330,6 +331,7 @@ fn functional_local_queue_push_pop_round_trip() {
 }
 
 #[test]
+#[cfg(feature = "test-internals")]
 fn functional_local_queue_steal_returns_tasks() {
     use asupersync::runtime::scheduler::local_queue::LocalQueue;
     use asupersync::types::TaskId;
@@ -347,6 +349,7 @@ fn functional_local_queue_steal_returns_tasks() {
 }
 
 #[test]
+#[cfg(feature = "test-internals")]
 fn functional_waker_dedup_coalesces_duplicates() {
     use asupersync::runtime::waker::WakerState;
     use asupersync::types::TaskId;
@@ -368,6 +371,7 @@ fn functional_waker_dedup_coalesces_duplicates() {
 }
 
 #[test]
+#[cfg(feature = "test-internals")]
 fn functional_steal_task_power_of_two_choices() {
     use asupersync::runtime::scheduler::local_queue::LocalQueue;
     use asupersync::runtime::scheduler::stealing::steal_task;

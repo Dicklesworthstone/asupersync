@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Spork baseline benchmarks (bd-12vyy).
 //!
 //! Reproducible benchmarks for core Spork operations:

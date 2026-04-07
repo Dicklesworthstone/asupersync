@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Tests for mpsc waker bug — ensures unpolled Recv drop does not clear registered wakers.
 
 use asupersync::channel::mpsc;
@@ -15,11 +16,7 @@ impl std::task::Wake for TrackWaker {
 #[test]
 fn test_mpsc_recv_drop_clears_waker_erroneously() {
     let (tx, mut rx) = mpsc::channel::<i32>(10);
-    let cx = asupersync::cx::Cx::new(
-        asupersync::types::RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
-        asupersync::types::TaskId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
-        asupersync::types::Budget::INFINITE,
-    );
+    let cx = asupersync::Cx::for_testing();
 
     let woken = Arc::new(AtomicBool::new(false));
     let waker = Waker::from(Arc::new(TrackWaker(woken.clone())));

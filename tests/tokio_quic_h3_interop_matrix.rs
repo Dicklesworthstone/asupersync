@@ -11,6 +11,13 @@
 //! 5. Cross-implementation issue linkage to gaps
 //! 6. Summary metrics consistency
 
+#[macro_use]
+mod common;
+
+mod asupersync {
+    pub use crate::test_complete;
+}
+
 use std::collections::HashSet;
 
 /// Load the JSON artifact at compile time.
@@ -23,8 +30,8 @@ fn parse_json() -> serde_json::Value {
 }
 
 fn init_test(name: &str) {
-    asupersync::test_utils::init_test_logging();
-    asupersync::test_phase!(name);
+    common::init_test_logging();
+    test_phase!(name);
 }
 
 // ════════════════════════════════════════════════════════════════════════

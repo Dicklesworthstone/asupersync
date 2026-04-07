@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-#![cfg(feature = "test-internals")]
 //! I/O Cancellation and Obligation Tests.
 //!
 //! These tests verify that I/O operations are cancel-safe and integrate

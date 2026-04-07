@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Channel fault injection integration tests (bd-2ktrc.1).
 //!
 //! Validates the `FaultSender` wrapper under reorder and duplication
@@ -14,20 +15,13 @@
 
 use asupersync::channel::fault::{FaultChannelConfig, fault_channel};
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
-use asupersync::types::Budget;
-use asupersync::util::ArenaIndex;
-use asupersync::{RegionId, TaskId};
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 fn test_cx() -> asupersync::cx::Cx {
-    asupersync::cx::Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
+    asupersync::cx::Cx::for_testing()
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {

@@ -1,5 +1,7 @@
 #![allow(missing_docs)]
 
+mod common;
+
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::lab::config::LabConfig;
@@ -88,7 +90,7 @@ fn run_lab_outcome(seed: u64) -> String {
 
 #[test]
 fn test_lab_simulates_all_live_outcomes() {
-    asupersync::test_utils::init_test_logging();
+    common::init_test_logging();
     let mut live_outcomes = BTreeSet::new();
 
     let runtime = RuntimeBuilder::new()

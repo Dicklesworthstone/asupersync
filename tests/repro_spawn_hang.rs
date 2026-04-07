@@ -1,5 +1,7 @@
 //! Reproduction test for scheduling bugs in `spawn_registered`.
 
+#![cfg(feature = "test-internals")]
+
 #[cfg(test)]
 mod tests {
     use asupersync::cx::Cx;

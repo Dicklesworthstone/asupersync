@@ -1,5 +1,7 @@
 //! Minimal tests to verify SharedLabHandle behavior.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -96,7 +98,7 @@ impl SharedLabHandle {
 
 #[test]
 fn shared_handle_finds_completed_value() {
-    asupersync::test_utils::init_test_logging();
+    common::init_test_logging();
 
     asupersync::lab::runtime::test(42, |runtime| {
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -137,7 +139,7 @@ fn shared_handle_finds_completed_value() {
 /// try_join_probe in a loop, yielding between iterations.
 #[test]
 fn shared_handle_polling_from_task() {
-    asupersync::test_utils::init_test_logging();
+    common::init_test_logging();
 
     asupersync::lab::runtime::test(42, |runtime| {
         let region = runtime.state.create_root_region(Budget::INFINITE);

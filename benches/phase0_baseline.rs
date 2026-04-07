@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Phase 0 baseline benchmarks for Asupersync.
 //!
 //! These benchmarks establish performance baselines for the Phase 0 kernel:

@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Methodology baseline benchmarks for Asupersync (bd-1e2if.1).
 //!
 //! Captures p50/p95/p99 baselines for all primary operations:
@@ -29,7 +30,6 @@ use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, CancelKind, CancelReason, RegionId, TaskId, Time};
-use asupersync::util::ArenaIndex;
 use std::sync::Arc;
 
 // =============================================================================
@@ -41,7 +41,7 @@ fn task(id: u32) -> TaskId {
 }
 
 fn region() -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(0, 0))
+    RegionId::testing_default()
 }
 
 fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {

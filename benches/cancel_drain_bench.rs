@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Cancel/drain latency benchmark suite for Asupersync (bd-19rj).
 //!
 //! Benchmarks the performance of cancellation, drain, and governor operations:

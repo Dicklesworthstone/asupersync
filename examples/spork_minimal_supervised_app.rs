@@ -170,7 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut runtime = LabRuntime::new(LabConfig::default());
     let parent_region = runtime.state.create_root_region(Budget::INFINITE);
-    let cx = Cx::new(parent_region, TaskId::testing_default(), Budget::INFINITE);
+    let cx = Cx::for_testing();
 
     let mut app = AppSpec::new("counter_app")
         .with_registry(registry_cap)

@@ -10,12 +10,14 @@
 //! 4. Mixed cancel/timed/ready workloads are all dispatched
 //! 5. Multi-worker coordination delivers all tasks exactly once
 
+mod common;
+
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::sync::ContendedMutex;
-use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, TaskId, Time};
+use common::init_test_logging;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};

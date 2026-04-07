@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Scheduler benchmark suite for Asupersync.
 //!
 //! Benchmarks the performance of scheduling primitives:
@@ -25,7 +26,7 @@ use asupersync::runtime::scheduler::{
 };
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
-use asupersync::util::{Arena, ArenaIndex};
+use asupersync::util::Arena;
 use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,7 +49,7 @@ fn tasks(count: usize) -> Vec<TaskId> {
 
 /// Creates a test RegionId.
 fn region() -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(0, 0))
+    RegionId::testing_default()
 }
 
 /// Creates an arena with `count` TaskRecords.

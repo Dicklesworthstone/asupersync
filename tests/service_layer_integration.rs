@@ -5,6 +5,14 @@
 //! steer, filter, and existing middleware (timeout, retry, concurrency_limit,
 //! load_shed, rate_limit) compose correctly.
 
+#[macro_use]
+mod common;
+
+mod asupersync {
+    pub use crate::test_complete;
+    pub use ::asupersync::*;
+}
+
 use asupersync::service::Layer;
 use asupersync::service::buffer::BufferLayer;
 use asupersync::service::discover::{
@@ -23,8 +31,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn init_test(name: &str) {
-    asupersync::test_utils::init_test_logging();
-    asupersync::test_phase!(name);
+    common::init_test_logging();
+    test_phase!(name);
 }
 
 fn socket_set(addrs: &[&str]) -> HashSet<SocketAddr> {

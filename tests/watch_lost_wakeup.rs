@@ -2,9 +2,6 @@
 
 use asupersync::channel::watch::channel;
 use asupersync::cx::Cx;
-use asupersync::types::Budget;
-use asupersync::util::ArenaIndex;
-use asupersync::{RegionId, TaskId};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -34,11 +31,7 @@ impl std::task::Wake for CountingWaker {
 
 #[test]
 fn test_watch_lost_wakeup() {
-    let cx = Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    );
+    let cx = Cx::for_testing();
 
     let (tx, mut rx) = channel(0);
 

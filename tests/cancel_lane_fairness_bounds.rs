@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+#![cfg(feature = "test-internals")]
 //! Cancel Lane Fairness & Starvation Bounds (bd-1jxe3).
 //!
 //! Proves and tests starvation bounds for cancel-lane prioritization.

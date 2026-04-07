@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Channel crash/restart fault injection integration tests (bd-2ktrc.3).
 //!
 //! Validates the `CrashController` and `CrashSender` wrapper under
@@ -20,19 +21,12 @@
 use asupersync::channel::crash::{CrashConfig, CrashSender, RestartMode, crash_channel};
 use asupersync::channel::mpsc;
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
-use asupersync::types::Budget;
-use asupersync::util::ArenaIndex;
-use asupersync::{RegionId, TaskId};
 use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 fn test_cx() -> asupersync::cx::Cx {
-    asupersync::cx::Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
+    asupersync::Cx::for_testing()
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {

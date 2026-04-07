@@ -3,10 +3,9 @@ use asupersync::actor::ActorId;
 use asupersync::lab::oracle::actor::*;
 use asupersync::supervision::{EscalationPolicy, RestartPolicy};
 use asupersync::types::{TaskId, Time};
-use asupersync::util::ArenaIndex;
 
 fn actor(n: u32) -> ActorId {
-    ActorId::from_task(TaskId::from_arena(ArenaIndex::new(n, 0)))
+    ActorId::from_task(TaskId::new_for_test(n, 0))
 }
 fn t(nanos: u64) -> Time {
     Time::from_nanos(nanos)

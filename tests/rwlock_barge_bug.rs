@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Regression test for writer fairness (no barging) in `RwLock`.
 
 use asupersync::sync::RwLock;
@@ -27,11 +28,7 @@ where
 
 #[test]
 fn test_rwlock_barge_bug() {
-    let cx = asupersync::cx::Cx::new(
-        asupersync::types::RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
-        asupersync::types::TaskId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
-        asupersync::types::Budget::INFINITE,
-    );
+    let cx = asupersync::Cx::for_testing();
 
     let lock = RwLock::new(0);
 

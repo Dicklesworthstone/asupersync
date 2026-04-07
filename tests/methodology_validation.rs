@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Methodology validation tests for the §0 Alien-Artifact Implementation Framework (bd-1e2if.7).
 //!
 //! Validates the four methodology pillars:

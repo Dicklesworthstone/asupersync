@@ -1,28 +1,38 @@
+#![allow(missing_docs)]
 //! Contract tests for the lab-vs-live scenario adapter contract (2a6k9.2.1).
 //!
 //! Verifies the shared ScenarioSpec shape, adapter boundary, valid/invalid
 //! examples, downstream bindings, and `rch`-offloaded validation policy.
 
-#![allow(missing_docs)]
-
 mod common;
 
+#[cfg(feature = "test-internals")]
+use asupersync::lab::{
+    ChaosSection, LabSection, NetworkSection, Scenario, ScenarioRunner, SporkScenarioConfig,
+    SporkScenarioRunner, SporkScenarioSpec,
+};
 use asupersync::lab::DrainStatus;
 use asupersync::lab::replay::{
     DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
 };
 use asupersync::lab::{
-    ChaosSection, DualRunHarness, DualRunScenarioIdentity, LabSection, LiveRunResult,
-    NetworkSection, NormalizedSemantics, Scenario, ScenarioRunner, SeedPlan, SporkScenarioConfig,
-    SporkScenarioRunner, SporkScenarioSpec, TerminalOutcome, assert_dual_run_passes,
-    capture_cancellation, capture_loser_drain, capture_obligation_balance, capture_region_close,
-    run_live_adapter,
+    DualRunHarness, DualRunScenarioIdentity, LiveRunResult, NormalizedSemantics, SeedPlan,
+    TerminalOutcome, assert_dual_run_passes, capture_cancellation, capture_loser_drain,
+    capture_obligation_balance, capture_region_close, run_live_adapter,
 };
+#[cfg(feature = "test-internals")]
 use asupersync::runtime::yield_now;
+#[cfg(feature = "test-internals")]
 use asupersync::spork::prelude::AppSpec;
+#[cfg(feature = "test-internals")]
 use asupersync::test_logging::{LIVE_CURRENT_THREAD_ADAPTER, ReproManifest, TestContext};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "test-internals")]
+use serde_json::json;
+#[cfg(feature = "test-internals")]
+use serde_json::Value;
+#[cfg(feature = "test-internals")]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 fn load_doc() -> String {
@@ -31,6 +41,7 @@ fn load_doc() -> String {
     std::fs::read_to_string(path).expect("lab-live scenario adapter contract must exist")
 }
 
+#[cfg(feature = "test-internals")]
 fn load_golden_harness_fixture() -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/semantic_golden/dual_run_harness_contract.json");
@@ -230,6 +241,7 @@ fn doc_binds_downstream_beads_and_validation_commands() {
     }
 }
 
+#[cfg(feature = "test-internals")]
 fn minimal_contract_identity() -> DualRunScenarioIdentity {
     let seed_plan = SeedPlan::inherit(42, "seed.phase1.cancel.race.one_loser.v1")
         .with_live_override(99)
@@ -244,6 +256,7 @@ fn minimal_contract_identity() -> DualRunScenarioIdentity {
     .with_seed_plan(seed_plan)
 }
 
+#[cfg(feature = "test-internals")]
 fn minimal_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
     let mut metadata = BTreeMap::new();
     metadata.insert("surface_id".into(), identity.surface_id.clone());
@@ -275,6 +288,7 @@ fn minimal_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
     }
 }
 
+#[cfg(feature = "test-internals")]
 fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::SporkScenarioResult {
     let mut runner = SporkScenarioRunner::new();
     runner
@@ -384,6 +398,7 @@ fn make_cancellation_live_result(
     })
 }
 
+#[cfg(feature = "test-internals")]
 fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
     if actual != expected {
         let actual_pretty =
@@ -394,6 +409,7 @@ fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
     }
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn shared_harness_smoke_executes_same_contract_across_lab_and_live_entrypoints() {
     let identity = minimal_contract_identity();
@@ -478,6 +494,7 @@ fn shared_harness_smoke_executes_same_contract_across_lab_and_live_entrypoints()
     assert_pretty_json_eq("shared dual-run smoke snapshot", &actual, &expected);
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn dual_run_failure_manifest_keeps_readable_provenance() {
     let identity = minimal_contract_identity();

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! RaptorQ conformance, property tests, and deterministic fuzz harness.
 //!
 //! This test suite validates:

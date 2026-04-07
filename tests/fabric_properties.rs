@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Property-based tests for critical FABRIC invariants.
 //!
 //! Uses proptest to verify structural properties of the subject routing,

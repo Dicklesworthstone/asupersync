@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Golden Fixture Validation Tests (SEM-12.8)
 //!
 //! Loads golden fixture data from `tests/fixtures/semantic_golden/` and validates
@@ -8,14 +9,21 @@
 //! Bead: asupersync-3cddg.12.8
 //! Rule IDs exercised: #7, #8, #29, #30, #31, #39, #42, #46
 
+#[cfg(feature = "test-internals")]
 use asupersync::lab::{
     ChaosSection, DualRunScenarioIdentity, LabSection, NetworkSection, Scenario, ScenarioRunner,
     SeedPlan, SporkScenarioConfig, SporkScenarioRunner, SporkScenarioSpec,
 };
+#[cfg(feature = "test-internals")]
 use asupersync::spork::prelude::AppSpec;
+#[cfg(feature = "test-internals")]
 use asupersync::test_logging::{ReproManifest, TestContext};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+#[cfg(feature = "test-internals")]
+use serde_json::json;
+use serde_json::Value;
+#[cfg(feature = "test-internals")]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::lab::fuzz::{FuzzConfig, FuzzHarness};
@@ -41,6 +49,7 @@ fn load_manifest() -> Value {
     load_fixture("manifest.json")
 }
 
+#[cfg(feature = "test-internals")]
 fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
     if actual != expected {
         let actual_pretty =
@@ -51,6 +60,7 @@ fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
     }
 }
 
+#[cfg(feature = "test-internals")]
 fn build_contract_identity() -> DualRunScenarioIdentity {
     let seed_plan = SeedPlan::inherit(42, "seed.phase1.cancel.race.one_loser.v1")
         .with_live_override(99)
@@ -65,6 +75,7 @@ fn build_contract_identity() -> DualRunScenarioIdentity {
     .with_seed_plan(seed_plan)
 }
 
+#[cfg(feature = "test-internals")]
 fn build_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
     let mut metadata = BTreeMap::new();
     metadata.insert("surface_id".into(), identity.surface_id.clone());
@@ -96,6 +107,7 @@ fn build_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
     }
 }
 
+#[cfg(feature = "test-internals")]
 fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::SporkScenarioResult {
     let mut runner = SporkScenarioRunner::new();
     runner
@@ -121,6 +133,7 @@ fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::Spo
 }
 
 #[allow(clippy::too_many_lines)]
+#[cfg(feature = "test-internals")]
 fn build_dual_run_harness_contract_fixture() -> Value {
     let identity = build_contract_identity();
     let scenario = build_contract_scenario(&identity);
@@ -313,6 +326,7 @@ fn golden_manifest_fixtures_all_loadable() {
     }
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn golden_dual_run_harness_contract_matches_runtime_helpers() {
     let expected = load_fixture("dual_run_harness_contract.json");

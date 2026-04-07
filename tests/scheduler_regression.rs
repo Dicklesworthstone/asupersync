@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Scheduler performance regression tests.
 //!
 //! These tests establish baseline performance metrics and fail if

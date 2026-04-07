@@ -11,6 +11,12 @@
 mod common;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+mod asupersync {
+    pub use crate::{test_complete, test_phase};
+    pub use ::asupersync::*;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 mod tests {
     use super::*;
 

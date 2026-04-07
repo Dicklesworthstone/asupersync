@@ -5,6 +5,7 @@
 //!
 //! Run with: `cargo test --test e2e_actor`
 
+#![cfg(feature = "test-internals")]
 #![allow(unused_imports)]
 
 mod common {

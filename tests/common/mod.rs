@@ -22,6 +22,7 @@ pub use asupersync::lab::{
     DualRunScenarioIdentity, ExecutionInstanceId, Phase, ReplayMetadata, ReplayPolicy, RuntimeKind,
     ScenarioFamilyId, SeedLineageRecord, SeedMode, SeedPlan,
 };
+#[cfg(feature = "test-internals")]
 pub use asupersync::test_logging::{
     ARTIFACT_SCHEMA_VERSION, AggregatedReport, AllocatedPort, DockerFixtureService,
     EnvironmentMetadata, FixtureService, InProcessService, LIVE_CURRENT_THREAD_ADAPTER,
@@ -30,6 +31,7 @@ pub use asupersync::test_logging::{
     derive_scenario_seed, wait_until_healthy,
 };
 
+#[cfg(feature = "test-internals")]
 pub use asupersync::raptorq::test_log_schema::{
     self as raptorq_log, E2E_LOG_SCHEMA_VERSION, E2eLogEntry, LogConfigReport, LogLossReport,
     LogOutcomeReport, LogProofReport, LogSymbolCounts, LogSymbolReport, UNIT_LOG_SCHEMA_VERSION,
@@ -188,6 +190,7 @@ pub fn test_lab_with_tracing() -> LabRuntime {
 
 /// Create a lab runtime from a [`TestContext`], using the context's seed.
 #[must_use]
+#[cfg(feature = "test-internals")]
 pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
     LabRuntime::new(LabConfig::new(ctx.seed))
 }
@@ -200,18 +203,21 @@ pub fn test_lab_from_dual_run_identity(identity: &DualRunScenarioIdentity) -> La
 
 /// Create a [`TestContext`] for an integration test with the default seed.
 #[must_use]
+#[cfg(feature = "test-internals")]
 pub fn test_context(test_id: &str) -> TestContext {
     TestContext::new(test_id, DEFAULT_TEST_SEED)
 }
 
 /// Create a [`TestContext`] for an integration test with a specific seed.
 #[must_use]
+#[cfg(feature = "test-internals")]
 pub fn test_context_with_seed(test_id: &str, seed: u64) -> TestContext {
     TestContext::new(test_id, seed)
 }
 
 /// Create a current-thread live test context from a shared dual-run identity.
 #[must_use]
+#[cfg(feature = "test-internals")]
 pub fn test_context_from_dual_run_identity(identity: &DualRunScenarioIdentity) -> TestContext {
     TestContext::from_live_dual_run(identity)
 }

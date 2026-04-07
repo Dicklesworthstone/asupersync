@@ -19,19 +19,12 @@ use asupersync::channel::partition::{
     ActorId, PartitionBehavior, PartitionController, partition_channel,
 };
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
-use asupersync::types::Budget;
-use asupersync::util::ArenaIndex;
-use asupersync::{RegionId, TaskId};
 use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 fn test_cx() -> asupersync::cx::Cx {
-    asupersync::cx::Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
+    asupersync::cx::Cx::for_testing()
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {

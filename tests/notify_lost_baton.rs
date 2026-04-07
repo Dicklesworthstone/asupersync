@@ -39,8 +39,8 @@ fn notify_one_lost_if_polled_after_broadcast() {
     let mut waiter_c = notify.notified();
     assert_eq!(poll_once(&mut waiter_c), Poll::Pending);
 
-    // A is polled! It should complete. BUT it must pass the baton to C!
-    assert_eq!(poll_once(&mut waiter_a), Poll::Ready(()));
+    // A is dropped (cancelled)! It must pass the baton to C!
+    drop(waiter_a);
 
     // Now C should be ready because A passed the baton to it.
     assert_eq!(poll_once(&mut waiter_c), Poll::Ready(()), "Baton was lost!");

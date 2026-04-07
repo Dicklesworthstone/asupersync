@@ -446,7 +446,7 @@ fn replay_compact_task_id_roundtrip_extremes() {
         let (idx, g) = compact.unpack();
         assert_eq!(idx, index, "index mismatch for ({index}, {generation})");
         assert_eq!(g, generation, "gen mismatch for ({index}, {generation})");
-        assert_eq!(compact.to_task_id(), task);
+        assert_eq!(TaskId::new_for_test(idx, g), task);
     }
 }
 
@@ -458,7 +458,7 @@ fn replay_compact_region_id_roundtrip_extremes() {
         let (idx, g) = compact.unpack();
         assert_eq!(idx, index);
         assert_eq!(g, generation);
-        assert_eq!(compact.to_region_id(), region);
+        assert_eq!(RegionId::new_for_test(idx, g), region);
     }
 }
 

@@ -1,3 +1,4 @@
+#![cfg(feature = "test-internals")]
 //! Browser scheduler benchmark suite for Asupersync.
 //!
 //! Benchmarks browser-specific scheduling features:
@@ -23,7 +24,6 @@ use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{Scheduler, ThreeLaneScheduler};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::ArenaIndex;
 use std::sync::Arc;
 
 // =============================================================================
@@ -35,7 +35,7 @@ fn task(id: u32) -> TaskId {
 }
 
 fn region() -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(0, 0))
+    RegionId::testing_default()
 }
 
 fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {

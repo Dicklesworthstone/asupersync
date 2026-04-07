@@ -2,8 +2,6 @@
 
 use asupersync::cx::Cx;
 use asupersync::sync::Mutex;
-use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::ArenaIndex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -32,11 +30,7 @@ where
 
 #[test]
 fn mutex_waiter_chain_does_not_lose_wakeup() {
-    let cx = Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    );
+    let cx = Cx::for_testing();
     let mutex = Mutex::new(0u32);
 
     // Hold lock

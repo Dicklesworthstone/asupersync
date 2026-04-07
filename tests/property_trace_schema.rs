@@ -191,7 +191,7 @@ proptest! {
         let (idx, g) = compact.unpack();
         prop_assert_eq!(idx, index);
         prop_assert_eq!(g, generation);
-        prop_assert_eq!(compact.to_task_id(), task);
+        prop_assert_eq!(TaskId::new_for_test(idx, g), task);
     }
 
     /// CompactRegionId pack/unpack round-trip for all u32 pairs.
@@ -203,7 +203,7 @@ proptest! {
         let (idx, g) = compact.unpack();
         prop_assert_eq!(idx, index);
         prop_assert_eq!(g, generation);
-        prop_assert_eq!(compact.to_region_id(), region);
+        prop_assert_eq!(RegionId::new_for_test(idx, g), region);
     }
 
     /// CompactTaskId packing is a bijection: distinct (index, gen) → distinct u64.
