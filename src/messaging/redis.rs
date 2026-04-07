@@ -1446,6 +1446,72 @@ pub struct RedisPubSub {
     channels: Vec<String>,
     patterns: Vec<String>,
     pending_events: VecDeque<PubSubEvent>,
+    poisoned: bool,
+}
+
+struct PubSubControlGuard<'a> {
+    pubsub: &'a mut RedisPubSub,
+    snapshot_channels: Vec<String>,
+    snapshot_patterns: Vec<String>,
+    active: bool,
+}
+
+impl<'a> PubSubControlGuard<'a> {
+    fn new(pubsub: &'a mut RedisPubSub) -> Result<Self, RedisError> {
+        pubsub.ensure_live()?;
+        Ok(Self {
+            snapshot_channels: pubsub.channels.clone(),
+            snapshot_patterns: pubsub.patterns.clone(),
+            pubsub,
+            active: true,
+        })
+    }
+
+    fn commit(mut self) {
+        self.active = false;
+    }
+
+    async fn write_command(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<(), RedisError> {
+        self.pubsub.conn.write_command(cx, args).await
+    }
+
+    async fn read_next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
+        self.pubsub.read_next_event(cx).await
+    }
+
+    fn push_pending_event(&mut self, event: PubSubEvent) {
+        self.pubsub.push_pending_event(event);
+    }
+
+    fn track_channel(&mut self, channel: &str) {
+        RedisPubSub::track_subscribe(&mut self.pubsub.channels, channel);
+    }
+
+    fn untrack_channel(&mut self, channel: &str) {
+        RedisPubSub::untrack_subscribe(&mut self.pubsub.channels, channel);
+    }
+
+    fn track_pattern(&mut self, pattern: &str) {
+        RedisPubSub::track_subscribe(&mut self.pubsub.patterns, pattern);
+    }
+
+    fn untrack_pattern(&mut self, pattern: &str) {
+        RedisPubSub::untrack_subscribe(&mut self.pubsub.patterns, pattern);
+    }
+}
+
+impl Drop for PubSubControlGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        self.pubsub.channels = std::mem::take(&mut self.snapshot_channels);
+        self.pubsub.patterns = std::mem::take(&mut self.snapshot_patterns);
+        self.pubsub.pending_events.clear();
+        self.pubsub.poisoned = true;
+        let _ = self.pubsub.conn.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 impl RedisPubSub {
@@ -1458,7 +1524,19 @@ impl RedisPubSub {
             channels: Vec::new(),
             patterns: Vec::new(),
             pending_events: VecDeque::new(),
+            poisoned: false,
         })
+    }
+
+    fn ensure_live(&self) -> Result<(), RedisError> {
+        if self.poisoned {
+            Err(RedisError::Protocol(
+                "redis pubsub connection was invalidated by a cancelled or failed control exchange; call reconnect"
+                    .to_string(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn push_pending_event(&mut self, event: PubSubEvent) {
@@ -1658,31 +1736,33 @@ impl RedisPubSub {
             ));
         }
 
+        let mut guard = PubSubControlGuard::new(self)?;
         let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len() + 1);
         args.push(b"SUBSCRIBE");
         for channel in channels {
             args.push(channel.as_bytes());
         }
-        self.conn.write_command(cx, &args).await?;
+        guard.write_command(cx, &args).await?;
 
         let mut acks_remaining = channels.len();
         while acks_remaining > 0 {
-            let event = self.read_next_event(cx).await?;
+            let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::Subscribe,
                     channel,
                     ..
                 } => {
-                    Self::track_subscribe(&mut self.channels, &channel);
+                    guard.track_channel(&channel);
                     acks_remaining -= 1;
                 }
                 // Buffer interleaved messages from existing subscriptions
                 // so they aren't silently dropped while waiting for acks.
-                other => self.push_pending_event(other),
+                other => guard.push_pending_event(other),
             }
         }
 
+        guard.commit();
         Ok(())
     }
 
@@ -1694,29 +1774,31 @@ impl RedisPubSub {
             ));
         }
 
+        let mut guard = PubSubControlGuard::new(self)?;
         let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len() + 1);
         args.push(b"PSUBSCRIBE");
         for pattern in patterns {
             args.push(pattern.as_bytes());
         }
-        self.conn.write_command(cx, &args).await?;
+        guard.write_command(cx, &args).await?;
 
         let mut acks_remaining = patterns.len();
         while acks_remaining > 0 {
-            let event = self.read_next_event(cx).await?;
+            let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::PatternSubscribe,
                     channel,
                     ..
                 } => {
-                    Self::track_subscribe(&mut self.patterns, &channel);
+                    guard.track_pattern(&channel);
                     acks_remaining -= 1;
                 }
-                other => self.push_pending_event(other),
+                other => guard.push_pending_event(other),
             }
         }
 
+        guard.commit();
         Ok(())
     }
 
@@ -1724,36 +1806,39 @@ impl RedisPubSub {
     ///
     /// Passing an empty slice unsubscribes from all channels currently tracked.
     pub async fn unsubscribe(&mut self, cx: &Cx, channels: &[&str]) -> Result<(), RedisError> {
+        self.ensure_live()?;
         if channels.is_empty() && self.channels.is_empty() {
             return Ok(());
         }
 
+        let mut guard = PubSubControlGuard::new(self)?;
         let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len() + 1);
         args.push(b"UNSUBSCRIBE");
         for channel in channels {
             args.push(channel.as_bytes());
         }
-        self.conn.write_command(cx, &args).await?;
+        guard.write_command(cx, &args).await?;
 
         let mut acks_remaining = if channels.is_empty() {
-            self.channels.len()
+            guard.pubsub.channels.len()
         } else {
             channels.len()
         };
         while acks_remaining > 0 {
-            let event = self.read_next_event(cx).await?;
+            let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::Unsubscribe,
                     channel,
                     ..
                 } => {
-                    Self::untrack_subscribe(&mut self.channels, &channel);
+                    guard.untrack_channel(&channel);
                     acks_remaining -= 1;
                 }
-                other => self.push_pending_event(other),
+                other => guard.push_pending_event(other),
             }
         }
+        guard.commit();
         Ok(())
     }
 
@@ -1761,41 +1846,45 @@ impl RedisPubSub {
     ///
     /// Passing an empty slice unsubscribes from all patterns currently tracked.
     pub async fn punsubscribe(&mut self, cx: &Cx, patterns: &[&str]) -> Result<(), RedisError> {
+        self.ensure_live()?;
         if patterns.is_empty() && self.patterns.is_empty() {
             return Ok(());
         }
 
+        let mut guard = PubSubControlGuard::new(self)?;
         let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len() + 1);
         args.push(b"PUNSUBSCRIBE");
         for pattern in patterns {
             args.push(pattern.as_bytes());
         }
-        self.conn.write_command(cx, &args).await?;
+        guard.write_command(cx, &args).await?;
 
         let mut acks_remaining = if patterns.is_empty() {
-            self.patterns.len()
+            guard.pubsub.patterns.len()
         } else {
             patterns.len()
         };
         while acks_remaining > 0 {
-            let event = self.read_next_event(cx).await?;
+            let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
                     kind: PubSubSubscriptionKind::PatternUnsubscribe,
                     channel,
                     ..
                 } => {
-                    Self::untrack_subscribe(&mut self.patterns, &channel);
+                    guard.untrack_pattern(&channel);
                     acks_remaining -= 1;
                 }
-                other => self.push_pending_event(other),
+                other => guard.push_pending_event(other),
             }
         }
+        guard.commit();
         Ok(())
     }
 
     /// Receive the next Pub/Sub event on this connection.
     pub async fn next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
+        self.ensure_live()?;
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(event);
         }
@@ -1806,19 +1895,23 @@ impl RedisPubSub {
     ///
     /// Redis returns a `pong` event while subscribed.
     pub async fn ping(&mut self, cx: &Cx, payload: Option<&[u8]>) -> Result<(), RedisError> {
+        let mut guard = PubSubControlGuard::new(self)?;
         if let Some(payload) = payload {
-            self.conn.write_command(cx, &[b"PING", payload]).await?;
+            guard.write_command(cx, &[b"PING", payload]).await?;
         } else {
-            self.conn.write_command(cx, &[b"PING"]).await?;
+            guard.write_command(cx, &[b"PING"]).await?;
         }
         // Loop until we receive PONG, buffering any interleaved events so a
         // liveness check cannot silently drop real messages. Cap the buffer
         // to prevent unbounded growth under high publish throughput.
         loop {
-            match self.read_next_event(cx).await? {
-                PubSubEvent::Pong(_) => return Ok(()),
+            match guard.read_next_event(cx).await? {
+                PubSubEvent::Pong(_) => {
+                    guard.commit();
+                    return Ok(());
+                }
                 event @ (PubSubEvent::Message(_) | PubSubEvent::Subscription { .. }) => {
-                    self.push_pending_event(event);
+                    guard.push_pending_event(event);
                     // Beyond the cap, interleaved messages are dropped to
                     // bound memory.  This is a defensive limit — in normal
                     // operation PONG arrives within a few round-trips.
@@ -1835,9 +1928,10 @@ impl RedisPubSub {
         let mut conn = RedisConnection::connect(self.config.clone()).await?;
         conn.ensure_initialized(cx).await?;
         self.conn = conn;
-        self.channels.clear();
-        self.patterns.clear();
+        self.channels.clone_from(&channels);
+        self.patterns.clone_from(&patterns);
         self.pending_events.clear();
+        self.poisoned = false;
 
         if !channels.is_empty() {
             let channel_refs: Vec<&str> = channels.iter().map(String::as_str).collect();
@@ -2573,6 +2667,88 @@ mod tests {
                 },
             )
             .await;
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn pubsub_cancelled_subscribe_poison_connection_and_requires_reconnect() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (subscribe_seen_tx, subscribe_seen_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept pubsub client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let subscribe = read_resp_frame(&mut stream);
+            assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
+            subscribe_seen_tx
+                .send(())
+                .expect("signal subscribe command arrival");
+
+            let mut probe = [0u8; 1];
+            match stream.read(&mut probe) {
+                Ok(0) => {}
+                Ok(n) => panic!(
+                    "expected cancelled pubsub subscribe to close the connection, read {n} extra byte(s)"
+                ),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("cancelled pubsub subscribe left the connection open")
+                }
+                Err(e) => panic!("read after cancelled pubsub subscribe: {e}"),
+            }
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut pubsub = RedisPubSub::connect(&cx, config)
+                .await
+                .expect("connect pubsub client");
+
+            {
+                let mut subscribe = Box::pin(pubsub.subscribe(&cx, &["chan"]));
+                drive_until_signal(
+                    subscribe.as_mut(),
+                    &subscribe_seen_rx,
+                    "redis pubsub subscribe",
+                );
+            }
+
+            assert!(
+                pubsub.channels().is_empty(),
+                "cancelled subscribe must restore the last confirmed channel snapshot"
+            );
+
+            let err = pubsub
+                .subscribe(&cx, &["other"])
+                .await
+                .expect_err("poisoned pubsub connection must fail closed");
+            assert!(
+                matches!(err, RedisError::Protocol(ref message) if message.contains("call reconnect")),
+                "unexpected poisoned pubsub error: {err:?}"
+            );
+
+            let err = pubsub
+                .next_event(&cx)
+                .await
+                .expect_err("poisoned pubsub connection must reject event reads");
+            assert!(
+                matches!(err, RedisError::Protocol(ref message) if message.contains("call reconnect")),
+                "unexpected poisoned next_event error: {err:?}"
+            );
         });
 
         server.join().expect("server join");
