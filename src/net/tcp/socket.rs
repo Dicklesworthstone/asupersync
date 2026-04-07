@@ -97,12 +97,6 @@ impl TcpSocket {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let state = self.state.into_inner();
-            if state.reuseaddr || state.reuseport {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "SO_REUSEADDR/SO_REUSEPORT not supported in Phase 0",
-                ));
-            }
             let addr = state.bound.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "socket is not bound")
             })?;
@@ -113,6 +107,15 @@ impl TcpSocket {
             };
             let socket =
                 socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+
+            if state.reuseaddr {
+                socket.set_reuse_address(true)?;
+            }
+
+            #[cfg(unix)]
+            if state.reuseport {
+                socket.set_reuse_port(true)?;
+            }
 
             socket.bind(&socket2::SockAddr::from(addr))?;
             socket.listen(i32::try_from(backlog).unwrap_or(i32::MAX))?;
@@ -407,5 +410,18 @@ mod tests {
         crate::assert_with_log!(accepted, "accepted connection", true, accepted);
         handle.join().expect("join accept thread");
         crate::test_complete!("test_connect_success_v4");
+    }
+
+    #[test]
+    fn test_listen_reuseaddr() {
+        init_test("test_listen_reuseaddr");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        socket.set_reuseaddr(true).expect("set_reuseaddr");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind");
+        let listener = socket.listen(128);
+        crate::assert_with_log!(listener.is_ok(), "listen ok", true, listener.is_ok());
+        crate::test_complete!("test_listen_reuseaddr");
     }
 }
