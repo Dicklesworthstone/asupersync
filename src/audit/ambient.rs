@@ -93,7 +93,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Spawn ───────────────────────────────────────────────────────────
     AmbientFinding {
         file: "time/sleep.rs",
-        line: 582,
+        line: 623,
         evidence_pattern: "std::thread::spawn",
         category: AmbientCategory::Spawn,
         severity: Severity::Warning,

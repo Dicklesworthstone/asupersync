@@ -5485,6 +5485,7 @@ mod tests {
             metadata.selected_targeted_addmul_average_delta_pct,
             NA_PROFILE_DELTA_PCT
         );
+        assert!(metadata.rejected_tuning_candidate_ids.is_empty());
         assert_eq!(
             tuning_candidate_metadata(policy.selected_tuning_candidate_id),
             None
@@ -5548,6 +5549,8 @@ mod tests {
             metadata.selected_targeted_addmul_average_delta_pct,
             NA_PROFILE_DELTA_PCT
         );
+        assert!(policy.rejected_tuning_candidate_ids.is_empty());
+        assert!(metadata.rejected_tuning_candidate_ids.is_empty());
     }
 
     #[test]

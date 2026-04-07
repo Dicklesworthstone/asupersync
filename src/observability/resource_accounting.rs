@@ -176,19 +176,19 @@ impl ResourceAccounting {
     /// Record that an obligation of the given kind was committed.
     pub fn obligation_committed(&self, kind: ObligationKind) {
         self.committed[obligation_index(kind)].fetch_add(1, Ordering::Relaxed);
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+        decrement_gauge_saturating_at_zero(&self.pending);
     }
 
     /// Record that an obligation of the given kind was aborted.
     pub fn obligation_aborted(&self, kind: ObligationKind) {
         self.aborted[obligation_index(kind)].fetch_add(1, Ordering::Relaxed);
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+        decrement_gauge_saturating_at_zero(&self.pending);
     }
 
     /// Record that an obligation of the given kind was leaked.
     pub fn obligation_leaked(&self, kind: ObligationKind) {
         self.leaked[obligation_index(kind)].fetch_add(1, Ordering::Relaxed);
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+        decrement_gauge_saturating_at_zero(&self.pending);
     }
 
     // ================================================================
@@ -443,6 +443,25 @@ impl Default for ResourceAccounting {
 /// Atomically updates a peak gauge if the new value exceeds the current peak.
 fn update_peak(peak: &AtomicI64, new_value: i64) {
     peak.fetch_max(new_value, Ordering::Relaxed);
+}
+
+/// Atomically decrements a live gauge but never allows it to become negative.
+fn decrement_gauge_saturating_at_zero(gauge: &AtomicI64) {
+    let mut current = gauge.load(Ordering::Relaxed);
+    loop {
+        if current <= 0 {
+            return;
+        }
+        match gauge.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 // ============================================================================
@@ -911,5 +930,40 @@ mod tests {
         }
 
         assert_eq!(acc.admissions_rejected_total(), 4);
+    }
+
+    #[test]
+    fn extra_resolution_does_not_underflow_pending_gauge() {
+        let acc = ResourceAccounting::new();
+
+        acc.obligation_committed(ObligationKind::SendPermit);
+        acc.obligation_aborted(ObligationKind::Ack);
+        acc.obligation_leaked(ObligationKind::Lease);
+
+        assert_eq!(acc.obligations_pending(), 0);
+
+        let snapshot = acc.snapshot();
+        assert_eq!(snapshot.obligations_pending, 0);
+    }
+
+    #[test]
+    fn duplicate_resolution_clamps_pending_gauge_at_zero() {
+        let acc = ResourceAccounting::new();
+
+        acc.obligation_reserved(ObligationKind::IoOp);
+        acc.obligation_committed(ObligationKind::IoOp);
+        acc.obligation_committed(ObligationKind::IoOp);
+        acc.obligation_aborted(ObligationKind::IoOp);
+        acc.obligation_leaked(ObligationKind::IoOp);
+
+        assert_eq!(acc.obligations_pending(), 0);
+
+        let stats = acc
+            .snapshot()
+            .obligation_stats
+            .into_iter()
+            .find(|stats| stats.kind == ObligationKind::IoOp)
+            .expect("IoOp stats must be present");
+        assert_eq!(stats.pending(), 0);
     }
 }

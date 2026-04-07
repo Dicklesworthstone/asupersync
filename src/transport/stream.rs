@@ -1,5 +1,7 @@
 //! Symbol stream traits and implementations.
 
+#![allow(clippy::drop_non_drop)]
+
 use crate::cx::Cx;
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::time::Sleep;

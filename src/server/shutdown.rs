@@ -435,6 +435,18 @@ mod tests {
         });
     }
 
+    struct FlagWaker(Arc<AtomicBool>);
+
+    impl std::task::Wake for FlagWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn initial_state_is_running() {
         init_test("initial_state_is_running");
@@ -666,6 +678,45 @@ mod tests {
             timer_driver.pending_count()
         );
         crate::test_complete!("wait_until_uses_captured_timer_driver_without_ambient_context");
+    }
+
+    #[test]
+    fn wait_until_with_time_getter_wakes_after_logical_clock_advance() {
+        init_test("wait_until_with_time_getter_wakes_after_logical_clock_advance");
+        set_test_time(0);
+        let signal = ShutdownSignal::with_time_getter(test_time);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = std::task::Waker::from(Arc::new(FlagWaker(Arc::clone(&woke))));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        let deadline = Time::from_secs(10);
+        let mut wait = std::pin::pin!(signal.wait_until(deadline));
+
+        let first_poll = std::future::Future::poll(wait.as_mut(), &mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "wait is pending before deadline",
+            true,
+            first_poll.is_pending()
+        );
+
+        set_test_time(deadline.as_nanos());
+        let wait_deadline = std::time::Instant::now() + Duration::from_millis(100);
+        while !woke.load(Ordering::SeqCst) && std::time::Instant::now() < wait_deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let woke = woke.load(Ordering::SeqCst);
+        crate::assert_with_log!(woke, "wait woke after logical advance", true, woke);
+
+        let second_poll = std::future::Future::poll(wait.as_mut(), &mut task_cx);
+        crate::assert_with_log!(
+            second_poll.is_ready(),
+            "wait becomes ready after logical deadline",
+            true,
+            second_poll.is_ready()
+        );
+        crate::test_complete!("wait_until_with_time_getter_wakes_after_logical_clock_advance");
     }
 
     #[test]
