@@ -310,26 +310,19 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        match &mut this.state {
-            LoadShedState::NotReady => {
-                this.state = LoadShedState::Done;
-                Poll::Ready(Err(LoadShedError::NotReady))
-            }
+        match std::mem::replace(&mut this.state, LoadShedState::Done) {
+            LoadShedState::NotReady => Poll::Ready(Err(LoadShedError::NotReady)),
             LoadShedState::Overloaded => {
-                this.state = LoadShedState::Done;
                 Poll::Ready(Err(LoadShedError::Overloaded(Overloaded::new())))
             }
-            LoadShedState::Inner(future) => {
-                let result = Pin::new(future).poll(cx);
-                if result.is_ready() {
-                    this.state = LoadShedState::Done;
+            LoadShedState::Inner(mut future) => match Pin::new(&mut future).poll(cx) {
+                Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(LoadShedError::Inner(e))),
+                Poll::Pending => {
+                    this.state = LoadShedState::Inner(future);
+                    Poll::Pending
                 }
-                match result {
-                    Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(LoadShedError::Inner(e))),
-                    Poll::Pending => Poll::Pending,
-                }
-            }
+            },
             LoadShedState::Done => Poll::Ready(Err(LoadShedError::PolledAfterCompletion)),
         }
     }
@@ -345,6 +338,7 @@ impl<F: std::fmt::Debug> std::fmt::Debug for LoadShedFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
@@ -466,6 +460,35 @@ mod tests {
         fn call(&mut self, req: i32) -> Self::Future {
             self.calls.fetch_add(1, Ordering::SeqCst);
             ready(Ok(req))
+        }
+    }
+
+    struct PanicOnPollFuture;
+
+    impl std::future::Future for PanicOnPollFuture {
+        type Output = Result<i32, std::convert::Infallible>;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<<Self as std::future::Future>::Output> {
+            panic!("panic in load shed future poll");
+        }
+    }
+
+    struct PanicOnPollService;
+
+    impl Service<i32> for PanicOnPollService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = PanicOnPollFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            PanicOnPollFuture
         }
     }
 
@@ -901,5 +924,29 @@ mod tests {
         );
         crate::assert_with_log!(second_done, "second poll fails closed", true, second_done);
         crate::test_complete!("load_shed_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn load_shed_future_inner_panic_fails_closed() {
+        init_test("load_shed_future_inner_panic_fails_closed");
+        let mut svc = LoadShed::new(PanicOnPollService);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let mut fut = svc.call(3);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut fut).poll(&mut cx);
+        }));
+        assert!(panic.is_err(), "inner panic should propagate");
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(LoadShedError::PolledAfterCompletion))
+        ));
+        crate::test_complete!("load_shed_future_inner_panic_fails_closed");
     }
 }

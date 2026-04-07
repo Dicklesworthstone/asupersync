@@ -233,26 +233,17 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        match &mut this.state {
-            FilterFutureState::NotReady => {
-                this.state = FilterFutureState::Done;
-                Poll::Ready(Err(FilterError::NotReady))
-            }
-            FilterFutureState::Inner(fut) => {
-                let result = Pin::new(fut).poll(cx);
-                if result.is_ready() {
-                    this.state = FilterFutureState::Done;
+        match std::mem::replace(&mut this.state, FilterFutureState::Done) {
+            FilterFutureState::NotReady => Poll::Ready(Err(FilterError::NotReady)),
+            FilterFutureState::Inner(mut fut) => match Pin::new(&mut fut).poll(cx) {
+                Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(FilterError::Inner(err))),
+                Poll::Pending => {
+                    this.state = FilterFutureState::Inner(fut);
+                    Poll::Pending
                 }
-                match result {
-                    Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
-                    Poll::Ready(Err(err)) => Poll::Ready(Err(FilterError::Inner(err))),
-                    Poll::Pending => Poll::Pending,
-                }
-            }
-            FilterFutureState::Rejected => {
-                this.state = FilterFutureState::Done;
-                Poll::Ready(Err(FilterError::Rejected))
-            }
+            },
+            FilterFutureState::Rejected => Poll::Ready(Err(FilterError::Rejected)),
             FilterFutureState::Done => Poll::Ready(Err(FilterError::PolledAfterCompletion)),
         }
     }
@@ -263,6 +254,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
@@ -382,6 +374,36 @@ mod tests {
 
             self.available.fetch_add(1, Ordering::SeqCst);
             std::future::ready(Ok(req))
+        }
+    }
+
+    #[derive(Clone)]
+    struct PanicOnPollService;
+
+    struct PanicOnPollFuture;
+
+    impl std::future::Future for PanicOnPollFuture {
+        type Output = Result<i32, std::convert::Infallible>;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<<Self as std::future::Future>::Output> {
+            panic!("panic in filter future poll");
+        }
+    }
+
+    impl Service<i32> for PanicOnPollService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = PanicOnPollFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            PanicOnPollFuture
         }
     }
 
@@ -784,5 +806,29 @@ mod tests {
             second,
             Poll::Ready(Err(FilterError::PolledAfterCompletion))
         ));
+    }
+
+    #[test]
+    fn filter_future_inner_panic_fails_closed() {
+        init_test("filter_future_inner_panic_fails_closed");
+        let mut filter = Filter::new(PanicOnPollService, |_: &i32| true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = filter.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let mut fut = filter.call(7);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut fut).poll(&mut cx);
+        }));
+        assert!(panic.is_err(), "inner panic should propagate");
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(FilterError::PolledAfterCompletion))
+        ));
+        crate::test_complete!("filter_future_inner_panic_fails_closed");
     }
 }

@@ -127,6 +127,37 @@ impl Drop for LoadMetricGuard {
     }
 }
 
+/// Ensures an in-flight load is released if a future poll unwinds or completes
+/// before the future is restored to the balancer wrapper.
+struct LoadMetricPollGuard {
+    load_metric: Option<Arc<LoadMetric>>,
+    release_on_drop: bool,
+}
+
+impl LoadMetricPollGuard {
+    fn new(load_metric: Option<Arc<LoadMetric>>) -> Self {
+        Self {
+            load_metric,
+            release_on_drop: true,
+        }
+    }
+
+    fn restore(mut self) -> Option<Arc<LoadMetric>> {
+        self.release_on_drop = false;
+        self.load_metric.take()
+    }
+}
+
+impl Drop for LoadMetricPollGuard {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            if let Some(load_metric) = self.load_metric.take() {
+                load_metric.decrement();
+            }
+        }
+    }
+}
+
 // ─── Strategy trait ───────────────────────────────────────────────────────
 
 /// Selects which backend to dispatch a request to.
@@ -728,22 +759,21 @@ where
     type Output = Result<T, LoadBalanceError<E>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some(inner) = self.inner.as_mut() else {
+        let this = self.as_mut().get_mut();
+        let Some(mut inner) = this.inner.take() else {
             return Poll::Ready(Err(LoadBalanceError::PolledAfterCompletion));
         };
 
-        let result = Pin::new(inner).poll(cx);
-        if result.is_ready() {
-            self.inner = None;
-            // Decrement in-flight counter when the future completes.
-            if let Some(load) = self.load_metric.take() {
-                load.decrement();
-            }
-        }
-        match result {
+        let load_guard = LoadMetricPollGuard::new(this.load_metric.take());
+        match Pin::new(&mut inner).poll(cx) {
             Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
             Poll::Ready(Err(err)) => Poll::Ready(Err(LoadBalanceError::Inner(err))),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                let load_metric = load_guard.restore();
+                this.inner = Some(inner);
+                this.load_metric = load_metric;
+                Poll::Pending
+            }
         }
     }
 }
@@ -1057,6 +1087,74 @@ mod tests {
 
         fn call(&mut self, _req: u32) -> Self::Future {
             panic!("panic during call construction");
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PanicOnPollService;
+
+    struct PanicOnPollFuture;
+
+    impl Future for PanicOnPollFuture {
+        type Output = Result<u32, std::io::Error>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<<Self as Future>::Output> {
+            panic!("panic during future poll");
+        }
+    }
+
+    impl Service<u32> for PanicOnPollService {
+        type Response = u32;
+        type Error = std::io::Error;
+        type Future = PanicOnPollFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            PanicOnPollFuture
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PendingOnceService {
+        response: u32,
+    }
+
+    struct PendingOnceFuture {
+        response: u32,
+        pending_once: bool,
+    }
+
+    impl Future for PendingOnceFuture {
+        type Output = Result<u32, std::io::Error>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.pending_once {
+                self.pending_once = false;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(self.response))
+            }
+        }
+    }
+
+    impl Service<u32> for PendingOnceService {
+        type Response = u32;
+        type Error = std::io::Error;
+        type Future = PendingOnceFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            PendingOnceFuture {
+                response: self.response,
+                pending_once: true,
+            }
         }
     }
 
@@ -1458,6 +1556,74 @@ mod tests {
         ));
         assert_eq!(lb.loads(), vec![0]);
         crate::test_complete!("lb_balanced_future_repoll_after_error_is_fail_closed");
+    }
+
+    #[test]
+    fn lb_balanced_future_panic_fails_closed_and_releases_load_metric() {
+        init_test("lb_balanced_future_panic_fails_closed_and_releases_load_metric");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![PanicOnPollService]);
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("ready backend should dispatch a future");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut fut).poll(&mut cx);
+        }));
+        assert!(panic.is_err(), "inner panic should propagate");
+        assert_eq!(
+            lb.loads(),
+            vec![0],
+            "panic path must release in-flight load"
+        );
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(LoadBalanceError::PolledAfterCompletion))
+        ));
+        assert_eq!(
+            lb.loads(),
+            vec![0],
+            "repoll must not resurrect in-flight load"
+        );
+        crate::test_complete!("lb_balanced_future_panic_fails_closed_and_releases_load_metric");
+    }
+
+    #[test]
+    fn lb_balanced_future_pending_poll_restores_inner_and_load_metric() {
+        init_test("lb_balanced_future_pending_poll_restores_inner_and_load_metric");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![PendingOnceService { response: 17 }]);
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("ready backend should dispatch a future");
+        assert_eq!(lb.loads(), vec![1], "dispatch increments in-flight load");
+
+        let (waker, woke) = tracked_probe_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        assert!(
+            first.is_pending(),
+            "first poll should preserve pending future"
+        );
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "pending future should re-wake caller"
+        );
+        assert_eq!(
+            lb.loads(),
+            vec![1],
+            "pending poll must keep load reserved for the in-flight future"
+        );
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(second, Poll::Ready(Ok(17))));
+        assert_eq!(lb.loads(), vec![0], "completion releases the load metric");
+        crate::test_complete!("lb_balanced_future_pending_poll_restores_inner_and_load_metric");
     }
 
     #[test]
