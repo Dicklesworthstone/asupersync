@@ -2338,6 +2338,11 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
+        // Mark closed before the protocol exchange so that if this future is
+        // dropped mid-write or mid-read (e.g. by task cancellation), the
+        // connection stays closed and prevents protocol desynchronization.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&msg).await {
             return Outcome::Err(e);
         }
@@ -2396,7 +2401,8 @@ impl PgConnection {
                     // Continue to ReadyForQuery
                 }
                 b'Z' => {
-                    // ReadyForQuery
+                    // ReadyForQuery — protocol exchange completed cleanly.
+                    self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }
@@ -2458,6 +2464,11 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
+        // Mark closed before the protocol exchange so that if this future is
+        // dropped mid-write or mid-read (e.g. by task cancellation), the
+        // connection stays closed and prevents protocol desynchronization.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&msg).await {
             return Outcome::Err(e);
         }
@@ -2492,7 +2503,8 @@ impl PgConnection {
                     // RowDescription, DataRow - skip for execute
                 }
                 b'Z' => {
-                    // ReadyForQuery
+                    // ReadyForQuery — protocol exchange completed cleanly.
+                    self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }

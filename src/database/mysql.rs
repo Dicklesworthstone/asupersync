@@ -1479,6 +1479,11 @@ impl MySqlConnection {
         buf.write_bytes(sql.as_bytes());
         let packet = buf.build_packet();
 
+        // Mark closed before the protocol exchange so that if this future is
+        // dropped mid-write or mid-read (e.g. by task cancellation), the
+        // connection stays closed and prevents protocol desynchronization.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
         }
@@ -1491,7 +1496,11 @@ impl MySqlConnection {
         };
         self.inner.sequence = seq.wrapping_add(1);
 
+        // Protocol exchange complete — safe to reuse the connection.
+        self.inner.closed = false;
+
         if data.is_empty() {
+            self.inner.closed = true;
             return Outcome::Err(MySqlError::Protocol("empty query response".to_string()));
         }
 
@@ -1818,6 +1827,11 @@ impl MySqlConnection {
         buf.write_bytes(sql.as_bytes());
         let packet = buf.build_packet();
 
+        // Mark closed before the protocol exchange so that if this future is
+        // dropped mid-write or mid-read (e.g. by task cancellation), the
+        // connection stays closed and prevents protocol desynchronization.
+        self.inner.closed = true;
+
         if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
         }
@@ -1830,7 +1844,11 @@ impl MySqlConnection {
         };
         self.inner.sequence = seq.wrapping_add(1);
 
+        // Protocol exchange complete — safe to reuse the connection.
+        self.inner.closed = false;
+
         if data.is_empty() {
+            self.inner.closed = true;
             return Outcome::Err(MySqlError::Protocol("empty execute response".to_string()));
         }
 
