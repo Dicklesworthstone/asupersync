@@ -19,7 +19,12 @@
 //! The `CertificateVerifier` replays a certificate against a trace buffer
 //! and checks that all invariant claims hold.
 
-use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
+use crate::monitor::DownReason;
+use crate::record::{ObligationAbortReason, ObligationState};
+use crate::trace::{
+    distributed::LogicalTime,
+    event::{TraceData, TraceEvent, TraceEventKind},
+};
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
@@ -71,11 +76,11 @@ impl TraceCertificate {
 
     /// Record an event into the certificate.
     pub fn record_event(&mut self, event: &TraceEvent) {
-        // Incremental hash: mix event kind + seq into running hash.
+        // Commit to the full event semantics so offline verification catches
+        // payload tampering, not just reordered or retyped events.
         let mut hasher = crate::util::DetHasher::default();
         self.event_hash.hash(&mut hasher);
-        (event.kind as u8).hash(&mut hasher);
-        event.seq.hash(&mut hasher);
+        hash_trace_event(&mut hasher, event);
         self.event_hash = hasher.finish();
 
         self.event_count += 1;
@@ -173,6 +178,335 @@ impl TraceCertificate {
                 .unwrap_or(i64::MAX)
                 .wrapping_neg()
         }
+    }
+}
+
+fn hash_trace_event<H: Hasher>(hasher: &mut H, event: &TraceEvent) {
+    event.version.hash(hasher);
+    event.seq.hash(hasher);
+    event.time.hash(hasher);
+    hash_logical_time(hasher, event.logical_time.as_ref());
+    event.kind.hash(hasher);
+    hash_trace_data(hasher, &event.data);
+}
+
+fn hash_logical_time<H: Hasher>(hasher: &mut H, logical_time: Option<&LogicalTime>) {
+    match logical_time {
+        None => 0_u8.hash(hasher),
+        Some(LogicalTime::Lamport(time)) => {
+            1_u8.hash(hasher);
+            time.hash(hasher);
+        }
+        Some(LogicalTime::Vector(clock)) => {
+            2_u8.hash(hasher);
+            clock.node_count().hash(hasher);
+            for (node, value) in clock.iter() {
+                node.hash(hasher);
+                value.hash(hasher);
+            }
+        }
+        Some(LogicalTime::Hybrid(time)) => {
+            3_u8.hash(hasher);
+            time.physical().hash(hasher);
+            time.logical().hash(hasher);
+        }
+    }
+}
+
+fn hash_trace_data<H: Hasher>(hasher: &mut H, data: &TraceData) {
+    if hash_lifecycle_trace_data(hasher, data)
+        || hash_runtime_trace_data(hasher, data)
+        || hash_supervision_trace_data(hasher, data)
+    {
+        return;
+    }
+
+    unreachable!("all TraceData variants should be covered");
+}
+
+fn hash_lifecycle_trace_data<H: Hasher>(hasher: &mut H, data: &TraceData) -> bool {
+    match data {
+        TraceData::None => {
+            0_u8.hash(hasher);
+            true
+        }
+        TraceData::Task { task, region } => {
+            1_u8.hash(hasher);
+            task.hash(hasher);
+            region.hash(hasher);
+            true
+        }
+        TraceData::Region { region, parent } => {
+            2_u8.hash(hasher);
+            region.hash(hasher);
+            parent.hash(hasher);
+            true
+        }
+        TraceData::Obligation {
+            obligation,
+            task,
+            region,
+            kind,
+            state,
+            duration_ns,
+            abort_reason,
+        } => {
+            3_u8.hash(hasher);
+            obligation.hash(hasher);
+            task.hash(hasher);
+            region.hash(hasher);
+            kind.hash(hasher);
+            hash_obligation_state(hasher, *state);
+            duration_ns.hash(hasher);
+            hash_obligation_abort_reason(hasher, *abort_reason);
+            true
+        }
+        TraceData::Cancel {
+            task,
+            region,
+            reason,
+        } => {
+            4_u8.hash(hasher);
+            task.hash(hasher);
+            region.hash(hasher);
+            hash_cancel_reason(hasher, reason);
+            true
+        }
+        TraceData::Worker {
+            worker_id,
+            job_id,
+            decision_seq,
+            replay_hash,
+            task,
+            region,
+            obligation,
+        } => {
+            5_u8.hash(hasher);
+            worker_id.hash(hasher);
+            job_id.hash(hasher);
+            decision_seq.hash(hasher);
+            replay_hash.hash(hasher);
+            task.hash(hasher);
+            region.hash(hasher);
+            obligation.hash(hasher);
+            true
+        }
+        TraceData::RegionCancel { region, reason } => {
+            6_u8.hash(hasher);
+            region.hash(hasher);
+            hash_cancel_reason(hasher, reason);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn hash_runtime_trace_data<H: Hasher>(hasher: &mut H, data: &TraceData) -> bool {
+    match data {
+        TraceData::Time { old, new } => {
+            7_u8.hash(hasher);
+            old.hash(hasher);
+            new.hash(hasher);
+            true
+        }
+        TraceData::Timer { timer_id, deadline } => {
+            8_u8.hash(hasher);
+            timer_id.hash(hasher);
+            deadline.hash(hasher);
+            true
+        }
+        TraceData::IoRequested { token, interest } => {
+            9_u8.hash(hasher);
+            token.hash(hasher);
+            interest.hash(hasher);
+            true
+        }
+        TraceData::IoReady { token, readiness } => {
+            10_u8.hash(hasher);
+            token.hash(hasher);
+            readiness.hash(hasher);
+            true
+        }
+        TraceData::IoResult { token, bytes } => {
+            11_u8.hash(hasher);
+            token.hash(hasher);
+            bytes.hash(hasher);
+            true
+        }
+        TraceData::IoError { token, kind } => {
+            12_u8.hash(hasher);
+            token.hash(hasher);
+            kind.hash(hasher);
+            true
+        }
+        TraceData::RngSeed { seed } => {
+            13_u8.hash(hasher);
+            seed.hash(hasher);
+            true
+        }
+        TraceData::RngValue { value } => {
+            14_u8.hash(hasher);
+            value.hash(hasher);
+            true
+        }
+        TraceData::Checkpoint {
+            sequence,
+            active_tasks,
+            active_regions,
+        } => {
+            15_u8.hash(hasher);
+            sequence.hash(hasher);
+            active_tasks.hash(hasher);
+            active_regions.hash(hasher);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn hash_supervision_trace_data<H: Hasher>(hasher: &mut H, data: &TraceData) -> bool {
+    match data {
+        TraceData::Futurelock {
+            task,
+            region,
+            idle_steps,
+            held,
+        } => {
+            16_u8.hash(hasher);
+            task.hash(hasher);
+            region.hash(hasher);
+            idle_steps.hash(hasher);
+            held.len().hash(hasher);
+            for (obligation, kind) in held {
+                obligation.hash(hasher);
+                kind.hash(hasher);
+            }
+            true
+        }
+        TraceData::Monitor {
+            monitor_ref,
+            watcher,
+            watcher_region,
+            monitored,
+        } => {
+            17_u8.hash(hasher);
+            monitor_ref.hash(hasher);
+            watcher.hash(hasher);
+            watcher_region.hash(hasher);
+            monitored.hash(hasher);
+            true
+        }
+        TraceData::Down {
+            monitor_ref,
+            watcher,
+            monitored,
+            completion_vt,
+            reason,
+        } => {
+            18_u8.hash(hasher);
+            monitor_ref.hash(hasher);
+            watcher.hash(hasher);
+            monitored.hash(hasher);
+            completion_vt.hash(hasher);
+            hash_down_reason(hasher, reason);
+            true
+        }
+        TraceData::Link {
+            link_ref,
+            task_a,
+            region_a,
+            task_b,
+            region_b,
+        } => {
+            19_u8.hash(hasher);
+            link_ref.hash(hasher);
+            task_a.hash(hasher);
+            region_a.hash(hasher);
+            task_b.hash(hasher);
+            region_b.hash(hasher);
+            true
+        }
+        TraceData::Exit {
+            link_ref,
+            from,
+            to,
+            failure_vt,
+            reason,
+        } => {
+            20_u8.hash(hasher);
+            link_ref.hash(hasher);
+            from.hash(hasher);
+            to.hash(hasher);
+            failure_vt.hash(hasher);
+            hash_down_reason(hasher, reason);
+            true
+        }
+        TraceData::Message(message) => {
+            21_u8.hash(hasher);
+            message.hash(hasher);
+            true
+        }
+        TraceData::Chaos { kind, task, detail } => {
+            22_u8.hash(hasher);
+            kind.hash(hasher);
+            task.hash(hasher);
+            detail.hash(hasher);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn hash_cancel_reason<H: Hasher>(hasher: &mut H, reason: &crate::types::CancelReason) {
+    reason.kind.hash(hasher);
+    reason.origin_region.hash(hasher);
+    reason.origin_task.hash(hasher);
+    reason.timestamp.hash(hasher);
+    reason.message.hash(hasher);
+    reason.truncated.hash(hasher);
+    reason.truncated_at_depth.hash(hasher);
+    match reason.cause.as_deref() {
+        None => 0_u8.hash(hasher),
+        Some(cause) => {
+            1_u8.hash(hasher);
+            hash_cancel_reason(hasher, cause);
+        }
+    }
+}
+
+fn hash_down_reason<H: Hasher>(hasher: &mut H, reason: &DownReason) {
+    match reason {
+        DownReason::Normal => 0_u8.hash(hasher),
+        DownReason::Error(message) => {
+            1_u8.hash(hasher);
+            message.hash(hasher);
+        }
+        DownReason::Cancelled(reason) => {
+            2_u8.hash(hasher);
+            hash_cancel_reason(hasher, reason);
+        }
+        DownReason::Panicked(payload) => {
+            3_u8.hash(hasher);
+            payload.message().hash(hasher);
+        }
+    }
+}
+
+fn hash_obligation_state<H: Hasher>(hasher: &mut H, state: ObligationState) {
+    match state {
+        ObligationState::Reserved => 0_u8.hash(hasher),
+        ObligationState::Committed => 1_u8.hash(hasher),
+        ObligationState::Aborted => 2_u8.hash(hasher),
+        ObligationState::Leaked => 3_u8.hash(hasher),
+    }
+}
+
+fn hash_obligation_abort_reason<H: Hasher>(hasher: &mut H, reason: Option<ObligationAbortReason>) {
+    match reason {
+        None => 0_u8.hash(hasher),
+        Some(ObligationAbortReason::Cancel) => 1_u8.hash(hasher),
+        Some(ObligationAbortReason::Error) => 2_u8.hash(hasher),
+        Some(ObligationAbortReason::Explicit) => 3_u8.hash(hasher),
     }
 }
 
@@ -409,6 +743,29 @@ mod tests {
     }
 
     #[test]
+    fn certificate_hash_sensitive_to_payload() {
+        let region = RegionId::new_for_test(0, 0);
+
+        let mut cert1 = TraceCertificate::new();
+        cert1.record_event(&TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            region,
+        ));
+
+        let mut cert2 = TraceCertificate::new();
+        cert2.record_event(&TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            region,
+        ));
+
+        assert_ne!(cert1.event_hash(), cert2.event_hash());
+    }
+
+    #[test]
     fn certificate_violation_tracking() {
         let mut cert = TraceCertificate::new();
         assert!(cert.is_clean());
@@ -448,12 +805,10 @@ mod tests {
 
         let result = CertificateVerifier::verify(&cert, &events);
         assert!(!result.valid);
-        assert!(
-            result
-                .checks
-                .iter()
-                .any(|c| c.name == "event_count" && !c.passed)
-        );
+        assert!(result
+            .checks
+            .iter()
+            .any(|c| c.name == "event_count" && !c.passed));
     }
 
     #[test]
@@ -466,12 +821,36 @@ mod tests {
         // Fix event count to match.
         let result = CertificateVerifier::verify(&cert, &events);
         assert!(!result.valid);
-        assert!(
-            result
-                .checks
-                .iter()
-                .any(|c| c.name == "event_hash" && !c.passed)
-        );
+        assert!(result
+            .checks
+            .iter()
+            .any(|c| c.name == "event_hash" && !c.passed));
+    }
+
+    #[test]
+    fn verifier_rejects_wrong_hash_when_payload_differs() {
+        let region = RegionId::new_for_test(0, 0);
+        let events = vec![TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            region,
+        )];
+
+        let mut cert = TraceCertificate::new();
+        cert.record_event(&TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            region,
+        ));
+
+        let result = CertificateVerifier::verify(&cert, &events);
+        assert!(!result.valid);
+        assert!(result
+            .checks
+            .iter()
+            .any(|c| c.name == "event_hash" && !c.passed));
     }
 
     #[test]
@@ -485,12 +864,10 @@ mod tests {
 
         let result = CertificateVerifier::verify(&cert, &events);
         assert!(!result.valid);
-        assert!(
-            result
-                .checks
-                .iter()
-                .any(|c| c.name == "no_violations" && !c.passed)
-        );
+        assert!(result
+            .checks
+            .iter()
+            .any(|c| c.name == "no_violations" && !c.passed));
     }
 
     #[test]
