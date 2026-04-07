@@ -48,11 +48,11 @@
 - **Disposition**: **DOCUMENT** → Track E (E1→E2→E3)
 - **Target**: E2 aligns public naming/feature-gating with the harness-only contract. E3 removes stale wording and makes the non-production status obvious anywhere this lane is described.
 
-### Surface 6: remote.rs phase-0 API surface
+### Surface 6: remote.rs remote-execution contract
 - **File**: `src/remote.rs`
-- **State**: Types and API shape exist. Network transport not implemented. Doc comments explicitly say "Phase 0" and "does not perform real network operations."
+- **State**: `src/remote.rs` now documents the transport-agnostic remote-execution contract: protocol payloads/envelopes, origin/remote state machines, `RemoteCap`, lease/idempotency/saga helpers, and deterministic fail-closed behavior when no runtime is attached. Real transport injection still happens through `RemoteRuntime`, and the fully transport-backed spawn/result/cancel/close lifecycle remains incomplete.
 - **Disposition**: **IMPLEMENT** → Track F (F1→F2→F3)
-- **Target**: Either implement transport-backed remote execution or explicitly mark the API as experimental/unsupported.
+- **Target**: Complete the transport-backed remote lifecycle and failure-injection coverage without regressing the now-honest protocol/capability surface.
 
 ### Surface 7: Session types — typestate without transport
 - **File**: `src/obligation/session_types.rs`

@@ -69,6 +69,13 @@ emitted scan summary/event artifacts are owned by the Z1 scan-ratchet policy
 surface; the heavier Z0b verification runner may consume those artifacts as one
 stage, but it does not replace or re-own the scan contract.
 
+The canonical audited asset set for that ratchet is:
+`scripts/scan_stubs.sh`, `scripts/verify_stub_resolution.sh`,
+`tests/stub_resolution_audit.rs`, `.stub-allowlist.txt`,
+`docs/stub_closure_policy.md`, `docs/stub_disposition_matrix.md`, and
+`TESTING.md` (because the shared validation contract there is part of the
+Track Z truth source, not incidental background reading).
+
 | Rule | Pattern | Violation If |
 |------|---------|-------------|
 | No crate-level dead_code | `#![allow(dead_code)]` in lib.rs | Present |

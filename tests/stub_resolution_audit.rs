@@ -367,3 +367,28 @@ fn probe_16_harness_poll_read_returns_ready_ok() {
     }
     eprintln!("[PASS] Harness poll_read uses Poll::Ready(Ok(()))");
 }
+
+// ── Probe 17: Canonical stub-ratchet assets are audited ────────────────
+
+#[test]
+fn probe_17_stub_ratchet_assets_are_audited() {
+    let audit_index = read_source("audit_index.jsonl");
+    let required_paths = [
+        "scripts/scan_stubs.sh",
+        "scripts/verify_stub_resolution.sh",
+        "tests/stub_resolution_audit.rs",
+        "docs/stub_closure_policy.md",
+        "docs/stub_disposition_matrix.md",
+        "TESTING.md",
+        ".stub-allowlist.txt",
+    ];
+
+    for path in required_paths {
+        assert!(
+            audit_index.contains(&format!("\"file\":\"{path}\"")),
+            "audit_index.jsonl missing canonical Track Z ratchet asset entry for {path}"
+        );
+    }
+
+    eprintln!("[PASS] Canonical stub-ratchet assets are recorded in audit_index.jsonl");
+}

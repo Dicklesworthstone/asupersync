@@ -367,6 +367,8 @@ check_stub_ratchet_assets_are_audited() {
         "scripts/verify_stub_resolution.sh"
         "tests/stub_resolution_audit.rs"
         "docs/stub_closure_policy.md"
+        "docs/stub_disposition_matrix.md"
+        "TESTING.md"
         ".stub-allowlist.txt"
     )
 
