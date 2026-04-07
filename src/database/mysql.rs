@@ -1496,27 +1496,31 @@ impl MySqlConnection {
         };
         self.inner.sequence = seq.wrapping_add(1);
 
-        // Protocol exchange complete — safe to reuse the connection.
-        self.inner.closed = false;
-
         if data.is_empty() {
-            self.inner.closed = true;
             return Outcome::Err(MySqlError::Protocol("empty query response".to_string()));
         }
 
         match data[0] {
             0x00 => {
                 // OK packet (for non-SELECT queries)
+                self.inner.closed = false;
                 Outcome::Ok(Vec::new())
             }
             0xFF => {
                 // ERR packet
-                Outcome::Err(Self::parse_error(&data))
+                let err = Self::parse_error(&data);
+                if matches!(&err, MySqlError::Server { .. }) {
+                    self.inner.closed = false;
+                }
+                Outcome::Err(err)
             }
             _ => {
                 // Result set
                 match self.read_result_set(cx, &data).await {
-                    Ok(rows) => Outcome::Ok(rows),
+                    Ok(rows) => {
+                        self.inner.closed = false;
+                        Outcome::Ok(rows)
+                    }
                     Err(MySqlError::Cancelled(r)) => Outcome::Cancelled(r),
                     Err(e) => Outcome::Err(e),
                 }
@@ -1844,11 +1848,7 @@ impl MySqlConnection {
         };
         self.inner.sequence = seq.wrapping_add(1);
 
-        // Protocol exchange complete — safe to reuse the connection.
-        self.inner.closed = false;
-
         if data.is_empty() {
-            self.inner.closed = true;
             return Outcome::Err(MySqlError::Protocol("empty execute response".to_string()));
         }
 
@@ -1857,18 +1857,28 @@ impl MySqlConnection {
                 // OK packet
                 let mut reader = PacketReader::new(&data[1..]);
                 match reader.read_lenenc_int() {
-                    Ok(affected_rows) => Outcome::Ok(affected_rows),
+                    Ok(affected_rows) => {
+                        self.inner.closed = false;
+                        Outcome::Ok(affected_rows)
+                    }
                     Err(e) => Outcome::Err(e),
                 }
             }
             0xFF => {
                 // ERR packet
-                Outcome::Err(Self::parse_error(&data))
+                let err = Self::parse_error(&data);
+                if matches!(&err, MySqlError::Server { .. }) {
+                    self.inner.closed = false;
+                }
+                Outcome::Err(err)
             }
             _ => {
                 // Result set - consume it and return 0 affected rows
                 match self.read_result_set(cx, &data).await {
-                    Ok(_) => Outcome::Ok(0),
+                    Ok(_) => {
+                        self.inner.closed = false;
+                        Outcome::Ok(0)
+                    }
                     Err(MySqlError::Cancelled(r)) => Outcome::Cancelled(r),
                     Err(e) => Outcome::Err(e),
                 }
@@ -2242,9 +2252,31 @@ mod tests {
     use super::*;
     use crate::Cx;
     use crate::types::CancelKind;
+    use std::io::{Read, Write};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::task::{Context, Poll, Wake, Waker};
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
         futures_lite::future::block_on(future)
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn poll_once<F: std::future::Future>(fut: &mut Pin<&mut F>) -> Poll<F::Output> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        fut.as_mut().poll(&mut cx)
     }
 
     fn cancelled_cx() -> Cx {
@@ -2298,6 +2330,61 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
         }
+    }
+
+    fn make_command_connection_with_single_response(
+        response_payload: Vec<u8>,
+    ) -> (MySqlConnection, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read command header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream.read_exact(&mut payload).expect("read command payload");
+            assert_eq!(payload[0], command::COM_QUERY);
+
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            packet.buf = response_payload;
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write server response packet");
+            stream.flush().expect("flush server response packet");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+
+        (conn, server)
     }
 
     fn read_packet_payload_from_wire(payload: Vec<u8>) -> (Vec<u8>, u8) {
@@ -2876,6 +2963,144 @@ mod tests {
 
         assert_eq!(data, payload);
         assert_eq!(seq, 1);
+    }
+
+    #[test]
+    fn malformed_server_err_packet_keeps_query_connection_closed() {
+        let (mut conn, server) = make_command_connection_with_single_response(vec![0xFF]);
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.query(&cx, "SELECT 1"));
+        match outcome {
+            Outcome::Err(MySqlError::Protocol(_)) => {}
+            other => panic!("expected malformed ERR packet protocol error, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.inner.closed,
+            "malformed ERR packets must keep query connections fail-closed"
+        );
+    }
+
+    #[test]
+    fn malformed_server_err_packet_keeps_execute_connection_closed() {
+        let (mut conn, server) = make_command_connection_with_single_response(vec![0xFF]);
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.execute(&cx, "DELETE FROM widgets"));
+        match outcome {
+            Outcome::Err(MySqlError::Protocol(_)) => {}
+            other => panic!("expected malformed ERR packet protocol error, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.inner.closed,
+            "malformed ERR packets must keep execute connections fail-closed"
+        );
+    }
+
+    #[test]
+    fn dropped_result_set_query_keeps_connection_closed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (query_seen_tx, query_seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read query header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream.read_exact(&mut payload).expect("read query payload");
+            assert_eq!(payload[0], command::COM_QUERY);
+            query_seen_tx.send(()).expect("signal query write");
+
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            packet.buf = vec![0x01]; // result set with one column follows
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write first result-set packet");
+            stream.flush().expect("flush first result-set packet");
+
+            release_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("wait for client cancellation");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+        let cx = Cx::for_testing();
+
+        {
+            let mut query = std::pin::pin!(conn.query(&cx, "SELECT 1"));
+            let mut saw_query = false;
+            for _ in 0..128 {
+                if query_seen_rx.try_recv().is_ok() {
+                    saw_query = true;
+                }
+                match poll_once(&mut query) {
+                    Poll::Pending => std::thread::yield_now(),
+                    Poll::Ready(outcome) => {
+                        panic!(
+                            "query unexpectedly completed before cancellation test point: {outcome:?}"
+                        )
+                    }
+                }
+                if saw_query {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            if !saw_query {
+                query_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server should observe COM_QUERY");
+                for _ in 0..32 {
+                    let _ = poll_once(&mut query);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+
+        release_tx.send(()).expect("release server");
+        server.join().expect("join server");
+
+        assert_eq!(
+            conn.inner.sequence, 2,
+            "test must consume the first result-set packet before cancellation"
+        );
+        assert!(
+            conn.inner.closed,
+            "dropping a query mid-result-set must keep the connection fail-closed"
+        );
     }
 
     #[test]
