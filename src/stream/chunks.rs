@@ -91,7 +91,7 @@ where
         let buffered = self.items.len();
         let (lower, upper) = self.stream.size_hint();
         let total_lower = lower.saturating_add(buffered);
-        let lower = total_lower / self.cap;
+        let lower = total_lower.div_ceil(self.cap);
         let upper = upper.map(|u| u.saturating_add(buffered).div_ceil(self.cap));
         (lower, upper)
     }
@@ -183,9 +183,17 @@ where
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (_, upper) = self.stream.size_hint();
-        let upper = upper.map(|u| u.div_ceil(self.cap));
-        (0, upper)
+        let buffered = self.items.len();
+        let (lower_items, upper_items) = self.stream.size_hint();
+        let total_lower_items = lower_items.saturating_add(buffered);
+        let lower = if total_lower_items == 0 {
+            0
+        } else {
+            total_lower_items.div_ceil(self.cap)
+        };
+        let upper =
+            upper_items.map(|upper_items| upper_items.saturating_add(usize::from(buffered > 0)));
+        (lower, upper)
     }
 }
 
@@ -268,6 +276,24 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct HintOnlyStream {
+        lower: usize,
+        upper: Option<usize>,
+    }
+
+    impl Stream for HintOnlyStream {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.lower, self.upper)
+        }
+    }
+
     #[test]
     fn ready_chunks_returns_immediate_items() {
         init_test("ready_chunks_returns_immediate_items");
@@ -283,6 +309,68 @@ mod tests {
         let ok = matches!(poll, Poll::Ready(Some(ref chunk)) if chunk == &vec![1, 2]);
         crate::assert_with_log!(ok, "ready chunk", "Poll::Ready(Some([1,2]))", poll);
         crate::test_complete!("ready_chunks_returns_immediate_items");
+    }
+
+    #[test]
+    fn ready_chunks_size_hint_counts_buffered_partial_chunk() {
+        init_test("ready_chunks_size_hint_counts_buffered_partial_chunk");
+        let stream = ReadyChunks {
+            stream: iter(Vec::<i32>::new()),
+            cap: 4,
+            items: vec![1, 2],
+        };
+
+        let hint = stream.size_hint();
+        crate::assert_with_log!(
+            hint == (1, Some(1)),
+            "buffered partial chunk remains visible in size_hint",
+            (1, Some(1)),
+            hint
+        );
+        crate::test_complete!("ready_chunks_size_hint_counts_buffered_partial_chunk");
+    }
+
+    #[test]
+    fn ready_chunks_size_hint_counts_guaranteed_upstream_items() {
+        init_test("ready_chunks_size_hint_counts_guaranteed_upstream_items");
+        let stream = ReadyChunks::new(
+            HintOnlyStream {
+                lower: 5,
+                upper: Some(5),
+            },
+            4,
+        );
+
+        let hint = stream.size_hint();
+        crate::assert_with_log!(
+            hint == (2, Some(5)),
+            "guaranteed upstream items imply at least two chunks and at most five flushes",
+            (2, Some(5)),
+            hint
+        );
+        crate::test_complete!("ready_chunks_size_hint_counts_guaranteed_upstream_items");
+    }
+
+    #[test]
+    fn ready_chunks_size_hint_upper_allows_per_item_flushes() {
+        init_test("ready_chunks_size_hint_upper_allows_per_item_flushes");
+        let stream = ReadyChunks {
+            stream: HintOnlyStream {
+                lower: 0,
+                upper: Some(2),
+            },
+            cap: 4,
+            items: vec![1, 2],
+        };
+
+        let hint = stream.size_hint();
+        crate::assert_with_log!(
+            hint == (1, Some(3)),
+            "buffered partial chunk plus two future items can still flush as three chunks",
+            (1, Some(3)),
+            hint
+        );
+        crate::test_complete!("ready_chunks_size_hint_upper_allows_per_item_flushes");
     }
 
     /// Invariant: empty stream produces `None` with no chunks.

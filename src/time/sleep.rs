@@ -22,6 +22,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 static START_TIME: OnceLock<Instant> = OnceLock::new();
+const CUSTOM_TIME_GETTER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Debug)]
 struct FallbackThread {
@@ -610,6 +611,7 @@ impl Future for Sleep {
                         // naturally clean themselves up upon exit.
                         let deadline = self.deadline;
                         let getter = self.time_getter.unwrap_or(wall_now);
+                        let polls_custom_time_getter = self.time_getter.is_some();
                         let state_clone = Arc::clone(&self.state);
 
                         let stop = Arc::new(AtomicBool::new(false));
@@ -627,7 +629,14 @@ impl Future for Sleep {
                                 }
                                 let remaining =
                                     deadline.as_nanos().saturating_sub(current.as_nanos());
-                                let park_dur = Duration::from_nanos(remaining);
+                                let mut park_dur = Duration::from_nanos(remaining);
+                                if polls_custom_time_getter {
+                                    // Custom logical clocks can jump forward without any
+                                    // timer-driver wakeup. Poll them on short real-time slices
+                                    // so the future becomes ready promptly after the injected
+                                    // clock advances instead of sleeping until wall time catches up.
+                                    park_dur = park_dur.min(CUSTOM_TIME_GETTER_POLL_INTERVAL);
+                                }
                                 std::thread::park_timeout(park_dur);
                             }
 
@@ -880,6 +889,39 @@ mod tests {
         let elapsed = sleep.is_elapsed(get_time());
         crate::assert_with_log!(elapsed, "elapsed", true, elapsed);
         crate::test_complete!("with_time_getter");
+    }
+
+    #[test]
+    fn custom_time_getter_wakes_promptly_after_logical_time_advance() {
+        init_test("custom_time_getter_wakes_promptly_after_logical_time_advance");
+        CURRENT_TIME.store(0, Ordering::SeqCst);
+
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = waker_that_sets(Arc::clone(&woken));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut sleep = Sleep::with_time_getter(Time::from_secs(10), get_time);
+
+        let first = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "first pending",
+            true,
+            first.is_pending()
+        );
+
+        CURRENT_TIME.store(Time::from_secs(10).as_nanos(), Ordering::SeqCst);
+
+        let wait_deadline = Instant::now() + Duration::from_millis(100);
+        while !woken.load(Ordering::SeqCst) && Instant::now() < wait_deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let woke = woken.load(Ordering::SeqCst);
+        crate::assert_with_log!(woke, "waker fired", true, woke);
+
+        let second = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(second.is_ready(), "second ready", true, second.is_ready());
+        crate::test_complete!("custom_time_getter_wakes_promptly_after_logical_time_advance");
     }
 
     // =========================================================================

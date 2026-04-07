@@ -417,12 +417,11 @@ fn percent_decode(input: &str) -> String {
                     let lo = hex_val(input[i + 2]);
                     if let (Some(h), Some(l)) = (hi, lo) {
                         output.push(h << 4 | l);
+                        i += 3;
                     } else {
                         output.push(b'%');
-                        output.push(input[i + 1]);
-                        output.push(input[i + 2]);
+                        i += 1;
                     }
-                    i += 3;
                 } else {
                     output.push(b'%');
                     i += 1;
@@ -948,6 +947,7 @@ mod tests {
         assert_eq!(percent_decode("x%1G"), "x%1G");
         assert_eq!(percent_decode("%"), "%");
         assert_eq!(percent_decode("%A"), "%A");
+        assert_eq!(percent_decode("%%41"), "%A"); // first % invalid, then valid %41
     }
 
     #[test]
