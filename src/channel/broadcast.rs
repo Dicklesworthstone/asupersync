@@ -189,12 +189,14 @@ impl<T: Clone> Sender<T> {
     /// Creates a new receiver subscribed to this channel.
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
-        let total_sent = {
+        let (total_sent, _to_drop) = {
             let mut inner = self.channel.inner.lock();
-            if self.channel.receiver_count.fetch_add(1, Ordering::Relaxed) == 0 {
-                inner.buffer.clear();
-            }
-            inner.total_sent
+            let to_drop = if self.channel.receiver_count.fetch_add(1, Ordering::Relaxed) == 0 {
+                Some(std::mem::take(&mut inner.buffer))
+            } else {
+                None
+            };
+            (inner.total_sent, to_drop)
         };
 
         Receiver {
@@ -1481,6 +1483,61 @@ mod tests {
 
         crate::test_complete!(
             "permit_send_does_not_commit_if_last_receiver_drops_while_waiting_for_lock"
+        );
+    }
+
+    #[test]
+    fn subscribe_reactivating_zero_receivers_drops_stale_buffer_outside_lock() {
+        init_test("subscribe_reactivating_zero_receivers_drops_stale_buffer_outside_lock");
+        let cx = test_cx();
+        let (tx, rx) = channel::<GateMsg>(1);
+        let (blocker, entered_rx, release_tx) = DropBlocker::new();
+
+        tx.send(&cx, GateMsg::Blocking(blocker))
+            .expect("send failed");
+
+        // Model the race window where the last receiver has already decremented
+        // the count to zero, but its buffer-clear path has not acquired `inner`
+        // yet. We intentionally forget the old receiver so this state remains
+        // stable for the deterministic regression test.
+        std::mem::forget(rx);
+        tx.channel.receiver_count.store(0, Ordering::Release);
+
+        let tx_thread = tx.clone();
+        let handle = std::thread::spawn(move || tx_thread.subscribe());
+
+        let drop_started = entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_ok();
+
+        let lock_free_during_drop = drop_started && tx.channel.inner.try_lock().is_some();
+        let _ = release_tx.send(());
+        let mut rx2 = handle.join().expect("subscribe thread panicked");
+
+        crate::assert_with_log!(
+            drop_started,
+            "subscribe drops stale buffer",
+            true,
+            drop_started
+        );
+        crate::assert_with_log!(
+            lock_free_during_drop,
+            "subscribe drops stale buffer outside lock",
+            true,
+            lock_free_during_drop
+        );
+
+        tx.send(&cx, GateMsg::Plain(7)).expect("send failed");
+        let got = block_on(rx2.recv(&cx)).expect("recv failed");
+        crate::assert_with_log!(
+            matches!(got, GateMsg::Plain(7)),
+            "reactivated subscriber sees future message",
+            true,
+            matches!(got, GateMsg::Plain(7))
+        );
+
+        crate::test_complete!(
+            "subscribe_reactivating_zero_receivers_drops_stale_buffer_outside_lock"
         );
     }
 
