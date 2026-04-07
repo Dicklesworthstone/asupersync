@@ -3734,6 +3734,40 @@ mod tests {
     }
 
     #[test]
+    fn mul_slices2_handles_empty_and_asymmetric_lane_pairs() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let c = Gf256(173);
+
+        for &(len_a, len_b, scenario) in &[
+            (0usize, 65usize, "left-empty"),
+            (65usize, 0usize, "right-empty"),
+            (1usize, 95usize, "left-byte-right-wide-plus-byte"),
+            (95usize, 1usize, "left-wide-plus-byte-right-byte"),
+            (31usize, 95usize, "left-subwide-right-wide"),
+            (95usize, 31usize, "left-wide-right-subwide"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "mul_slices2_handles_empty_and_asymmetric_lane_pairs",
+                replay_ref,
+            );
+            let mut actual_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(7)) as u8).collect();
+            let mut actual_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(11)) as u8).collect();
+            let mut expected_a = actual_a.clone();
+            let mut expected_b = actual_b.clone();
+
+            gf256_mul_slices2(&mut actual_a, &mut actual_b, c);
+            gf256_mul_slice(&mut expected_a, c);
+            gf256_mul_slice(&mut expected_b, c);
+
+            assert_eq!(actual_a, expected_a, "{scenario}: {context}");
+            assert_eq!(actual_b, expected_b, "{scenario}: {context}");
+        }
+    }
+
+    #[test]
     fn addmul_slices2_matches_two_independent_addmul_slice_calls() {
         const LEN_A: usize = 79;
         const LEN_B: usize = 149;
@@ -3760,6 +3794,43 @@ mod tests {
 
         assert_eq!(accum_left, expected_left, "{context}");
         assert_eq!(accum_right, expected_right, "{context}");
+    }
+
+    #[test]
+    fn addmul_slices2_handles_empty_and_asymmetric_lane_pairs() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let c = Gf256(181);
+
+        for &(len_a, len_b, scenario) in &[
+            (0usize, 65usize, "left-empty"),
+            (65usize, 0usize, "right-empty"),
+            (1usize, 95usize, "left-byte-right-wide-plus-byte"),
+            (95usize, 1usize, "left-wide-plus-byte-right-byte"),
+            (31usize, 95usize, "left-subwide-right-wide"),
+            (95usize, 31usize, "left-wide-right-subwide"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "addmul_slices2_handles_empty_and_asymmetric_lane_pairs",
+                replay_ref,
+            );
+            let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(13)) as u8).collect();
+            let src_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(17)) as u8).collect();
+            let mut actual_left: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(19)) as u8).collect();
+            let mut actual_right: Vec<u8> =
+                (0..len_b).map(|i| (i.wrapping_mul(23)) as u8).collect();
+            let mut expected_left = actual_left.clone();
+            let mut expected_right = actual_right.clone();
+
+            gf256_addmul_slices2(&mut actual_left, &src_a, &mut actual_right, &src_b, c);
+            gf256_addmul_slice(&mut expected_left, &src_a, c);
+            gf256_addmul_slice(&mut expected_right, &src_b, c);
+
+            assert_eq!(actual_left, expected_left, "{scenario}: {context}");
+            assert_eq!(actual_right, expected_right, "{scenario}: {context}");
+        }
     }
 
     #[test]
@@ -3857,6 +3928,44 @@ mod tests {
 
             assert_eq!(accum_left, expected_left, "{scenario}: {context}");
             assert_eq!(accum_right, expected_right, "{scenario}: {context}");
+        }
+    }
+
+    #[test]
+    fn addmul_slices2_with_one_handles_empty_lane_pairs() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        for &(len_a, len_b, scenario) in &[
+            (0usize, 65usize, "left-empty"),
+            (65usize, 0usize, "right-empty"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "addmul_slices2_with_one_handles_empty_lane_pairs",
+                replay_ref,
+            );
+
+            let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(13)) as u8).collect();
+            let src_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(17)) as u8).collect();
+            let mut actual_left: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(19)) as u8).collect();
+            let mut actual_right: Vec<u8> =
+                (0..len_b).map(|i| (i.wrapping_mul(23)) as u8).collect();
+            let mut expected_left = actual_left.clone();
+            let mut expected_right = actual_right.clone();
+
+            gf256_addmul_slices2(
+                &mut actual_left,
+                &src_a,
+                &mut actual_right,
+                &src_b,
+                Gf256::ONE,
+            );
+            gf256_add_slice(&mut expected_left, &src_a);
+            gf256_add_slice(&mut expected_right, &src_b);
+
+            assert_eq!(actual_left, expected_left, "{scenario}: {context}");
+            assert_eq!(actual_right, expected_right, "{scenario}: {context}");
         }
     }
 

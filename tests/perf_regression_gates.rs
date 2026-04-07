@@ -11,10 +11,12 @@
 //! These tests do NOT run actual benchmarks — they validate the gate logic
 //! itself using synthetic data so CI stays fast and deterministic.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 // =========================================================================
 // Baseline JSON schema (matches capture_baseline.sh output)
@@ -216,6 +218,35 @@ fn make_report(benchmarks: Vec<BaselineBenchmark>) -> BaselineReport {
     }
 }
 
+fn write_minimal_criterion_output(root: &Path) {
+    let bench_dir = root.join("criterion").join("bench").join("new");
+    fs::create_dir_all(&bench_dir).expect("create criterion fixture directories");
+    fs::write(
+        bench_dir.join("estimates.json"),
+        r#"{"mean":{"point_estimate":1},"median":{"point_estimate":1},"std_dev":{"point_estimate":0}}"#,
+    )
+    .expect("write estimates.json");
+    fs::write(
+        bench_dir.join("sample.json"),
+        r#"{"iters":[1],"times":[1]}"#,
+    )
+    .expect("write sample.json");
+}
+
+fn run_capture_baseline_with_command(arg_name: &str, arg_value: &str) -> std::process::Output {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/capture_baseline.sh");
+    Command::new("bash")
+        .arg(script)
+        .arg("--run")
+        .arg(arg_name)
+        .arg(arg_value)
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .output()
+        .expect("run capture_baseline.sh")
+}
+
 // =========================================================================
 // Tests: baseline JSON parsing
 // =========================================================================
@@ -250,6 +281,88 @@ fn parse_baseline_json_from_disk() {
             bench.name
         );
     }
+}
+
+#[test]
+fn capture_baseline_preserves_quoted_commands_and_emits_valid_run_events() {
+    let command = "printf '%s\\n' 'alpha beta'";
+    let encoded = BASE64_STANDARD.encode(command);
+
+    for (arg_name, arg_value) in [("--cmd", command), ("--cmd-b64", encoded.as_str())] {
+        let output = run_capture_baseline_with_command(arg_name, arg_value);
+        assert!(
+            output.status.success(),
+            "capture_baseline should succeed for {arg_name}: status={:?}, stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+        assert!(
+            stdout.contains("\nalpha beta\n"),
+            "quoted argument should survive wrapper transport for {arg_name}: {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"\"alpha") && !stdout.contains("\"\"beta"),
+            "wrapper transport must not split quoted command output for {arg_name}: {stdout}"
+        );
+
+        let start_line = stdout
+            .lines()
+            .find(|line| line.contains("\"profiling_run_start\""))
+            .expect("start event line");
+        let end_line = stdout
+            .lines()
+            .find(|line| line.contains("\"profiling_run_end\""))
+            .expect("end event line");
+
+        let start: serde_json::Value =
+            serde_json::from_str(start_line).expect("start event must be valid json");
+        let end: serde_json::Value =
+            serde_json::from_str(end_line).expect("end event must be valid json");
+
+        assert_eq!(start["command"], command, "start event command");
+        assert_eq!(end["command"], command, "end event command");
+    }
+}
+
+#[test]
+fn capture_baseline_quoted_command_runner_ignores_login_shell_profiles() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+    fs::write(
+        temp.path().join(".bash_profile"),
+        "printf 'LOGIN_SHELL_NOISE\\n'\n",
+    )
+    .expect("write .bash_profile");
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--run")
+        .arg("--cmd")
+        .arg("printf '%s\\n' 'alpha beta'")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("HOME", temp.path())
+        .output()
+        .expect("run capture_baseline.sh");
+
+    assert!(
+        output.status.success(),
+        "capture_baseline should succeed when HOME contains a noisy login profile: status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(
+        !stdout.contains("LOGIN_SHELL_NOISE"),
+        "quoted command runner must not source login-shell startup files: {stdout}"
+    );
+    assert!(
+        stdout.contains("\nalpha beta\n"),
+        "command output should still be present without login-shell noise: {stdout}"
+    );
 }
 
 #[test]

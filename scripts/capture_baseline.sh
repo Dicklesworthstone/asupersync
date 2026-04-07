@@ -20,6 +20,8 @@ COMPARE_PATH=""
 MAX_REGRESSION_PCT="10"
 METRIC="median_ns"
 CMD=()
+CMD_STRING=""
+CMD_B64=""
 RUN_CMD=0
 SMOKE=0
 SMOKE_SEED=""
@@ -34,6 +36,8 @@ Options:
   --max-regression-pct <pct>     Regression threshold (default: 10)
   --metric <mean_ns|median_ns|p95_ns|p99_ns> Metric to compare (default: median_ns)
   --cmd "<command>"              Command to run for --run/--smoke
+  --cmd=<command>                Same as --cmd; useful when wrappers split quoted args
+  --cmd-b64 <base64>             Base64-encoded command string for wrapper-safe transport
   --run                          Run benchmark command before capture
   --smoke                        Run benchmark + capture + smoke report
   --seed <value>                 Set ASUPERSYNC_SEED for --run/--smoke
@@ -53,7 +57,10 @@ while [[ $# -gt 0 ]]; do
         --compare) COMPARE_PATH="$2"; shift 2 ;;
         --max-regression-pct) MAX_REGRESSION_PCT="$2"; shift 2 ;;
         --metric) METRIC="$2"; shift 2 ;;
-        --cmd) CMD=($2); shift 2 ;;
+        --cmd) CMD_STRING="$2"; shift 2 ;;
+        --cmd=*) CMD_STRING="${1#--cmd=}"; shift ;;
+        --cmd-b64) CMD_B64="$2"; shift 2 ;;
+        --cmd-b64=*) CMD_B64="${1#--cmd-b64=}"; shift ;;
         --run) RUN_CMD=1; shift ;;
         --smoke) SMOKE=1; RUN_CMD=1; shift ;;
         --seed) SMOKE_SEED="$2"; shift 2 ;;
@@ -62,7 +69,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ${#CMD[@]} -eq 0 ]]; then
+if [[ -n "$CMD_B64" ]]; then
+    if ! command -v base64 &>/dev/null; then
+        echo "ERROR: base64 is required when using --cmd-b64" >&2
+        exit 1
+    fi
+    CMD_STRING="$(printf '%s' "$CMD_B64" | base64 --decode)"
+fi
+
+if [[ -z "$CMD_STRING" ]]; then
     CMD=(cargo bench --bench phase0_baseline)
 fi
 
@@ -74,6 +89,10 @@ if ! command -v python3 &>/dev/null; then
     echo "ERROR: python3 is required but not installed" >&2
     exit 1
 fi
+
+json_escape() {
+    jq -Rn --arg s "$1" '$s'
+}
 
 if [[ "$SMOKE" -eq 1 && -z "$SAVE_DIR" ]]; then
     SAVE_DIR="baselines"
@@ -91,9 +110,23 @@ if [[ "$RUN_CMD" -eq 1 ]]; then
         RUN_SEED_FMT="$RUN_SEED"
     fi
 
-    printf '{"event":"profiling_run_start","command":"%s","seed":"%s"}\n' "${CMD[*]}" "$RUN_SEED_FMT"
-    "${CMD[@]}"
-    printf '{"event":"profiling_run_end","command":"%s","seed":"%s"}\n' "${CMD[*]}" "$RUN_SEED_FMT"
+    if [[ -n "$CMD_STRING" ]]; then
+        RUN_COMMAND_DISPLAY="$CMD_STRING"
+    else
+        RUN_COMMAND_DISPLAY="${CMD[*]}"
+    fi
+    printf '{"event":"profiling_run_start","command":%s,"seed":%s}\n' \
+        "$(json_escape "$RUN_COMMAND_DISPLAY")" \
+        "$(json_escape "$RUN_SEED_FMT")"
+    if [[ -n "$CMD_STRING" ]]; then
+        # Preserve shell quoting without pulling in login/startup-file noise.
+        BASH_ENV= "${BASH:-bash}" -c "$CMD_STRING"
+    else
+        "${CMD[@]}"
+    fi
+    printf '{"event":"profiling_run_end","command":%s,"seed":%s}\n' \
+        "$(json_escape "$RUN_COMMAND_DISPLAY")" \
+        "$(json_escape "$RUN_SEED_FMT")"
 fi
 
 if [[ ! -d "$CRITERION_DIR" ]]; then
