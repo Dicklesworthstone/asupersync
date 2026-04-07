@@ -89,7 +89,10 @@ impl<'a> VirtualClient<'a> {
         for &idx in &indices {
             responses[idx] = Some(self.get(paths[idx]));
         }
-        responses.into_iter().map(|r| r.expect("response should be present")).collect()
+        responses
+            .into_iter()
+            .map(|r| r.expect("response should be present"))
+            .collect()
     }
 
     /// Send a custom request built with [`RequestBuilder`].

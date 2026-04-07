@@ -1305,8 +1305,14 @@ mod contract_artifacts {
         for (domain, info) in t65_summary.as_object().unwrap() {
             let count = info["count"].as_u64().unwrap();
             let impl_count = info["implemented"].as_u64().unwrap()
-                + info.get("partial").and_then(serde_json::Value::as_u64).unwrap_or(0)
-                + info.get("defined").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                + info
+                    .get("partial")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                + info
+                    .get("defined")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
                 + info
                     .get("not_implemented")
                     .and_then(serde_json::Value::as_u64)
@@ -1322,8 +1328,14 @@ mod contract_artifacts {
         for (domain, info) in t69_summary.as_object().unwrap() {
             let count = info["count"].as_u64().unwrap();
             let sum = info["implemented"].as_u64().unwrap()
-                + info.get("partial").and_then(serde_json::Value::as_u64).unwrap_or(0)
-                + info.get("defined").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                + info
+                    .get("partial")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                + info
+                    .get("defined")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
                 + info
                     .get("not_implemented")
                     .and_then(serde_json::Value::as_u64)

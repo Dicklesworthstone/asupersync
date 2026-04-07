@@ -1076,7 +1076,9 @@ impl WasmHandleTable {
             }
         })?;
         // Re-borrow after validation
-        let entry = self.slots[handle.slot as usize].as_mut().expect("slot must be populated to be mutated");
+        let entry = self.slots[handle.slot as usize]
+            .as_mut()
+            .expect("slot must be populated to be mutated");
         entry.state = to;
         Ok(())
     }

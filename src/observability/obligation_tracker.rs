@@ -379,7 +379,8 @@ impl ObligationTracker {
             "Active: {}  |  Potential Leaks: {}  |  Age Warnings: {}",
             summary.total_active, summary.potential_leaks, summary.age_warnings
         )
-        .expect("write should not fail on String");        output.push_str(&"-".repeat(60));
+        .expect("write should not fail on String");
+        output.push_str(&"-".repeat(60));
         output.push('\n');
 
         // Type breakdown
@@ -688,4 +689,3 @@ mod tests {
         assert_eq!(obligations[0].age, Duration::from_secs(8));
     }
 }
-

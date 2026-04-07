@@ -844,8 +844,8 @@ impl HttpClient {
     > {
         Box::pin(async move {
             check_cx(cx)?;
-            let resp = Box::pin(self.execute_single(cx, &method, &parsed, &extra_headers, &body))
-                .await?;
+            let resp =
+                Box::pin(self.execute_single(cx, &method, &parsed, &extra_headers, &body)).await?;
 
             // Check for redirect
             if is_redirect(resp.status) {

@@ -1019,7 +1019,9 @@ impl NameRegistry {
         }
         // Grant to first waiter (FIFO, deterministic).
         // unwrap is safe because we checked is_empty() above.
-        let waiter = queue.pop_front().expect("queue was verified to be non-empty");
+        let waiter = queue
+            .pop_front()
+            .expect("queue was verified to be non-empty");
         if queue.is_empty() {
             self.waiters.remove(name);
         }

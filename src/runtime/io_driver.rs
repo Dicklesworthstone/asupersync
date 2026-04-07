@@ -358,7 +358,10 @@ impl IoDriver {
             events: Some(events),
         };
 
-        let events_ref = restorer.events.as_ref().expect("events should be Some during restore");
+        let events_ref = restorer
+            .events
+            .as_ref()
+            .expect("events should be Some during restore");
         let mut wakers = smallvec::SmallVec::with_capacity(events_ref.len());
         for event in events_ref {
             let interest = restorer.driver.interests.get(&event.token).copied();

@@ -393,7 +393,10 @@ impl FuzzHarness {
         if best_seed == original_seed {
             None
         } else {
-            Some((best_seed, best_result.expect("best result should exist when updating best_seed")))
+            Some((
+                best_seed,
+                best_result.expect("best result should exist when updating best_seed"),
+            ))
         }
     }
 }

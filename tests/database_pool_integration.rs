@@ -14,10 +14,10 @@ mod common;
 mod tests {
     use super::*;
 
-    use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
     use asupersync::database::pool::DbPoolStats;
-    use std::fmt;
+    use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
     use std::error::Error;
+    use std::fmt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;

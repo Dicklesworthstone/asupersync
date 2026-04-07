@@ -620,7 +620,8 @@ where
         // Check timer to start backup
         if this.timer.is_some() {
             // If timer is ready, spawn backup
-            if Pin::new(this.timer.as_mut().expect("timer initialized")).poll(cx) == Poll::Ready(()) {
+            if Pin::new(this.timer.as_mut().expect("timer initialized")).poll(cx) == Poll::Ready(())
+            {
                 // Timer elapsed, start backup
                 this.timer = None; // Drop timer
                 this.config.backup_spawned = true;

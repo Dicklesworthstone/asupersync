@@ -189,7 +189,7 @@ where
         // Get the unfilled region from Asupersync's ReadBuf for Tokio to write into.
         let unfilled = asupersync_buf.unfilled();
         let mut tokio_buf = tokio::io::ReadBuf::new(unfilled);
-        
+
         // Asupersync's ReadBuf guarantees that `unfilled()` returns a fully initialized slice.
         // We inform Tokio of this to prevent it from zeroing the buffer unnecessarily.
         let capacity = tokio_buf.capacity();

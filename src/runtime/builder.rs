@@ -3667,12 +3667,17 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     loop {
         // Clear the woken flag BEFORE polling. This tracks if the future
         // wakes itself during the poll or immediately after.
-        thread_waker.woken.store(false, std::sync::atomic::Ordering::Relaxed);
+        thread_waker
+            .woken
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         match future.as_mut().poll(&mut cx) {
             Poll::Ready(output) => return output,
             Poll::Pending => {
-                if thread_waker.woken.load(std::sync::atomic::Ordering::Acquire) {
+                if thread_waker
+                    .woken
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
                     // The future was woken without parking. This indicates a spin.
                     polls = polls.saturating_add(1);
                     if polls >= budget {
