@@ -2359,18 +2359,31 @@ impl ThreeLaneWorker {
 
         let lyapunov_suggestion = governor.suggest(&snapshot);
 
-        // Feed the drain progress certificate with the current Lyapunov
-        // potential. This enables martingale-based convergence verdicts
-        // (Azuma–Hoeffding + Freedman bounds) and drain-phase classification
-        // during cancellation drain.
-        //
-        // Note: this recomputes the potential via `compute_record()` after
-        // `suggest()` already computed it internally. The cost is trivial
-        // (4 weighted sums) compared to the lock acquisition above, and
-        // avoids duplicating `suggest()`'s decision logic here.
-        let drain_verdict = self.drain_certificate.as_mut().map(|cert| {
-            cert.observe(governor.compute_record(&snapshot).total);
-            cert.verdict()
+        // Feed the drain progress certificate ONLY when the Lyapunov
+        // governor indicates a drain phase (DrainObligations or DrainRegions).
+        // During normal operation, steady-state potential fluctuation would
+        // trigger false stall detection after stall_threshold consecutive
+        // non-decreasing observations. By gating on the drain suggestion,
+        // the certificate tracks convergence only when convergence is the
+        // goal. When the governor leaves drain mode (NoPreference), the
+        // certificate is reset for the next drain cycle.
+        let drain_verdict = self.drain_certificate.as_mut().and_then(|cert| {
+            let is_drain_phase = matches!(
+                lyapunov_suggestion,
+                SchedulingSuggestion::DrainObligations
+                    | SchedulingSuggestion::DrainRegions
+            );
+            if is_drain_phase {
+                cert.observe(governor.compute_record(&snapshot).total);
+                Some(cert.verdict())
+            } else {
+                // Not in a drain phase — reset the certificate so stale
+                // observations from a prior drain cycle don't carry over.
+                if cert.len() > 0 {
+                    cert.reset();
+                }
+                None
+            }
         });
 
         let mut spectral_report = None;
@@ -2508,40 +2521,29 @@ impl ThreeLaneWorker {
             suggestion = SchedulingSuggestion::DrainObligations;
         }
 
-        // Drain-certificate override: when the martingale certificate detects
-        // a stall (potential not decreasing for stall_threshold consecutive
-        // governor snapshots), escalate to drain obligations to force progress.
-        // This closes the observability loop — the certificate's statistical
-        // verdict directly actuates the scheduler's drain priority.
+        // Drain-certificate override: the certificate is only fed during
+        // Lyapunov drain phases (see above), so `drain_verdict` is `Some`
+        // only when the governor wants to drain.
         //
         // IMPORTANT: never override a trapped-wait-cycle forced drain. The
-        // certificate's quiescence verdict (Lyapunov potential ≈ 0) does NOT
-        // mean a structural deadlock is resolved — blocked tasks may have
-        // zero potential while remaining permanently stuck.
+        // certificate's quiescence verdict (Lyapunov potential near 0) does
+        // NOT mean a structural deadlock is resolved — blocked tasks may
+        // have zero potential while remaining permanently stuck.
         if !trapped_wait_cycle {
             if let Some(ref verdict) = drain_verdict {
                 match verdict.drain_phase {
-                    DrainPhase::Stalled
-                        if verdict.stall_detected
-                            && (suggestion == SchedulingSuggestion::NoPreference
-                                || suggestion == SchedulingSuggestion::MeetDeadlines) =>
-                    {
-                        // Stall detected: potential has not decreased for threshold
-                        // steps. Force obligation drain to break the deadlock.
+                    DrainPhase::Stalled if verdict.stall_detected => {
+                        // Drain is in progress but potential has not decreased
+                        // for stall_threshold consecutive governor snapshots.
+                        // Ensure we are draining obligations specifically (the
+                        // most aggressive drain mode).
                         suggestion = SchedulingSuggestion::DrainObligations;
                     }
                     DrainPhase::Quiescent => {
                         // Drain has converged to quiescence — relax back to
-                        // normal scheduling. Reset the certificate for the next
-                        // drain cycle.
-                        if let Some(cert) = self.drain_certificate.as_mut() {
-                            cert.reset();
-                        }
-                        if suggestion == SchedulingSuggestion::DrainObligations
-                            || suggestion == SchedulingSuggestion::DrainRegions
-                        {
-                            suggestion = SchedulingSuggestion::NoPreference;
-                        }
+                        // normal scheduling. The certificate is reset in the
+                        // non-drain branch above on the next governor call.
+                        suggestion = SchedulingSuggestion::NoPreference;
                     }
                     _ => {}
                 }
