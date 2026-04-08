@@ -138,6 +138,8 @@ terminated process, with task ID as tie-breaker.
   if vt(completion(P1)) = vt(completion(P2)),
     then order by tid(P1) < tid(P2)
     (ArenaIndex comparison: generation first, then slot).
+  if vt(completion(P1)) = vt(completion(P2)) and tid(P1) = tid(P2),
+    then order by monitor_ref(P1) < monitor_ref(P2).
 ```
 
 **Rationale**: Virtual time is the primary ordering key because it captures
@@ -147,14 +149,14 @@ produces same TaskId assignments).
 ### 2.2 Batch Delivery
 
 When multiple down notifications become ready in a single scheduler step,
-they are sorted by the (vt, tid) key and enqueued into the monitor's
-notification channel in that order.
+they are sorted by the `(vt, tid, monitor_ref)` key and enqueued into the
+monitor's notification channel in that order.
 
 **Contract (DOWN-BATCH)**:
 ```
 ∀ scheduler step S producing down-notifications D = {d1, d2, ..., dn}
   for monitor M:
-  D is sorted by (vt(di), tid(di)) before enqueue.
+  D is sorted by (vt(di), tid(di), monitor_ref(di)) before enqueue.
   M receives them in sorted order.
 ```
 
@@ -445,7 +447,7 @@ delivery, registry races, or shutdown system messages.
 | Contract Area | What to Validate | Primary Artifact |
 |---------------|------------------|------------------|
 | MAIL-\* | Multi-sender ordering and reserve/commit behavior | `event_log.txt` + `trace.async` |
-| DOWN-\* | `(vt, tid)` notification order | `trace.async` |
+| DOWN-\* | `(vt, tid, monitor_ref)` notification order | `trace.async` |
 | REG-\* | First-commit winner and collision behavior | `event_log.txt` + test assertion output |
 | SYS-\* | `Down` before `Exit` before `Timeout` for equal `vt` | `trace.async` |
 | REPLAY-\* | Certificate and observable sequence stability | `trace.async` + verification output |

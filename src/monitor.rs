@@ -9,7 +9,8 @@
 //! Down notifications follow the contracts specified in
 //! `docs/spork_deterministic_ordering.md`:
 //!
-//! - **DOWN-ORDER**: Notifications are sorted by `(completion_vt, monitored_tid)`.
+//! - **DOWN-ORDER**: Notifications are sorted by
+//!   `(completion_vt, monitored_tid, monitor_ref)`.
 //! - **DOWN-BATCH**: When multiple notifications become ready in a single
 //!   scheduler step, they are sorted before delivery.
 //! - **DOWN-CONTENT**: Each notification carries the monitored TaskId, reason,
@@ -374,7 +375,9 @@ impl Default for MonitorSet {
 /// A batch of down notifications pending delivery, with deterministic sort.
 ///
 /// **Contract (DOWN-ORDER)**: Notifications are sorted by
-/// `(completion_vt, monitored_tid)` — virtual time first, then TaskId.
+/// `(completion_vt, monitored_tid, monitor_ref)` — virtual time first, then
+/// `TaskId`, then `MonitorRef` to fully order duplicate monitors on the same
+/// target in the same quantum.
 ///
 /// **Contract (DOWN-BATCH)**: When multiple down notifications become ready
 /// in a single scheduler step, they are sorted before enqueue. The watcher
@@ -422,16 +425,18 @@ impl DownBatch {
         self.entries.is_empty()
     }
 
-    /// Sorts by `(completion_vt, monitored_tid)` and returns notifications
+    /// Sorts by `(completion_vt, monitored_tid, monitor_ref)` and returns notifications
     /// in deterministic delivery order.
     ///
     /// This consumes the batch. The sort is stable, so notifications with
-    /// identical `(vt, tid)` keys preserve insertion order.
+    /// identical `(vt, tid, monitor_ref)` keys preserve insertion order.
     #[must_use]
     pub fn into_sorted(mut self) -> Vec<DownNotification> {
         self.entries.sort_by(|a, b| {
             let vt_cmp = a.completion_vt.cmp(&b.completion_vt);
-            vt_cmp.then_with(|| a.notification.monitored.cmp(&b.notification.monitored))
+            vt_cmp
+                .then_with(|| a.notification.monitored.cmp(&b.notification.monitored))
+                .then_with(|| a.notification.monitor_ref.cmp(&b.notification.monitor_ref))
         });
         self.entries.into_iter().map(|e| e.notification).collect()
     }
@@ -814,6 +819,42 @@ mod tests {
         assert_eq!(sorted[0].monitored, test_task_id(1, 0));
         assert_eq!(sorted[1].monitored, test_task_id(3, 0));
         assert_eq!(sorted[2].monitored, test_task_id(5, 0));
+    }
+
+    #[test]
+    fn down_batch_tie_breaks_duplicate_target_by_monitor_ref() {
+        let mut batch = DownBatch::new();
+        let same_vt = Time::from_nanos(100);
+        let same_target = test_task_id(7, 0);
+
+        batch.push(
+            same_vt,
+            DownNotification {
+                monitored: same_target,
+                reason: DownReason::Normal,
+                monitor_ref: MonitorRef::from_raw(3),
+            },
+        );
+        batch.push(
+            same_vt,
+            DownNotification {
+                monitored: same_target,
+                reason: DownReason::Normal,
+                monitor_ref: MonitorRef::from_raw(1),
+            },
+        );
+        batch.push(
+            same_vt,
+            DownNotification {
+                monitored: same_target,
+                reason: DownReason::Normal,
+                monitor_ref: MonitorRef::from_raw(2),
+            },
+        );
+
+        let sorted = batch.into_sorted();
+        let refs: Vec<u64> = sorted.into_iter().map(|n| n.monitor_ref.id()).collect();
+        assert_eq!(refs, vec![1, 2, 3]);
     }
 
     #[test]
