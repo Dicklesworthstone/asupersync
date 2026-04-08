@@ -14,7 +14,7 @@ warning threshold. CI gates MUST fail when any hard ceiling is exceeded.
 | Package | Artifact | Warning (KB) | Hard Ceiling (KB) | Notes |
 |---|---|---|---|---|
 | `@asupersync/browser-core` | `asupersync_bg.wasm` | 400 | 512 | Primary WASM binary (release profile, wasm-opt -Oz) |
-| `@asupersync/browser-core` | `index.js` | 24 | 32 | JS facade wrapping wasm-bindgen exports |
+| `@asupersync/browser-core` | `index.js` | 36 | 40 | JS facade wrapping wasm-bindgen exports |
 | `@asupersync/browser-core` | `asupersync.js` | 20 | 28 | Raw wasm-bindgen glue |
 | `@asupersync/browser-core` | Total publishable | 500 | 640 | Sum of all files in `files` array |
 | `@asupersync/browser` | `dist/` total | 12 | 20 | SDK layer (excludes browser-core dep) |

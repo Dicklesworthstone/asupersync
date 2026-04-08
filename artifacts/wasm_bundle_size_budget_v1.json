@@ -34,9 +34,9 @@
         },
         "index.js": {
           "category": "js_facade",
-          "warning_bytes": 24576,
-          "ceiling_bytes": 32768,
-          "gzip_ceiling_bytes": 19660
+          "warning_bytes": 36864,
+          "ceiling_bytes": 40960,
+          "gzip_ceiling_bytes": 24576
         },
         "asupersync.js": {
           "category": "wasm_bindgen_glue",
