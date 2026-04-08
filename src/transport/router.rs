@@ -2206,7 +2206,8 @@ mod tests {
         ];
 
         let selected = lb.select_n(&endpoints, 16, None);
-        let selected_ids: Vec<_> = selected.iter().map(|endpoint| endpoint.id).collect();
+        let mut selected_ids: Vec<_> = selected.iter().map(|endpoint| endpoint.id).collect();
+        selected_ids.sort();
         assert_eq!(
             selected_ids,
             vec![EndpointId::new(1), EndpointId::new(3), EndpointId::new(5)]

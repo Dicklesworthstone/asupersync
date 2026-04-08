@@ -522,7 +522,7 @@ impl ScopedWorkerId {
 impl Drop for ScopedWorkerId {
     fn drop(&mut self) {
         let prev = self.prev.take();
-        CURRENT_WORKER_ID.with(|cell| {
+        let _ = CURRENT_WORKER_ID.try_with(|cell| {
             *cell.borrow_mut() = prev;
         });
     }
@@ -2379,7 +2379,7 @@ impl ThreeLaneWorker {
             } else {
                 // Not in a drain phase — reset the certificate so stale
                 // observations from a prior drain cycle don't carry over.
-                if cert.len() > 0 {
+                if !cert.is_empty() {
                     cert.reset();
                 }
                 None
