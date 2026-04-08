@@ -687,11 +687,14 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = self.inner.lock();
-        inner.receiver_dropped = true;
-        // Clear any pending recv waker so a dropped receiver does not
-        // retain executor task state indefinitely.
-        inner.clear_waker();
+        let _value = {
+            let mut inner = self.inner.lock();
+            inner.receiver_dropped = true;
+            // Clear any pending recv waker so a dropped receiver does not
+            // retain executor task state indefinitely.
+            inner.clear_waker();
+            inner.value.take()
+        };
     }
 }
 
