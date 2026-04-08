@@ -191,6 +191,29 @@ impl LabRunReport {
             },
         })
     }
+
+    /// Export this run's trace events to a TLA+ module for model checking.
+    ///
+    /// Converts the captured trace into a TLA+ behavior (concrete state
+    /// sequence) with property templates for the 6 core invariants. The
+    /// resulting module can be fed to TLC for bounded model checking.
+    ///
+    /// Returns `None` if no trace events were captured.
+    #[must_use]
+    pub fn export_tla(
+        &self,
+        trace_events: &[crate::trace::TraceEvent],
+        module_name: &str,
+    ) -> Option<crate::trace::tla_export::TlaModule> {
+        if trace_events.is_empty() {
+            return None;
+        }
+        let exporter = crate::trace::tla_export::TlaExporter::from_trace(trace_events);
+        if exporter.snapshot_count() == 0 {
+            return None;
+        }
+        Some(exporter.export_behavior(module_name))
+    }
 }
 
 const TEMPORAL_ORACLE_INVARIANTS: &[&str] = &[
