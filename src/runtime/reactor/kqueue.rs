@@ -109,6 +109,15 @@ pub struct KqueueReactor {
     poller: Poller,
     /// Maps tokens to registration info for bookkeeping.
     registrations: Mutex<HashMap<Token, RegistrationInfo>>,
+    /// Reusable polling event buffer to avoid per-poll allocations.
+    poll_events: Mutex<PollingEvents>,
+}
+
+const DEFAULT_POLL_EVENTS_CAPACITY: usize = 64;
+
+#[inline]
+fn should_resize_poll_events(current: usize, target: usize) -> bool {
+    current < target || target.checked_mul(4).is_some_and(|t4| current >= t4)
 }
 
 impl KqueueReactor {
@@ -133,6 +142,9 @@ impl KqueueReactor {
         Ok(Self {
             poller,
             registrations: Mutex::new(HashMap::new()),
+            poll_events: Mutex::new(PollingEvents::with_capacity(
+                NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
+            )),
         })
     }
 
@@ -300,19 +312,28 @@ impl Reactor for KqueueReactor {
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         events.clear();
 
-        let capacity = NonZeroUsize::new(events.capacity().max(1)).expect("max(1)");
-        let mut poll_events = PollingEvents::with_capacity(capacity);
+        let requested_capacity = NonZeroUsize::new(events.capacity().max(1)).expect("max(1)");
+        let mut poll_events = self.poll_events.lock();
+
+        let current = poll_events.capacity().get();
+        let target = requested_capacity.get();
+
+        if should_resize_poll_events(current, target) {
+            *poll_events = PollingEvents::with_capacity(requested_capacity);
+        } else {
+            poll_events.clear();
+        }
+
         self.poller.wait(&mut poll_events, timeout)?;
 
         // Convert polling events to our Event type.
-        // `Events` may drop entries when capacity is reached; report only
-        // the number of events actually stored in `events`.
         for poll_event in poll_events.iter() {
             let token = Token(poll_event.key);
             let interest = Self::poll_event_to_interest(&poll_event);
             events.push(Event::new(token, interest));
         }
 
+        drop(poll_events);
         Ok(events.len())
     }
 

@@ -36,6 +36,14 @@ mod iocp_impl {
     pub struct IocpReactor {
         poller: Poller,
         registrations: Mutex<HashMap<Token, RegistrationInfo>>,
+        poll_events: Mutex<PollEvents>,
+    }
+
+    const DEFAULT_POLL_EVENTS_CAPACITY: usize = 64;
+
+    #[inline]
+    fn should_resize_poll_events(current: usize, target: usize) -> bool {
+        current < target || target.checked_mul(4).is_some_and(|t4| current >= t4)
     }
 
     impl IocpReactor {
@@ -45,6 +53,9 @@ mod iocp_impl {
             Ok(Self {
                 poller,
                 registrations: Mutex::new(HashMap::new()),
+                poll_events: Mutex::new(PollEvents::with_capacity(
+                    NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
+                )),
             })
         }
 
@@ -179,9 +190,18 @@ mod iocp_impl {
         fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
             events.clear();
 
-            let requested_capacity =
-                NonZeroUsize::new(events.capacity().max(1)).expect("capacity >= 1");
-            let mut poll_events = PollEvents::with_capacity(requested_capacity);
+            let requested_capacity = NonZeroUsize::new(events.capacity().max(1)).expect("max(1)");
+            let mut poll_events = self.poll_events.lock();
+
+            let current = poll_events.capacity().get();
+            let target = requested_capacity.get();
+
+            if should_resize_poll_events(current, target) {
+                *poll_events = PollEvents::with_capacity(requested_capacity);
+            } else {
+                poll_events.clear();
+            }
+
             self.poller.wait(&mut poll_events, timeout)?;
 
             // `Events` may drop entries when capacity is reached; report only
@@ -192,6 +212,7 @@ mod iocp_impl {
                 events.push(Event::new(token, interest));
             }
 
+            drop(poll_events);
             Ok(events.len())
         }
 
