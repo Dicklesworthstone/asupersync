@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+#![cfg(feature = "test-internals")]
 //! Targeted rwlock fairness reproduction test.
 
 use asupersync::cx::Cx;
