@@ -1,0 +1,131 @@
+{
+  "schema_version": "raptorq-track-e-gf256-multiscenario-refresh-v4",
+  "artifact_id": "raptorq_track_e_gf256_multiscenario_refresh_v4",
+  "generated_at_utc": "2026-04-08T02:20:00Z",
+  "track_bead_id": "asupersync-36m6p",
+  "external_ref": "bd-3g5em",
+  "evidence_role": "broader_multiscenario_raw_sample_successor_guardrail",
+  "scope_contract": "same_target_multi_scenario_raw_sample_corpus",
+  "confidence_contract": "raw_sample_mixed_signal_not_closure_grade",
+  "successor_policy": "requires_new_artifact_version_for_future_closure_retest_or_profile_contract_change",
+  "source_artifacts": [
+    "artifacts/raptorq_track_e_gf256_bench_v1.json",
+    "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+    "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+    "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json"
+  ],
+  "source_comments": [
+    "asupersync-36m6p comment #3080 (2026-04-07 current-head raw-sample capture headline)",
+    "asupersync-36m6p.22 comment #3087 (2026-04-08 bounded successor-packet publication slice)"
+  ],
+  "methodology": {
+    "benchmark": "raptorq_benchmark",
+    "runner": "rch exec",
+    "bench_filter": "RQ-E-GF256-DUAL",
+    "scenario_family": "RQ-E-GF256-DUAL-*",
+    "scenario_scope": [
+      "RQ-E-GF256-DUAL-001",
+      "RQ-E-GF256-DUAL-002",
+      "RQ-E-GF256-DUAL-003",
+      "RQ-E-GF256-DUAL-004",
+      "RQ-E-GF256-DUAL-005",
+      "RQ-E-GF256-DUAL-006",
+      "RQ-E-GF256-DUAL-007",
+      "RQ-E-GF256-DUAL-008"
+    ],
+    "criterion_settings": {
+      "sample_size": 40,
+      "warm_up_time_seconds": 0.2,
+      "measurement_time_seconds": 0.2
+    },
+    "comparison_strategy": "same target dir comparator corpus; current-head raw-sample capture from Criterion sample.json across baseline, auto, and rollback on the eight-scenario dual-policy family",
+    "value_contract": "current-head raw-sample median/p95/p99 deltas across the same multi-scenario corpus",
+    "commands": [
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2"
+    ]
+  },
+  "aggregate_deltas_pct": {
+    "auto_vs_baseline": {
+      "combined": {
+        "median_delta_pct": 1.25,
+        "p95_delta_pct": -5.6,
+        "p99_delta_pct": -7.06
+      },
+      "mul_slices2_auto": {
+        "average_median_delta_pct": 1.26,
+        "average_p95_delta_pct": 0.63,
+        "median_regressed_scenarios": 6,
+        "scenario_count": 8
+      },
+      "addmul_slices2_auto": {
+        "average_median_delta_pct": -2.17,
+        "average_p95_delta_pct": -3.15,
+        "average_p99_delta_pct": -2.74
+      }
+    },
+    "rollback_vs_baseline": {
+      "combined": {
+        "median_delta_pct": -0.38,
+        "p95_delta_pct": -8.97,
+        "p99_delta_pct": -4.66
+      },
+      "contract_status": "manual_env_override_unbacked"
+    }
+  },
+  "candidate_results": [
+    {
+      "id": "candidate_addmul_window_only",
+      "selected": true,
+      "summary": "Retains the canonical current x86 default contract while the broader raw-sample successor packet now shows improved combined p95/p99 but regressed combined median, so closure remains open."
+    },
+    {
+      "id": "candidate_mul_and_addmul_windows",
+      "selected": false,
+      "summary": "Still rejected as the current-head raw-sample refresh does not justify promoting mul auto defaults into the canonical contract."
+    }
+  ],
+  "current_contract_summary": {
+    "canonical_default_contract_packet": "simd_policy_ablation_2026_03_04",
+    "selected_candidate_id": "candidate_addmul_window_only",
+    "selected_profile_defaults": "update x86 addmul auto window",
+    "mul_window": "unchanged: disabled (mul_min_total > mul_max_total)",
+    "addmul_window": "24576..32768 total bytes",
+    "addmul_min_lane": 8192
+  },
+  "closure_assessment": {
+    "ready_for_e5_closure": false,
+    "acceptance_criterion_4_status": "not_met",
+    "broader_scope_demonstrated": true,
+    "raw_sample_capture_demonstrated": true,
+    "longer_window_demonstrated": true,
+    "closure_grade_material_uplift_demonstrated": false,
+    "material_regression_demonstrated": true,
+    "overall_median_direction_vs_baseline": "regressed",
+    "overall_tail_direction_vs_baseline": "improved",
+    "operation_tail_pattern_vs_baseline": "addmul_improved_mul_mixed",
+    "scope_sufficiency": "broader_raw_sample_sufficient_for_current_head_mixed_signal_only",
+    "linked_guardrail_artifact": "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+    "linked_guardrail_ready_for_e5_closure": false,
+    "supersedes_directional_refresh_artifact": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+    "supersedes_broader_interval_proxy_artifact": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+    "summary": "This successor packet keeps Track-E on the eight-scenario RQ-E-GF256-DUAL-001..008 corpus and upgrades the broader evidence to current-head raw-sample capture. Combined p95/p99 improve versus baseline, but combined median still regresses and mul remains mixed, so the packet is current mixed-signal evidence rather than closure-grade proof.",
+    "blocking_requirements": [
+      "Demonstrate materially better broader-corpus canonical auto behavior on current-head raw-sample capture instead of the current mixed result (combined median regressed, mul still mixed).",
+      "Show closure-grade broader evidence that keeps the eight-scenario raw-sample packet favorable without relying on manual env overrides.",
+      "Keep highconf_v1 as the narrowed not-ready guardrail, v2 as the historical directional packet, and v3 as the historical broader interval-proxy negative guardrail until a future closure artifact version supersedes this mixed-signal v4 packet."
+    ]
+  },
+  "findings": [
+    "Current-head combined raw-sample summary versus scalar conservative baseline is mixed: p50/median regresses by 1.25%, while p95 and p99 improve by 5.60% and 7.06%.",
+    "addmul improves overall on current-head raw-sample capture (median -2.17%, p95 -3.15%, p99 -2.74%), while mul remains mixed/regressed (median +1.26%, p95 +0.63%, 6 of 8 median scenarios slower).",
+    "Runtime-override rollback also improves combined median/p95/p99 (-0.38%/-8.97%/-4.66%), but that path remains manual-env-override-unbacked and is not closure-proof for the canonical contract."
+  ],
+  "limitations": [
+    "This packet supersedes the broader directional refresh lineage while keeping highconf_v1 as the narrowed not-ready guardrail, v2 as the historical directional packet, and v3 as the historical broader interval-proxy negative guardrail.",
+    "The broader raw-sample packet is still mixed-signal evidence rather than closure-grade proof because canonical auto retains a regressed combined median and mul remains mixed.",
+    "Manual-env-override rollback evidence stays informative but non-canonical because it is runtime-override-unbacked.",
+    "Any future closure attempt must publish a new artifact/schema version instead of mutating the v2, v3, or v4 packets in place."
+  ]
+}

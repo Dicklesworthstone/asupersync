@@ -133,7 +133,8 @@
           "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json; the current checked-in packet keeps `ready_for_e5_closure=false` / `acceptance_criterion_4_status=not_met` on the narrowed high-confidence corpus.",
           "2026-03-05 E5 support slice made the command-surface split explicit: manifest-level comparator/rollback `command_bundle` remains `gf256_primitives`, while probe-only `repro_command` remains `gf256_dual_policy` (agent-mail asupersync-36m6p #4585).",
           "2026-03-15 E5 broader refresh published artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json so the seven-scenario `RQ-E-GF256-DUAL-*` directional corpus and current x86 default contract are versioned separately from the narrowed `highconf_v1` guardrail.",
-          "2026-03-21 E5 broader longer-window guardrail published artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json; it supersedes v2 as the current broader negative-evidence packet while keeping `ready_for_e5_closure=false` on the eight-scenario `RQ-E-GF256-DUAL-001..008` corpus."
+          "2026-03-21 E5 broader longer-window guardrail published artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json; it superseded v2 as the then-current broader negative-evidence packet while keeping `ready_for_e5_closure=false` on the eight-scenario `RQ-E-GF256-DUAL-001..008` corpus.",
+          "2026-04-07 current-head raw-sample successor packet published as artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json; it supersedes v3 as the current broader packet, preserves the canonical x86 default contract, and records a mixed result (combined p95/p99 improved, combined median regressed, mul still mixed) with `ready_for_e5_closure=false`."
         ]
       },
       "risk_class": "high",
@@ -171,6 +172,7 @@
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
           "agent-mail thread asupersync-3ltrv msg #1542 and coord thread msg #1543 (E5 high-confidence publication confirmation; earlier closure-ready wording is superseded by the checked-in closure_assessment block)"
         ]
       },
@@ -213,7 +215,8 @@
           "asupersync-36m6p comment #1894",
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
-          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json"
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json"
         ],
         "bench_repro_commands": [
           "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
@@ -244,14 +247,15 @@
           "Directional p95/p99 summaries are now attached via artifacts/raptorq_track_e_gf256_p95p99_v1.json.",
           "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and currently encodes `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
           "Broader multi-scenario directional refresh remains published at artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json; it is now the historical short-window packet complementing the narrowed highconf_v1 guardrail.",
-          "The current broader negative-evidence guardrail is artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json; it widens scenario coverage to `RQ-E-GF256-DUAL-001..008`, preserves the canonical current x86 default contract, and explicitly remains `longer_window_interval_proxy_negative_guardrail`.",
+          "The current broader raw-sample successor packet is artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json; it keeps scenario coverage at `RQ-E-GF256-DUAL-001..008`, preserves the canonical current x86 default contract, and explicitly remains non-closure-grade because combined p95/p99 improved while combined median regressed and mul stayed mixed.",
           "High-confidence headline (overall proxy p95/p99 time, us): baseline 9.0743/9.0743, auto 9.3392/9.3392, rollback 9.9333/9.9333.",
+          "Current-head raw-sample headline (combined delta pct vs baseline): auto median +1.25%, p95 -5.60%, p99 -7.06%; rollback median -0.38%, p95 -8.97%, p99 -4.66%.",
           "Transient compile-frontier interruption noted in coord msgs #1493/#1504 has follow-up green check evidence (`rch exec -- cargo check -p asupersync --lib` exit 0).",
           "High-confidence closure slice is intentionally narrowed to RQ-E-GF256-005 and uses conservative interval-endpoint proxies; limitations are explicitly documented in the artifact."
         ],
         "pending_blockers": [
           "Current high-confidence guardrail packet (artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json) still records `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
-          "Current broader negative-evidence guardrail (artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json) is now published, but it explicitly remains `longer_window_interval_proxy_negative_guardrail`; artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json remains the historical short-window directional packet, and raw-sample or materially better broader evidence is still required before G3 can treat E5 as closure-complete."
+          "Current broader raw-sample successor packet (artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json) is now published, but it explicitly remains non-closure-grade (`raw_sample_mixed_signal_not_closure_grade`): combined p95/p99 improve while combined median regresses and mul remains mixed. artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json remains the historical short-window directional packet, artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json remains the historical broader interval-proxy negative guardrail, and materially better broader canonical-auto evidence is still required before G3 can treat E5 as closure-complete."
         ]
       },
       "deterministic_replay": {
@@ -691,7 +695,7 @@
       "E5"
     ],
     "closure_blockers": [
-      "E5 PARTIAL: artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json still reports `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`; artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json is now the current broader negative guardrail and remains `longer_window_interval_proxy_negative_guardrail`, while v2 remains historical, so raw-sample or materially better broader evidence is still required."
+      "E5 PARTIAL: artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json still reports `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`; artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json is now the current broader raw-sample mixed-signal packet and remains `raw_sample_mixed_signal_not_closure_grade`, while v2 remains the historical directional packet and v3 remains the historical broader interval-proxy negative guardrail, so materially better broader canonical-auto evidence is still required."
     ]
   }
 }

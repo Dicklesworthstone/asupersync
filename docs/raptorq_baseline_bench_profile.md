@@ -403,15 +403,15 @@ historical short-window directional packet for the seven-scenario
 - `confidence_contract = short_window_directional_not_closure_grade`
 - selected candidate remains `candidate_addmul_window_only`
 
-`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` is now the
-current broader longer-window negative-guardrail packet for the eight-scenario
+`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json` is now the
+current broader raw-sample successor packet for the eight-scenario
 `RQ-E-GF256-DUAL-001..008` corpus.
 
-- `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v3`
-- `evidence_role = broader_multiscenario_longer_window_guardrail`
-- `scope_contract = same_target_multi_scenario_longer_window_corpus`
-- `confidence_contract = longer_window_interval_proxy_negative_guardrail`
-- `successor_policy = requires_new_artifact_version_for_raw_sample_positive_retest_or_profile_contract_change`
+- `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v4`
+- `evidence_role = broader_multiscenario_raw_sample_successor_guardrail`
+- `scope_contract = same_target_multi_scenario_raw_sample_corpus`
+- `confidence_contract = raw_sample_mixed_signal_not_closure_grade`
+- `successor_policy = requires_new_artifact_version_for_future_closure_retest_or_profile_contract_change`
 - scenario scope widens to `RQ-E-GF256-DUAL-001..008`
 - selected candidate remains `candidate_addmul_window_only`
 - canonical current x86 default contract remains:
@@ -422,10 +422,12 @@ current broader longer-window negative-guardrail packet for the eight-scenario
 Interpretation: these broader packets complement rather than replace
 `highconf_v1`. The narrowed guardrail still owns the live closure-status check
 (`ready_for_e5_closure = false`). `multiscenario_refresh_v2` preserves the
-historical short-window directional read, while `multiscenario_refresh_v3`
-keeps the current broader longer-window negative result machine-checkable:
-overall broader-corpus percentile proxies still regress under auto, so the
-broader packet remains a guardrail rather than closure-grade proof.
+historical short-window directional read, `multiscenario_refresh_v3` preserves
+the historical broader interval-proxy negative guardrail, and
+`multiscenario_refresh_v4` keeps the current-head raw-sample mixed result
+machine-checkable: combined p95/p99 improve under auto, but combined median
+still regresses and mul remains mixed, so the broader packet remains a
+guardrail rather than closure-grade proof.
 
 Closure consequence:
 
@@ -433,12 +435,14 @@ Closure consequence:
   narrowed negative-evidence guardrail for the current not-ready state
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the
   historical broader directional packet
-- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` is the
-  current broader longer-window negative guardrail and still keeps
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` remains the
+  historical broader interval-proxy negative guardrail
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json` is the
+  current broader raw-sample mixed-signal packet and still keeps
   `ready_for_e5_closure = false`
-- a future closure attempt still needs raw-sample or materially better broader
-  evidence and must publish a new artifact/schema version rather than mutating
-  any checked-in packet in place
+- a future closure attempt still needs materially better broader evidence and
+  must publish a new artifact/schema version rather than mutating any
+  checked-in packet in place
 
 ## Calibration Checklist for Closure
 

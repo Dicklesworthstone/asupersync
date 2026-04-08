@@ -102,6 +102,9 @@ The dedicated-worker summary is expected to retain these bundle markers:
 - `worker_artifact_download_guard_marker`
 - `worker_artifact_quota_guard_marker`
 - `worker_artifact_cleanup_marker`
+- `browser_final_phase_is_shutdown_complete`
+- `browser_shutdown_reason`
+- `browser_shutdown_reason_is_fixture_handoff_complete`
 
 The dedicated-worker summary bundle must also preserve top-level
 `scenario_inventory` plus artifact pointers under `artifacts` so

@@ -97,7 +97,9 @@ Track-E evidence consumed by the expected-loss gate stays anchored to:
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json`
   (`short_window_directional_not_closure_grade`, `raw-sample`)
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json`
-  (`longer_window_interval_proxy_negative_guardrail`, `raw-sample`)
+  (`longer_window_interval_proxy_negative_guardrail`, `historical broader guardrail`)
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`
+  (`raw_sample_mixed_signal_not_closure_grade`, `current-head raw-sample`)
 
 The replay bundle must include fixed-input decision samples for:
 
