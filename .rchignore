@@ -1,0 +1,3 @@
+# Agent-local RCH scratch directories are transient and can vanish mid-rsync.
+.rch-*/
+.rch_target*/
