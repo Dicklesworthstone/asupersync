@@ -48,6 +48,9 @@
 
 use crate::obligation::calm::Monotonicity;
 use crate::trace::distributed::lattice::LatticeState;
+use crate::trace::distributed::sheaf::{
+    ConsistencyReport, NodeSnapshot, SagaConsistencyChecker, SagaConstraint,
+};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -429,6 +432,67 @@ impl SagaExecutionResult {
     #[must_use]
     pub fn is_clean(&self) -> bool {
         !self.final_state.is_conflict()
+    }
+
+    /// Checks sheaf-theoretic consistency of this saga's batch results.
+    ///
+    /// When a saga runs coordination-free batches, each batch produces a
+    /// local view of the obligation state (its `merged_state`). Pairwise
+    /// lattice merges can hide *global* inconsistency — a "phantom commit"
+    /// where the merged state is terminal but no single batch witnessed the
+    /// full commit.
+    ///
+    /// This method models each batch as a "node" with a snapshot of the
+    /// obligations it touched, then runs the sheaf gluing checker to detect
+    /// obstructions (H^1 != 0) that pairwise merges miss.
+    ///
+    /// `obligation_ids` maps batch index to the set of obligation IDs that
+    /// batch touched. If not provided, each batch is assumed to touch a
+    /// single synthetic obligation (which limits the checker to detecting
+    /// state disagreements but not phantom commits).
+    #[must_use]
+    pub fn check_sheaf_consistency(
+        &self,
+        obligation_ids: Option<&[Vec<crate::types::ObligationId>]>,
+    ) -> ConsistencyReport {
+        let snapshots: Vec<NodeSnapshot> = self
+            .batch_results
+            .iter()
+            .enumerate()
+            .map(|(i, batch)| {
+                let mut snapshot =
+                    NodeSnapshot::new(crate::remote::NodeId::new(format!("batch-{i}")));
+                if let Some(ids) = obligation_ids.and_then(|o| o.get(i)) {
+                    for &id in ids {
+                        snapshot.observe(id, batch.merged_state);
+                    }
+                } else {
+                    // Synthetic: all batches observe the same obligation so the
+                    // checker can compare their local views. Using different IDs
+                    // per batch would make every node's view trivially consistent
+                    // (no shared obligations = nothing to disagree on).
+                    snapshot.observe(
+                        crate::types::ObligationId::new_for_test(0, 0),
+                        batch.merged_state,
+                    );
+                }
+                snapshot
+            })
+            .collect();
+
+        // Default constraint: all obligations should reach the same terminal
+        // state (all-or-nothing atomicity).
+        let all_obligation_ids: std::collections::BTreeSet<crate::types::ObligationId> = snapshots
+            .iter()
+            .flat_map(|s| s.states.keys().copied())
+            .collect();
+        let constraints = vec![SagaConstraint::AllOrNothing {
+            name: self.saga_name.clone(),
+            obligations: all_obligation_ids,
+        }];
+
+        let checker = SagaConsistencyChecker::new(snapshots, constraints);
+        checker.check()
     }
 }
 
