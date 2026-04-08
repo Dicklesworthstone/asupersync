@@ -772,7 +772,7 @@ mod lock_order {
 
     /// Releases the most recent `count` lock records (LIFO).
     pub fn unlock_n(count: usize) {
-        HELD.with(|held| {
+        let _ = HELD.try_with(|held| {
             let mut held = held.borrow_mut();
             for _ in 0..count {
                 held.pop();

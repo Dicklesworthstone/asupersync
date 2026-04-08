@@ -226,7 +226,7 @@ pub(crate) struct CurrentQueueGuard {
 impl Drop for CurrentQueueGuard {
     fn drop(&mut self) {
         let prev = self.prev.take();
-        CURRENT_QUEUE.with(|slot| {
+        let _ = CURRENT_QUEUE.try_with(|slot| {
             *slot.borrow_mut() = prev;
         });
     }

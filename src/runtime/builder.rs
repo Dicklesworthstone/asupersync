@@ -213,7 +213,7 @@ impl ScopedRuntimeHandle {
 impl Drop for ScopedRuntimeHandle {
     fn drop(&mut self) {
         let prev = self.prev.take();
-        CURRENT_RUNTIME_HANDLE.with(|cell| {
+        let _ = CURRENT_RUNTIME_HANDLE.try_with(|cell| {
             *cell.borrow_mut() = prev;
         });
     }

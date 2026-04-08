@@ -260,7 +260,7 @@ pub(crate) struct CurrentCxGuard {
 impl Drop for CurrentCxGuard {
     fn drop(&mut self) {
         let prev = self.prev.take();
-        CURRENT_CX.with(|slot| {
+        let _ = CURRENT_CX.try_with(|slot| {
             *slot.borrow_mut() = prev;
         });
     }
