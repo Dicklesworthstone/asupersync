@@ -56,9 +56,9 @@
 
 ### Surface 7: Session types — typestate without transport
 - **File**: `src/obligation/session_types.rs`
-- **State**: Protocol typestate machinery exists and compiles. Send/recv advance type state but don't communicate over any real transport.
-- **Disposition**: **IMPLEMENT** → Track G (G1→G2→G3)
-- **Target**: Wire session channels to a concrete transport bridge, or explicitly document the typestate-only scope.
+- **State**: **RESOLVED** — the module now exposes an honest two-lane contract: pure typestate transitions for compile-time protocol enforcement, plus in-process transport-backed session channels via `new_transport_pair()` and the async transition methods (`send_async`, `recv_async`, `select_*_async`, `offer_async`). Cross-process/network transport remains explicitly deferred instead of being implied.
+- **Disposition**: **RESOLVED**
+- **Evidence**: `src/obligation/session_types.rs` documents the bounded `mpsc` bridge and ships transport cancellation/drop regressions; `tests/session_type_obligations.rs` covers typed/dynamic migration parity and transport-backed flows.
 
 ### Surface 8: Legacy UringReactor shim
 - **File**: `src/runtime/reactor/uring.rs`

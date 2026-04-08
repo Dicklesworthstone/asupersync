@@ -1346,6 +1346,9 @@ The opt-in session-typed obligation surface lives in
 `src/obligation/session_types.rs`. The code now publishes a rollout contract via
 `session_protocol_adoption_specs()` so the typed API and the legacy
 runtime-checked API stay unambiguous during adoption.
+The currently supported runtime bridge is intentionally narrow: in-process
+bounded `mpsc` transport via `new_transport_pair()` and the async session
+transition methods. Cross-process/network bindings are still deferred.
 
 First-wave protocol families:
 

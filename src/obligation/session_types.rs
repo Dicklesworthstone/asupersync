@@ -1129,17 +1129,24 @@ pub struct TracingContract;
 
 /// Transport bridge contract for session-typed channels.
 ///
-/// # Decision Summary (bead v2ofj7.7.1)
+/// # Current contract
 ///
-/// The session-type API currently operates as pure typestate transitions with
-/// no transport backing — `send(v)` discards the value, `recv(v)` accepts a
-/// placeholder. This contract freezes the chosen transport binding.
+/// The session-type API now supports both:
 ///
-/// ## Chosen Bridge: `mpsc`-backed `TrackedSender`/`TrackedReceiver`
+/// - pure typestate transitions for compile-time protocol checking, and
+/// - an in-process transport-backed mode via [`new_transport_pair`] plus the
+///   async transition methods (`send_async`, `recv_async`, `select_*_async`,
+///   `offer_async`).
 ///
-/// Session channels bind to the existing in-process `mpsc::channel` transport
-/// via the obligation-tracked wrappers in `channel::session`. This is the
-/// narrowest viable bridge that preserves all invariants.
+/// The transport-backed surface is intentionally narrow: it only covers
+/// in-process bounded `mpsc` delivery. Cross-process and network bindings
+/// remain explicitly deferred.
+///
+/// ## Chosen Bridge: in-process `mpsc`
+///
+/// Session channels bind to the existing in-process `mpsc::channel` transport.
+/// This keeps the runtime contract honest without pretending the surface is
+/// already a general remote/session-runtime abstraction.
 ///
 /// ### Architecture
 ///
@@ -1173,10 +1180,10 @@ pub struct TracingContract;
 ///   and budget enforcement. If `cx.is_cancel_requested()`, the operation fails
 ///   immediately with `SessionError::Cancelled`.
 ///
-/// - **Obligation tracking**: Send-side uses `TrackedPermit` from
-///   `channel::session`. Drop-bomb ensures every reserved slot is committed
-///   or aborted. The `ObligationToken<SendPermit>` proof flows into the
-///   evidence ledger.
+/// - **Obligation tracking**: transport-backed sends and receives flow through
+///   Asupersync's cancel-aware bounded `mpsc` channel, so cancellation and peer
+///   closure preserve the existing obligation semantics of the underlying
+///   channel primitives.
 ///
 /// - **Budget consumption**: Each transition decrements the `Cx` poll budget.
 ///   If budget is exhausted, the operation yields rather than blocking.
@@ -1201,20 +1208,12 @@ pub struct TracingContract;
 /// - **Backpressure**: Bounded by `mpsc` channel capacity (set at session
 ///   creation time).
 ///
-/// ### Downstream Contract (G2, G3)
+/// ### Validation contract
 ///
-/// G2 (implement send/recv/close) must:
-/// - Add `TransportBridge` field to `Chan<R, S>` holding sender + receiver halves
-/// - Make `send()` async: `async fn send(self, cx: &Cx, value: T) -> Result<Chan<R, S>, SessionError>`
-/// - Make `recv()` async: `async fn recv(self, cx: &Cx) -> Result<(T, Chan<R, S>), SessionError>`
-/// - Preserve drop-bomb semantics (existing behavior)
-/// - Add `SessionError` type with Cancelled/Closed/ProtocolViolation variants
-///
-/// G3 (testing) must:
-/// - Verify cancel-correctness: cancelled Cx → abort proof, no value loss
-/// - Verify obligation tracking: dropped permit → panic in debug
-/// - Verify protocol enforcement: out-of-order → compile error (existing)
-/// - Deterministic lab tests with virtual time
+/// The current truthfulness/rollout contract is backed by:
+/// - compile-fail doctests in this module,
+/// - transport-backed integration coverage in `tests/session_type_obligations.rs`,
+/// - focused transport and cancellation regressions in this module's tests.
 #[allow(dead_code)] // Contract type — used as documentation anchor
 pub struct TransportBridgeContract;
 
