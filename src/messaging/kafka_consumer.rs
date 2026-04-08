@@ -302,6 +302,8 @@ pub struct KafkaConsumer {
     consumer: Option<Arc<BaseConsumer>>,
     #[cfg(feature = "kafka")]
     broker_ops: Option<Arc<Mutex<()>>>,
+    #[cfg(feature = "kafka")]
+    buffered_outcome: Arc<Mutex<Option<Result<BrokerPollOutcome, KafkaError>>>>,
     #[cfg(test)]
     rebalance_after_open_hook: Mutex<Option<Arc<RebalanceAfterOpenHook>>>,
     #[cfg(all(test, not(feature = "kafka")))]
@@ -577,6 +579,8 @@ impl KafkaConsumer {
             consumer,
             #[cfg(feature = "kafka")]
             broker_ops,
+            #[cfg(feature = "kafka")]
+            buffered_outcome: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             rebalance_after_open_hook: Mutex::new(None),
             #[cfg(all(test, not(feature = "kafka")))]
@@ -812,6 +816,26 @@ impl KafkaConsumer {
                         return Ok(None);
                     }
 
+                    if let Some(res) = self.buffered_outcome.lock().take() {
+                        match res {
+                            Ok(outcome) => {
+                                let mut state = self.state.lock();
+                                apply_broker_snapshot(&mut state, outcome.snapshot);
+                                drop(state);
+
+                                if let Some(record) = outcome.record {
+                                    return Ok(Some(record));
+                                }
+                            }
+                            Err(e) => return Err(e),
+                        }
+                        if timeout.is_zero() {
+                            return Ok(None);
+                        }
+                        first_iteration = false;
+                        continue;
+                    }
+
                     let wait_for = if timeout.is_zero() {
                         Duration::ZERO
                     } else {
@@ -819,17 +843,19 @@ impl KafkaConsumer {
                         remaining.min(MAX_BROKER_POLL_SLICE)
                     };
 
-                    let outcome = crate::runtime::spawn_blocking::spawn_blocking_on_thread({
+                    let outcome_res = crate::runtime::spawn_blocking::spawn_blocking_on_thread({
                         let consumer = Arc::clone(&consumer);
                         let broker_ops = Arc::clone(&broker_ops);
-                        move || -> Result<BrokerPollOutcome, KafkaError> {
+                        let buffered_outcome = Arc::clone(&self.buffered_outcome);
+                        move || -> Result<(), KafkaError> {
                             let _guard = broker_ops.lock();
                             let record = match consumer.poll(wait_for) {
                                 Some(Ok(message)) => {
                                     if auto_commit {
-                                        consumer
-                                            .store_offset_from_message(&message)
-                                            .map_err(map_consumer_error)?;
+                                        if let Err(e) = consumer.store_offset_from_message(&message).map_err(map_consumer_error) {
+                                            *buffered_outcome.lock() = Some(Err(e));
+                                            return Ok(());
+                                        }
                                     }
                                     Some(consumer_record_from_message(&message))
                                 }
@@ -837,25 +863,27 @@ impl KafkaConsumer {
                                     RdKafkaError::NoMessageReceived | RdKafkaError::PartitionEOF(_),
                                 ))
                                 | None => None,
-                                Some(Err(err)) => return Err(map_consumer_error(err)),
+                                Some(Err(err)) => {
+                                    *buffered_outcome.lock() = Some(Err(map_consumer_error(err)));
+                                    return Ok(());
+                                }
                             };
-                            let snapshot = capture_broker_snapshot(&consumer)?;
-                            Ok(BrokerPollOutcome { record, snapshot })
+                            let snapshot = match capture_broker_snapshot(&consumer) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    *buffered_outcome.lock() = Some(Err(e));
+                                    return Ok(());
+                                }
+                            };
+                            *buffered_outcome.lock() = Some(Ok(BrokerPollOutcome { record, snapshot }));
+                            Ok(())
                         }
                     })
-                    .await?;
+                    .await;
 
-                    let mut state = self.state.lock();
-                    apply_broker_snapshot(&mut state, outcome.snapshot);
-                    drop(state);
-
-                    if let Some(record) = outcome.record {
-                        return Ok(Some(record));
+                    if let Err(e) = outcome_res {
+                        return Err(e);
                     }
-                    if timeout.is_zero() {
-                        return Ok(None);
-                    }
-                    first_iteration = false;
                 }
             }
         }
