@@ -884,6 +884,22 @@ impl<S: GenServer> GenServerHandle<S> {
             return Err(CallError::ServerStopped);
         }
 
+        let send_permit = match self.sender.reserve(cx).await {
+            Ok(p) => p,
+            Err(e) => {
+                let was_cancelled = matches!(e, mpsc::SendError::Cancelled(()));
+                if was_cancelled {
+                    cx.trace("gen_server::call_send_cancelled");
+                    let reason = cx
+                        .cancel_reason()
+                        .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                    return Err(CallError::Cancelled(reason));
+                }
+                cx.trace("gen_server::call_send_failed");
+                return Err(CallError::ServerStopped);
+            }
+        };
+
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
         let envelope: Envelope<S> = Envelope::Call {
@@ -891,26 +907,7 @@ impl<S: GenServer> GenServerHandle<S> {
             reply_permit,
         };
 
-        if let Err(e) = self.sender.send(cx, envelope).await {
-            // If the envelope couldn't be enqueued, we must abort the reply
-            // obligation to avoid an obligation-token leak.
-            let (envelope, was_cancelled) = match e {
-                mpsc::SendError::Cancelled(v) => (v, true),
-                mpsc::SendError::Disconnected(v) | mpsc::SendError::Full(v) => (v, false),
-            };
-            if let Envelope::Call { reply_permit, .. } = envelope {
-                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
-            }
-            if was_cancelled {
-                cx.trace("gen_server::call_send_cancelled");
-                let reason = cx
-                    .cancel_reason()
-                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
-                return Err(CallError::Cancelled(reason));
-            }
-            cx.trace("gen_server::call_send_failed");
-            return Err(CallError::ServerStopped);
-        }
+        send_permit.send(envelope);
 
         cx.trace("gen_server::call_enqueued");
 
@@ -1269,6 +1266,22 @@ impl<S: GenServer> GenServerRef<S> {
             return Err(CallError::ServerStopped);
         }
 
+        let send_permit = match self.sender.reserve(cx).await {
+            Ok(p) => p,
+            Err(e) => {
+                let was_cancelled = matches!(e, mpsc::SendError::Cancelled(()));
+                if was_cancelled {
+                    cx.trace("gen_server::call_send_cancelled");
+                    let reason = cx
+                        .cancel_reason()
+                        .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                    return Err(CallError::Cancelled(reason));
+                }
+                cx.trace("gen_server::call_send_failed");
+                return Err(CallError::ServerStopped);
+            }
+        };
+
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
         let envelope: Envelope<S> = Envelope::Call {
@@ -1276,24 +1289,7 @@ impl<S: GenServer> GenServerRef<S> {
             reply_permit,
         };
 
-        if let Err(e) = self.sender.send(cx, envelope).await {
-            let (envelope, was_cancelled) = match e {
-                mpsc::SendError::Cancelled(v) => (v, true),
-                mpsc::SendError::Disconnected(v) | mpsc::SendError::Full(v) => (v, false),
-            };
-            if let Envelope::Call { reply_permit, .. } = envelope {
-                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
-            }
-            if was_cancelled {
-                cx.trace("gen_server::call_send_cancelled");
-                let reason = cx
-                    .cancel_reason()
-                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
-                return Err(CallError::Cancelled(reason));
-            }
-            cx.trace("gen_server::call_send_failed");
-            return Err(CallError::ServerStopped);
-        }
+        send_permit.send(envelope);
 
         cx.trace("gen_server::call_enqueued");
 
