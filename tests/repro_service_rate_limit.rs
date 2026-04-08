@@ -52,7 +52,7 @@ fn test_rate_limit_does_not_spin_when_time_is_frozen() {
 
     // Consume first token
     assert!(svc.poll_ready(&mut cx).is_ready());
-    let _ = svc.call(()); // Actually consume the reserved token
+    let _fut = svc.call(()); // Actually consume the reserved token
 
     // Try second token - should return Pending without eager wake/spin.
     assert!(svc.poll_ready(&mut cx).is_pending());
