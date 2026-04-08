@@ -232,7 +232,7 @@ impl Drop for ContextGuard<'_> {
         if !self.active {
             return;
         }
-        CONTEXT_STACK.with(|stack| {
+        let _ = CONTEXT_STACK.try_with(|stack| {
             let mut stack = stack.borrow_mut();
             if let Some(pos) = stack.iter().rposition(|entry| entry.id == self.id) {
                 stack.remove(pos);
