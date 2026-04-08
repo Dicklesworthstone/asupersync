@@ -1017,6 +1017,7 @@ enum FrontendMessage {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 enum BackendMessage {
     /// Authentication request.
     Authentication = b'R',
@@ -3946,7 +3947,6 @@ mod tests {
             PgConnection {
                 inner: PgConnectionInner {
                     stream: PgStream::Plain(stream),
-                    read_buf: Vec::new(),
                     process_id: 0,
                     secret_key: 0,
                     parameters: BTreeMap::new(),

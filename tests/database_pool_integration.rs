@@ -20,8 +20,8 @@ mod asupersync {
 mod tests {
     use super::*;
 
-    use asupersync::database::pool::DbPoolStats;
-    use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
+    use ::asupersync::database::pool::DbPoolStats;
+    use ::asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
     use std::error::Error;
     use std::fmt;
     use std::sync::Arc;
@@ -32,7 +32,7 @@ mod tests {
 
     fn init_test(name: &str) {
         common::init_test_logging();
-        asupersync::test_phase!(name);
+        ::asupersync::test_phase!(name);
     }
 
     /// Minimal in-memory connection for pool integration tests.
@@ -128,7 +128,7 @@ mod tests {
 
         assert_eq!(pool.stats().idle, 1);
         assert_eq!(pool.stats().total_creates, 1);
-        asupersync::test_complete!("pool_checkout_work_return_cycle");
+        ::asupersync::test_complete!("pool_checkout_work_return_cycle");
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
 
         assert_eq!(pool.stats().idle, 3);
         assert_eq!(pool.stats().active, 0);
-        asupersync::test_complete!("pool_concurrent_checkouts_respect_max");
+        ::asupersync::test_complete!("pool_concurrent_checkouts_respect_max");
     }
 
     #[test]
@@ -176,7 +176,7 @@ mod tests {
         let conn2 = pool.get().unwrap();
         assert_eq!(conn2.id, 2);
         assert_eq!(pool.stats().total_creates, 2);
-        asupersync::test_complete!("pool_discard_and_recreate");
+        ::asupersync::test_complete!("pool_discard_and_recreate");
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
 
         // No more checkouts.
         assert!(matches!(pool.get(), Err(DbPoolError::Closed)));
-        asupersync::test_complete!("pool_warmup_and_drain");
+        ::asupersync::test_complete!("pool_warmup_and_drain");
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod tests {
         // Returning after close → disconnected.
         conn.return_to_pool();
         assert_eq!(pool.stats().total, 0);
-        asupersync::test_complete!("pool_close_while_checked_out");
+        ::asupersync::test_complete!("pool_close_while_checked_out");
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod tests {
         // Can't recover after construction since we don't have a handle to
         // the manager. Instead test that error type is correct.
         assert!(matches!(pool.get(), Err(DbPoolError::Connect(_))));
-        asupersync::test_complete!("pool_connect_failure_and_recovery");
+        ::asupersync::test_complete!("pool_connect_failure_and_recovery");
     }
 
     #[test]
@@ -250,7 +250,7 @@ mod tests {
         drop(held);
         let got = pool.try_get();
         assert!(got.is_some());
-        asupersync::test_complete!("pool_try_get_nonblocking");
+        ::asupersync::test_complete!("pool_try_get_nonblocking");
     }
 
     #[test]
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(stats.total_discards, 1);
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.total, 1);
-        asupersync::test_complete!("pool_stats_cumulative");
+        ::asupersync::test_complete!("pool_stats_cumulative");
     }
 
     #[test]
@@ -286,12 +286,12 @@ mod tests {
         // DerefMut via do_work (takes &self, works through Deref).
         conn.do_work();
         assert_eq!(conn.operations(), 1);
-        asupersync::test_complete!("pooled_connection_deref_access");
+        ::asupersync::test_complete!("pooled_connection_deref_access");
     }
 
     // ─── RetryPolicy integration ─────────────────────────────────────────────────
 
-    use asupersync::database::transaction::RetryPolicy;
+    use ::asupersync::database::transaction::RetryPolicy;
 
     #[test]
     fn retry_policy_backoff_progression() {
@@ -315,7 +315,7 @@ mod tests {
         for attempt in 0..10 {
             assert!(policy.delay_for(attempt) <= Duration::from_millis(500));
         }
-        asupersync::test_complete!("retry_policy_backoff_progression");
+        ::asupersync::test_complete!("retry_policy_backoff_progression");
     }
 
     #[test]
@@ -330,7 +330,7 @@ mod tests {
         // Zero base delay → always zero.
         assert_eq!(policy.delay_for(0), Duration::ZERO);
         assert_eq!(policy.delay_for(5), Duration::ZERO);
-        asupersync::test_complete!("retry_policy_zero_base_delay");
+        ::asupersync::test_complete!("retry_policy_zero_base_delay");
     }
 
     #[test]
@@ -357,7 +357,7 @@ mod tests {
         // Debug.
         let dbg = format!("{default:?}");
         assert!(dbg.contains("RetryPolicy"));
-        asupersync::test_complete!("retry_policy_constructors");
+        ::asupersync::test_complete!("retry_policy_constructors");
     }
 
     // ─── PgError helper methods ──────────────────────────────────────────────────
@@ -365,11 +365,11 @@ mod tests {
     #[cfg(feature = "postgres")]
     mod pg_error_tests {
         use super::*;
-        use asupersync::database::PgError;
+        use ::asupersync::database::PgError;
 
         fn init_test(name: &str) {
             common::init_test_logging();
-            asupersync::test_phase!(name);
+            ::asupersync::test_phase!(name);
         }
 
         fn server_error(code: &str, message: &str) -> PgError {
@@ -389,7 +389,7 @@ mod tests {
             assert!(!err.is_deadlock());
             assert!(!err.is_unique_violation());
             assert_eq!(err.code(), Some("40001"));
-            asupersync::test_complete!("pg_error_serialization_failure");
+            ::asupersync::test_complete!("pg_error_serialization_failure");
         }
 
         #[test]
@@ -399,7 +399,7 @@ mod tests {
             assert!(err.is_deadlock());
             assert!(!err.is_serialization_failure());
             assert_eq!(err.code(), Some("40P01"));
-            asupersync::test_complete!("pg_error_deadlock");
+            ::asupersync::test_complete!("pg_error_deadlock");
         }
 
         #[test]
@@ -409,7 +409,7 @@ mod tests {
             assert!(err.is_unique_violation());
             assert!(!err.is_serialization_failure());
             assert_eq!(err.code(), Some("23505"));
-            asupersync::test_complete!("pg_error_unique_violation");
+            ::asupersync::test_complete!("pg_error_unique_violation");
         }
 
         #[test]
@@ -420,7 +420,7 @@ mod tests {
             assert!(!err.is_serialization_failure());
             assert!(!err.is_deadlock());
             assert!(!err.is_unique_violation());
-            asupersync::test_complete!("pg_error_no_code_for_non_server");
+            ::asupersync::test_complete!("pg_error_no_code_for_non_server");
         }
 
         #[test]
@@ -430,7 +430,7 @@ mod tests {
             assert!(err.code().is_none());
             let display = format!("{err}");
             assert!(display.contains("finished"));
-            asupersync::test_complete!("pg_error_transaction_finished");
+            ::asupersync::test_complete!("pg_error_transaction_finished");
         }
 
         #[test]
@@ -447,7 +447,7 @@ mod tests {
             assert!(display.contains("42P01"));
             assert!(display.contains("detail"));
             assert!(display.contains("hint"));
-            asupersync::test_complete!("pg_error_with_detail_and_hint");
+            ::asupersync::test_complete!("pg_error_with_detail_and_hint");
         }
 
         #[test]
@@ -458,7 +458,7 @@ mod tests {
             assert!(!err.is_serialization_failure());
             assert!(!err.is_deadlock());
             assert_eq!(err.code(), Some("42601"));
-            asupersync::test_complete!("pg_error_other_codes_not_retryable");
+            ::asupersync::test_complete!("pg_error_other_codes_not_retryable");
         }
 
         #[test]
@@ -475,7 +475,7 @@ mod tests {
 
             use std::error::Error;
             assert!(err.source().is_some());
-            asupersync::test_complete!("pg_error_io_variant");
+            ::asupersync::test_complete!("pg_error_io_variant");
         }
 
         #[test]
@@ -498,7 +498,7 @@ mod tests {
                     "Display should not be empty for {err:?}"
                 );
             }
-            asupersync::test_complete!("pg_error_display_all_variants");
+            ::asupersync::test_complete!("pg_error_display_all_variants");
         }
     }
 
@@ -521,7 +521,7 @@ mod tests {
         let conn2 = pool.get().unwrap();
         conn2.do_work();
         assert_eq!(conn2.operations(), 11);
-        asupersync::test_complete!("pool_multiple_operations_per_checkout");
+        ::asupersync::test_complete!("pool_multiple_operations_per_checkout");
     }
 
     #[test]
@@ -542,7 +542,7 @@ mod tests {
         drop(c2);
         drop(c3);
         assert_eq!(pool.stats().idle, 2);
-        asupersync::test_complete!("pool_interleaved_checkout_return");
+        ::asupersync::test_complete!("pool_interleaved_checkout_return");
     }
 
     #[test]
@@ -555,7 +555,7 @@ mod tests {
 
         let conn2 = pool.get().unwrap();
         assert_ne!(conn2.id, 0); // got a valid new connection
-        asupersync::test_complete!("pool_discard_doesnt_block_new_gets");
+        ::asupersync::test_complete!("pool_discard_doesnt_block_new_gets");
     }
 
     // ─── Config edge cases ───────────────────────────────────────────────────────
@@ -570,7 +570,7 @@ mod tests {
         let created = pool.warm_up();
         assert_eq!(created, 0);
         assert_eq!(pool.stats().idle, 0);
-        asupersync::test_complete!("pool_config_min_idle_zero");
+        ::asupersync::test_complete!("pool_config_min_idle_zero");
     }
 
     #[test]
@@ -582,7 +582,7 @@ mod tests {
         assert!(matches!(pool.get(), Err(DbPoolError::Full)));
         c.return_to_pool();
         let _ = pool.get().unwrap();
-        asupersync::test_complete!("pool_config_max_size_one");
+        ::asupersync::test_complete!("pool_config_max_size_one");
     }
 
     #[test]
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!(config.idle_timeout, Duration::from_secs(120));
         assert_eq!(config.max_lifetime, Duration::from_secs(600));
         assert_eq!(config.connection_timeout, Duration::from_secs(10));
-        asupersync::test_complete!("pool_config_builder_chain");
+        ::asupersync::test_complete!("pool_config_builder_chain");
     }
 
     // ─── Validation integration ──────────────────────────────────────────────────
@@ -620,7 +620,7 @@ mod tests {
         // Without validation, no failures.
         let _conn2 = pool.get().unwrap();
         assert_eq!(pool.stats().total_validation_failures, 0);
-        asupersync::test_complete!("pool_validation_counts_in_stats");
+        ::asupersync::test_complete!("pool_validation_counts_in_stats");
     }
 
     // ─── Pool error variants ─────────────────────────────────────────────────────
@@ -648,7 +648,7 @@ mod tests {
         // Error trait source.
         assert!(closed.source().is_none());
         assert!(connect_err.source().is_some());
-        asupersync::test_complete!("pool_error_variants");
+        ::asupersync::test_complete!("pool_error_variants");
     }
 
     // ─── RetryPolicy edge cases ─────────────────────────────────────────────────
@@ -663,7 +663,7 @@ mod tests {
             let delay = policy.delay_for(attempt);
             assert!(delay <= policy.max_delay);
         }
-        asupersync::test_complete!("retry_policy_large_attempt_numbers");
+        ::asupersync::test_complete!("retry_policy_large_attempt_numbers");
     }
 
     #[test]
@@ -680,7 +680,7 @@ mod tests {
         assert!(delay <= Duration::from_secs(60));
         let delay = policy.delay_for(5);
         assert!(delay <= Duration::from_secs(60));
-        asupersync::test_complete!("retry_policy_very_large_base_delay");
+        ::asupersync::test_complete!("retry_policy_very_large_base_delay");
     }
 
     // ─── Pool debug/display ──────────────────────────────────────────────────────
@@ -692,7 +692,7 @@ mod tests {
         let dbg = format!("{pool:?}");
         assert!(dbg.contains("DbPool"));
         assert!(dbg.contains("max_size"));
-        asupersync::test_complete!("pool_debug_output");
+        ::asupersync::test_complete!("pool_debug_output");
     }
 
     #[test]
@@ -708,6 +708,6 @@ mod tests {
 
         let cloned = stats;
         assert_eq!(cloned.total, 0);
-        asupersync::test_complete!("pool_stats_default_and_debug");
+        ::asupersync::test_complete!("pool_stats_default_and_debug");
     }
 }

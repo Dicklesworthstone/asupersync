@@ -40,7 +40,6 @@ use std::time::Duration;
 
 #[cfg(feature = "kafka")]
 use rdkafka::{
-    config::ClientConfig,
     consumer::{BaseConsumer, CommitMode, Consumer},
     error::KafkaError as RdKafkaError,
     message::{Headers, Message},
@@ -380,7 +379,7 @@ struct BrokerPollOutcome {
     snapshot: BrokerSnapshot,
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(all(feature = "kafka", not(test)))]
 fn auto_offset_reset_str(reset: AutoOffsetReset) -> &'static str {
     match reset {
         AutoOffsetReset::Earliest => "earliest",
@@ -389,7 +388,7 @@ fn auto_offset_reset_str(reset: AutoOffsetReset) -> &'static str {
     }
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(all(feature = "kafka", not(test)))]
 fn isolation_level_str(level: IsolationLevel) -> &'static str {
     match level {
         IsolationLevel::ReadUncommitted => "read_uncommitted",
@@ -397,14 +396,14 @@ fn isolation_level_str(level: IsolationLevel) -> &'static str {
     }
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(all(feature = "kafka", not(test)))]
 fn duration_to_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-#[cfg(feature = "kafka")]
-fn build_consumer_config(config: &ConsumerConfig) -> ClientConfig {
-    let mut client = ClientConfig::new();
+#[cfg(all(feature = "kafka", not(test)))]
+fn build_consumer_config(config: &ConsumerConfig) -> rdkafka::ClientConfig {
+    let mut client = rdkafka::ClientConfig::new();
     client.set("bootstrap.servers", config.bootstrap_servers.join(","));
     client.set("group.id", &config.group_id);
     if let Some(client_id) = &config.client_id {
@@ -816,7 +815,8 @@ impl KafkaConsumer {
                         return Ok(None);
                     }
 
-                    if let Some(res) = self.buffered_outcome.lock().take() {
+                    let buffered_res = self.buffered_outcome.lock().take();
+                    if let Some(res) = buffered_res {
                         match res {
                             Ok(outcome) => {
                                 let mut state = self.state.lock();
@@ -881,9 +881,7 @@ impl KafkaConsumer {
                     })
                     .await;
 
-                    if let Err(e) = outcome_res {
-                        return Err(e);
-                    }
+                    outcome_res?;
                 }
             }
         }
