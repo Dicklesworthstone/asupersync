@@ -212,7 +212,8 @@ impl LatencyModel {
                     return *min;
                 }
                 let range = max.as_nanos().saturating_sub(min.as_nanos());
-                let offset = u128::from(rng.next_u64()) % (range + 1);
+                let rand_u128 = (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64());
+                let offset = rand_u128 % (range + 1);
                 duration_from_total_nanos_saturating(min.as_nanos().saturating_add(offset))
             }
             Self::Normal { mean, std_dev } => {
@@ -270,7 +271,8 @@ impl JitterModel {
                     return Duration::ZERO;
                 }
                 let nanos = max.as_nanos();
-                let offset = u128::from(rng.next_u64()) % (nanos + 1);
+                let rand_u128 = (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64());
+                let offset = rand_u128 % (nanos + 1);
                 duration_from_total_nanos_saturating(offset)
             }
             Self::Bursty {
@@ -288,7 +290,8 @@ impl JitterModel {
                     Duration::ZERO
                 } else {
                     let nanos = range.as_nanos();
-                    let offset = u128::from(rng.next_u64()) % (nanos + 1);
+                    let rand_u128 = (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64());
+                    let offset = rand_u128 % (nanos + 1);
                     duration_from_total_nanos_saturating(offset)
                 }
             }
