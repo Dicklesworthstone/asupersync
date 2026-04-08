@@ -802,12 +802,12 @@ impl OracleSuite {
         if !marking_result.is_safe() {
             for leak in &marking_result.leaks {
                 violations.push(ObligationTheoryViolation::MarkingLeak {
-                    description: format!("VASS marking non-zero at region close: {leak:?}",),
+                    description: format!("VASS marking non-zero at region close: {leak:?}"),
                 });
             }
             for invalid in &marking_result.invalid_transitions {
                 violations.push(ObligationTheoryViolation::InvalidTransition {
-                    description: format!("Invalid marking transition: {invalid:?}",),
+                    description: format!("Invalid marking transition: {invalid:?}"),
                 });
             }
         }

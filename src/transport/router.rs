@@ -743,23 +743,20 @@ impl LoadBalancer {
             return Vec::new();
         }
 
-        if n >= available.len() {
-            return available;
-        }
+        let count = n.min(available.len());
 
         match self.strategy {
             LoadBalanceStrategy::RoundRobin => {
-                let start = self.rr_counter.fetch_add(n as u64, Ordering::Relaxed) as usize;
+                let start = self.rr_counter.fetch_add(count as u64, Ordering::Relaxed) as usize;
                 let len = available.len();
-                (0..n).map(|i| available[(start + i) % len]).collect()
+                (0..count).map(|i| available[(start + i) % len]).collect()
             }
 
             LoadBalanceStrategy::Random => {
                 // Fisher-Yates shuffle in-place on the available vector.
                 // This avoids allocating a separate indices vector.
-                let mut seed = self.random_seed.fetch_add(n as u64, Ordering::Relaxed);
+                let mut seed = self.random_seed.fetch_add(count as u64, Ordering::Relaxed);
                 let len = available.len();
-                let count = n.min(len);
 
                 for i in 0..count {
                     // Simple LCG step
@@ -774,29 +771,29 @@ impl LoadBalancer {
                 available
             }
             LoadBalanceStrategy::LeastConnections => {
-                Self::select_ranked_prefix(available, n, |a, b| {
+                Self::select_ranked_prefix(available, count, |a, b| {
                     a.1.connection_count()
                         .cmp(&b.1.connection_count())
                         .then(a.0.cmp(&b.0))
                 })
             }
             LoadBalanceStrategy::WeightedLeastConnections => {
-                Self::select_ranked_prefix(available, n, |a, b| {
+                Self::select_ranked_prefix(available, count, |a, b| {
                     Self::compare_weighted_load(a.1, b.1).then(a.0.cmp(&b.0))
                 })
             }
             LoadBalanceStrategy::HashBased => {
                 let start_idx = object_id.map_or_else(
-                    || self.rr_counter.fetch_add(n as u64, Ordering::Relaxed) as usize,
+                    || self.rr_counter.fetch_add(count as u64, Ordering::Relaxed) as usize,
                     |oid| oid.as_u128() as usize,
                 );
                 let len = available.len();
-                (0..n).map(|i| available[(start_idx + i) % len]).collect()
+                (0..count).map(|i| available[(start_idx + i) % len]).collect()
             }
             LoadBalanceStrategy::WeightedRoundRobin => {
-                self.select_n_weighted_round_robin(&available, n)
+                self.select_n_weighted_round_robin(&available, count)
             }
-            LoadBalanceStrategy::FirstAvailable => available.into_iter().take(n).collect(),
+            LoadBalanceStrategy::FirstAvailable => available.into_iter().take(count).collect(),
         }
     }
 

@@ -135,7 +135,13 @@ impl CloseReason {
     pub fn encode(&self) -> Bytes {
         let code = self.raw_code.or_else(|| self.code.map(u16::from));
         match (code, &self.text) {
-            (None, _) => Bytes::new(),
+            (None, None) => Bytes::new(),
+            (None, Some(text)) => {
+                let mut buf = Vec::with_capacity(2 + text.len());
+                buf.extend_from_slice(&1000u16.to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
+                Bytes::from(buf)
+            }
             (Some(code_val), None) => Bytes::copy_from_slice(&code_val.to_be_bytes()),
             (Some(code_val), Some(text)) => {
                 let mut buf = Vec::with_capacity(2 + text.len());
