@@ -407,28 +407,31 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             guard.clone()
         };
 
-        // 6. Save if modified or new.
-        let session_cleared = session_data.is_empty() && !is_new && session_data.is_modified();
-        if session_data.is_modified() || is_new {
-            if session_cleared {
+        // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
+        let session_cleared = session_data.is_empty() && session_data.is_modified();
+        
+        if session_cleared {
+            if !is_new {
                 // Session cleared → delete server-side data and expire the cookie.
                 self.store.delete(&session_id);
-            } else {
-                self.store.save(&session_id, &session_data);
             }
+        } else if session_data.is_modified() {
+            self.store.save(&session_id, &session_data);
         }
 
-        // 7. Set cookie on new sessions or modified sessions.
+        // 7. Set cookie on modified sessions, or expire if cleared.
         if session_cleared {
-            // Expire the cookie so the browser deletes it.
-            // Reuse set_cookie_header to ensure all configured attributes
-            // (Secure, SameSite, HttpOnly) are included — omitting them
-            // could leave a stale session cookie in the browser.
-            let mut expire_config = self.config.clone();
-            expire_config.max_age = Some(0);
-            let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
-            resp.headers.insert("set-cookie".to_string(), cookie_val);
-        } else if is_new || session_data.is_modified() {
+            if !is_new {
+                // Expire the cookie so the browser deletes it.
+                // Reuse set_cookie_header to ensure all configured attributes
+                // (Secure, SameSite, HttpOnly) are included — omitting them
+                // could leave a stale session cookie in the browser.
+                let mut expire_config = self.config.clone();
+                expire_config.max_age = Some(0);
+                let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
+                resp.headers.insert("set-cookie".to_string(), cookie_val);
+            }
+        } else if session_data.is_modified() {
             let cookie_val = set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
             resp.headers.insert("set-cookie".to_string(), cookie_val);
         }

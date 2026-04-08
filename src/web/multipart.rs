@@ -318,6 +318,11 @@ fn parse_multipart(
         }
     };
 
+    // Check if the first boundary is actually the close boundary (empty multipart).
+    if body.get(pos..pos + 2) == Some(b"--") {
+        return Ok(fields);
+    }
+
     // Skip the CRLF (or LF) after the delimiter.
     pos = skip_line_ending(body, pos);
 
