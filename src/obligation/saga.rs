@@ -447,9 +447,11 @@ impl SagaExecutionResult {
     /// obstructions (H^1 != 0) that pairwise merges miss.
     ///
     /// `obligation_ids` maps batch index to the set of obligation IDs that
-    /// batch touched. If not provided, each batch is assumed to touch a
-    /// single synthetic obligation (which limits the checker to detecting
-    /// state disagreements but not phantom commits).
+    /// batch touched. Must have the same length as `batch_results` when
+    /// provided. If `None`, all batches are assumed to observe a single
+    /// shared synthetic obligation (which limits the checker to detecting
+    /// state disagreements but not phantom commits across distinct
+    /// obligation sets).
     #[must_use]
     pub fn check_sheaf_consistency(
         &self,
