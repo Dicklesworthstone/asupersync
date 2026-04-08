@@ -17,7 +17,7 @@
 //! separate async tasks. For concurrent use across tasks, use an owned split
 //! provided by the underlying stream (e.g., `TcpStream::into_split()`).
 
-use super::{AsyncRead, AsyncWrite, ReadBuf};
+use super::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use std::cell::RefCell;
 use std::io::{self, IoSlice};
 use std::pin::Pin;
@@ -119,6 +119,20 @@ where
     ) -> Poll<io::Result<()>> {
         let mut inner = self.inner.borrow_mut();
         Pin::new(&mut *inner).poll_read(cx, buf)
+    }
+}
+
+impl<T> AsyncReadVectored for ReadHalf<'_, T>
+where
+    T: AsyncReadVectored + Unpin,
+{
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [std::io::IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let mut inner = self.inner.borrow_mut();
+        Pin::new(&mut *inner).poll_read_vectored(cx, bufs)
     }
 }
 
