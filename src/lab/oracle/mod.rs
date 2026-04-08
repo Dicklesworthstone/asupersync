@@ -94,6 +94,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use crate::obligation::dialectica::ContractChecker;
+use crate::obligation::marking::{MarkingAnalyzer, MarkingEvent};
+use crate::obligation::no_aliasing_proof::NoAliasingProver;
 use crate::record::region::RegionState;
 use crate::runtime::RuntimeState;
 use crate::types::Time;
@@ -232,13 +235,23 @@ pub struct OracleSuite {
     /// FABRIC: redelivery remains bounded.
     #[cfg(feature = "messaging-fabric")]
     pub fabric_redelivery: FabricRedeliveryOracle,
+    /// Anytime-valid e-process monitor for sequential invariant testing.
+    ///
+    /// Continuously monitors oracle reports via betting martingales so that
+    /// peeking after every scheduling step preserves Type-I error control
+    /// (Ville's inequality). When `Some`, initialized with standard invariants
+    /// (task_leak, obligation_leak, quiescence) and fed every oracle report.
+    pub eprocess_monitor: Option<EProcessMonitor>,
 }
 
 impl OracleSuite {
     /// Creates a new oracle suite with all oracles initialized.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            eprocess_monitor: Some(EProcessMonitor::standard()),
+            ..Self::default()
+        }
     }
 
     /// Rebuilds core temporal-oracle state from a runtime snapshot.
@@ -735,6 +748,133 @@ impl OracleSuite {
             passed,
             failed,
             check_time_nanos: now.as_nanos(),
+        }
+    }
+
+    /// Generates an oracle report and feeds it to the e-process monitor for
+    /// anytime-valid sequential testing.
+    ///
+    /// This closes the loop between oracle observations and statistical
+    /// evidence accumulation: each call updates the per-invariant betting
+    /// martingales, so that `eprocess_monitor.any_rejected()` provides a
+    /// continuously valid (Ville's inequality) rejection signal.
+    #[must_use]
+    pub fn report_and_observe(&mut self, now: Time) -> OracleReport {
+        let report = self.report(now);
+        if let Some(ref mut monitor) = self.eprocess_monitor {
+            monitor.observe_report(&report);
+        }
+        report
+    }
+
+    /// Returns the names of invariants rejected by the e-process monitor,
+    /// if any. Empty if no monitor is active or no invariant has been rejected.
+    #[must_use]
+    pub fn eprocess_rejected_invariants(&self) -> Vec<String> {
+        self.eprocess_monitor.as_ref().map_or_else(Vec::new, |m| {
+            m.rejected_invariants()
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
+    }
+
+    /// Runs post-hoc obligation theory validators on a collected marking
+    /// event trace.
+    ///
+    /// This wires the formal methods modules (VASS marking analysis,
+    /// Dialectica contract checking, and no-aliasing proof) into the oracle
+    /// pipeline. Call after a lab run with the marking events projected from
+    /// the runtime trace.
+    ///
+    /// Returns a list of violations from all three validators combined.
+    /// An empty list means all obligation-theory invariants held.
+    #[must_use]
+    pub fn check_obligation_theory(
+        &self,
+        marking_events: &[MarkingEvent],
+    ) -> Vec<ObligationTheoryViolation> {
+        let mut violations = Vec::new();
+
+        // VASS marking analysis: verify zero-marking at region close.
+        let mut marking_analyzer = MarkingAnalyzer::new();
+        let marking_result = marking_analyzer.analyze(marking_events);
+        if !marking_result.is_safe() {
+            for leak in &marking_result.leaks {
+                violations.push(ObligationTheoryViolation::MarkingLeak {
+                    description: format!("VASS marking non-zero at region close: {leak:?}",),
+                });
+            }
+            for invalid in &marking_result.invalid_transitions {
+                violations.push(ObligationTheoryViolation::InvalidTransition {
+                    description: format!("Invalid marking transition: {invalid:?}",),
+                });
+            }
+        }
+
+        // Dialectica contract checking: verify exhaustive resolution,
+        // no partial commit, region closure safety, cancellation
+        // non-cascading, and kind-uniform state machine.
+        let mut contract_checker = ContractChecker::new();
+        let contract_result = contract_checker.check(marking_events);
+        for violation in &contract_result.violations {
+            violations.push(ObligationTheoryViolation::ContractViolation {
+                description: format!("{violation:?}"),
+            });
+        }
+
+        // No-aliasing proof: verify single-ownership invariant.
+        let mut aliasing_prover = NoAliasingProver::new();
+        let aliasing_result = aliasing_prover.check(marking_events);
+        for counterexample in &aliasing_result.counterexamples {
+            violations.push(ObligationTheoryViolation::AliasingViolation {
+                description: format!("{counterexample:?}"),
+            });
+        }
+
+        violations
+    }
+}
+
+/// A violation detected by the obligation theory validators
+/// (marking analysis, Dialectica contracts, no-aliasing proof).
+#[derive(Debug, Clone)]
+pub enum ObligationTheoryViolation {
+    /// VASS marking was non-zero at region close (obligation leak).
+    MarkingLeak {
+        /// Human-readable description of the marking leak.
+        description: String,
+    },
+    /// Invalid state transition in the obligation state machine.
+    InvalidTransition {
+        /// Human-readable description of the invalid transition.
+        description: String,
+    },
+    /// Dialectica contract violation (exhaustive resolution, etc.).
+    ContractViolation {
+        /// Human-readable description of the contract violation.
+        description: String,
+    },
+    /// Single-ownership (no-aliasing) invariant violated.
+    AliasingViolation {
+        /// Human-readable description of the aliasing violation.
+        description: String,
+    },
+}
+
+impl std::fmt::Display for ObligationTheoryViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MarkingLeak { description } => write!(f, "Marking leak: {description}"),
+            Self::InvalidTransition { description } => {
+                write!(f, "Invalid transition: {description}")
+            }
+            Self::ContractViolation { description } => {
+                write!(f, "Contract violation: {description}")
+            }
+            Self::AliasingViolation { description } => {
+                write!(f, "Aliasing violation: {description}")
+            }
         }
     }
 }
