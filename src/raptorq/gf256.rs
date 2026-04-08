@@ -1177,7 +1177,12 @@ fn profile_pack_metadata(profile_pack: Gf256ProfilePackId) -> &'static Gf256Prof
     GF256_PROFILE_PACK_CATALOG
         .iter()
         .find(|metadata| metadata.profile_pack == profile_pack)
-        .unwrap_or(&GF256_PROFILE_PACK_CATALOG[0])
+        .unwrap_or_else(|| {
+            panic!(
+                "missing deterministic profile-pack metadata for {}",
+                profile_pack.as_str()
+            )
+        })
 }
 
 fn select_profile_pack(
@@ -5227,6 +5232,41 @@ mod tests {
             selected.rejected_candidates,
             REJECTED_PROFILE_SELECTED_SCALAR
         );
+    }
+
+    #[test]
+    fn profile_pack_catalog_covers_every_known_profile_id_exactly_once() {
+        let expected_profiles = [
+            Gf256ProfilePackId::ScalarConservativeV1,
+            Gf256ProfilePackId::X86Avx2BalancedV1,
+            Gf256ProfilePackId::Aarch64NeonBalancedV1,
+        ];
+        let observed_profiles = GF256_PROFILE_PACK_CATALOG
+            .iter()
+            .map(|metadata| metadata.profile_pack.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_profile_set = expected_profiles
+            .iter()
+            .map(|profile_pack| profile_pack.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            GF256_PROFILE_PACK_CATALOG.len(),
+            expected_profiles.len(),
+            "deterministic profile-pack catalog must contain exactly one entry per known profile id"
+        );
+        assert_eq!(
+            observed_profiles, expected_profile_set,
+            "deterministic profile-pack catalog must cover every known profile id"
+        );
+
+        for profile_pack in expected_profiles {
+            assert_eq!(
+                profile_pack_metadata(profile_pack).profile_pack,
+                profile_pack,
+                "profile-pack lookup must resolve to its exact metadata entry"
+            );
+        }
     }
 
     #[test]
