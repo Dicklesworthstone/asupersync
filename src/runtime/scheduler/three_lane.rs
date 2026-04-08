@@ -48,6 +48,7 @@
 //! the ready lane, so a worker whose ready lane is starved by cancel work
 //! will not have its ready tasks stolen.
 
+use crate::cancel::progress_certificate::{DrainPhase, ProgressCertificate};
 use crate::obligation::lyapunov::{
     LyapunovGovernor, PotentialWeights, SchedulingSuggestion, StateSnapshot,
 };
@@ -969,6 +970,11 @@ impl ThreeLaneScheduler {
                 } else {
                     None
                 },
+                drain_certificate: if enable_governor {
+                    Some(ProgressCertificate::with_defaults())
+                } else {
+                    None
+                },
                 decision_sequence: 0,
             });
         }
@@ -1492,6 +1498,13 @@ pub struct ThreeLaneWorker {
     adaptive_cancel_policy: Option<AdaptiveCancelStreakPolicy>,
     /// Spectral monitor for topology-aware early warning and overrides.
     spectral_monitor: Option<SpectralHealthMonitor>,
+    /// Martingale-based drain progress certificate.
+    ///
+    /// When the governor is active, the certificate tracks Lyapunov potential
+    /// descent during drain phases and provides statistical convergence
+    /// verdicts (Azuma–Hoeffding + Freedman bounds) with phase classification
+    /// (Warmup / RapidDrain / SlowTail / Stalled / Quiescent).
+    drain_certificate: Option<ProgressCertificate>,
     /// Monotone sequence for deterministic decision IDs and timestamps.
     decision_sequence: u64,
 }
@@ -2345,6 +2358,21 @@ impl ThreeLaneWorker {
         let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
 
         let lyapunov_suggestion = governor.suggest(&snapshot);
+
+        // Feed the drain progress certificate with the current Lyapunov
+        // potential. This enables martingale-based convergence verdicts
+        // (Azuma–Hoeffding + Freedman bounds) and drain-phase classification
+        // during cancellation drain.
+        //
+        // Note: this recomputes the potential via `compute_record()` after
+        // `suggest()` already computed it internally. The cost is trivial
+        // (4 weighted sums) compared to the lock acquisition above, and
+        // avoids duplicating `suggest()`'s decision logic here.
+        let drain_verdict = self.drain_certificate.as_mut().map(|cert| {
+            cert.observe(governor.compute_record(&snapshot).total);
+            cert.verdict()
+        });
+
         let mut spectral_report = None;
         if let Some(monitor) = self.spectral_monitor.as_mut() {
             if trapped_wait_cycle || wait_graph_nodes > 1 {
@@ -2478,6 +2506,46 @@ impl ThreeLaneWorker {
         }
         if trapped_wait_cycle {
             suggestion = SchedulingSuggestion::DrainObligations;
+        }
+
+        // Drain-certificate override: when the martingale certificate detects
+        // a stall (potential not decreasing for stall_threshold consecutive
+        // governor snapshots), escalate to drain obligations to force progress.
+        // This closes the observability loop — the certificate's statistical
+        // verdict directly actuates the scheduler's drain priority.
+        //
+        // IMPORTANT: never override a trapped-wait-cycle forced drain. The
+        // certificate's quiescence verdict (Lyapunov potential ≈ 0) does NOT
+        // mean a structural deadlock is resolved — blocked tasks may have
+        // zero potential while remaining permanently stuck.
+        if !trapped_wait_cycle {
+            if let Some(ref verdict) = drain_verdict {
+                match verdict.drain_phase {
+                    DrainPhase::Stalled
+                        if verdict.stall_detected
+                            && (suggestion == SchedulingSuggestion::NoPreference
+                                || suggestion == SchedulingSuggestion::MeetDeadlines) =>
+                    {
+                        // Stall detected: potential has not decreased for threshold
+                        // steps. Force obligation drain to break the deadlock.
+                        suggestion = SchedulingSuggestion::DrainObligations;
+                    }
+                    DrainPhase::Quiescent => {
+                        // Drain has converged to quiescence — relax back to
+                        // normal scheduling. Reset the certificate for the next
+                        // drain cycle.
+                        if let Some(cert) = self.drain_certificate.as_mut() {
+                            cert.reset();
+                        }
+                        if suggestion == SchedulingSuggestion::DrainObligations
+                            || suggestion == SchedulingSuggestion::DrainRegions
+                        {
+                            suggestion = SchedulingSuggestion::NoPreference;
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Emit simple evidence when the scheduling suggestion changes.
