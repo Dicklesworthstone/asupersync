@@ -4298,11 +4298,7 @@ impl DurableSegment {
     fn source_symbol_count(&self) -> usize {
         match &self.encoding {
             DurableSegmentEncoding::Inline { payload } => {
-                if payload.is_empty() {
-                    0
-                } else {
-                    1
-                }
+                usize::from(!payload.is_empty())
             }
             DurableSegmentEncoding::Coded { source_symbols, .. } => *source_symbols,
         }
@@ -9115,7 +9111,7 @@ mod tests {
             .expect("duplicate delivery should collapse");
         assert_eq!(
             outcome,
-            ReplicatedAppendOutcome::IdempotentNoop(first.clone())
+            ReplicatedAppendOutcome::IdempotentNoop(first)
         );
 
         capsule
@@ -9700,7 +9696,7 @@ mod tests {
         let shard = capsule
             .attach_shared_control_shard("control-shard-a", 1, 3)
             .expect("slot inside cardinality bound should succeed");
-        assert_eq!(capsule.shared_control_shard, Some(shard.clone()));
+        assert_eq!(capsule.shared_control_shard, Some(shard));
 
         let err = capsule
             .attach_shared_control_shard("control-shard-a", 3, 3)

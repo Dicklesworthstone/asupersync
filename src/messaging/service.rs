@@ -5412,7 +5412,7 @@ mod tests {
     fn reply_shape_unary_with_empty_named_schema_rejects() {
         let shape = ReplyShape::Unary {
             shape: PayloadShape::NamedSchema {
-                schema: "".to_owned(),
+                schema: String::new(),
             },
         };
         assert!(shape.validate("test").is_err());

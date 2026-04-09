@@ -1441,7 +1441,7 @@ mod tests {
         ProtocolContract::new(
             "reservation_handoff",
             SchemaVersion::new(1, 0, 1),
-            vec![caller.clone(), steward.clone()],
+            vec![caller, steward.clone()],
             GlobalSessionType::new(SessionType::send(
                 reserve,
                 SessionType::branch(
@@ -1689,7 +1689,7 @@ mod tests {
         let contract = ProtocolContract::new(
             "degenerate",
             SchemaVersion::new(0, 0, 1),
-            vec![client.clone(), server.clone()],
+            vec![client.clone(), server],
             GlobalSessionType::new(SessionType::send(
                 request.clone(),
                 SessionType::recurse_point("L", SessionType::recurse("L")),

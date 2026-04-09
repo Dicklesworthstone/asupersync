@@ -1120,7 +1120,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "user_lookup",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),
@@ -1164,13 +1164,13 @@ mod tests {
         let contract = ProtocolContract {
             name: "streaming".to_owned(),
             version: SchemaVersion::new(1, 1, 0),
-            roles: vec![producer.clone(), consumer.clone()],
+            roles: vec![producer, consumer.clone()],
             global_type: GlobalSessionType::new(SessionType::send(
                 open,
                 SessionType::recurse_point(
                     "stream_loop",
                     SessionType::choice(
-                        consumer.clone(),
+                        consumer,
                         vec![
                             SessionBranch::new(
                                 "chunk",
@@ -1253,11 +1253,11 @@ mod tests {
         let contract = ProtocolContract::new(
             "reservation_handoff",
             SchemaVersion::new(1, 0, 1),
-            vec![caller.clone(), steward.clone()],
+            vec![caller, steward.clone()],
             GlobalSessionType::new(SessionType::send(
                 reserve,
                 SessionType::branch(
-                    steward.clone(),
+                    steward,
                     vec![
                         SessionBranch::new(
                             "granted",
@@ -1287,7 +1287,7 @@ mod tests {
         let contract = ProtocolContract::new(
             "bad_loop",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::recurse("missing_loop"),
@@ -1313,7 +1313,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "bad_evidence",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),
@@ -1342,7 +1342,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "root_evidence",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),
@@ -1371,7 +1371,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "root_timeout",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),
@@ -1400,7 +1400,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "root_compensation",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),
@@ -1433,7 +1433,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "root_cutoff",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),
@@ -1464,7 +1464,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "unordered_compensation",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),
@@ -1501,7 +1501,7 @@ mod tests {
         let mut contract = ProtocolContract::new(
             "unordered_cutoff",
             SchemaVersion::new(1, 0, 0),
-            vec![client.clone(), server.clone()],
+            vec![client, server],
             GlobalSessionType::new(SessionType::send(
                 request,
                 SessionType::receive(response, SessionType::End),

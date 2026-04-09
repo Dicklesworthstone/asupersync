@@ -2264,6 +2264,7 @@ mod tests {
     use crate::Cx;
     use crate::types::CancelKind;
     use std::io::{Read, Write};
+    use std::time::Duration;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::mpsc;
@@ -2407,7 +2408,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
-        let server_payload = payload.clone();
+        let server_payload = payload;
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client");

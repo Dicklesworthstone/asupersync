@@ -706,13 +706,12 @@ mod tests {
         assert_eq!(
             append.to_string(),
             format!(
-                "append-certificate[cell={}, epoch=5:3, sequence=17]",
-                cell_id
+                "append-certificate[cell={cell_id}, epoch=5:3, sequence=17]"
             )
         );
         assert_eq!(
             fence.to_string(),
-            format!("fence-token[cell={}, epoch=5:3]", cell_id)
+            format!("fence-token[cell={cell_id}, epoch=5:3]")
         );
     }
 }

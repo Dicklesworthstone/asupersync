@@ -363,7 +363,7 @@ mod tests {
         ProtocolContract::new(
             "streaming",
             SchemaVersion::new(1, 1, 0),
-            vec![producer.clone(), consumer.clone()],
+            vec![producer, consumer.clone()],
             GlobalSessionType::new(SessionType::send(
                 open,
                 SessionType::recurse_point(
@@ -397,7 +397,7 @@ mod tests {
         ProtocolContract::new(
             "reservation_handoff",
             SchemaVersion::new(1, 0, 1),
-            vec![caller.clone(), steward.clone()],
+            vec![caller, steward.clone()],
             GlobalSessionType::new(SessionType::send(
                 reserve,
                 SessionType::branch(

@@ -2445,7 +2445,7 @@ mod tests {
         assert_eq!(permit1.committed_seq(), Some(2));
         assert_eq!(
             stream.range(1..=2).expect("range"),
-            vec![r2.clone(), r1.clone()],
+            vec![r2, r1],
             "retained storage must stay ordered by committed sequence"
         );
 

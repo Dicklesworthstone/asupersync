@@ -832,9 +832,10 @@ impl QuicH3ScenarioManifest {
         if let (Some(cancel_ts), Some(close_ts)) = (
             summary.first_cancel_ts_us,
             summary.first_close_initiated_ts_us,
-        ) && close_ts >= cancel_ts
-        {
-            summary.cancel_to_close_latency_us = Some(close_ts - cancel_ts);
+        ) {
+            if close_ts >= cancel_ts {
+                summary.cancel_to_close_latency_us = Some(close_ts - cancel_ts);
+            }
         }
 
         summary

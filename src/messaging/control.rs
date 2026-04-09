@@ -2143,7 +2143,7 @@ mod tests {
         T::Delta: std::fmt::Debug,
     {
         let delta = updated.delta(&baseline);
-        let mut applied = baseline.clone();
+        let mut applied = baseline;
         assert!(applied.apply_delta(&delta));
         assert_eq!(applied, updated);
     }
@@ -2209,7 +2209,7 @@ mod tests {
         let baseline = CursorCheckpoint::default();
 
         let mut updated = CursorCheckpoint::default();
-        updated.observe("consumer-a", CursorMark::new(10, 1_000, replica_a.clone()));
+        updated.observe("consumer-a", CursorMark::new(10, 1_000, replica_a));
         updated.observe("consumer-a", CursorMark::new(12, 1_100, replica_b.clone()));
 
         let checkpoint = updated.checkpoint("consumer-a").expect("checkpoint");
@@ -2238,7 +2238,7 @@ mod tests {
 
         let mut right = MembershipView::default();
         right.observe(
-            replica_b.clone(),
+            replica_b,
             MembershipRecord::new(1, MembershipState::Joining, 900, 50),
         );
 

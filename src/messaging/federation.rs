@@ -2641,7 +2641,7 @@ mod tests {
             FederationRole::ReplicationLink(ReplicationConfig::default()),
             FederationRole::EdgeReplayLink(EdgeReplayConfig::default()),
         ];
-        let mut names: Vec<&str> = roles.iter().map(|r| r.name()).collect();
+        let mut names: Vec<&str> = roles.iter().map(super::FederationRole::name).collect();
         let orig = names.len();
         names.sort_unstable();
         names.dedup();

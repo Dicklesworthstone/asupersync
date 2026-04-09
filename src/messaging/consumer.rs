@@ -4095,7 +4095,7 @@ mod tests {
         delegate_partition_to_holder(
             &mut cursor,
             26,
-            CursorLeaseHolder::Relay(relay_a.clone()),
+            CursorLeaseHolder::Relay(relay_a),
             obligation(187),
         );
         cursor

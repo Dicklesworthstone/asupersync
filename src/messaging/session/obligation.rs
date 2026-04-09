@@ -444,13 +444,13 @@ mod tests {
         ProtocolContract {
             name: "streaming".to_owned(),
             version: SchemaVersion::new(1, 1, 0),
-            roles: vec![producer.clone(), consumer.clone()],
+            roles: vec![producer, consumer.clone()],
             global_type: super::super::contract::GlobalSessionType::new(SessionType::send(
                 open,
                 SessionType::recurse_point(
                     "stream_loop",
                     SessionType::choice(
-                        consumer.clone(),
+                        consumer,
                         vec![
                             SessionBranch::new(
                                 "chunk",

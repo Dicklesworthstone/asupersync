@@ -963,7 +963,7 @@ mod imp {
             let n = unsafe {
                 libc::read(
                     reactor.wake_fd.as_raw_fd(),
-                    (&mut counter as *mut u64).cast::<libc::c_void>(),
+                    (&raw mut counter).cast::<libc::c_void>(),
                     std::mem::size_of::<u64>(),
                 )
             };
@@ -990,7 +990,7 @@ mod imp {
             let n = unsafe {
                 libc::read(
                     reactor.wake_fd.as_raw_fd(),
-                    (&mut counter as *mut u64).cast::<libc::c_void>(),
+                    (&raw mut counter).cast::<libc::c_void>(),
                     std::mem::size_of::<u64>(),
                 )
             };
