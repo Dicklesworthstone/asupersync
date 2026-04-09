@@ -100,17 +100,31 @@ We only use **Cargo** in this project, NEVER any other package manager.
 |-------|---------|
 | `asupersync` | Main runtime crate — scheduler, regions, channels, sync, IO, net, HTTP |
 | `asupersync-macros` | Proc macros for structured concurrency (`scope!`, `spawn!`, `join!`, `race!`) |
+| `asupersync-browser-core` | Browser Edition Rust boundary crate for wasm-facing runtime/package surfaces |
+| `asupersync-tokio-compat` | Legacy Tokio-boundary compatibility crate kept outside the core runtime feature graph |
 | `conformance` | Conformance test suite for async runtime specifications |
 | `franken_kernel` | FrankenSuite type substrate (`TraceId`, `DecisionId`, `PolicyId`, `SchemaVersion`) |
 | `franken_evidence` | Canonical `EvidenceLedger` schema for FrankenSuite decision tracing |
 | `franken_decision` | Decision Contract schema and runtime for FrankenSuite |
 | `frankenlab` | Deterministic testing harness: record, replay, and minimize concurrency bugs |
+| `drop_unwrap_finder` | Audit/refactor helper CLI for finding drop/unwrap anti-patterns in the tree |
 
 ### Feature Flags
 
 ```toml
 [features]
-default = ["test-internals"]
+default = ["test-internals", "proc-macros"]
+messaging-fabric = []          # Native FABRIC messaging lane
+wasm-browser-preview = []      # Guarded browser-targeted compilation surface
+wasm-runtime = ["wasm-browser-preview"]
+browser-io = []
+browser-trace = []
+deterministic-mode = []
+native-runtime = []
+wasm-browser-dev = ["wasm-runtime", "browser-io"]
+wasm-browser-prod = ["wasm-runtime", "browser-io"]
+wasm-browser-deterministic = ["wasm-runtime", "deterministic-mode", "browser-trace"]
+wasm-browser-minimal = ["wasm-runtime"]
 test-internals = [...]         # Internal test helpers (Cx::new(), etc.) — NOT for production
 metrics = [...]                # OpenTelemetry metrics provider
 tracing-integration = [...]    # Structured logging and spans (zero-cost when disabled)
@@ -128,7 +142,11 @@ cli = [...]                    # CLI tooling (trace inspection)
 sqlite = [...]                 # SQLite async wrapper with blocking pool
 postgres = []                  # PostgreSQL async client with wire protocol
 mysql = []                     # MySQL async client with wire protocol
+quic = []                      # Native QUIC rollout surface
+http3 = ["quic"]               # Native HTTP/3 rollout surface
 kafka = [...]                  # Kafka client integration via rdkafka
+compression = [...]            # HTTP response compression (gzip/deflate/Brotli)
+simd-intrinsics = []           # Unsafe AVX2/NEON GF(256) kernels for RaptorQ
 loom-tests = [...]             # Loom concurrency tests for scheduler verification
 ```
 
@@ -348,7 +366,7 @@ Violating this order causes deadlocks. `ShardedState` with `ContendedMutex` prov
 ```
 asupersync/
 ├── Cargo.toml                         # Workspace root
-├── src/                               # Main runtime (~377K lines, 499 files)
+├── src/                               # Main runtime crate and module tree
 │   ├── types/                         # Core types (IDs, outcomes, budgets, policies)
 │   ├── record/                        # Internal records for tasks, regions, obligations
 │   ├── runtime/                       # Scheduler and runtime state management
@@ -382,18 +400,25 @@ asupersync/
 │   ├── gen_server.rs                  # Generic server pattern
 │   ├── config.rs                      # Runtime configuration
 │   ├── error.rs                       # Error types
-│   └── ...                            # ~30 additional single-file modules
+│   └── ...                            # Additional single-file modules
 ├── asupersync-macros/                 # Proc macros (scope!, spawn!, join!, race!)
+├── asupersync-browser-core/           # Browser Edition Rust boundary crate
+├── asupersync-tokio-compat/           # Tokio-boundary compatibility adapters
+├── asupersync-wasm/                   # WASM ABI/package crate (repo-local, excluded from workspace build)
 ├── conformance/                       # Conformance test suite
+├── drop_unwrap_finder/                # Audit/refactor helper CLI
 ├── franken_kernel/                    # FrankenSuite type substrate
 ├── franken_evidence/                  # FrankenSuite evidence ledger
 ├── franken_decision/                  # FrankenSuite decision contracts
 ├── frankenlab/                        # Deterministic testing harness
+├── packages/                          # JS/TS Browser Edition packages
+├── artifacts/                         # Validation, governance, and replay artifacts
 ├── tests/                             # Integration tests
 ├── benches/                           # Performance benchmarks
 ├── examples/                          # Usage examples
 ├── docs/                              # Documentation
 ├── formal/                            # Formal specifications
+├── scripts/                           # Validation, scan, and release tooling
 └── .beads/                            # Beads issue tracking
 ```
 
@@ -435,7 +460,7 @@ asupersync/
 - **`ShardedState`** with `ContendedMutex` for independent locking across task/region/obligation tables
 - **Two-phase effects** (reserve/commit) prevent data loss on cancellation
 - **FrankenSuite integration** — evidence ledger, decision contracts, and kernel types for runtime verification
-- **Phase 0 complete, Phase 1 in progress** — dead code allowances for stubs, core types stabilizing
+- **Roadmap reality** — README roadmap currently treats Phases 0-5 as complete, with Phase 6 ongoing hardening / policy gates / adapter expansion; some audit and cleanup beads still refer to earlier phase labels for historical context
 
 ---
 
