@@ -671,8 +671,7 @@ impl NatsClient {
                     NatsMessage::Err(e) => return Err(NatsError::Server(e)),
                     NatsMessage::Ping => {
                         // Respond to PING during handshake
-                        self.stream.write_all(b"PONG\r\n").await?;
-                        self.stream.flush().await?;
+                        self.send_server_pong().await?;
                     }
                     _ => {} // Ignore other messages during handshake
                 }
@@ -715,6 +714,26 @@ impl NatsClient {
         if let Err(_err) = self.unsubscribe(cx, sid).await {
             // tracing could go here, but for now we ignore
         }
+    }
+
+    /// Write a server-required `PONG` response.
+    ///
+    /// If the client is currently considered connected, fail closed around
+    /// the write so a partial `PONG` cannot leave the connection reusable.
+    async fn send_server_pong(&mut self) -> Result<(), NatsError> {
+        let restore_connected = self.connected;
+        if restore_connected {
+            self.connected = false;
+        }
+
+        self.stream.write_all(b"PONG\r\n").await?;
+        self.stream.flush().await?;
+
+        if restore_connected {
+            self.connected = true;
+        }
+
+        Ok(())
     }
 
     fn remove_local_subscription(&self, sid: u64) {
@@ -1029,8 +1048,7 @@ impl NatsClient {
 
                 match message {
                     Some(NatsMessage::Ping) => {
-                        self.stream.write_all(b"PONG\r\n").await?;
-                        self.stream.flush().await?;
+                        self.send_server_pong().await?;
                         processed_any = true;
                     }
                     Some(NatsMessage::Msg(m)) => {
@@ -1237,8 +1255,7 @@ impl NatsClient {
                     }
                     NatsMessage::Err(e) => return Err(NatsError::Server(e)),
                     NatsMessage::Ping => {
-                        self.stream.write_all(b"PONG\r\n").await?;
-                        self.stream.flush().await?;
+                        self.send_server_pong().await?;
                     }
                     NatsMessage::Msg(m) => {
                         // Dispatch to subscription
@@ -1258,8 +1275,7 @@ impl NatsClient {
         loop {
             match self.try_parse_message()? {
                 Some(NatsMessage::Ping) => {
-                    self.stream.write_all(b"PONG\r\n").await?;
-                    self.stream.flush().await?;
+                    self.send_server_pong().await?;
                 }
                 Some(NatsMessage::Msg(m)) => {
                     self.dispatch_message(m);
@@ -1297,8 +1313,7 @@ impl NatsClient {
         loop {
             match self.try_parse_message()? {
                 Some(NatsMessage::Ping) => {
-                    self.stream.write_all(b"PONG\r\n").await?;
-                    self.stream.flush().await?;
+                    self.send_server_pong().await?;
                     processed_any = true;
                 }
                 Some(NatsMessage::Msg(m)) => {
@@ -1425,8 +1440,10 @@ impl Drop for Subscription {
 mod tests {
     use super::*;
     use crate::test_utils::{assert_completes_within, run_test_with_cx};
+    use socket2::SockRef;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
+    use std::sync::mpsc as std_mpsc;
     use std::thread;
 
     fn read_protocol_line(reader: &mut BufReader<std::net::TcpStream>) -> String {
@@ -1923,6 +1940,64 @@ mod tests {
             line.is_none(),
             "disconnected ping must not emit wire bytes, got {line:?}"
         );
+    }
+
+    #[test]
+    fn process_ping_write_failure_marks_client_disconnected() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (close_tx, close_rx) = std_mpsc::channel();
+        let (closed_tx, closed_rx) = std_mpsc::channel();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            close_rx.recv().expect("close signal");
+            SockRef::from(&stream)
+                .set_linger(Some(Duration::ZERO))
+                .expect("force reset on close");
+            drop(stream);
+            closed_tx.send(()).expect("closed ack");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+            };
+
+            client.read_buf.extend(b"PING\r\n").expect("buffer ping");
+            close_tx.send(()).expect("signal close");
+            closed_rx.recv().expect("server closed");
+            thread::sleep(Duration::from_millis(20));
+
+            let err = client
+                .process(&cx)
+                .await
+                .expect_err("PONG write must fail against reset peer");
+            assert!(
+                matches!(err, NatsError::Io(_)),
+                "expected I/O error, got {err:?}"
+            );
+            assert!(
+                !client.connected,
+                "client must remain disconnected after failed PONG write"
+            );
+
+            let follow_up = client
+                .publish(&cx, "svc.echo", b"ping")
+                .await
+                .expect_err("fail-closed client must reject follow-up publish");
+            assert!(matches!(follow_up, NatsError::NotConnected));
+        });
+
+        server.join().expect("server join");
     }
 
     #[test]
