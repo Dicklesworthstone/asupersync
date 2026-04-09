@@ -1392,15 +1392,23 @@ impl SymbolReorderer {
 
             // Either gap is too large, or buffer is full.
             // Give up waiting on missing sequence and advance.
+            // First, insert the current symbol into the buffer to ensure chronological sorting.
+            state.buffer.insert(
+                seq_unwrapped,
+                BufferedSymbol {
+                    symbol,
+                    received_at: now,
+                    path,
+                },
+            );
+
             // Deliver all buffered symbols (in sequence order) before resetting.
-            for (_, buffered) in std::mem::take(&mut state.buffer) {
+            for (seq, buffered) in std::mem::take(&mut state.buffer) {
                 ready.push(buffered.symbol);
                 self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
+                state.next_expected = seq.wrapping_add(1);
             }
-            state.next_expected = seq_unwrapped.wrapping_add(1);
             state.last_delivery = now;
-            ready.push(symbol);
-            self.in_order_deliveries.fetch_add(1, Ordering::Relaxed);
             drop(objects);
             return ReorderProcessResult::accepted(ready);
         }
