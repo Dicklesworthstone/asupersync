@@ -422,11 +422,11 @@ mod tests {
     }
 
     fn set_test_time(nanos: u64) {
-        TEST_NOW.store(nanos, Ordering::Relaxed);
+        TEST_NOW.store(nanos, Ordering::SeqCst);
     }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW.load(Ordering::Relaxed))
+        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
     }
 
     fn set_trigger_immediate_pre_phase_hook(hook: Option<Box<dyn FnMut()>>) {
