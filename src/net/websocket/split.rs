@@ -118,7 +118,7 @@ struct AcquireWritePermitFuture<'a, IO> {
     waiter_id: Option<u64>,
 }
 
-impl<'a, IO> Future for AcquireWritePermitFuture<'a, IO> {
+impl<IO> Future for AcquireWritePermitFuture<'_, IO> {
     type Output = SplitWritePermit<IO>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -157,7 +157,7 @@ impl<'a, IO> Future for AcquireWritePermitFuture<'a, IO> {
     }
 }
 
-impl<'a, IO> Drop for AcquireWritePermitFuture<'a, IO> {
+impl<IO> Drop for AcquireWritePermitFuture<'_, IO> {
     fn drop(&mut self) {
         if let Some(id) = self.waiter_id {
             let next_waker = {

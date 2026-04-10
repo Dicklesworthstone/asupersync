@@ -49,11 +49,18 @@ struct JoinInput {
 
 impl Parse for JoinInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // Try to detect if the first element is a cx followed by semicolon
-        let cx = if input.peek2(Token![;]) {
-            let cx_expr: Expr = input.parse()?;
-            let _semi: Token![;] = input.parse()?;
-            Some(cx_expr)
+        // Try to detect if the first element is a cx followed by semicolon.
+        // We use a fork because `cx` could be a complex expression (e.g. `&my.cx`),
+        // which `peek2` wouldn't correctly identify.
+        let fork = input.fork();
+        let cx = if let Ok(cx_expr) = fork.parse::<Expr>() {
+            if fork.peek(Token![;]) {
+                let _ = input.parse::<Expr>()?;
+                let _semi: Token![;] = input.parse()?;
+                Some(cx_expr)
+            } else {
+                None
+            }
         } else {
             None
         };

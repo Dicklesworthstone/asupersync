@@ -63,12 +63,10 @@ pub async fn budget_sleep(cx: &Cx, duration: Duration, now: Time) -> Result<(), 
     crate::time::sleep(now, effective_duration).await;
 
     // Check if we were cut short by budget
-    if let Some(rem) = BudgetTimeExt::remaining_duration(&budget, now) {
-        if rem < duration {
-            // We slept for 'remaining', which means deadline is hit.
-            let deadline = budget.deadline.unwrap_or(now);
-            return Err(Elapsed::new(deadline));
-        }
+    if effective_duration < duration {
+        // We slept for 'remaining', which means deadline is hit.
+        let deadline = budget.deadline.unwrap_or(now);
+        return Err(Elapsed::new(deadline));
     }
 
     Ok(())

@@ -2007,11 +2007,9 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
     if c == Gf256::ONE {
         return;
     }
-    #[allow(unused_variables)]
     let dispatch = dispatch();
     if !should_use_dual_mul_fused(dst_a.len(), dst_b.len()) {
-        (dispatch.mul_slice)(dst_a, c);
-        (dispatch.mul_slice)(dst_b, c);
+        mul_slices2_sequential_with_shared_setup(dst_a, dst_b, c, dispatch);
         return;
     }
 
@@ -2050,6 +2048,48 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
 
     let nib = NibbleTables::for_scalar(c);
     mul_with_table_wide2(dst_a, dst_b, &nib, table);
+}
+
+#[inline]
+#[allow(unused_variables)]
+fn mul_slices2_sequential_with_shared_setup(
+    dst_a: &mut [u8],
+    dst_b: &mut [u8],
+    c: Gf256,
+    dispatch: &Gf256Dispatch,
+) {
+    let table = mul_table_for(c);
+    #[cfg(feature = "simd-intrinsics")]
+    let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
+        // SAFETY: `dispatch` only carries X86Avx2 when runtime feature
+        // detection succeeds; both helpers stay within the provided slices.
+        unsafe {
+            gf256_mul_slice_x86_avx2_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
+            gf256_mul_slice_x86_avx2_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
+        }
+        return;
+    }
+
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+    if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
+        // SAFETY: `dispatch` only carries Aarch64Neon when runtime feature
+        // detection succeeds; both helpers stay within the provided slices.
+        unsafe {
+            gf256_mul_slice_aarch64_neon_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
+            gf256_mul_slice_aarch64_neon_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
+        }
+        return;
+    }
+
+    let nib = NibbleTables::for_scalar(c);
+    mul_with_table_wide(dst_a, &nib, table);
+    mul_with_table_wide(dst_b, &nib, table);
 }
 
 fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
@@ -3866,6 +3906,34 @@ mod tests {
         mul_with_table_wide2(&mut actual_a, &mut actual_b, &nib, table);
         mul_with_table_wide(&mut expected_a, &nib, table);
         mul_with_table_wide(&mut expected_b, &nib, table);
+
+        assert_eq!(actual_a, expected_a, "{context}");
+        assert_eq!(actual_b, expected_b, "{context}");
+    }
+
+    #[test]
+    fn mul_slices2_sequential_shared_setup_matches_two_independent_mul_slice_calls() {
+        const LEN_A: usize = 4127;
+        const LEN_B: usize = 1089;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "mul_slices2_sequential_shared_setup_matches_two_independent_mul_slice_calls",
+            replay_ref,
+        );
+        let c = Gf256(113);
+
+        let mut actual_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(7)) as u8).collect();
+        let mut actual_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(11)) as u8).collect();
+        let mut expected_a = actual_a.clone();
+        let mut expected_b = actual_b.clone();
+        let dispatch = dispatch();
+
+        mul_slices2_sequential_with_shared_setup(&mut actual_a, &mut actual_b, c, dispatch);
+        (dispatch.mul_slice)(&mut expected_a, c);
+        (dispatch.mul_slice)(&mut expected_b, c);
 
         assert_eq!(actual_a, expected_a, "{context}");
         assert_eq!(actual_b, expected_b, "{context}");

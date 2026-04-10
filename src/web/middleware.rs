@@ -169,7 +169,7 @@ impl<H: Handler> CorsMiddleware<H> {
         if !self.policy.expose_headers.is_empty() {
             resp.set_header(
                 "access-control-expose-headers",
-                &self.policy.expose_headers.join(", "),
+                self.policy.expose_headers.join(", "),
             );
         }
         resp

@@ -392,16 +392,15 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
         R: 'a,
         S: 'a,
     {
-        let transport = self
-            .transport
-            .take()
-            .expect("send_async called on non-transport-backed session channel");
-
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
         async move {
+            let Some(transport) = self.transport.take() else {
+                return Err(SessionError::NoTransport);
+            };
+
             let boxed = Box::new(value) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, boxed).await {
                 return Err(map_transport_send_error(&error));
@@ -526,16 +525,15 @@ impl<R, A, B> Chan<R, Select<A, B>> {
         A: 'a,
         B: 'a,
     {
-        let transport = self
-            .transport
-            .take()
-            .expect("select_left_async called on non-transport-backed session channel");
-
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
         async move {
+            let Some(transport) = self.transport.take() else {
+                return Err(SessionError::NoTransport);
+            };
+
             let branch = Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, branch).await {
                 return Err(map_transport_send_error(&error));
@@ -562,16 +560,15 @@ impl<R, A, B> Chan<R, Select<A, B>> {
         A: 'a,
         B: 'a,
     {
-        let transport = self
-            .transport
-            .take()
-            .expect("select_right_async called on non-transport-backed session channel");
-
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
         async move {
+            let Some(transport) = self.transport.take() else {
+                return Err(SessionError::NoTransport);
+            };
+
             let branch = Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, branch).await {
                 return Err(map_transport_send_error(&error));
@@ -609,16 +606,16 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
         A: 'a,
         B: 'a,
     {
-        let mut transport = self
-            .transport
-            .take()
-            .expect("offer_async called on non-transport-backed session channel");
-
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
         async move {
+            let mut transport = match self.transport.take() {
+                Some(t) => t,
+                None => return Err(SessionError::NoTransport),
+            };
+
             let boxed = match transport.rx.recv(cx).await {
                 Ok(boxed) => boxed,
                 Err(error) => {
@@ -1240,6 +1237,8 @@ pub enum SessionError {
         /// What was actually received.
         actual: &'static str,
     },
+    /// Async operation called on a pure typestate session channel.
+    NoTransport,
 }
 
 impl std::fmt::Display for SessionError {
@@ -1250,6 +1249,7 @@ impl std::fmt::Display for SessionError {
             Self::ProtocolViolation { expected, actual } => {
                 write!(f, "protocol violation: expected {expected}, got {actual}")
             }
+            Self::NoTransport => write!(f, "async operation on non-transport-backed channel"),
         }
     }
 }

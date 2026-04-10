@@ -465,9 +465,8 @@ fn find_blank_line(data: &[u8], pos: usize) -> Option<(usize, usize)> {
     let lf_pos = search.windows(2).position(|w| w == b"\n\n");
     match (crlf_pos, lf_pos) {
         (Some(c), Some(l)) if c <= l => Some((pos + c, pos + c + 4)),
-        (Some(_), Some(l)) => Some((pos + l, pos + l + 2)),
         (Some(c), None) => Some((pos + c, pos + c + 4)),
-        (None, Some(l)) => Some((pos + l, pos + l + 2)),
+        (Some(_) | None, Some(l)) => Some((pos + l, pos + l + 2)),
         (None, None) => None,
     }
 }

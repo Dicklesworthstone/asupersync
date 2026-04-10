@@ -367,21 +367,15 @@ impl Reactor for EpollReactor {
                     drop(state);
                     Ok(())
                 }
-                Some(libc::EBADF) => {
+                Some(libc::EBADF) if unsafe { fcntl(info.raw_fd, F_GETFD) } == -1 => {
                     // Determine whether the target fd itself is valid so EBADF can be
                     // interpreted correctly (target closed vs reactor poller invalid).
                     // Evaluated AFTER the delete attempt to prevent TOCTOU race.
-                    let fd_still_valid = unsafe { fcntl(info.raw_fd, F_GETFD) } != -1;
-                    if !fd_still_valid {
-                        if let Some(info) = state.tokens.remove(&token) {
-                            state.fds.remove(&info.raw_fd);
-                        }
-                        drop(state);
-                        Ok(())
-                    } else {
-                        drop(state);
-                        Err(err)
+                    if let Some(info) = state.tokens.remove(&token) {
+                        state.fds.remove(&info.raw_fd);
                     }
+                    drop(state);
+                    Ok(())
                 }
                 _ => {
                     drop(state);
