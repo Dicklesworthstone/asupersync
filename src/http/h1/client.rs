@@ -955,8 +955,24 @@ impl<T> ClientIncomingBody<T> {
                     let line = &self.buffer.as_ref()[..line_end];
                     let line_str =
                         std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
-                    let size_part = line_str.split(';').next().unwrap_or("").trim();
+                    // Split on ';' to separate chunk-size from chunk-ext.
+                    // Do NOT trim — chunk-size = 1*HEXDIG with no leading/trailing
+                    // whitespace. Trimming would mask differences from stricter
+                    // proxies (request smuggling vector). Must match codec.rs
+                    // parse_chunk_size_line() behavior.
+                    let size_part = line_str.split(';').next().unwrap_or("");
                     if size_part.is_empty() {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
+                    if size_part
+                        .as_bytes()
+                        .first()
+                        .is_some_and(u8::is_ascii_whitespace)
+                        || size_part
+                            .as_bytes()
+                            .last()
+                            .is_some_and(u8::is_ascii_whitespace)
+                    {
                         return Err(HttpError::BadChunkedEncoding);
                     }
 

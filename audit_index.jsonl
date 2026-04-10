@@ -2833,3 +2833,13 @@
 {"file":"src/fs/buf_writer.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"into_inner() documented data loss matches std semantics, commit() properly flushes"}
 {"file":"src/fs/buf_reader.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Buffered read correct"}
 {"file":"src/fs/read_dir.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Directory iteration state machine correct"}
+{"file":"src/process.rs","lines":2746,"batch":"agfwj4.4","date":"2026-04-10","agent":"CyanSnow","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes random audit: spawn-time stdio setup failures killed the child but did not reap it; added cleanup_child_after_spawn_setup_failure() and a regression test to prevent zombie leakage on Unix"}
+{"file":"src/net/sys/windows.rs","lines":177,"batch":"agfwj4.4","date":"2026-04-10","agent":"CyanSnow","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes random audit: named-pipe client path validation/open surface inspected in context; no concrete correctness bug found in this bounded pass"}
+{"file":"src/net/quic/error.rs","lines":236,"batch":"agfwj4.4","date":"2026-04-10","agent":"CyanSnow","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes random audit: Quinn-wrapper error surface inspected, but current net::quic exports the native inline alias in src/net/mod.rs rather than wiring this wrapper into the live build graph"}
+{"file":"src/http/h1/client.rs","lines":1647,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"Chunked encoding size parser used .trim() unlike strict codec (request smuggling vector). Fixed to match codec.rs parse_chunk_size_line() whitespace rejection."}
+{"file":"src/http/h1/stream.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Stream handling correct"}
+{"file":"src/http/h1/types.rs","lines":1793,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Type definitions correct, Content-Length+Transfer-Encoding conflict properly rejected"}
+{"file": "src/net/websocket/split.rs", "status": "verified"}
+{"file": "src/runtime/reactor/epoll.rs", "status": "verified"}
+{"file": "src/web/middleware.rs", "status": "verified"}
+{"file": "src/web/multipart.rs", "status": "verified"}
