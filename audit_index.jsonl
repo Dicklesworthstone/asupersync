@@ -2897,3 +2897,8 @@
 {"file":"src/cli/args.rs","lines":385,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"All parse functions return Result, no panic paths"}
 {"file":"src/cli/exit.rs","lines":254,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"sanitize() bounds exit codes to [0-125], invalid→INTERNAL_ERROR(3)"}
 {"file":"src/cli/error.rs","lines":516,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ExitCode::sanitize called before storing, proper Result propagation"}
+{"file":"src/service/service.rs","lines":1646,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Service composition type-safe, no runtime stack overflow from layering"}
+{"file":"src/service/layer.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Stack<Inner,Outer> depth bounded by compile-time types"}
+{"file":"src/combinator/select.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Loser not auto-drained by design (documented), Scope::race handles it structurally"}
+{"file":"src/combinator/first_ok.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cancellation stops chain, errors collected so far returned, semantics match docs"}
+{"file":"src/combinator/map_reduce.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Partial results preserved on cancel (documented), reduce on non-empty successes correct"}
