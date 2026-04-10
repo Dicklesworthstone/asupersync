@@ -173,9 +173,7 @@ impl SymbolAssigner {
 
                 if candidate_projected_total < best_projected_total
                     || (candidate_projected_total == best_projected_total
-                        && (assigned_counts[candidate_idx] < assigned_counts[best_idx]
-                            || (assigned_counts[candidate_idx] == assigned_counts[best_idx]
-                                && candidate_idx < best_idx)))
+                        && assigned_counts[candidate_idx] < assigned_counts[best_idx])
                 {
                     best_idx = candidate_idx;
                     best_projected_total = candidate_projected_total;
