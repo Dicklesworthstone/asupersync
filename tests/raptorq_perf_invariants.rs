@@ -4696,6 +4696,41 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 "track H status_reason must say Track-G is the sole remaining blocker"
             );
         }
+        if track_code == "E" {
+            let status_reason = track["status_reason"]
+                .as_str()
+                .expect("track E must include status_reason");
+            assert!(
+                status_reason.contains("asupersync-36m6p"),
+                "track E status_reason must still name the active E5 leaf"
+            );
+            assert!(
+                status_reason.contains("raptorq_track_e_gf256_multiscenario_refresh_v4.json"),
+                "track E status_reason must point at the current broader v4 blocker packet"
+            );
+
+            let evidence_refs = track["evidence_refs"]
+                .as_array()
+                .expect("track E must include evidence_refs")
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("track E evidence_refs entries must be strings")
+                        .to_string()
+                })
+                .collect::<BTreeSet<_>>();
+            for required in [
+                "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+                "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+                "artifacts/raptorq_optimization_decision_records_v1.json",
+            ] {
+                assert!(
+                    evidence_refs.contains(required),
+                    "track E evidence_refs must include {required}"
+                );
+            }
+        }
         assert!(
             !track["closure_dependency_path"]
                 .as_str()
@@ -5125,6 +5160,8 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "artifacts/raptorq_controlled_rollout_policy_v1.json",
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
         "artifacts/raptorq_replay_catalog_v1.json",
+        "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
         "follow_up_ownership",
         "upstream_active_leaf_bead_ids",
         "track_signoff_owner",

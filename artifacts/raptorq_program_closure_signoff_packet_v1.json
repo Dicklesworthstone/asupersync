@@ -103,10 +103,11 @@
       "track_bead_id": "asupersync-2ncba",
       "required_status": "closed",
       "current_status": "in_progress",
-      "status_reason": "Track-E remains the unresolved upstream convergence lane; H2 closure consumes it only through the still-open Track-G governance path, with E5 as the active closure-critical leaf.",
+      "status_reason": "Track-E remains the unresolved upstream convergence lane; H2 closure consumes it only through the still-open Track-G governance path, with asupersync-36m6p as the active E5 closure-critical leaf and artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json recording the current broader mixed-signal blocker state.",
       "closure_dependency_path": "via asupersync-2cyx5",
       "evidence_refs": [
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
         "artifacts/raptorq_optimization_decision_records_v1.json",
         "tests/ci_regression_gates.rs"
       ]

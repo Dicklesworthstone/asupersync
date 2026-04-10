@@ -73,10 +73,17 @@ The packet includes an explicit Track D/E/F/G/H completion matrix in
 Current state snapshot in the artifact:
 
 1. Track D (`asupersync-np1co`): `closed`
-2. Track E (`asupersync-2ncba`): `in_progress` (the unresolved upstream lane, consumed via Track G; active leaf: `asupersync-36m6p`)
+2. Track E (`asupersync-2ncba`): `in_progress` (the unresolved upstream lane, consumed via Track G; active leaf: `asupersync-36m6p`; current broader blocker packet: `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`)
 3. Track F (`asupersync-mg1qh`): `closed`
 4. Track G (`asupersync-2cyx5`): `in_progress` (the sole remaining direct H2 blocker)
 5. Track H (`asupersync-p8o9m`): `closed`
+
+The Track-E entry's evidence refs intentionally include both
+`artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` and
+`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json` so the
+narrowed guardrail and the current broader mixed-signal blocker state are both
+machine-linked in the H2 packet instead of being implied only through the
+optimization decision record summary.
 
 ## Track-G Handoff Packet Fields
 
