@@ -66,6 +66,8 @@ pub enum JsError {
     },
     /// Message not acknowledged.
     NotAcked,
+    /// Message was already acknowledged, nacked, or terminated.
+    AlreadyAcknowledged,
     /// Invalid configuration.
     InvalidConfig(String),
     /// Parse error in API response.
@@ -84,6 +86,9 @@ impl fmt::Display for JsError {
                 write!(f, "JetStream consumer not found: {stream}/{consumer}")
             }
             Self::NotAcked => write!(f, "JetStream message not acknowledged"),
+            Self::AlreadyAcknowledged => {
+                write!(f, "JetStream message already acknowledged/nacked/terminated")
+            }
             Self::InvalidConfig(msg) => write!(f, "JetStream invalid config: {msg}"),
             Self::ParseError(msg) => write!(f, "JetStream parse error: {msg}"),
         }
@@ -1053,20 +1058,30 @@ impl Consumer {
 
 impl JsMessage {
     /// Acknowledge the message (marks as processed).
+    ///
+    /// Returns `Err(JsError::AlreadyAcknowledged)` if the message was
+    /// previously acknowledged, nacked, or terminated.
     pub async fn ack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        if self.acked.swap(true, Ordering::AcqRel) {
+            return Err(JsError::AlreadyAcknowledged);
+        }
 
         client.publish(cx, &self.reply_subject, b"+ACK").await?;
-        self.acked.store(true, Ordering::Release);
         Ok(())
     }
 
     /// Negative acknowledge (request redelivery).
+    ///
+    /// Returns `Err(JsError::AlreadyAcknowledged)` if the message was
+    /// previously acknowledged, nacked, or terminated.
     pub async fn nack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        if self.acked.swap(true, Ordering::AcqRel) {
+            return Err(JsError::AlreadyAcknowledged);
+        }
 
         client.publish(cx, &self.reply_subject, b"-NAK").await?;
-        self.acked.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -1079,11 +1094,16 @@ impl JsMessage {
     }
 
     /// Terminate processing (do not redeliver).
+    ///
+    /// Returns `Err(JsError::AlreadyAcknowledged)` if the message was
+    /// previously acknowledged, nacked, or terminated.
     pub async fn term(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        if self.acked.swap(true, Ordering::AcqRel) {
+            return Err(JsError::AlreadyAcknowledged);
+        }
 
         client.publish(cx, &self.reply_subject, b"+TERM").await?;
-        self.acked.store(true, Ordering::Release);
         Ok(())
     }
 }
