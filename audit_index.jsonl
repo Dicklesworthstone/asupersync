@@ -2780,3 +2780,6 @@
 {"file":"src/runtime/reactor/epoll.rs","lines":1373,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TOCTOU deregister fix applied (f21584b1), mutex serializes register/modify/deregister"}
 {"file":"src/runtime/io_driver.rs","lines":1570,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Split-lock with generation counter prevents stale delivery, is_polling CAS serializes poll"}
 {"file":"src/runtime/reactor/token.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MAX_GENERATION slots permanently retired (f21584b1 fix), ABA prevention correct"}
+{"file":"src/config.rs","lines":1564,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"All zero values normalized (.max(1)), finite checks on floats, validation enforced"}
+{"file":"src/app.rs","lines":2374,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Builder pattern always calls normalize() before runtime creation"}
+{"file":"src/runtime/builder.rs","lines":2711,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Env var parsing returns Result, poll_budget guarded with .max(1), no partial construction"}
