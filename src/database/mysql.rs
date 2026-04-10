@@ -274,6 +274,10 @@ const MAX_PACKET_SIZE: u32 = 16 * 1024 * 1024 - 1; // 16_777_215
 /// Default maximum number of rows returned from a single result set.
 /// Prevents unbounded memory growth from runaway SELECTs.
 const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+/// Guard against corrupted or malicious servers sending enormous column counts.
+const MAX_COLUMN_COUNT: u64 = 16_384;
+/// Practical limit for reassembled multi-packet payloads.
+const MAX_REASSEMBLED_PACKET_SIZE: usize = 64 * 1024 * 1024;
 
 /// MySQL column types for result set parsing.
 #[allow(dead_code, missing_docs)]
@@ -1553,9 +1557,6 @@ impl MySqlConnection {
     ) -> Result<Vec<MySqlRow>, MySqlError> {
         let mut reader = PacketReader::new(first_packet);
         let column_count_raw = reader.read_lenenc_int()?;
-        // Guard against corrupted/malicious servers sending enormous column counts.
-        // MySQL practical limit is 4096 columns; we use a generous cap.
-        const MAX_COLUMN_COUNT: u64 = 16_384;
         if column_count_raw > MAX_COLUMN_COUNT {
             return Err(MySqlError::Protocol(format!(
                 "column count {column_count_raw} exceeds maximum {MAX_COLUMN_COUNT}"
@@ -1655,36 +1656,47 @@ impl MySqlConnection {
                     // ERR packet
                     return Err(Self::parse_error(&data));
                 }
-                _ => match Self::parse_data_row_or_terminator(&data, &columns, deprecate_eof)? {
-                    Some(values) => {
-                        if rows.len() >= max_rows {
-                            // The server is still sending row packets that we
-                            // cannot drain synchronously. Mark the connection
-                            // as closed to prevent protocol desync on reuse.
-                            self.inner.closed = true;
-                            return Err(MySqlError::Protocol(format!(
-                                "result set exceeds maximum row limit ({max_rows})"
-                            )));
-                        }
-                        rows.push(MySqlRow {
-                            columns: Arc::clone(&columns),
-                            column_indices: Arc::clone(&indices),
-                            values,
-                        });
-                    }
-                    None => {
-                        self.inner.status_flags = if Self::is_eof_packet(&data) {
-                            Self::parse_eof_packet_status_flags(&data)?
-                        } else {
-                            Self::parse_ok_packet(&data)?.status_flags
-                        };
+                _ => {
+                    if let Some(values) =
+                        Self::parse_data_row_or_terminator(&data, &columns, deprecate_eof)?
+                    {
+                        self.push_result_row(&mut rows, &columns, &indices, values, max_rows)?;
+                    } else {
+                        self.inner.status_flags =
+                            Self::parse_result_set_terminator_status_flags(&data)?;
                         break;
                     }
-                },
+                }
             }
         }
 
         Ok(rows)
+    }
+
+    fn push_result_row(
+        &mut self,
+        rows: &mut Vec<MySqlRow>,
+        columns: &Arc<Vec<MySqlColumn>>,
+        indices: &Arc<BTreeMap<String, usize>>,
+        values: Vec<MySqlValue>,
+        max_rows: usize,
+    ) -> Result<(), MySqlError> {
+        if rows.len() >= max_rows {
+            // The server is still sending row packets that we cannot drain
+            // synchronously. Mark the connection as closed to prevent
+            // protocol desync on reuse.
+            self.inner.closed = true;
+            return Err(MySqlError::Protocol(format!(
+                "result set exceeds maximum row limit ({max_rows})"
+            )));
+        }
+
+        rows.push(MySqlRow {
+            columns: Arc::clone(columns),
+            column_indices: Arc::clone(indices),
+            values,
+        });
+        Ok(())
     }
 
     /// Parse a text protocol row.
@@ -1721,9 +1733,8 @@ impl MySqlConnection {
     }
 
     fn parse_ok_packet(data: &[u8]) -> Result<OkPacket, MySqlError> {
-        match data.first() {
-            Some(0x00 | 0xFE) => {}
-            _ => return Err(MySqlError::Protocol("not an OK packet".to_string())),
+        if data.first() != Some(&0x00) {
+            return Err(MySqlError::Protocol("not an OK packet".to_string()));
         }
 
         let mut reader = PacketReader::new(&data[1..]);
@@ -1745,6 +1756,31 @@ impl MySqlConnection {
 
         let mut reader = PacketReader::new(&data[1..]);
         let _warning_count = reader.read_u16_le()?;
+        reader.read_u16_le()
+    }
+
+    fn parse_result_set_terminator_status_flags(data: &[u8]) -> Result<u16, MySqlError> {
+        if Self::is_eof_packet(data) {
+            return Self::parse_eof_packet_status_flags(data);
+        }
+
+        match data.first() {
+            Some(0x00 | 0xFE) => Self::parse_ok_packet_like_status_flags(data),
+            _ => Err(MySqlError::Protocol(
+                "not a result-set terminator packet".to_string(),
+            )),
+        }
+    }
+
+    fn parse_ok_packet_like_status_flags(data: &[u8]) -> Result<u16, MySqlError> {
+        match data.first() {
+            Some(0x00 | 0xFE) => {}
+            _ => return Err(MySqlError::Protocol("not an OK-like packet".to_string())),
+        }
+
+        let mut reader = PacketReader::new(&data[1..]);
+        let _affected_rows = reader.read_lenenc_int()?;
+        let _last_insert_id = reader.read_lenenc_int()?;
         reader.read_u16_le()
     }
 
@@ -2163,8 +2199,6 @@ impl MySqlConnection {
         let mut expected_seq = self.inner.sequence;
         let mut last_seq;
         let mut data = Vec::new();
-        // Practical limit for reassembled packets (DoS mitigation).
-        const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
 
         loop {
             let mut header = [0u8; 4];
@@ -2176,9 +2210,9 @@ impl MySqlConnection {
             if len > 0 {
                 let start = data.len();
                 let new_len = start.saturating_add(len as usize);
-                if new_len > MAX_PAYLOAD_SIZE {
+                if new_len > MAX_REASSEMBLED_PACKET_SIZE {
                     return Err(MySqlError::Protocol(format!(
-                        "packet payload {new_len} exceeds maximum allowed {MAX_PAYLOAD_SIZE}"
+                        "packet payload {new_len} exceeds maximum allowed {MAX_REASSEMBLED_PACKET_SIZE}"
                     )));
                 }
                 data.resize(new_len, 0);
@@ -2401,6 +2435,18 @@ mod tests {
         buf.write_byte(0xFE);
         buf.buf.extend_from_slice(&0u16.to_le_bytes());
         buf.buf.extend_from_slice(&status_flags.to_le_bytes());
+        buf.buf
+    }
+
+    fn deprecate_eof_ok_packet_payload(status_flags: u16, info: &[u8]) -> Vec<u8> {
+        let mut buf = PacketBuffer::new();
+        buf.write_byte(0xFE);
+        buf.write_lenenc_int(0);
+        buf.write_lenenc_int(0);
+        buf.buf.extend_from_slice(&status_flags.to_le_bytes());
+        buf.buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.write_lenenc_int(info.len() as u64);
+        buf.write_bytes(info);
         buf.buf
     }
 
@@ -3235,6 +3281,81 @@ mod tests {
         assert!(
             conn.in_transaction(),
             "final result-set terminator must refresh transaction state"
+        );
+    }
+
+    #[test]
+    fn query_deprecate_eof_ok_terminator_updates_in_transaction_status_flag() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read query header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream.read_exact(&mut payload).expect("read query payload");
+            assert_eq!(payload[0], command::COM_QUERY);
+
+            let responses = [
+                vec![0x01],
+                column_definition_payload("value"),
+                deprecate_eof_ok_packet_payload(SERVER_STATUS_IN_TRANS, b"done"),
+            ];
+
+            for (sequence, response) in responses.into_iter().enumerate() {
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence((sequence + 1) as u8);
+                packet.buf = response;
+                let packet = packet.build_packet();
+                stream
+                    .write_all(&packet.bytes)
+                    .expect("write result-set packet");
+            }
+            stream.flush().expect("flush result-set packets");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: capability::CLIENT_DEPRECATE_EOF,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.query(&cx, "SELECT value FROM test"));
+        match outcome {
+            Outcome::Ok(rows) => assert!(rows.is_empty(), "expected empty result set"),
+            other => panic!("expected empty result set success, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.in_transaction(),
+            "deprecate-EOF OK terminator must refresh transaction state"
         );
     }
 
