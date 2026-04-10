@@ -435,6 +435,13 @@ impl<T> Receiver<T> {
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
+        let current = self.inner.current_version();
+        if current != self.seen_version {
+            self.seen_version = current;
+            cx.trace("watch::changed received update");
+            return Poll::Ready(Ok(()));
+        }
+
         if self.inner.is_sender_dropped() {
             let current = self.inner.current_version();
             if current != self.seen_version {
@@ -443,13 +450,6 @@ impl<T> Receiver<T> {
             }
             cx.trace("watch::changed sender dropped");
             return Poll::Ready(Err(RecvError::Closed));
-        }
-
-        let current = self.inner.current_version();
-        if current != self.seen_version {
-            self.seen_version = current;
-            cx.trace("watch::changed received update");
-            return Poll::Ready(Ok(()));
         }
 
         match self.waiter.as_ref() {
@@ -478,20 +478,26 @@ impl<T> Receiver<T> {
             }
         }
 
-        let current = self.inner.current_version();
-        if current != self.seen_version {
-            self.seen_version = current;
-            cx.trace("watch::changed received update");
+        // We must check ONE MORE TIME after registering the waker to avoid race conditions
+        // where a value was sent between our initial check and adding ourselves to the wait queue.
+        let current_after_register = self.inner.current_version();
+        if current_after_register != self.seen_version {
+            self.seen_version = current_after_register;
+            cx.trace("watch::changed received update after register");
+            
+            // Fast path: we registered, but actually the value arrived. 
+            // We should mark ourselves as no longer waiting so our drop doesn't take the lock.
+            if let Some(w) = self.waiter.as_ref() {
+                w.store(false, Ordering::Release);
+            }
             return Poll::Ready(Ok(()));
         }
-
+        
         if self.inner.is_sender_dropped() {
-            let current = self.inner.current_version();
-            if current != self.seen_version {
-                self.seen_version = current;
-                return Poll::Ready(Ok(()));
+            // Also fast path for drop
+            if let Some(w) = self.waiter.as_ref() {
+                w.store(false, Ordering::Release);
             }
-            cx.trace("watch::changed sender dropped");
             return Poll::Ready(Err(RecvError::Closed));
         }
 
@@ -612,6 +618,8 @@ impl<T> Drop for ChangedFuture<'_, '_, T> {
     fn drop(&mut self) {
         if let Some(waiter) = self.receiver.waiter.as_ref() {
             if waiter.load(Ordering::Acquire) {
+                // Clear the flag so subsequent `changed()` calls or `drop`s don't re-lock unnecessarily.
+                waiter.store(false, Ordering::Release);
                 let mut waiters = self.receiver.inner.waiters.lock();
                 waiters.retain(|entry| {
                     !Arc::ptr_eq(&entry.queued, waiter) && Arc::strong_count(&entry.queued) > 1

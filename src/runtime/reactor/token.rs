@@ -305,21 +305,40 @@ impl TokenSlab {
             // Increment generation to invalidate stale tokens.
             let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
 
-            // Take the waker and convert to vacant.
-            let old_entry = std::mem::replace(
-                &mut self.entries[index],
-                Entry::Vacant {
-                    next_free: self.free_head,
-                    generation: new_generation,
-                },
-            );
+            if current_generation == SlabToken::MAX_GENERATION {
+                // Generation overflow: mark the slot permanently unusable
+                // by not adding it back to the free list.
+                let old_entry = std::mem::replace(
+                    &mut self.entries[index],
+                    Entry::Vacant {
+                        next_free: FREE_LIST_END,
+                        generation: new_generation,
+                    },
+                );
 
-            self.free_head = index as u32;
-            self.len -= 1;
+                self.len -= 1;
 
-            match old_entry {
-                Entry::Occupied { waker, .. } => Some(waker),
-                Entry::Vacant { .. } => unreachable!(),
+                match old_entry {
+                    Entry::Occupied { waker, .. } => Some(waker),
+                    Entry::Vacant { .. } => unreachable!(),
+                }
+            } else {
+                // Take the waker and convert to vacant.
+                let old_entry = std::mem::replace(
+                    &mut self.entries[index],
+                    Entry::Vacant {
+                        next_free: self.free_head,
+                        generation: new_generation,
+                    },
+                );
+
+                self.free_head = index as u32;
+                self.len -= 1;
+
+                match old_entry {
+                    Entry::Occupied { waker, .. } => Some(waker),
+                    Entry::Vacant { .. } => unreachable!(),
+                }
             }
         } else {
             None
@@ -354,13 +373,20 @@ impl TokenSlab {
     pub fn clear(&mut self) {
         self.free_head = FREE_LIST_END;
         for index in (0..self.entries.len()).rev() {
-            let generation =
-                self.entries[index].generation().wrapping_add(1) & SlabToken::MAX_GENERATION;
-            self.entries[index] = Entry::Vacant {
-                next_free: self.free_head,
-                generation,
-            };
-            self.free_head = index as u32;
+            let current_generation = self.entries[index].generation();
+            let generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
+            if current_generation == SlabToken::MAX_GENERATION {
+                self.entries[index] = Entry::Vacant {
+                    next_free: FREE_LIST_END,
+                    generation,
+                };
+            } else {
+                self.entries[index] = Entry::Vacant {
+                    next_free: self.free_head,
+                    generation,
+                };
+                self.free_head = index as u32;
+            }
         }
         self.len = 0;
     }
@@ -372,19 +398,32 @@ impl TokenSlab {
     where
         F: FnMut(SlabToken, &Waker) -> bool,
     {
-        for (index, entry) in self.entries.iter_mut().enumerate() {
-            if let Entry::Occupied { waker, generation } = entry {
+        for index in 0..self.entries.len() {
+            let mut remove = false;
+            let current_generation = self.entries[index].generation();
+            
+            if let Entry::Occupied { waker, generation } = &self.entries[index] {
                 let token = SlabToken::new(index as u32, *generation);
                 if !f(token, waker) {
-                    // Convert to vacant.
-                    let new_generation = generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
-                    *entry = Entry::Vacant {
+                    remove = true;
+                }
+            }
+            
+            if remove {
+                let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
+                if current_generation == SlabToken::MAX_GENERATION {
+                    self.entries[index] = Entry::Vacant {
+                        next_free: FREE_LIST_END,
+                        generation: new_generation,
+                    };
+                } else {
+                    self.entries[index] = Entry::Vacant {
                         next_free: self.free_head,
                         generation: new_generation,
                     };
                     self.free_head = index as u32;
-                    self.len -= 1;
                 }
+                self.len -= 1;
             }
         }
     }

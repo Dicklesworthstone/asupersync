@@ -399,10 +399,6 @@ impl RaceConnections {
             return Poll::Ready(Err(Self::poll_after_completion_error()));
         }
 
-        if Pin::new(&mut self.timeout_sleep).poll(cx).is_ready() {
-            return self.finish_overall_timeout();
-        }
-
         loop {
             let mut made_progress = false;
 
@@ -442,6 +438,10 @@ impl RaceConnections {
             }
 
             now = (self.time_getter)();
+        }
+
+        if Pin::new(&mut self.timeout_sleep).poll(cx).is_ready() {
+            return self.finish_overall_timeout();
         }
 
         if self.in_flight.is_empty() && self.addrs.len() == 0 {

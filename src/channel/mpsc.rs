@@ -388,14 +388,8 @@ impl<'a, T> Reserve<'a, T> {
                     } else {
                         None
                     }
-                } else if inner.reserved > 0 {
-                    // We are NOT in the queue, and the channel is NOT closed.
-                    // This means we were pre-granted a reservation!
-                    // We must release it and pass the baton.
-                    inner.reserved -= 1;
-                    inner.take_next_sender_waker()
                 } else {
-                    // Stale waiter: not in queue, no reservation, channel alive.
+                    // Stale waiter: not in queue, channel alive.
                     // Another agent or cleanup already removed us. We have no
                     // resource ownership to transfer, so do nothing.
                     None
