@@ -3980,6 +3980,62 @@ fn g7_expected_loss_contract_schema_and_coverage() {
             "G7 validation.unit_commands must include {command}"
         );
     }
+    let status_snapshot_contract = &artifact["reproducibility"]["status_snapshot_contract"];
+    assert_eq!(
+        status_snapshot_contract["env_var"].as_str(),
+        Some("ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON"),
+        "G7 status snapshot contract must name the override env"
+    );
+    assert_eq!(
+        status_snapshot_contract["source_of_truth"].as_str(),
+        Some(".beads/issues.jsonl from the caller workspace snapshot"),
+        "G7 status snapshot contract must identify the caller-side Beads snapshot"
+    );
+    let status_snapshot_reason = status_snapshot_contract["reason"]
+        .as_str()
+        .expect("G7 status snapshot contract must explain why the override exists");
+    assert!(
+        status_snapshot_reason.contains("shared rch workers")
+            && status_snapshot_reason.contains("stale .beads/issues.jsonl"),
+        "G7 status snapshot contract reason must explain the shared-rch stale-JSONL hazard"
+    );
+    let status_snapshot_beads = status_snapshot_contract["required_bead_ids"]
+        .as_array()
+        .expect("G7 status snapshot contract must list required bead ids")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("G7 status snapshot contract bead ids must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        status_snapshot_beads,
+        BTreeSet::from([
+            "asupersync-2cyx5".to_string(),
+            "asupersync-36m6p".to_string(),
+            "asupersync-3ltrv".to_string(),
+            "asupersync-n5fk6".to_string(),
+            "asupersync-2zu9p".to_string(),
+        ]),
+        "G7 status snapshot contract must list the live Beads ids that feed closure_readiness assertions"
+    );
+    let applies_to_unit_commands = status_snapshot_contract["applies_to_unit_commands"]
+        .as_array()
+        .expect("G7 status snapshot contract must list the affected unit commands")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("G7 status snapshot contract commands must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        applies_to_unit_commands, unit_commands,
+        "G7 status snapshot contract must cover the canonical G7 unit commands"
+    );
 
     let replay_command = artifact["reproducibility"]["replay_command"]
         .as_str()
@@ -4358,6 +4414,10 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "deterministic_fallback_trigger",
         "conflicting_evidence",
         "g7_expected_loss_contract_replay_bundle_is_well_formed",
+        "status_snapshot_contract",
+        "ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON",
+        ".beads/issues.jsonl",
+        "shared rch workers",
         "rch exec --",
         "C6",
         "F8",
@@ -4950,6 +5010,70 @@ fn h2_closure_packet_schema_and_lever_coverage() {
     let replay_index = artifact["artifact_replay_index"]
         .as_array()
         .expect("artifact_replay_index must be an array");
+    let h2_replay_entry = replay_index
+        .iter()
+        .find(|entry| {
+            entry["artifact_path"].as_str()
+                == Some("artifacts/raptorq_program_closure_signoff_packet_v1.json")
+        })
+        .expect("artifact_replay_index must include the canonical H2 packet entry");
+    let h2_status_snapshot_contract = &h2_replay_entry["status_snapshot_contract"];
+    assert_eq!(
+        h2_status_snapshot_contract["env_var"].as_str(),
+        Some("ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON"),
+        "H2 packet replay entry must name the shared-rch status snapshot env"
+    );
+    assert_eq!(
+        h2_status_snapshot_contract["source_of_truth"].as_str(),
+        Some(".beads/issues.jsonl from the caller workspace snapshot"),
+        "H2 packet replay entry must identify the caller-side Beads snapshot"
+    );
+    let h2_status_snapshot_reason = h2_status_snapshot_contract["reason"]
+        .as_str()
+        .expect("H2 packet replay entry must explain the shared-rch status snapshot requirement");
+    assert!(
+        h2_status_snapshot_reason.contains("shared rch workers")
+            && h2_status_snapshot_reason.contains("stale .beads/issues.jsonl"),
+        "H2 packet replay entry reason must explain the shared-rch stale-JSONL hazard"
+    );
+    let h2_status_snapshot_beads = h2_status_snapshot_contract["required_bead_ids"]
+        .as_array()
+        .expect("H2 packet replay entry must list the required bead ids")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("H2 packet replay entry bead ids must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        h2_status_snapshot_beads,
+        BTreeSet::from([
+            "asupersync-2cyx5".to_string(),
+            "asupersync-346lm".to_string(),
+            "asupersync-36m6p.23".to_string(),
+        ]),
+        "H2 packet replay entry must list the live Beads ids needed for shared-rch dependency-status replay"
+    );
+    let h2_status_snapshot_commands = h2_status_snapshot_contract["applies_to_replay_commands"]
+        .as_array()
+        .expect("H2 packet replay entry must list the affected replay commands")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("H2 packet replay entry commands must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        h2_status_snapshot_commands,
+        BTreeSet::from([String::from(
+            "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_dependency_status_alignment -- --nocapture",
+        )]),
+        "H2 packet replay entry must narrow the override requirement to the status-sensitive H2 replay command"
+    );
     let g7_replay_entry = replay_index
         .iter()
         .find(|entry| {
@@ -4978,6 +5102,62 @@ fn h2_closure_packet_schema_and_lever_coverage() {
             "H2 G7 replay index must include {command}"
         );
     }
+    let status_snapshot_contract = &g7_replay_entry["status_snapshot_contract"];
+    assert_eq!(
+        status_snapshot_contract["env_var"].as_str(),
+        Some("ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON"),
+        "H2 G7 replay entry must name the shared-rch status snapshot env"
+    );
+    assert_eq!(
+        status_snapshot_contract["source_of_truth"].as_str(),
+        Some(".beads/issues.jsonl from the caller workspace snapshot"),
+        "H2 G7 replay entry must identify the caller-side Beads snapshot"
+    );
+    let status_snapshot_reason = status_snapshot_contract["reason"]
+        .as_str()
+        .expect("H2 G7 replay entry must explain the shared-rch status snapshot requirement");
+    assert!(
+        status_snapshot_reason.contains("shared rch workers")
+            && status_snapshot_reason.contains("stale .beads/issues.jsonl"),
+        "H2 G7 replay entry reason must explain the shared-rch stale-JSONL hazard"
+    );
+    let status_snapshot_beads = status_snapshot_contract["required_bead_ids"]
+        .as_array()
+        .expect("H2 G7 replay entry must list the required bead ids")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("H2 G7 replay entry bead ids must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        status_snapshot_beads,
+        BTreeSet::from([
+            "asupersync-2cyx5".to_string(),
+            "asupersync-36m6p".to_string(),
+            "asupersync-3ltrv".to_string(),
+            "asupersync-n5fk6".to_string(),
+            "asupersync-2zu9p".to_string(),
+        ]),
+        "H2 G7 replay entry must list the live Beads ids needed for shared-rch status replay"
+    );
+    let applies_to_replay_commands = status_snapshot_contract["applies_to_replay_commands"]
+        .as_array()
+        .expect("H2 G7 replay entry must list the affected replay commands")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("H2 G7 replay entry replay commands must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        applies_to_replay_commands, g7_replay_commands,
+        "H2 G7 replay entry must attach the shared-rch snapshot contract to the canonical replay commands"
+    );
 }
 
 /// Validate H2 closure packet dependency status fields stay aligned with Beads state.
@@ -5227,6 +5407,16 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "packet_curator",
         "residual_risk_register",
         "go_no_go_decision",
+        "status_snapshot_contract",
+        "ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON",
+        "status_snapshot_contract.applies_to_replay_commands",
+        ".beads/issues.jsonl",
+        "caller workspace snapshot",
+        "shared rch workers",
+        "g7_expected_loss_contract_schema_and_coverage",
+        "g7_expected_loss_contract_replay_bundle_is_well_formed",
+        "g7_expected_loss_contract_docs_are_cross_linked",
+        "asupersync-346lm",
         "E4",
         "F8",
         "asupersync-36m6p",
@@ -5599,6 +5789,10 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         "validate_dual_policy_probe_contract",
         "bench-smoke-gf256-dual-policy-contract",
         "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v6\"",
+        "length == 8",
+        "map(.scenario_id) | sort) == [",
+        "\"RQ-E-GF256-DUAL-001\"",
+        "\"RQ-E-GF256-DUAL-008\"",
         ".manifest_schema_version | type == \"string\" and length > 0",
         ".profile_schema_version | type == \"string\" and length > 0",
         ".kernel | type == \"string\" and length > 0",

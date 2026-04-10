@@ -321,7 +321,17 @@ validate_dual_policy_probe_contract() {
         echo "    FAIL (missing probe records) -> ${stage_log}"
         echo "    repro: ${repro_cmd}"
     elif ! jq -s -e '
-        length >= 7 and
+        length == 8 and
+        (map(.scenario_id) | sort) == [
+            "RQ-E-GF256-DUAL-001",
+            "RQ-E-GF256-DUAL-002",
+            "RQ-E-GF256-DUAL-003",
+            "RQ-E-GF256-DUAL-004",
+            "RQ-E-GF256-DUAL-005",
+            "RQ-E-GF256-DUAL-006",
+            "RQ-E-GF256-DUAL-007",
+            "RQ-E-GF256-DUAL-008"
+        ] and
         all(.[];
             .schema_version == "raptorq-track-e-dual-policy-probe-v6" and
             (.manifest_schema_version | type == "string" and length > 0) and
