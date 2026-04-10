@@ -84,7 +84,10 @@ struct CancelTokenState {
     object_id: ObjectId,
     /// Whether cancellation has been requested.
     cancelled: AtomicBool,
-    /// When cancellation was requested (nanos since epoch, 0 = not cancelled).
+    /// When cancellation was requested (nanos since epoch).
+    /// `u64::MAX` is the "not yet recorded" sentinel; legitimate timestamps
+    /// are clamped to `u64::MAX - 1` at store time so the sentinel cannot
+    /// collide with a real cancellation time.
     cancelled_at: AtomicU64,
     /// The cancellation reason (set when cancelled).
     reason: RwLock<Option<CancelReason>>,
@@ -215,9 +218,12 @@ impl SymbolCancelToken {
             .is_ok()
         {
             // We won the race. State is now cancelled.
+            // Clamp to u64::MAX - 1 to avoid colliding with the
+            // "not yet recorded" sentinel in cancelled_at queries.
+            let stored_nanos = now.as_nanos().min(u64::MAX - 1);
             self.state
                 .cancelled_at
-                .store(now.as_nanos(), Ordering::Release);
+                .store(stored_nanos, Ordering::Release);
             *reason_guard = Some(reason.clone());
 
             // Drop the lock before notifying to avoid reentrancy deadlocks.
@@ -265,11 +271,13 @@ impl SymbolCancelToken {
                 // This case should be unreachable under the new locking protocol,
                 // but we handle it safely just in case (e.g. from_bytes).
                 *reason_guard = Some(reason.clone());
+                // Clamp to u64::MAX - 1 to avoid colliding with the sentinel.
+                let stored_nanos = now.as_nanos().min(u64::MAX - 1);
                 self.state
                     .cancelled_at
                     .compare_exchange(
                         u64::MAX,
-                        now.as_nanos(),
+                        stored_nanos,
                         Ordering::Release,
                         Ordering::Relaxed,
                     )
