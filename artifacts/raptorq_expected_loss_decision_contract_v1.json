@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-m7o6i",
   "parent_track_bead_id": "asupersync-2cyx5",
   "external_ref": "bd-2bd8e",
-  "generated_at_utc": "2026-03-23T08:09:00Z",
+  "generated_at_utc": "2026-04-10T02:35:00Z",
   "contract": {
     "states": [
       "healthy",
@@ -249,7 +249,8 @@
   "validation": {
     "unit_commands": [
       "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
-      "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture"
+      "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture",
+      "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture"
     ],
     "deterministic_e2e_commands": [
       "rch exec -- ./scripts/run_raptorq_e2e.sh --profile fast"
@@ -407,7 +408,7 @@
       },
       {
         "bead_id": "asupersync-36m6p",
-        "name": "E5 high-confidence p95/p99 comparator corpus",
+        "name": "E5 Track-E evidence lineage (highconf_v1 + v2/v3 history + v4 blocker)",
         "required_status": "closed",
         "current_status": "in_progress",
         "evidence_refs": [

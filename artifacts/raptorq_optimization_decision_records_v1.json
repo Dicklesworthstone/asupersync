@@ -82,7 +82,7 @@
         "conservative_mode": "Sequential GF256 kernels only."
       },
       "rollback_rehearsal": {
-        "command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4 cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
         "post_rollback_verification_checklist": [
           "Benchmark output present under target dir and parseable.",
           "No fused-path activation in logs/config snapshot.",
@@ -105,8 +105,8 @@
       "deterministic_replay": {
         "seed": 424242,
         "fixture_or_scenario_id": "RQ-G1-GF256-ADDMUL",
-        "pre_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-pre cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
-        "post_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-post cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+        "pre_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-pre cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-post cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
       }
     },
     {
@@ -182,7 +182,7 @@
         "conservative_mode": "Scalar conservative profile-pack with deterministic fallback reasons."
       },
       "rollback_rehearsal": {
-        "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-rollback cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
         "post_rollback_verification_checklist": [
           "Bench logs show profile_pack=scalar-conservative-v1 (or explicit fallback to it).",
           "Targeted metadata tests pass (`profile_pack_catalog_*`, `profile_pack_selection_*`, `dual_policy_snapshot_*`).",
@@ -219,12 +219,12 @@
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json"
         ],
         "bench_repro_commands": [
-          "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
-          "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy"
+          "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives",
+          "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy"
         ],
         "command_surface_split": {
-          "manifest_command_bundle": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
-          "probe_repro_command": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy",
+          "manifest_command_bundle": "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives",
+          "probe_repro_command": "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy",
           "notes": [
             "Comparator/rollback profile-pack validation stays anchored to the broader gf256_primitives surface.",
             "Dual-policy probe forensics stay anchored to the narrower gf256_dual_policy surface."
@@ -261,8 +261,8 @@
       "deterministic_replay": {
         "seed": 424242,
         "fixture_or_scenario_id": "RQ-E-GF256-005",
-        "pre_change_command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-pre cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
-        "post_change_command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-post cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+        "pre_change_command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-pre cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_change_command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-post cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
       }
     },
     {

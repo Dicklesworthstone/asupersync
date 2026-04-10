@@ -111,8 +111,8 @@ Recent evidence alignment updates (2026-02-20):
 
 - Added partial `E5` measured-comparator evidence anchors from latest Track-E execution (`agent-mail asupersync-3ltrv #1383`) and linked bead evidence comments (`asupersync-36m6p` comments `#1848` and `#1855`).
 - Added deterministic bench repro commands for E5 comparator capture:
-  - `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives`
-  - `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`
+  - `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`
+  - `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy`
 - Added follow-up E5 evidence from `asupersync-36m6p` comment `#1848` and coord thread updates (`#1408`, `#1410`): manifest snapshot determinism tests + `rch exec -- cargo check --all-targets` pass.
 - Added follow-up E5 fifth-slice reproducibility evidence (`asupersync-36m6p` comment `#1855`, agent-mail `#1422/#1424`): deterministic environment metadata now included in manifest snapshots and Track-E policy/probe logs.
 - Added sixth-slice comparator artifact `artifacts/raptorq_track_e_gf256_bench_v1.json`: baseline/auto/rollback Track-E capture with rollback rehearsal outcomes.
@@ -153,8 +153,8 @@ Recent evidence alignment updates (2026-02-22):
 Recent evidence alignment updates (2026-03-05):
 
 - Added an explicit E5 `command_surface_split` record to keep Track-E reproducibility semantics machine-checkable:
-  - manifest-level comparator/rollback `command_bundle` stays anchored to `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives`
-  - probe-specific `repro_command` stays anchored to `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`
+  - manifest-level comparator/rollback `command_bundle` stays anchored to `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`
+  - probe-specific `repro_command` stays anchored to `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy`
 - Captured the support-slice validation bundle (`agent-mail asupersync-36m6p #4585`): `dual_policy_snapshot_exposes_profile_pack_metadata`, `e5_profile_pack_doc_explains_command_bundle_split`, and `e5_profile_pack_doc_mentions_current_x86_default_contract` all pass, and `rch exec -- cargo check --all-targets` remains green.
 - **F8 closure evidence landed (FrostyCave)**: Published `artifacts/raptorq_track_f_wavefront_pipeline_v1.json` with closure-grade evidence:
   - Implemented bounded wavefront decode pipeline (`decode_wavefront`) in `src/raptorq/decoder.rs` with fused assembly+peeling in bounded batches and catch-up propagation for deterministic results.

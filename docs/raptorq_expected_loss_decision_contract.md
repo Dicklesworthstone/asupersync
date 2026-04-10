@@ -93,13 +93,21 @@ to:
 
 Track-E evidence consumed by the expected-loss gate stays anchored to:
 
-- `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` (`highconf_v1`)
+- `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json`
+  (`highconf_v1`, `narrowed closure-status guardrail`)
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json`
-  (`short_window_directional_not_closure_grade`, `raw-sample`)
+  (`short_window_directional_not_closure_grade`,
+  `historical short-window directional packet`)
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json`
-  (`longer_window_interval_proxy_negative_guardrail`, `historical broader guardrail`)
+  (`longer_window_interval_proxy_negative_guardrail`,
+  `historical broader interval-proxy negative guardrail`)
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`
-  (`raw_sample_mixed_signal_not_closure_grade`, `current-head raw-sample`)
+  (`raw_sample_mixed_signal_not_closure_grade`,
+  `current mixed-signal raw-sample blocker`)
+
+`highconf_v1` remains the narrowed closure-status guardrail, `v2` and `v3`
+remain historical broader packets, and `v4` is the current broader blocker
+consumed by G7 and the Track-G handoff.
 
 The replay bundle must include fixed-input decision samples for:
 
@@ -116,6 +124,7 @@ Cargo-heavy validation and replay commands must use `rch`:
 
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture`
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture`
+- `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture`
 
 ## Closure Readiness Contract
 
@@ -125,11 +134,14 @@ hand-off ambiguity while dependencies are still active.
 Current dependency set in the artifact:
 
 1. `asupersync-3ltrv` (G3 decision records) must be `closed`
-2. `asupersync-36m6p` (E5 high-confidence p95/p99 corpus) must be `closed`
+2. `asupersync-36m6p` (E5 Track-E evidence lineage: `highconf_v1` + v2/v3
+   history + v4 blocker) must be `closed`
 3. `asupersync-n5fk6` (F7 final closure evidence in G3 cards) must be `closed`
 4. `asupersync-2zu9p` (F8 implementation + closure evidence) must be `closed`
 
-Current closure-readiness status (2026-03-23 refresh):
+Dependency shorthand: `highconf_v1 + v2/v3 history + v4 blocker`.
+
+Current closure-readiness status (2026-04-10 refresh):
 
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`
@@ -138,6 +150,10 @@ Current closure-readiness status (2026-03-23 refresh):
 
 `ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
 `closed`.
+
+The current unresolved broader blocker in that dependency lineage is
+`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`; `highconf_v1`
+stays the narrowed guardrail and `v2`/`v3` stay historical.
 
 Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `residual_risk_register`, `go_no_go_decision`) are now attached in

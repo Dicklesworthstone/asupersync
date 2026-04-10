@@ -2479,7 +2479,8 @@ fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
         "live x86 profile-pack metadata must keep the documented replay contract"
     );
     assert_eq!(
-        x86.command_bundle, "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
+        x86.command_bundle,
+        "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives",
         "live x86 profile-pack metadata must keep the manifest command-bundle contract"
     );
     assert_eq!(
@@ -3368,12 +3369,16 @@ fn g3_e5_decision_record_command_surface_split_is_explicit() {
     let split = &e5["measured_comparator_evidence"]["command_surface_split"];
     assert_eq!(
         split["manifest_command_bundle"].as_str(),
-        Some("rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives"),
+        Some(
+            "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives"
+        ),
         "E5 manifest command bundle must stay anchored to gf256_primitives"
     );
     assert_eq!(
         split["probe_repro_command"].as_str(),
-        Some("rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy"),
+        Some(
+            "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy"
+        ),
         "E5 probe repro command must stay anchored to gf256_dual_policy"
     );
     for required in [
@@ -3947,6 +3952,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
     for command in [
         "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
         "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture",
     ] {
         assert!(
             unit_commands.contains(command),
@@ -4046,6 +4052,15 @@ fn g7_expected_loss_contract_schema_and_coverage() {
     let e5_evidence_refs = dependency_evidence_refs
         .get("asupersync-36m6p")
         .expect("closure_readiness.dependencies must include the E5 bead");
+    let e5_dependency = closure_dependencies
+        .iter()
+        .find(|entry| entry["bead_id"].as_str() == Some("asupersync-36m6p"))
+        .expect("closure_readiness.dependencies must include the E5 bead");
+    assert_eq!(
+        e5_dependency["name"].as_str(),
+        Some("E5 Track-E evidence lineage (highconf_v1 + v2/v3 history + v4 blocker)"),
+        "E5 closure dependency name must reflect the current multi-packet blocker lineage"
+    );
     for required in [
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
@@ -4296,7 +4311,11 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "asupersync-3ltrv",
         "highconf_v1",
         "short_window_directional_not_closure_grade",
+        "historical short-window directional packet",
+        "historical broader interval-proxy negative guardrail",
         "raw_sample_mixed_signal_not_closure_grade",
+        "current mixed-signal raw-sample blocker",
+        "highconf_v1 + v2/v3 history + v4 blocker",
         "raw-sample",
         "asupersync-2zu9p",
         "argmin_expected_loss",
@@ -5560,7 +5579,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".selected_tuning_prefetch_distance",
         ".selected_tuning_fusion_shape",
         ".rejected_tuning_candidate_ids | type == \"string\" and length > 0",
-        ".command_bundle | type == \"string\" and test(\"^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark -- gf256_primitives)\")",
+        ".command_bundle | type == \"string\" and test(\"^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives)\")",
         ".replay_pointer | type == \"string\" and length > 0",
         ".decision_artifact_id",
         ".decision_role",
@@ -5576,7 +5595,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".mode_fallback_reason == \"unknown-requested-mode\"",
         ".tuning_corpus_id == \"manual-env-override-unbacked\"",
         ".selected_tuning_candidate_id == \"manual-env-override-unbacked\"",
-        ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives\"",
+        ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives\"",
         ".decision_artifact_id == \"manual_env_override_unbacked\"",
         ".decision_role == \"runtime_override_not_canonical_profile_selection\"",
         ".decision_evidence_status == \"runtime-override-unbacked\"",
@@ -5603,7 +5622,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".criterion_warm_up_seconds",
         ".criterion_measurement_seconds",
         ".tail_confidence_proxy == \"criterion_interval_high_endpoint_proxy_p95p99\"",
-        ".command_bundle == \"rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives\"",
+        ".command_bundle == \"rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives\"",
         "bench_gf256_dual_policy_contract.ndjson",
     ] {
         assert!(

@@ -23,12 +23,10 @@ use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_x
 use asupersync::raptorq::systematic::SystematicEncoder;
 
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
-const TRACK_E_REPRO_CMD: &str =
-    "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
+const TRACK_E_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives";
 const TRACK_E_POLICY_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-v6";
 const TRACK_E_POLICY_PROBE_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-probe-v6";
-const TRACK_E_POLICY_PROBE_REPRO_CMD: &str =
-    "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy";
+const TRACK_E_POLICY_PROBE_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy";
 const TRACK_E_CRITERION_SAMPLE_SIZE: usize = 10;
 const TRACK_E_CRITERION_WARM_UP_SECONDS: f64 = 0.05;
 const TRACK_E_CRITERION_MEASUREMENT_SECONDS: f64 = 0.05;

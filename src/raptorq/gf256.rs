@@ -263,8 +263,7 @@ const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-
 const GF256_PROFILE_PACK_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-v3";
 // Keep manifest-level profile-pack command bundles on the broader comparator
 // surface; dual-policy probe logs emit their own narrower repro command.
-const GF256_PROFILE_PACK_COMMAND_BUNDLE: &str =
-    "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
+const GF256_PROFILE_PACK_COMMAND_BUNDLE: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives";
 const GF256_PROFILE_TUNING_CORPUS_ID: &str = "raptorq-gf256-profile-corpus-v1";
 
 fn dispatch() -> &'static Gf256Dispatch {
@@ -835,7 +834,7 @@ const MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS: Gf256ProfileEvidenceStatus =
 const MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY: &str = "runtime override changed the effective dual-policy contract; canonical selected candidate suppressed";
 const MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY: &str = "override run is not a catalog-backed offline selection result; use emitted override fields to reproduce";
 const MANUAL_OVERRIDE_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-env-override-v1";
-const MANUAL_OVERRIDE_COMMAND_BUNDLE: &str = "rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives";
+const MANUAL_OVERRIDE_COMMAND_BUNDLE: &str = "rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives";
 
 const SCALAR_REJECTED_TUNING_CANDIDATES: &[&str] = &["scalar-t8-u1-pf0-fused-off-v1"];
 const X86_REJECTED_TUNING_CANDIDATES: &[&str] = &[

@@ -143,7 +143,7 @@ Artifact path conventions by profile:
 Track-E dual-lane policy probes are emitted from `benches/raptorq_benchmark.rs` under benchmark group `gf256_dual_policy`:
 
 ```bash
-rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy
+rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy
 ```
 
 Probe log schema:
@@ -193,7 +193,7 @@ Override truthfulness rule:
   `decision_evidence_status = runtime-override-unbacked`,
   `replay_pointer = replay:rq-e-gf256-profile-pack-env-override-v1`
   and an override-specific `command_bundle` placeholder:
-  `rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives`
+  `rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`
   that tells operators to replay from the emitted override fields
 - the same override branch must keep the rationale/delta fields honest:
   `selected_candidate_summary = runtime override changed the effective dual-policy contract; canonical selected candidate suppressed`,
@@ -211,9 +211,9 @@ Coverage intent:
 Command-surface split:
 
 - Comparator/rollback bundle: manifest-level `command_bundle` in the profile-pack
-  snapshot remains anchored to `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives`.
+  snapshot remains anchored to `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`.
 - Probe-specific bundle: the dual-policy log `repro_command` remains anchored to
-  `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`.
+  `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy`.
 
 Current default policy note (profile-pack schema v5):
 
@@ -245,17 +245,17 @@ Capture command bundle (rch-only):
 
 ```bash
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_auto_capture.log 2>&1
 
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=sequential ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_sequential_capture.log 2>&1
 
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=fused ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_fused_capture.log 2>&1
 ```
