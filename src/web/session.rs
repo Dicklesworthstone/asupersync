@@ -409,7 +409,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
 
         // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
         let session_cleared = session_data.is_empty() && session_data.is_modified();
-        
+
         if session_cleared {
             if !is_new {
                 // Session cleared → delete server-side data and expire the cookie.

@@ -852,7 +852,10 @@ impl KafkaConsumer {
                             let record = match consumer.poll(wait_for) {
                                 Some(Ok(message)) => {
                                     if auto_commit {
-                                        if let Err(e) = consumer.store_offset_from_message(&message).map_err(map_consumer_error) {
+                                        if let Err(e) = consumer
+                                            .store_offset_from_message(&message)
+                                            .map_err(map_consumer_error)
+                                        {
                                             *buffered_outcome.lock() = Some(Err(e));
                                             return Ok(());
                                         }
@@ -875,7 +878,8 @@ impl KafkaConsumer {
                                     return Ok(());
                                 }
                             };
-                            *buffered_outcome.lock() = Some(Ok(BrokerPollOutcome { record, snapshot }));
+                            *buffered_outcome.lock() =
+                                Some(Ok(BrokerPollOutcome { record, snapshot }));
                             Ok(())
                         }
                     })

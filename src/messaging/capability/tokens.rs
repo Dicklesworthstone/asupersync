@@ -705,9 +705,7 @@ mod tests {
         );
         assert_eq!(
             append.to_string(),
-            format!(
-                "append-certificate[cell={cell_id}, epoch=5:3, sequence=17]"
-            )
+            format!("append-certificate[cell={cell_id}, epoch=5:3, sequence=17]")
         );
         assert_eq!(
             fence.to_string(),

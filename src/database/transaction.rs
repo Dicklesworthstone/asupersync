@@ -141,7 +141,7 @@ async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> 
 
 #[cfg(feature = "postgres")]
 mod pg {
-    use super::{Cx, Future, Outcome, RetryPolicy, wait_retry_delay, validate_savepoint_name};
+    use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
     use std::fmt;
 
@@ -540,7 +540,7 @@ pub use sqlite::{
 
 #[cfg(feature = "mysql")]
 mod mysql {
-    use super::{Future, Cx, Outcome, RetryPolicy, wait_retry_delay, validate_savepoint_name};
+    use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
     use std::fmt;
 

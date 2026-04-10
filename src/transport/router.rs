@@ -788,7 +788,9 @@ impl LoadBalancer {
                     |oid| oid.as_u128() as usize,
                 );
                 let len = available.len();
-                (0..count).map(|i| available[(start_idx + i) % len]).collect()
+                (0..count)
+                    .map(|i| available[(start_idx + i) % len])
+                    .collect()
             }
             LoadBalanceStrategy::WeightedRoundRobin => {
                 self.select_n_weighted_round_robin(&available, count)

@@ -2264,11 +2264,11 @@ mod tests {
     use crate::Cx;
     use crate::types::CancelKind;
     use std::io::{Read, Write};
-    use std::time::Duration;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
         futures_lite::future::block_on(future)

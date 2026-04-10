@@ -4297,9 +4297,7 @@ impl DurableSegment {
     #[cfg(test)]
     fn source_symbol_count(&self) -> usize {
         match &self.encoding {
-            DurableSegmentEncoding::Inline { payload } => {
-                usize::from(!payload.is_empty())
-            }
+            DurableSegmentEncoding::Inline { payload } => usize::from(!payload.is_empty()),
             DurableSegmentEncoding::Coded { source_symbols, .. } => *source_symbols,
         }
     }
@@ -9109,10 +9107,7 @@ mod tests {
         let outcome = capsule
             .accept_replicated_append(first.clone())
             .expect("duplicate delivery should collapse");
-        assert_eq!(
-            outcome,
-            ReplicatedAppendOutcome::IdempotentNoop(first)
-        );
+        assert_eq!(outcome, ReplicatedAppendOutcome::IdempotentNoop(first));
 
         capsule
             .fence_sequencer(NodeId::new("node-b"))

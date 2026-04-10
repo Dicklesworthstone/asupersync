@@ -2370,8 +2370,7 @@ impl ThreeLaneWorker {
         let drain_verdict = self.drain_certificate.as_mut().and_then(|cert| {
             let is_drain_phase = matches!(
                 lyapunov_suggestion,
-                SchedulingSuggestion::DrainObligations
-                    | SchedulingSuggestion::DrainRegions
+                SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions
             );
             if is_drain_phase {
                 cert.observe(governor.compute_record(&snapshot).total);
