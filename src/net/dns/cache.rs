@@ -512,6 +512,7 @@ mod tests {
         init_test("cache_negative_no_records_hits_and_expires");
         set_test_time(0);
         let config = CacheConfig {
+            min_ttl: Duration::from_millis(1),
             negative_ttl: Duration::from_millis(10),
             ..Default::default()
         };

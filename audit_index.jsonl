@@ -2854,3 +2854,13 @@
 {"file": "src/raptorq/linalg.rs", "status": "verified"}
 {"file": "src/raptorq/gf256.rs", "status": "verified"}
 {"file": "src/raptorq/builder.rs", "status": "verified"}
+{"file":"src/net/dns/cache.rs","lines":686,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"put_negative_ip_no_records bypassed clamp_ttl, allowing negative_ttl > max_ttl to persist longer than configured maximum. Fixed + test updated."}
+{"file":"src/net/dns/resolver.rs","lines":988,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cancel-safe (blocking thread continues, result discarded), IPv6-first correct"}
+{"file":"src/net/dns/lookup.rs","lines":621,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS lookup types correct"}
+{"file":"src/net/quic_native/streams.rs","lines":2000,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Stream ID (seq<<2|dir<<1|init) no collision, flow control saturating arithmetic"}
+{"file":"src/net/quic_native/transport.rs","lines":2000,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Loss recovery epoch prevents double congestion reduction, RTT estimation correct"}
+{"file":"src/net/quic_core/mod.rs","lines":1300,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC codec primitives correct"}
+{"file":"src/plan/mod.rs","lines":2000,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DAG cycle detection correct, rewrite single-pass by design"}
+{"file":"src/plan/analysis.rs","lines":2752,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Plan analysis correct"}
+{"file":"src/plan/latency_algebra.rs","lines":2689,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Division guarded with 1e-15 check, unwrap_or fallbacks safe"}
+{"file":"src/plan/certificate.rs","lines":1869,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Duration nanos try_into unwrap_or(u64::MAX) safe"}
