@@ -45,7 +45,7 @@
 //! - Squares lexicographically by `(top_left, top_right, bottom_left, bottom_right)`.
 
 use crate::trace::event_structure::TracePoset;
-use crate::trace::gf2::BoundaryMatrix;
+use crate::trace::gf2::{BoundaryMatrix, PersistencePairs};
 
 /// A square cell complex with deterministic cell ordering.
 #[derive(Debug, Clone)]
@@ -174,6 +174,73 @@ impl SquareComplex {
             d2.set(self.edge_index(c, d), col);
         }
         d2
+    }
+
+    /// Build the full filtration boundary matrix for vertices, edges, and squares.
+    ///
+    /// The filtration order is:
+    /// 1. Vertices `0..num_vertices`
+    /// 2. Edges `num_vertices..num_vertices + edges.len()`
+    /// 3. Squares after the edge block
+    ///
+    /// This ordering preserves the dimension boundaries needed to separate H0
+    /// from H1 persistence classes after reduction.
+    #[must_use]
+    pub fn combined_boundary_matrix(&self) -> BoundaryMatrix {
+        let edge_offset = self.num_vertices;
+        let square_offset = edge_offset + self.edges.len();
+        let total_cells = square_offset + self.squares.len();
+        let mut matrix = BoundaryMatrix::zeros(total_cells, total_cells);
+
+        for (edge_idx, &(s, t)) in self.edges.iter().enumerate() {
+            let col = edge_offset + edge_idx;
+            matrix.set(s, col);
+            matrix.set(t, col);
+        }
+
+        for (square_idx, &(a, b, c, d)) in self.squares.iter().enumerate() {
+            let col = square_offset + square_idx;
+            matrix.set(edge_offset + self.edge_index(a, b), col);
+            matrix.set(edge_offset + self.edge_index(a, c), col);
+            matrix.set(edge_offset + self.edge_index(b, d), col);
+            matrix.set(edge_offset + self.edge_index(c, d), col);
+        }
+
+        matrix
+    }
+
+    /// Compute H1 persistence pairs from the full filtration.
+    ///
+    /// The reduced matrix contains classes from every dimension. We only keep
+    /// H1 classes here:
+    /// - births on edge columns
+    /// - deaths on square columns
+    /// - unpaired edge births that persist to infinity
+    #[must_use]
+    pub fn h1_persistence_pairs(&self) -> PersistencePairs {
+        let edge_start = self.num_vertices;
+        let edge_end = edge_start + self.edges.len();
+        let square_start = edge_end;
+        let square_end = square_start + self.squares.len();
+
+        let reduced = self.combined_boundary_matrix().reduce();
+        let pairs = reduced.persistence_pairs();
+
+        PersistencePairs {
+            pairs: pairs
+                .pairs
+                .into_iter()
+                .filter(|&(birth, death)| {
+                    (edge_start..edge_end).contains(&birth)
+                        && (square_start..square_end).contains(&death)
+                })
+                .collect(),
+            unpaired: pairs
+                .unpaired
+                .into_iter()
+                .filter(|birth| (edge_start..edge_end).contains(birth))
+                .collect(),
+        }
     }
 }
 
@@ -559,6 +626,26 @@ mod tests {
         assert_eq!(cx.squares.len(), 0);
     }
 
+    /// An unfilled triangle carries one persistent H1 class.
+    #[test]
+    fn triangle_cycle_survives_as_unpaired_h1_class() {
+        let cx = SquareComplex::from_edges(3, vec![(0, 1), (0, 2), (1, 2)]);
+
+        let pairs = cx.h1_persistence_pairs();
+
+        assert!(pairs.pairs.is_empty(), "unfilled triangle has no H1 deaths");
+        assert_eq!(
+            pairs.unpaired.len(),
+            1,
+            "triangle should contribute one H1 class"
+        );
+        assert!(
+            (3..6).contains(&pairs.unpaired[0]),
+            "triangle H1 birth should come from an edge column, got {}",
+            pairs.unpaired[0]
+        );
+    }
+
     /// End-to-end H1 persistence: a 1-cycle is born and then killed by a 2-cell.
     ///
     /// Complex: a square with a "tail" edge.
@@ -570,59 +657,30 @@ mod tests {
     /// 1-cycle. The square (0,1,2,3) kills it, giving a finite persistence pair.
     #[test]
     fn h1_cycle_born_and_killed() {
-        use crate::trace::gf2::BoundaryMatrix;
-
-        // Build combined boundary matrix for the full filtration.
-        // Filtration order: v0, v1, v2, v3, v4, e01, e02, e13, e23, e34, sq0123
-        // Indices:           0   1   2   3   4    5    6    7    8    9    10
-        //
-        // We build the single big boundary matrix D where:
-        // - columns 0..5 are vertices (zero boundary)
-        // - columns 5..10 are edges (boundary = sum of endpoints)
-        // - column 10 is the square (boundary = sum of 4 edges)
-        let n = 11; // total simplices
-        let mut d = BoundaryMatrix::zeros(n, n);
-
-        // Edge boundaries (column index → which vertex rows are set)
-        // e01 (col 5): v0 + v1
-        d.set(0, 5);
-        d.set(1, 5);
-        // e02 (col 6): v0 + v2
-        d.set(0, 6);
-        d.set(2, 6);
-        // e13 (col 7): v1 + v3
-        d.set(1, 7);
-        d.set(3, 7);
-        // e23 (col 8): v2 + v3
-        d.set(2, 8);
-        d.set(3, 8);
-        // e34 (col 9): v3 + v4
-        d.set(3, 9);
-        d.set(4, 9);
-
-        // Square boundary (col 10): e01 + e02 + e13 + e23
-        d.set(5, 10);
-        d.set(6, 10);
-        d.set(7, 10);
-        d.set(8, 10);
-
-        let reduced = d.reduce();
-        let pairs = reduced.persistence_pairs();
+        let cx = SquareComplex::from_edges(5, vec![(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)]);
+        let pairs = cx.h1_persistence_pairs();
 
         // The square should kill the 1-cycle.
         // We expect a pair where a 1-cycle (born at some edge) dies at the square (col 10).
         let square_pair = pairs.pairs.iter().find(|&&(_, death)| death == 10);
         assert!(
             square_pair.is_some(),
-            "expected 1-cycle killed by square at column 10, pairs: {:?}",
-            pairs.pairs
+            "expected 1-cycle killed by square at column 10, pairs: {pairs:?}"
         );
 
-        // The birth should be one of the edges forming the cycle
-        let (birth, _) = square_pair.unwrap();
+        // The birth should be one of the edges forming the cycle.
+        let (birth, death) = square_pair.unwrap();
         assert!(
             (5..=8).contains(birth),
-            "birth {birth} should be an edge in the cycle (cols 5..=8)"
+            "birth {} should be an edge in the cycle (cols 5..=8), paired with {}",
+            birth,
+            death
+        );
+        assert_eq!(
+            pairs.unpaired,
+            Vec::<usize>::new(),
+            "the square should kill the only H1 class in this complex. birth was {}",
+            birth
         );
     }
 

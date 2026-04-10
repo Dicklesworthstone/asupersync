@@ -354,7 +354,7 @@ impl BoundaryMatrix {
     /// Returns the pivot (lowest set bit index) of column `j`.
     #[must_use]
     pub fn column_pivot(&self, j: usize) -> Option<usize> {
-        self.columns[j].pivot()
+        self.columns[j].highest_bit()
     }
 
     /// Performs standard column reduction (left-to-right) and returns
@@ -744,9 +744,9 @@ mod tests {
         let reduced = d.reduce();
         let pairs = reduced.persistence_pairs();
 
-        // One pair: vertex 0 killed by edge 0
+        // One pair: vertex 1 killed by edge 0 (highest bit of v0+v1 is v1)
         assert_eq!(pairs.pairs.len(), 1);
-        assert_eq!(pairs.pairs[0], (0, 0));
+        assert_eq!(pairs.pairs[0], (1, 0));
         // Vertex 1 is unpaired (it survives)
         // Actually v1 (row index 1) is not a column, so it won't appear
         // in unpaired. The unpaired list is for zero columns that aren't paired.

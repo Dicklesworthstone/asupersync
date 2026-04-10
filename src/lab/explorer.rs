@@ -1088,29 +1088,7 @@ impl TopologyExplorer {
 
         // Compute topological score from the trace's square complex.
         let fp = seed_fingerprint(seed);
-        let ledger = if trace_events.len() >= 2 {
-            let poset = TracePoset::from_trace(&trace_events);
-            let complex = SquareComplex::from_trace_poset(&poset);
-            let d2 = complex.boundary_2();
-
-            // Build the combined boundary matrix for H1 computation.
-            // We reduce ∂₁ to find 1-cycles, and use ∂₂ to identify which are boundaries.
-            // For scoring, we use the ∂₁ matrix reduction directly — paired columns
-            // in the reduction of ∂₁ give H₀ pairs, and unpaired edge columns give
-            // 1-cycle candidates. Then reducing ∂₂ kills some of those cycles.
-            //
-            // Simplified approach: reduce ∂₂ to get H₁ persistence pairs directly.
-            let reduced = d2.reduce();
-            let pairs = reduced.persistence_pairs();
-            score_persistence(&pairs, &mut self.seen_classes, fp)
-        } else {
-            use crate::trace::gf2::PersistencePairs;
-            let pairs = PersistencePairs {
-                pairs: vec![],
-                unpaired: vec![],
-            };
-            score_persistence(&pairs, &mut self.seen_classes, fp)
-        };
+        let ledger = score_trace_topology(&trace_events, &mut self.seen_classes, fp);
 
         self.enqueue_derived_seeds(seed, &ledger);
         self.ledgers.push(ledger);
@@ -1241,6 +1219,17 @@ impl TopologyExplorer {
     }
 }
 
+pub(crate) fn score_trace_topology(
+    trace_events: &[TraceEvent],
+    seen_classes: &mut BTreeSet<ClassId>,
+    fingerprint: u64,
+) -> EvidenceLedger {
+    let poset = TracePoset::from_trace(trace_events);
+    let complex = SquareComplex::from_trace_poset(&poset);
+    let pairs = complex.h1_persistence_pairs();
+    score_persistence(&pairs, seen_classes, fingerprint)
+}
+
 fn derive_seed(seed: u64, class: ClassId, index: u64) -> u64 {
     let mut hasher = DetHasher::default();
     seed.hash(&mut hasher);
@@ -1265,7 +1254,9 @@ impl Clone for ViolationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::{TraceData, TraceEventKind};
     use crate::types::Budget;
+    use crate::types::Time;
     use serde_json::Value as JsonValue;
     use std::fs;
     use tempfile::NamedTempFile;
@@ -1770,6 +1761,53 @@ mod tests {
 
         assert_eq!(report.runs.len(), report.total_runs);
         assert!(!report.runs.is_empty());
+    }
+
+    #[test]
+    fn topology_scoring_detects_unfilled_triangle_h1_class() {
+        let trace = vec![
+            TraceEvent::new(
+                1,
+                Time::from_nanos(10),
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "triangle-a".to_string(),
+                    task: None,
+                    detail: "write global state".to_string(),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(20),
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "triangle-b".to_string(),
+                    task: None,
+                    detail: "write global state".to_string(),
+                },
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(30),
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "triangle-c".to_string(),
+                    task: None,
+                    detail: "write global state".to_string(),
+                },
+            ),
+        ];
+
+        let mut seen_classes = BTreeSet::new();
+        let ledger = score_trace_topology(&trace, &mut seen_classes, seed_fingerprint(7));
+
+        assert_eq!(ledger.score.novelty, 1);
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries[0].class.death, usize::MAX);
+        assert!(
+            (3..6).contains(&ledger.entries[0].class.birth),
+            "triangle H1 birth should come from an edge column"
+        );
     }
 
     #[test]
