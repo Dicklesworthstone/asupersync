@@ -171,10 +171,10 @@ impl Response {
 
     /// Insert or replace a header while canonicalizing the stored name.
     ///
-    /// Header values are sanitized: CR (`\r`) and LF (`\n`) characters are
-    /// stripped to prevent HTTP response header injection (CRLF injection).
+    /// Both names and values are sanitized: CR (`\r`) and LF (`\n`) characters
+    /// are stripped to prevent HTTP response header injection (CRLF injection).
     pub fn set_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        let normalized = name.into().to_ascii_lowercase();
+        let normalized = sanitize_header_name(name.into()).to_ascii_lowercase();
         let stale_keys: Vec<String> = self
             .headers
             .keys()
@@ -191,15 +191,17 @@ impl Response {
     }
 
     /// Ensure a header exists while preserving any existing value.
+    ///
+    /// The name is sanitized to strip CR/LF characters that would otherwise
+    /// produce a wire-format response the HTTP/1.1 codec rejects.
     pub fn ensure_header(&mut self, name: &str, default_value: impl Into<String>) {
+        let normalized = sanitize_header_name(name.to_owned()).to_ascii_lowercase();
         if let Some(existing) = self.remove_header(name) {
             self.headers
-                .insert(name.to_ascii_lowercase(), sanitize_header_value(existing));
+                .insert(normalized, sanitize_header_value(existing));
         } else {
-            self.headers.insert(
-                name.to_ascii_lowercase(),
-                sanitize_header_value(default_value.into()),
-            );
+            self.headers
+                .insert(normalized, sanitize_header_value(default_value.into()));
         }
     }
 
@@ -305,8 +307,7 @@ impl<T: IntoResponse> IntoResponse for (StatusCode, Vec<(String, String)>, T) {
         let mut resp = self.2.into_response();
         resp.status = self.0;
         for (k, v) in self.1 {
-            resp.headers
-                .insert(k.to_ascii_lowercase(), sanitize_header_value(v));
+            resp.set_header(k, v);
         }
         resp
     }
@@ -429,6 +430,20 @@ fn sanitize_header_value(value: String) -> String {
         value.replace(['\r', '\n'], "")
     } else {
         value
+    }
+}
+
+/// Strip CR and LF from a header name to prevent CRLF injection attacks.
+///
+/// Header names with raw CR/LF would be rejected by the wire-format codec, but
+/// stripping them at the web layer is a defense-in-depth measure that ensures
+/// the response state is always serializable and matches the asymmetric
+/// sanitization applied to header values.
+fn sanitize_header_name(name: String) -> String {
+    if name.bytes().any(|b| b == b'\r' || b == b'\n') {
+        name.replace(['\r', '\n'], "")
+    } else {
+        name
     }
 }
 
@@ -649,6 +664,43 @@ mod tests {
         )
             .into_response();
         assert_eq!(resp.headers.get("x-test").unwrap(), "ab");
+    }
+
+    #[test]
+    fn set_header_strips_crlf_from_name() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.set_header("x-test\r\nEvil-Header: injected", "value");
+        // CRLF in the name is stripped before lowercasing/insertion so the
+        // wire-format encoder never sees an injection vector.
+        assert!(resp.headers.contains_key("x-testevil-header: injected"));
+        assert!(!resp
+            .headers
+            .keys()
+            .any(|k| k.contains('\r') || k.contains('\n')));
+    }
+
+    #[test]
+    fn ensure_header_strips_crlf_from_name() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.ensure_header("x-test\r\nEvil:", "value");
+        assert!(!resp
+            .headers
+            .keys()
+            .any(|k| k.contains('\r') || k.contains('\n')));
+    }
+
+    #[test]
+    fn tuple_headers_strip_crlf_from_name() {
+        let resp = (
+            StatusCode::OK,
+            vec![("x-test\r\nEvil:".to_string(), "value".to_string())],
+            "body",
+        )
+            .into_response();
+        assert!(!resp
+            .headers
+            .keys()
+            .any(|k| k.contains('\r') || k.contains('\n')));
     }
 
     #[test]

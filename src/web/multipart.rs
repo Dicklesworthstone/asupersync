@@ -453,17 +453,23 @@ fn find_multipart_delimiter(body: &[u8], delimiter: &[u8], start: usize) -> Opti
 
 /// Find a blank line (CRLFCRLF or LFLF) starting at `pos`.
 /// Returns (end_of_headers, start_of_body).
+///
+/// Both `\r\n\r\n` and `\n\n` are scanned and the *earlier* match wins. This
+/// matters when a part uses `\n\n` for its header terminator but the part
+/// body itself contains `\r\n\r\n`: an unconditional CRLFCRLF-first scan
+/// would skip past the real blank line and split the body in the wrong
+/// place, corrupting one part's payload.
 fn find_blank_line(data: &[u8], pos: usize) -> Option<(usize, usize)> {
     let search = &data[pos..];
-    // Try CRLFCRLF first.
-    if let Some(idx) = search.windows(4).position(|w| w == b"\r\n\r\n") {
-        return Some((pos + idx, pos + idx + 4));
+    let crlf_pos = search.windows(4).position(|w| w == b"\r\n\r\n");
+    let lf_pos = search.windows(2).position(|w| w == b"\n\n");
+    match (crlf_pos, lf_pos) {
+        (Some(c), Some(l)) if c <= l => Some((pos + c, pos + c + 4)),
+        (Some(_), Some(l)) => Some((pos + l, pos + l + 2)),
+        (Some(c), None) => Some((pos + c, pos + c + 4)),
+        (None, Some(l)) => Some((pos + l, pos + l + 2)),
+        (None, None) => None,
     }
-    // Fall back to LFLF.
-    if let Some(idx) = search.windows(2).position(|w| w == b"\n\n") {
-        return Some((pos + idx, pos + idx + 2));
-    }
-    None
 }
 
 /// Skip a CRLF or LF at the given position.
@@ -734,6 +740,22 @@ mod tests {
         assert_eq!(fields[0].name(), "a");
         assert_eq!(fields[1].name(), "b");
         assert_eq!(fields[2].name(), "c");
+    }
+
+    #[test]
+    fn find_blank_line_prefers_earlier_lflf_over_later_crlfcrlf() {
+        // Headers terminated with bare LFLF, body contains CRLFCRLF.
+        // The earlier (LFLF) match must win so the body is not truncated.
+        let data = b"Header: value\n\nbefore\r\n\r\nafter";
+        let result = find_blank_line(data, 0);
+        assert_eq!(result, Some((13, 15)));
+    }
+
+    #[test]
+    fn find_blank_line_prefers_earlier_crlfcrlf_over_later_lflf() {
+        let data = b"Header: value\r\n\r\nbefore\n\nafter";
+        let result = find_blank_line(data, 0);
+        assert_eq!(result, Some((13, 17)));
     }
 
     #[test]
