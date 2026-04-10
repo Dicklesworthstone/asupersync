@@ -4195,6 +4195,63 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         track_g_status, canonical_track_g_status,
         "closure_readiness.track_g_handoff.current_status must match canonical Track-G Beads status"
     );
+    let expected_track_g_handoff_fields = BTreeSet::from([
+        String::from("gate_verdict_table"),
+        String::from("artifact_replay_index"),
+        String::from("residual_risk_register"),
+        String::from("go_no_go_decision"),
+    ]);
+    let required_track_g_handoff_fields =
+        closure_readiness["track_g_handoff"]["required_packet_fields"]
+            .as_array()
+            .expect("closure_readiness.track_g_handoff.required_packet_fields must be present")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("required_packet_fields entries must be strings")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+    assert_eq!(
+        required_track_g_handoff_fields, expected_track_g_handoff_fields,
+        "closure_readiness.track_g_handoff.required_packet_fields must stay aligned with the H2 packet handoff contract"
+    );
+    let attached_track_g_handoff_fields =
+        closure_readiness["track_g_handoff"]["attached_packet_fields"]
+            .as_array()
+            .expect("closure_readiness.track_g_handoff.attached_packet_fields must be present")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("attached_packet_fields entries must be strings")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+    assert_eq!(
+        attached_track_g_handoff_fields, expected_track_g_handoff_fields,
+        "closure_readiness.track_g_handoff.attached_packet_fields must match the required handoff fields while Track-G remains open"
+    );
+    assert_eq!(
+        closure_readiness["track_g_handoff"]["attachment_status"].as_str(),
+        Some("complete_in_h2_packet_pending_track_g_closure"),
+        "closure_readiness.track_g_handoff.attachment_status must describe the blocked-but-attached H2 packet state"
+    );
+    assert_eq!(
+        closure_readiness["track_g_handoff"]["evidence_ref"].as_str(),
+        Some("artifacts/raptorq_program_closure_signoff_packet_v1.json"),
+        "closure_readiness.track_g_handoff.evidence_ref must stay anchored to the canonical H2 packet artifact"
+    );
+    let h2_packet_artifact: serde_json::Value =
+        serde_json::from_str(RAPTORQ_H2_CLOSURE_PACKET_JSON)
+            .expect("H2 closure packet artifact must be valid JSON");
+    for field in &expected_track_g_handoff_fields {
+        assert!(
+            h2_packet_artifact.get(field).is_some(),
+            "H2 closure packet artifact must include the Track-G handoff field {field}"
+        );
+    }
 }
 
 /// Validate G7 deterministic decision replay samples are complete and coherent.
@@ -4408,6 +4465,11 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "current mixed-signal raw-sample blocker",
         "highconf_v1 + v2/v3 history + v4 blocker",
         "track_g_handoff.current_status",
+        "required_packet_fields",
+        "attached_packet_fields",
+        "attachment_status",
+        "evidence_ref",
+        "complete_in_h2_packet_pending_track_g_closure",
         "raw-sample",
         "asupersync-2zu9p",
         "argmin_expected_loss",
@@ -4419,6 +4481,7 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         ".beads/issues.jsonl",
         "shared rch workers",
         "rch exec --",
+        "artifacts/raptorq_program_closure_signoff_packet_v1.json",
         "C6",
         "F8",
     ] {

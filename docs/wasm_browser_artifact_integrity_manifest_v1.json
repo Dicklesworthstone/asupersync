@@ -5,17 +5,17 @@
   "entries": [
     {
       "path": "docs/wasm_browser_sbom_v1.json",
-      "sha256": "18b4a9ed62e1259d015858c935ea0d90e15fbef148fb1b2bdab85ba734098222",
+      "sha256": "56a437d94ea68326ca73d86b2190baf8511bd7e9c232db62277819c246d6c27c",
       "kind": "sbom"
     },
     {
       "path": "docs/wasm_browser_provenance_attestation_v1.json",
-      "sha256": "a6b5934a34d10c7bcbeb1d817fd5297ab4c1e1c4e0d4d62360af70824af026a8",
+      "sha256": "29010d1909146941aeef589e82b7f20c4c8aa20894ea15179821d3418b22cb21",
       "kind": "provenance"
     },
     {
       "path": "packages/browser-core/package.json",
-      "sha256": "bf5288626f0afd7976cf96ffdf8a4a6d771c009dddee53c88a87ca8b19a47b4e",
+      "sha256": "d3219286974d56fb1a46e9c7977dd5288667a6e5edeaaf54f06ed0ec57b40fab",
       "kind": "manifest"
     },
     {

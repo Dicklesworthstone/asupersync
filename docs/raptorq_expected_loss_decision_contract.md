@@ -171,6 +171,19 @@ remains `open` after stale-triage reopen, and that live state is now recorded
 under `closure_readiness.track_g_handoff.current_status` so the G7 contract
 does not rely on bead id alone.
 
+The handoff remains machine-checkable through four explicit fields on
+`closure_readiness.track_g_handoff`:
+
+1. `required_packet_fields`
+2. `attached_packet_fields`
+3. `attachment_status`
+4. `evidence_ref`
+
+`required_packet_fields` and `attached_packet_fields` must match exactly while
+the handoff stays blocked, `attachment_status` must remain
+`complete_in_h2_packet_pending_track_g_closure`, and `evidence_ref` must stay
+anchored to `artifacts/raptorq_program_closure_signoff_packet_v1.json`.
+
 ## Closure Notes
 
 `asupersync-m7o6i` can close after:
