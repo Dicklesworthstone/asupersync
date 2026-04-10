@@ -2843,3 +2843,5 @@
 {"file": "src/runtime/reactor/epoll.rs", "status": "verified"}
 {"file": "src/web/middleware.rs", "status": "verified"}
 {"file": "src/web/multipart.rs", "status": "verified"}
+{"file":"src/net/websocket/handshake.rs","lines":1226,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Sec-WebSocket-Key validated (16 bytes), accept hash verified, extension CR/LF sanitized, protocol negotiation correct"}
+{"file":"src/net/happy_eyeballs.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Stagger delay RFC 8305 compliant, socket cleanup via Future drop, no leaks"}
