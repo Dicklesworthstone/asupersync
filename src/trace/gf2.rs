@@ -656,17 +656,14 @@ mod tests {
         // Columns 0 and 1 have pivots at rows 0 and 0... let's check.
         let p0 = reduced.matrix.column_pivot(0);
         let p1 = reduced.matrix.column_pivot(1);
-        let _p2 = reduced.matrix.column_pivot(2);
+        let p2 = reduced.matrix.column_pivot(2);
 
-        // Column 0 pivot: row 0 (lowest bit of {0,1})
-        assert_eq!(p0, Some(0));
-        // Column 1: after XOR with col 0, becomes {1,2}, pivot at row 1
-        assert_eq!(p1, Some(1));
-        // Column 2: after reduction, should be zero (it's e01+e02+e12 = 0 in ∂∂=0)
-        // Actually e12 XOR e01 = {0,2}, then XOR with col1 = {1,2} gives {0,1,2}...
-        // Let me just verify determinism and non-None vs None
-        // The exact result depends on elimination order.
-        // What matters: the pivot map is well-defined and deterministic.
+        // Column 0: {0,1}, pivot is highest bit 1
+        assert_eq!(p0, Some(1));
+        // Column 1: {0,2}, pivot is highest bit 2 (not reduced by col 0 since pivots differ)
+        assert_eq!(p1, Some(2));
+        // Column 2: {1,2} XOR col 1 {0,2} -> {0,1} XOR col 0 {0,1} -> empty, pivot None
+        assert_eq!(p2, None);
         let pairs = reduced.persistence_pairs();
         // Triangle has β0=1, β1=0 (connected, no holes when filled)
         // Pairs: edge deaths kill vertex births

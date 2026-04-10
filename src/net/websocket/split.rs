@@ -46,7 +46,7 @@ use smallvec::SmallVec;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 const MAX_PENDING_PONGS: usize = 16;
 
@@ -55,6 +55,11 @@ fn enqueue_pending_pong(pending_pongs: &mut std::collections::VecDeque<Bytes>, p
         let _ = pending_pongs.pop_front();
     }
     pending_pongs.push_back(payload);
+}
+
+struct WriterWaiter {
+    id: u64,
+    waker: Waker,
 }
 
 /// Shared state between read and write halves.
@@ -84,7 +89,9 @@ struct WebSocketShared<IO> {
     /// True while one half is performing a frame write sequence.
     writer_active: bool,
     /// Wakers for waiters blocked on `writer_active`.
-    writer_waiters: SmallVec<[Waker; 2]>,
+    writer_waiters: SmallVec<[WriterWaiter; 2]>,
+    /// Next waiter ID.
+    next_waiter_id: u64,
     /// Unique ID for reunite verification.
     id: u64,
 }
@@ -100,8 +107,74 @@ impl<IO> Drop for SplitWritePermit<IO> {
             shared.writer_active = false;
             std::mem::take(&mut shared.writer_waiters)
         };
-        for waker in waiters {
-            waker.wake();
+        for waiter in waiters {
+            waiter.waker.wake();
+        }
+    }
+}
+
+struct AcquireWritePermitFuture<'a, IO> {
+    shared: &'a Arc<Mutex<WebSocketShared<IO>>>,
+    waiter_id: Option<u64>,
+}
+
+impl<'a, IO> Future for AcquireWritePermitFuture<'a, IO> {
+    type Output = SplitWritePermit<IO>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.shared.lock();
+        if state.writer_active {
+            if let Some(id) = self.waiter_id {
+                if let Some(existing) = state.writer_waiters.iter_mut().find(|w| w.id == id) {
+                    if !existing.waker.will_wake(cx.waker()) {
+                        existing.waker.clone_from(cx.waker());
+                    }
+                }
+            } else {
+                let id = state.next_waiter_id;
+                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                state.writer_waiters.push(WriterWaiter {
+                    id,
+                    waker: cx.waker().clone(),
+                });
+                self.waiter_id = Some(id);
+            }
+            drop(state);
+            Poll::Pending
+        } else {
+            state.writer_active = true;
+            if let Some(id) = self.waiter_id {
+                if let Some(pos) = state.writer_waiters.iter().position(|w| w.id == id) {
+                    state.writer_waiters.remove(pos);
+                }
+                self.waiter_id = None;
+            }
+            drop(state);
+            Poll::Ready(SplitWritePermit {
+                shared: Arc::clone(self.shared),
+            })
+        }
+    }
+}
+
+impl<'a, IO> Drop for AcquireWritePermitFuture<'a, IO> {
+    fn drop(&mut self) {
+        if let Some(id) = self.waiter_id {
+            let next_waker = {
+                let mut state = self.shared.lock();
+                let is_head = state.writer_waiters.first().is_some_and(|w| w.id == id);
+                if let Some(pos) = state.writer_waiters.iter().position(|w| w.id == id) {
+                    state.writer_waiters.remove(pos);
+                }
+                if is_head && !state.writer_active {
+                    state.writer_waiters.first().map(|w| w.waker.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(w) = next_waker {
+                w.wake();
+            }
         }
     }
 }
@@ -109,32 +182,11 @@ impl<IO> Drop for SplitWritePermit<IO> {
 async fn acquire_write_permit<IO>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
 ) -> SplitWritePermit<IO> {
-    use std::future::poll_fn;
-
-    poll_fn(|cx| {
-        let mut state = shared.lock();
-        if state.writer_active {
-            let waiter = cx.waker();
-            if !state
-                .writer_waiters
-                .iter()
-                .any(|existing| existing.will_wake(waiter))
-            {
-                state.writer_waiters.push(waiter.clone());
-            }
-            drop(state);
-            Poll::Pending
-        } else {
-            state.writer_active = true;
-            drop(state);
-            Poll::Ready(())
-        }
-    })
-    .await;
-
-    SplitWritePermit {
-        shared: Arc::clone(shared),
+    AcquireWritePermitFuture {
+        shared,
+        waiter_id: None,
     }
+    .await
 }
 
 /// Flush the shared write buffer to the underlying I/O.
@@ -307,6 +359,7 @@ where
             entropy: self.entropy,
             writer_active: false,
             writer_waiters: SmallVec::new(),
+            next_waiter_id: 0,
             id,
         }));
 

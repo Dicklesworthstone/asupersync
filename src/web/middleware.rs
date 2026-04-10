@@ -765,6 +765,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         }
 
         resp.body = compressed.into();
+        resp.remove_header("content-length");
         resp.set_header("content-encoding", encoding.as_token().to_string());
         append_vary_header(&mut resp, "accept-encoding");
         resp
@@ -2503,6 +2504,32 @@ mod tests {
 
         #[cfg(not(feature = "compression"))]
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn compression_removes_stale_content_length_after_body_rewrite() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'a'; 4096]).header("content-length", "4096")
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 0,
+            supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "gzip");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            Some(&"gzip".to_string())
+        );
+        assert!(
+            !resp.headers.contains_key("content-length"),
+            "compressed responses must not retain stale content-length after body rewrite"
+        );
     }
 
     #[test]

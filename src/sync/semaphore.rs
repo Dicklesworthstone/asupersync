@@ -116,7 +116,14 @@ fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64)
         // if clone() panics, our waiter remains in the queue for Drop cleanup.
         let next_waker = state.waiters.get(1).map(|w| w.waker.clone());
         state.waiters.pop_front();
-        next_waker
+        
+        // Only pass the baton if there are actually permits available.
+        // Otherwise, we just cause a cascade of spurious wakeups.
+        if state.permits > 0 {
+            next_waker
+        } else {
+            None
+        }
     } else {
         // Non-front waiter: targeted removal stops at first match instead of
         // scanning the entire deque like retain() would.
@@ -1491,7 +1498,7 @@ mod tests {
         init_test("cancel_front_waiter_wakes_next");
         let cx1 = test_cx();
         let cx2 = test_cx();
-        let sem = Semaphore::new(1);
+        let sem = Semaphore::new(2);
         let _held = sem.try_acquire(1).expect("initial acquire");
 
         // Two waiters queue up.
@@ -1500,7 +1507,7 @@ mod tests {
         let waker1 = Waker::from(Arc::clone(&w1));
         let waker2 = Waker::from(Arc::clone(&w2));
 
-        let mut fut1 = sem.acquire(&cx1, 1);
+        let mut fut1 = sem.acquire(&cx1, 2);
         let mut fut2 = sem.acquire(&cx2, 1);
         let pending1 = poll_once_with_waker(&mut fut1, &waker1).is_none();
         let pending2 = poll_once_with_waker(&mut fut2, &waker2).is_none();
@@ -1525,13 +1532,13 @@ mod tests {
         init_test("drop_front_waiter_wakes_next");
         let cx1 = test_cx();
         let cx2 = test_cx();
-        let sem = Semaphore::new(1);
+        let sem = Semaphore::new(2);
         let _held = sem.try_acquire(1).expect("initial acquire");
 
         let w2 = CountingWaker::new();
         let waker2 = Waker::from(Arc::clone(&w2));
 
-        let mut fut1 = sem.acquire(&cx1, 1);
+        let mut fut1 = sem.acquire(&cx1, 2);
         let mut fut2 = sem.acquire(&cx2, 1);
         let pending1 = poll_once(&mut fut1).is_none();
         let pending2 = poll_once_with_waker(&mut fut2, &waker2).is_none();

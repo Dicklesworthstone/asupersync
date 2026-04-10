@@ -394,7 +394,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
 
         // 3. Inject session data into request extensions.
         //    We use a shared Arc<Mutex<SessionData>> so the handler can modify it.
-        let session_handle = Arc::new(Mutex::new(session_data.clone()));
+        let session_handle = Arc::new(Mutex::new(session_data));
         req.extensions
             .insert_typed(Session(Arc::clone(&session_handle)));
 

@@ -294,6 +294,40 @@ impl<E: std::error::Error + 'static> std::error::Error for DbPoolError<E> {
     }
 }
 
+struct ValidationGuard<'a, M: ConnectionManager> {
+    pool: &'a DbPool<M>,
+    conn: Option<M::Connection>,
+}
+
+impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let mut inner = self.pool.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+            drop(inner);
+            self.pool
+                .stats
+                .total_discards
+                .fetch_add(1, Ordering::Relaxed);
+            self.pool.manager.disconnect(conn);
+        }
+    }
+}
+
+struct CreationGuard<'a, M: ConnectionManager> {
+    pool: &'a DbPool<M>,
+    disarmed: bool,
+}
+
+impl<M: ConnectionManager> Drop for CreationGuard<'_, M> {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let mut inner = self.pool.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+        }
+    }
+}
+
 impl<M: ConnectionManager> DbPool<M> {
     /// Create a new connection pool with the given manager and configuration.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
@@ -381,17 +415,31 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
 
                 // Validate if configured.
-                if self.config.validate_on_checkout && !self.manager.is_valid(&conn) {
-                    {
-                        let mut inner = self.inner.lock();
-                        inner.total = inner.total.saturating_sub(1);
+                if self.config.validate_on_checkout {
+                    let mut guard = ValidationGuard {
+                        pool: self,
+                        conn: Some(conn),
+                    };
+
+                    let valid = self.manager.is_valid(guard.conn.as_ref().unwrap());
+
+                    if !valid {
+                        self.stats
+                            .total_validation_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        // Guard will drop here and safely decrement total & disconnect
+                        continue;
                     }
+
+                    let valid_conn = guard.conn.take().unwrap();
                     self.stats
-                        .total_validation_failures
+                        .total_acquisitions
                         .fetch_add(1, Ordering::Relaxed);
-                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                    self.manager.disconnect(conn);
-                    continue;
+                    return Ok(PooledConnection {
+                        conn: Some(valid_conn),
+                        pool: self,
+                        created_at,
+                    });
                 }
 
                 self.stats
@@ -404,8 +452,14 @@ impl<M: ConnectionManager> DbPool<M> {
                 });
             }
 
+            let mut creation_guard = CreationGuard {
+                pool: self,
+                disarmed: false,
+            };
+
             match self.manager.connect() {
                 Ok(conn) => {
+                    creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
                     self.stats
                         .total_acquisitions
@@ -417,10 +471,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     });
                 }
                 Err(e) => {
-                    // Roll back total count on failure.
-                    let mut inner = self.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
-                    drop(inner);
+                    // Drop guard rolls back total count on failure (or panic).
                     return Err(DbPoolError::Connect(e));
                 }
             }

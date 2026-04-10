@@ -133,6 +133,13 @@ fn register_interest(
     }
 }
 
+fn cleanup_child_after_spawn_setup_failure(child: &mut std_process::Child) {
+    // `kill()` alone still leaves a zombie on Unix until the parent reaps it.
+    // Best-effort reap here keeps spawn-time setup failures from leaking the child.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Error type for process operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -653,7 +660,7 @@ impl Command {
             .map(ChildStdin::from_std)
             .transpose()
             .inspect_err(|_| {
-                let _ = child.kill();
+                cleanup_child_after_spawn_setup_failure(&mut child);
             })?;
         let stdout = child
             .stdout
@@ -661,7 +668,7 @@ impl Command {
             .map(ChildStdout::from_std)
             .transpose()
             .inspect_err(|_| {
-                let _ = child.kill();
+                cleanup_child_after_spawn_setup_failure(&mut child);
             })?;
         let stderr = child
             .stderr
@@ -669,7 +676,7 @@ impl Command {
             .map(ChildStderr::from_std)
             .transpose()
             .inspect_err(|_| {
-                let _ = child.kill();
+                cleanup_child_after_spawn_setup_failure(&mut child);
             })?;
 
         Ok(Child {
@@ -2324,6 +2331,33 @@ mod tests {
         }
 
         crate::test_complete!("test_command_kill_on_drop_reaps_process");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_setup_failure_cleanup_reaps_child() {
+        init_test("test_spawn_setup_failure_cleanup_reaps_child");
+
+        let mut child = std_process::Command::new("sleep")
+            .arg("100")
+            .spawn()
+            .expect("spawn failed");
+        #[allow(clippy::cast_possible_wrap)]
+        let pid = child.id() as i32;
+
+        cleanup_child_after_spawn_setup_failure(&mut child);
+
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+        let err = io::Error::last_os_error();
+        crate::assert_with_log!(
+            waited == -1 && err.raw_os_error() == Some(libc::ECHILD),
+            "spawn setup cleanup reaps child",
+            format!("waitpid=-1 errno={}", libc::ECHILD),
+            format!("waitpid={waited} errno={:?}", err.raw_os_error())
+        );
+
+        crate::test_complete!("test_spawn_setup_failure_cleanup_reaps_child");
     }
 
     #[test]

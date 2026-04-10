@@ -347,10 +347,6 @@ impl Reactor for EpollReactor {
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
-        // Determine whether the target fd itself is valid so EBADF can be
-        // interpreted correctly (target closed vs reactor poller invalid).
-        let fd_still_valid = unsafe { fcntl(info.raw_fd, F_GETFD) } != -1;
-
         // Remove from epoll. Only drop bookkeeping once the source is
         // definitely gone from the kernel or the target fd itself is already
         // closed. Keeping the entry on hard failures preserves accurate retry
@@ -371,12 +367,21 @@ impl Reactor for EpollReactor {
                     drop(state);
                     Ok(())
                 }
-                Some(libc::EBADF) if !fd_still_valid => {
-                    if let Some(info) = state.tokens.remove(&token) {
-                        state.fds.remove(&info.raw_fd);
+                Some(libc::EBADF) => {
+                    // Determine whether the target fd itself is valid so EBADF can be
+                    // interpreted correctly (target closed vs reactor poller invalid).
+                    // Evaluated AFTER the delete attempt to prevent TOCTOU race.
+                    let fd_still_valid = unsafe { fcntl(info.raw_fd, F_GETFD) } != -1;
+                    if !fd_still_valid {
+                        if let Some(info) = state.tokens.remove(&token) {
+                            state.fds.remove(&info.raw_fd);
+                        }
+                        drop(state);
+                        Ok(())
+                    } else {
+                        drop(state);
+                        Err(err)
                     }
-                    drop(state);
-                    Ok(())
                 }
                 _ => {
                     drop(state);
