@@ -1029,6 +1029,11 @@ struct Handshake {
     auth_plugin_name: String,
 }
 
+struct OkPacket {
+    affected_rows: u64,
+    status_flags: u16,
+}
+
 /// Inner connection state.
 struct MySqlConnectionInner {
     /// TCP stream to the server.
@@ -1502,9 +1507,19 @@ impl MySqlConnection {
 
         match data[0] {
             0x00 => {
-                // OK packet (for non-SELECT queries)
-                self.inner.closed = false;
-                Outcome::Ok(Vec::new())
+                match Self::parse_ok_packet(&data) {
+                    Ok(ok) => {
+                        self.inner.status_flags = ok.status_flags;
+                        self.inner.closed = false;
+                        Outcome::Ok(Vec::new())
+                    }
+                    Err(e) => {
+                        // The full packet was received, so protocol sync is
+                        // preserved even if the OK payload is malformed.
+                        self.inner.closed = false;
+                        Outcome::Err(e)
+                    }
+                }
             }
             0xFF => {
                 // ERR packet
@@ -1608,6 +1623,7 @@ impl MySqlConnection {
                     "expected EOF after columns".to_string(),
                 ));
             }
+            self.inner.status_flags = Self::parse_eof_packet_status_flags(&data)?;
         }
 
         let columns = Arc::new(columns);
@@ -1656,7 +1672,14 @@ impl MySqlConnection {
                             values,
                         });
                     }
-                    None => break,
+                    None => {
+                        self.inner.status_flags = if Self::is_eof_packet(&data) {
+                            Self::parse_eof_packet_status_flags(&data)?
+                        } else {
+                            Self::parse_ok_packet(&data)?.status_flags
+                        };
+                        break;
+                    }
                 },
             }
         }
@@ -1695,6 +1718,34 @@ impl MySqlConnection {
     #[inline]
     fn is_eof_packet(data: &[u8]) -> bool {
         data.first() == Some(&0xFE) && data.len() < 9
+    }
+
+    fn parse_ok_packet(data: &[u8]) -> Result<OkPacket, MySqlError> {
+        match data.first() {
+            Some(0x00 | 0xFE) => {}
+            _ => return Err(MySqlError::Protocol("not an OK packet".to_string())),
+        }
+
+        let mut reader = PacketReader::new(&data[1..]);
+        let affected_rows = reader.read_lenenc_int()?;
+        let _last_insert_id = reader.read_lenenc_int()?;
+        let status_flags = reader.read_u16_le()?;
+        let _warning_count = reader.read_u16_le()?;
+
+        Ok(OkPacket {
+            affected_rows,
+            status_flags,
+        })
+    }
+
+    fn parse_eof_packet_status_flags(data: &[u8]) -> Result<u16, MySqlError> {
+        if !Self::is_eof_packet(data) {
+            return Err(MySqlError::Protocol("not an EOF packet".to_string()));
+        }
+
+        let mut reader = PacketReader::new(&data[1..]);
+        let _warning_count = reader.read_u16_le()?;
+        reader.read_u16_le()
     }
 
     #[inline]
@@ -1855,11 +1906,11 @@ impl MySqlConnection {
         match data[0] {
             0x00 => {
                 // OK packet
-                let mut reader = PacketReader::new(&data[1..]);
-                match reader.read_lenenc_int() {
-                    Ok(affected_rows) => {
+                match Self::parse_ok_packet(&data) {
+                    Ok(ok) => {
+                        self.inner.status_flags = ok.status_flags;
                         self.inner.closed = false;
-                        Outcome::Ok(affected_rows)
+                        Outcome::Ok(ok.affected_rows)
                     }
                     Err(e) => {
                         // OK packet was fully received; connection protocol
@@ -1936,10 +1987,17 @@ impl MySqlConnection {
         self.inner.sequence = seq.wrapping_add(1);
 
         match data.first() {
-            Some(0x00) => {
-                self.inner.closed = false;
-                Outcome::Ok(())
-            }
+            Some(0x00) => match Self::parse_ok_packet(&data) {
+                Ok(ok) => {
+                    self.inner.status_flags = ok.status_flags;
+                    self.inner.closed = false;
+                    Outcome::Ok(())
+                }
+                Err(e) => {
+                    self.inner.closed = false;
+                    Outcome::Err(e)
+                }
+            },
             Some(0xFF) => {
                 let err = Self::parse_error(&data);
                 if matches!(&err, MySqlError::Server { .. }) {
@@ -2039,6 +2097,7 @@ impl MySqlConnection {
         match data.first() {
             Some(0x00) => {
                 self.inner.needs_rollback = false;
+                self.inner.status_flags = Self::parse_ok_packet(&data)?.status_flags;
                 self.inner.closed = false;
                 Ok(())
             }
@@ -2325,6 +2384,44 @@ mod tests {
             flags: 0,
             decimals: 0,
         }
+    }
+
+    fn ok_packet_payload(affected_rows: u64, status_flags: u16) -> Vec<u8> {
+        let mut buf = PacketBuffer::new();
+        buf.write_byte(0x00);
+        buf.write_lenenc_int(affected_rows);
+        buf.write_lenenc_int(0);
+        buf.buf.extend_from_slice(&status_flags.to_le_bytes());
+        buf.buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.buf
+    }
+
+    fn eof_packet_payload(status_flags: u16) -> Vec<u8> {
+        let mut buf = PacketBuffer::new();
+        buf.write_byte(0xFE);
+        buf.buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.buf.extend_from_slice(&status_flags.to_le_bytes());
+        buf.buf
+    }
+
+    fn column_definition_payload(name: &str) -> Vec<u8> {
+        let mut buf = PacketBuffer::new();
+        buf.write_lenenc_int(3);
+        buf.write_bytes(b"def");
+        buf.write_lenenc_int(0);
+        buf.write_lenenc_int(0);
+        buf.write_lenenc_int(0);
+        buf.write_lenenc_int(name.len() as u64);
+        buf.write_bytes(name.as_bytes());
+        buf.write_lenenc_int(name.len() as u64);
+        buf.write_bytes(name.as_bytes());
+        buf.write_lenenc_int(0x0C);
+        buf.buf.extend_from_slice(&33u16.to_le_bytes());
+        buf.write_u32_le(255);
+        buf.write_byte(column_type::MYSQL_TYPE_VAR_STRING);
+        buf.buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.write_byte(0);
+        buf.buf
     }
 
     fn make_test_connection() -> MySqlConnection {
@@ -3017,6 +3114,127 @@ mod tests {
         assert!(
             conn.inner.closed,
             "malformed ERR packets must keep execute connections fail-closed"
+        );
+    }
+
+    #[test]
+    fn execute_ok_packet_updates_in_transaction_status_flag() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        let (mut conn, server) = make_command_connection_with_single_response(ok_packet_payload(
+            0,
+            SERVER_STATUS_IN_TRANS,
+        ));
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.execute(&cx, "START TRANSACTION"));
+        match outcome {
+            Outcome::Ok(0) => {}
+            other => panic!("expected START TRANSACTION OK packet, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.in_transaction(),
+            "OK packet status flags must refresh transaction state"
+        );
+    }
+
+    #[test]
+    fn execute_ok_packet_clears_in_transaction_status_flag() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        let (mut conn, server) =
+            make_command_connection_with_single_response(ok_packet_payload(0, 0));
+        conn.inner.status_flags = SERVER_STATUS_IN_TRANS;
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.execute(&cx, "COMMIT"));
+        match outcome {
+            Outcome::Ok(0) => {}
+            other => panic!("expected COMMIT OK packet, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            !conn.in_transaction(),
+            "OK packet status flags must clear transaction state after COMMIT/ROLLBACK"
+        );
+    }
+
+    #[test]
+    fn query_result_set_terminator_updates_in_transaction_status_flag() {
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read query header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream.read_exact(&mut payload).expect("read query payload");
+            assert_eq!(payload[0], command::COM_QUERY);
+
+            let responses = [
+                vec![0x01],
+                column_definition_payload("value"),
+                eof_packet_payload(0),
+                eof_packet_payload(SERVER_STATUS_IN_TRANS),
+            ];
+
+            for (sequence, response) in responses.into_iter().enumerate() {
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence((sequence + 1) as u8);
+                packet.buf = response;
+                let packet = packet.build_packet();
+                stream
+                    .write_all(&packet.bytes)
+                    .expect("write result-set packet");
+            }
+            stream.flush().expect("flush result-set packets");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.query(&cx, "SELECT value FROM test"));
+        match outcome {
+            Outcome::Ok(rows) => assert!(rows.is_empty(), "expected empty result set"),
+            other => panic!("expected empty result set success, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.in_transaction(),
+            "final result-set terminator must refresh transaction state"
         );
     }
 

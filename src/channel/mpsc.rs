@@ -367,6 +367,47 @@ pub struct Reserve<'a, T> {
     waiter_id: Option<u64>,
 }
 
+impl<'a, T> Reserve<'a, T> {
+    fn cleanup_waiter(&mut self) {
+        if let Some(id) = self.waiter_id.take() {
+            let next_waker = {
+                let mut inner = self.sender.shared.inner.lock();
+
+                if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
+                    // Channel closed. We either were drained (no reservation)
+                    // or pre-granted (reservation leaked, but channel is dead anyway).
+                    // Safest to just do nothing.
+                    None
+                } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
+                    // We are in the queue. We haven't been granted a reservation.
+                    inner.send_wakers.remove(pos);
+                    // CASCADE: A receiver may have freed capacity and woken us,
+                    // but we never polled. Pass the baton to the next waiter.
+                    if inner.has_capacity(self.sender.shared.capacity) {
+                        inner.take_next_sender_waker()
+                    } else {
+                        None
+                    }
+                } else if inner.reserved > 0 {
+                    // We are NOT in the queue, and the channel is NOT closed.
+                    // This means we were pre-granted a reservation!
+                    // We must release it and pass the baton.
+                    inner.reserved -= 1;
+                    inner.take_next_sender_waker()
+                } else {
+                    // Stale waiter: not in queue, no reservation, channel alive.
+                    // Another agent or cleanup already removed us. We have no
+                    // resource ownership to transfer, so do nothing.
+                    None
+                }
+            };
+            if let Some(w) = next_waker {
+                w.wake();
+            }
+        }
+    }
+}
+
 impl<'a, T> Future for Reserve<'a, T> {
     type Output = Result<SendPermit<'a, T>, SendError<()>>;
 
@@ -374,25 +415,7 @@ impl<'a, T> Future for Reserve<'a, T> {
         // Check cancellation
         if self.cx.checkpoint().is_err() {
             self.cx.trace("mpsc::reserve cancelled");
-            if let Some(id) = self.waiter_id.take() {
-                let next_waker = {
-                    let mut inner = self.sender.shared.inner.lock();
-                    let is_head = inner.send_wakers.front().is_some_and(|w| w.id == id);
-                    if is_head {
-                        inner.send_wakers.pop_front();
-                    } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
-                        inner.send_wakers.remove(pos);
-                    }
-                    if is_head && inner.has_capacity(self.sender.shared.capacity) {
-                        inner.take_next_sender_waker()
-                    } else {
-                        None
-                    }
-                };
-                if let Some(w) = next_waker {
-                    w.wake();
-                }
-            }
+            self.cleanup_waiter();
             return Poll::Ready(Err(SendError::<()>::Cancelled(())));
         }
 
@@ -470,35 +493,7 @@ impl<'a, T> Future for Reserve<'a, T> {
 
 impl<T> Drop for Reserve<'_, T> {
     fn drop(&mut self) {
-        // If we have a waiter, we need to remove it from the sender's queue.
-        if let Some(id) = self.waiter_id {
-            let next_waker = {
-                let mut inner = self.sender.shared.inner.lock();
-
-                // Remove ourselves by id.
-                let is_head = inner.send_wakers.front().is_some_and(|w| w.id == id);
-
-                if is_head {
-                    inner.send_wakers.pop_front();
-                } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
-                    inner.send_wakers.remove(pos);
-                }
-
-                // Only the actual head waiter may hand the wake baton to the next
-                // sender. A missing waiter id means some other path already
-                // reconciled this future; treating "not found" as baton ownership
-                // spuriously wakes unrelated waiters.
-                if is_head && inner.has_capacity(self.sender.shared.capacity) {
-                    inner.take_next_sender_waker()
-                } else {
-                    None
-                }
-            };
-            // Wake outside the lock.
-            if let Some(w) = next_waker {
-                w.wake();
-            }
-        }
+        self.cleanup_waiter();
     }
 }
 
