@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-m7o6i",
   "parent_track_bead_id": "asupersync-2cyx5",
   "external_ref": "bd-2bd8e",
-  "generated_at_utc": "2026-04-10T02:35:00Z",
+  "generated_at_utc": "2026-04-10T19:52:00Z",
   "contract": {
     "states": [
       "healthy",
@@ -445,6 +445,7 @@
     ],
     "track_g_handoff": {
       "bead_id": "asupersync-2cyx5",
+      "current_status": "open",
       "required_packet_fields": [
         "gate_verdict_table",
         "artifact_replay_index",

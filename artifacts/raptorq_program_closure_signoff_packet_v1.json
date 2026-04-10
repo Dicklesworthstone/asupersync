@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-3bsp5.4",
   "parent_track_bead_id": "asupersync-3bsp5",
   "external_ref": "bd-2finy",
-  "generated_at_utc": "2026-04-01T19:05:00Z",
+  "generated_at_utc": "2026-04-10T20:03:11Z",
   "packet_state": {
     "status": "draft_blocked",
     "go_no_go_decision": "no_go_pending_dependency_closure",
@@ -103,7 +103,7 @@
       "track_bead_id": "asupersync-2ncba",
       "required_status": "closed",
       "current_status": "in_progress",
-      "status_reason": "Track-E remains the unresolved upstream convergence lane; H2 closure consumes it only through the still-open Track-G governance path, with asupersync-36m6p as the active E5 closure-critical leaf and artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json recording the current broader mixed-signal blocker state.",
+      "status_reason": "Track-E remains the unresolved upstream convergence lane; H2 closure consumes it only through the still-open Track-G governance path, with asupersync-36m6p.23 as the current active E5 closure-critical leaf under asupersync-36m6p and artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json recording the current broader mixed-signal blocker state.",
       "closure_dependency_path": "via asupersync-2cyx5",
       "evidence_refs": [
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
@@ -129,8 +129,8 @@
       "track_code": "G",
       "track_bead_id": "asupersync-2cyx5",
       "required_status": "closed",
-      "current_status": "in_progress",
-      "status_reason": "Track-G is the sole remaining direct blocker for H2 sign-off; parent governance closure still depends on Track-E convergence, especially the active E5 lane.",
+      "current_status": "open",
+      "status_reason": "Track-G is the sole remaining direct blocker for H2 sign-off; the bead was reopened to open during stale-triage, and parent governance closure still depends on Track-E convergence, especially the active E5 lane.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "artifacts/raptorq_controlled_rollout_policy_v1.json",
@@ -352,7 +352,7 @@
       "gate_id": "TRACK_G",
       "bead_id": "asupersync-2cyx5",
       "required_status": "closed",
-      "current_status": "in_progress",
+      "current_status": "open",
       "verdict": "blocked",
       "evidence_refs": [
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
@@ -441,7 +441,7 @@
       "severity": "medium",
       "status": "mitigated",
       "description": "Track-H final dossier (`asupersync-346lm`) previously lagged closure, creating narrative drift risk before H1 consolidation.",
-      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G remains in progress and Track-H is closed.",
+      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G remains open and Track-H is closed.",
       "owner_bead_id": "asupersync-346lm",
       "upstream_active_leaf_bead_ids": []
     },
@@ -449,11 +449,11 @@
       "risk_id": "RQ-H2-R2",
       "severity": "medium",
       "status": "open",
-      "description": "Track-G aggregation (`asupersync-2cyx5`) is the sole remaining H2 blocker because Track-E convergence, especially `asupersync-36m6p`, can still change lever governance fields.",
-      "mitigation": "Re-run the lever matrix, claim-boundary checklist, and blocker wording once Track-E/E5 closes and Track-G can transition out of in_progress.",
+      "description": "Track-G aggregation (`asupersync-2cyx5`) is the sole remaining H2 blocker because Track-E convergence, especially active leaf `asupersync-36m6p.23` under `asupersync-36m6p`, can still change lever governance fields.",
+      "mitigation": "Re-run the lever matrix, claim-boundary checklist, and blocker wording once Track-E/E5 closes and Track-G can transition from open to closed.",
       "owner_bead_id": "asupersync-2cyx5",
       "upstream_active_leaf_bead_ids": [
-        "asupersync-36m6p"
+        "asupersync-36m6p.23"
       ]
     }
   ],

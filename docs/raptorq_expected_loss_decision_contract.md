@@ -158,7 +158,10 @@ stays the narrowed guardrail and `v2`/`v3` stay historical.
 Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `residual_risk_register`, `go_no_go_decision`) are now attached in
 `artifacts/raptorq_program_closure_signoff_packet_v1.json` and recorded under
-`closure_readiness.track_g_handoff.attached_packet_fields`.
+`closure_readiness.track_g_handoff.attached_packet_fields`. Track-G itself
+remains `open` after stale-triage reopen, and that live state is now recorded
+under `closure_readiness.track_g_handoff.current_status` so the G7 contract
+does not rely on bead id alone.
 
 ## Closure Notes
 
