@@ -2773,3 +2773,10 @@
 {"file":"src/stream/debounce.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Pending item always buffered, timer re-arm logic correct"}
 {"file":"src/stream/chunks.rs","lines":300,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Items preserved in buffer across yields"}
 {"file":"src/stream/throttle.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Intentional item drop during suppression by design, cooperative budget correct"}
+{"file":"src/actor.rs","lines":2270,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Mailbox drain on stop, restart preserves mailbox, cancellation checks in send/recv"}
+{"file":"src/net/websocket/frame.rs","lines":1625,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Defensive parsing, no panic on malformed input"}
+{"file":"src/net/websocket/client.rs","lines":1371,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Close handshake has timeout, ping_interval config field unused at runtime (missing feature, not correctness bug)"}
+{"file":"src/net/websocket/server.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Server-side WebSocket lifecycle correct"}
+{"file":"src/runtime/reactor/epoll.rs","lines":1373,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TOCTOU deregister fix applied (f21584b1), mutex serializes register/modify/deregister"}
+{"file":"src/runtime/io_driver.rs","lines":1570,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Split-lock with generation counter prevents stale delivery, is_polling CAS serializes poll"}
+{"file":"src/runtime/reactor/token.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MAX_GENERATION slots permanently retired (f21584b1 fix), ABA prevention correct"}
