@@ -126,6 +126,14 @@ Cargo-heavy validation and replay commands must use `rch`:
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture`
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture`
 
+Because those G7 checks compare `closure_readiness` status fields against live
+Beads state, the artifact also defines a machine-checkable
+`reproducibility.status_snapshot_contract`. On shared rch workers, export
+`ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON` from the caller workspace snapshot of
+`.beads/issues.jsonl` for `asupersync-2cyx5`, `asupersync-36m6p`,
+`asupersync-3ltrv`, `asupersync-n5fk6`, and `asupersync-2zu9p`; shared workers
+can otherwise observe stale Beads JSONL during multi-agent sync races.
+
 ## Closure Readiness Contract
 
 The artifact includes a machine-checkable `closure_readiness` section to avoid

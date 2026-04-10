@@ -158,6 +158,38 @@ The closure packet requires schema-aligned logs containing:
 
 Replay resolution source: `artifacts/raptorq_replay_catalog_v1.json`.
 
+The `artifact_replay_index` entry for
+`artifacts/raptorq_expected_loss_decision_contract_v1.json` also records a
+G7-specific `status_snapshot_contract`: when replaying those status-sensitive
+checks on shared rch workers, export
+`ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON` from the caller workspace snapshot of
+`.beads/issues.jsonl` so the G7 contract sees the authoritative local Beads
+status map instead of whichever stale worker snapshot last won the sync race.
+That replay-index entry now records
+`status_snapshot_contract.applies_to_replay_commands` so the shared-rch
+precondition is attached to the exact G7 replay bundle rather than living only
+in surrounding prose.
+
+The shared-rch snapshot requirement applies to these G7 replay commands:
+
+```bash
+rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture
+rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture
+rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture
+```
+
+Before running them on shared workers, export
+`ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON` from the caller workspace snapshot of
+`.beads/issues.jsonl` for `asupersync-2cyx5`, `asupersync-36m6p`,
+`asupersync-3ltrv`, `asupersync-n5fk6`, and `asupersync-2zu9p`.
+
+The top-level H2 packet replay entry carries the same kind of
+`status_snapshot_contract` for
+`h2_closure_packet_dependency_status_alignment`, because that check also reads
+live Beads ownership/leaf ids (`asupersync-346lm`, `asupersync-2cyx5`,
+`asupersync-36m6p.23`) and can otherwise observe stale JSONL on shared rch
+workers.
+
 ## Required Repro Commands
 
 Cargo-heavy commands in this packet must use `rch exec --`:
@@ -166,6 +198,9 @@ Cargo-heavy commands in this packet must use `rch exec --`:
 rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_schema_and_lever_coverage -- --nocapture
 rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_dependency_status_alignment -- --nocapture
 rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_docs_are_cross_linked -- --nocapture
+rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture
+rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture
+rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture
 rch exec -- cargo test --test ci_regression_gates -- --nocapture
 rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --bundle
 ```

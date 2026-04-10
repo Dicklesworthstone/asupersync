@@ -264,6 +264,23 @@
       "seed",
       "scenario id"
     ],
+    "status_snapshot_contract": {
+      "env_var": "ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON",
+      "source_of_truth": ".beads/issues.jsonl from the caller workspace snapshot",
+      "reason": "shared rch workers can observe stale .beads/issues.jsonl during multi-agent sync races",
+      "required_bead_ids": [
+        "asupersync-2cyx5",
+        "asupersync-36m6p",
+        "asupersync-3ltrv",
+        "asupersync-n5fk6",
+        "asupersync-2zu9p"
+      ],
+      "applies_to_unit_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture"
+      ]
+    },
     "decision_replay_bundle": {
       "artifact_path": "artifacts/raptorq_replay_catalog_v1.json",
       "required_scenario_classes": [
