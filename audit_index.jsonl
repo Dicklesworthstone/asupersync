@@ -2824,3 +2824,12 @@
 {"file":"src/codec/framed.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full-duplex transport correct, EOF decode fix (9c910557) applied"}
 {"file":"src/codec/framed_write.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MAX_WRITE_PASSES_PER_POLL cooperative budget (c1bea827) correct"}
 {"file":"src/codec/framed_read.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Partial frame handling correct, decoder only returns Some for complete frames"}
+{"file":"src/transport/stream.rs","lines":1895,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cancel check before stream consumption, baton passing on Drop"}
+{"file":"src/transport/sink.rs","lines":1476,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Flush propagates errors, no silent data loss, Drop cleanup correct"}
+{"file":"src/grpc/client.rs","lines":1498,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RequestSink Drop closes streams, loopback implementation safe"}
+{"file":"src/grpc/server.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Server lifecycle correct"}
+{"file":"src/grpc/codec.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Compression flag validated, length try_from for overflow, no panic on malformed frames"}
+{"file":"src/fs/file.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Arc wrapping and spawn_blocking semantics correct"}
+{"file":"src/fs/buf_writer.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"into_inner() documented data loss matches std semantics, commit() properly flushes"}
+{"file":"src/fs/buf_reader.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Buffered read correct"}
+{"file":"src/fs/read_dir.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Directory iteration state machine correct"}
