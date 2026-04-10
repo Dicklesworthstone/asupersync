@@ -2654,3 +2654,12 @@
 {"file":"src/messaging/fabric.rs","lines":1500,"batch":"piwhi5","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DiscoverySessionFingerprintMaterial (22e944bc) correct: deterministic hash, canonical sorting, all-or-nothing construction"}
 {"file":"src/gen_server.rs","lines":5778,"batch":"piwhi5","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Two-phase mailbox, TrackedOneshotPermit obligation tracking, drain phase all correct. Recent fix 84351e90 reserves before creating obligation."}
 {"file":"src/supervision.rs","lines":8362,"batch":"piwhi5","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Window/threshold, restart attempt numbering, backoff ordering all correct. Fixes cb375e77/c40b0819 properly applied."}
+{"file":"src/messaging/nats.rs","lines":2400,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"handle_pending_messages swallowed server -ERR messages; fixed to return Err(NatsError::Server(e))"}
+{"file":"src/messaging/stream.rs","lines":2872,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/consumer.rs","lines":5211,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/capability/tokens.rs","lines":715,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/kafka_consumer.rs","lines":1072,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/runtime/scheduler/local_queue.rs","lines":1074,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/sync/mutex.rs","lines":0,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: cleanup_waiter refactoring with improved baton-passing semantics"}
+{"file":"src/runtime/reactor/token.rs","lines":0,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: generation overflow protection, permanently retires MAX_GENERATION slots"}
+{"file":"src/trace/boundary.rs","lines":0,"batch":"8nox6v","date":"2026-04-09","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: combined_boundary_matrix and h1_persistence_pairs addition"}
