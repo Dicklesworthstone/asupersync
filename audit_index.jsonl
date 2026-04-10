@@ -2890,3 +2890,6 @@
 {"file":"src/lab/oracle/obligation_leak.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"is_success checks Committed/Aborted correctly, no false positive for legitimate obligations"}
 {"file":"src/types/wasm_abi.rs","lines":6586,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"All casts safe on wasm32 (usize==u32), handle table bounded by address space"}
 {"file":"src/io/browser_stream.rs","lines":1782,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"cfg(wasm32) only, usize==u32 on target, ReadableStream/WritableStream Drop impls correct"}
+{"file":"src/encoding.rs","lines":997,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"BlockPlan::end() unchecked add bounded by planning logic saturating_mul, sequential offset tracking"}
+{"file":"src/decoding.rs","lines":2085,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"plan_blocks validates object_size against max_total, div_ceil safe"}
+{"file":"src/messaging/stream.rs","lines":1500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"WAL uses saturating_add throughout, no unbounded allocation"}
