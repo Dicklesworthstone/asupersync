@@ -2806,3 +2806,7 @@
 {"file":"src/signal/signal.rs","lines":702,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Signal handling correct"}
 {"file":"src/web/sse.rs","lines":567,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"All text fields sanitized for CRLF injection, retry field numeric and safe"}
 {"file":"src/server/connection.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RAII ConnectionGuard prevents connection leaks on error"}
+{"file":"src/obligation/choreography/mod.rs","lines":3528,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Projection correct, choice/compensation/seq/par interactions sound"}
+{"file":"src/obligation/choreography/pipeline.rs","lines":1898,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Choreography-to-saga conversion correct, choice both branches included"}
+{"file":"src/obligation/separation_logic.rs","lines":2429,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"check_final_state catches only Reserved (correct: Leaked handled via Leak events in verify_resolve). No false negatives."}
+{"file":"src/obligation/saga.rs","lines":1375,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CALM batching correct, lattice joins + post-hoc monotonicity validation"}
