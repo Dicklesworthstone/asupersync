@@ -817,10 +817,17 @@ impl TimerWheel {
             }
 
             let current_slot = (level_tick_current % (SLOTS_PER_LEVEL as u64)) as usize;
-            let mut diff = (level_tick_boundary - level_tick_current) as usize;
-            if diff >= SLOTS_PER_LEVEL {
-                diff = SLOTS_PER_LEVEL - 1;
-            }
+            // Compare in u64 before narrowing to usize: on 32-bit targets, a
+            // direct `as usize` cast of a wide difference would silently
+            // truncate the high bits and could bypass the SLOTS_PER_LEVEL
+            // clamp, causing us to miss timer slots that are far in the
+            // future.
+            let diff_u64 = level_tick_boundary - level_tick_current;
+            let diff = if diff_u64 >= SLOTS_PER_LEVEL as u64 {
+                SLOTS_PER_LEVEL - 1
+            } else {
+                diff_u64 as usize
+            };
 
             for i in 0..=diff {
                 let slot_idx = (current_slot + i) % SLOTS_PER_LEVEL;
@@ -971,10 +978,15 @@ impl TimerWheel {
             }
 
             let current_slot = (level_tick_current % (SLOTS_PER_LEVEL as u64)) as usize;
-            let mut diff = (level_tick_boundary - level_tick_current) as usize;
-            if diff >= SLOTS_PER_LEVEL {
-                diff = SLOTS_PER_LEVEL - 1;
-            }
+            // Clamp in u64 before narrowing to usize: a direct cast on 32-bit
+            // targets would silently truncate the high bits and could bypass
+            // the SLOTS_PER_LEVEL clamp. See `promote_coalescing_window_entries`.
+            let diff_u64 = level_tick_boundary - level_tick_current;
+            let diff = if diff_u64 >= SLOTS_PER_LEVEL as u64 {
+                SLOTS_PER_LEVEL - 1
+            } else {
+                diff_u64 as usize
+            };
 
             for i in 0..=diff {
                 let slot_idx = (current_slot + i) % SLOTS_PER_LEVEL;
