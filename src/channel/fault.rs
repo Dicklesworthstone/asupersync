@@ -240,7 +240,8 @@ impl<T: Clone> FaultSender<T> {
         };
 
         if should_reorder {
-            self.record_reorder();
+            // Defer record_reorder() until after the send path succeeds
+            // to prevent stat corruption when auto_flush fails.
             let value_to_flush = {
                 let mut buffer = self.reorder_buffer.lock();
                 if buffer.len() + 1 < self.config.reorder_buffer_size {
@@ -255,6 +256,7 @@ impl<T: Clone> FaultSender<T> {
             if let Some(v) = value_to_flush {
                 self.auto_flush_including_current(cx, v).await?;
             }
+            self.record_reorder();
         } else {
             self.inner.send(cx, value).await?;
             self.record_sent();

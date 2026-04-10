@@ -157,7 +157,7 @@ impl Diagnostics {
             if !has_cycle {
                 continue;
             }
-            cycle_nodes += nodes.len();
+            cycle_nodes = cycle_nodes.saturating_add(nodes.len());
             let mut ingress = 0_u32;
             let mut egress = 0_u32;
             for &u in &nodes {
