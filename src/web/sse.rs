@@ -119,8 +119,15 @@ impl SseEvent {
     /// Write this event to the given buffer in SSE wire format.
     fn write_to(&self, buf: &mut String) {
         // Comment lines first.
+        // Normalize bare \r to \n the same way the data field does so a
+        // comment containing `foo\rdata: injected` cannot be interpreted as
+        // a real `data:` field by the WHATWG EventSource parser. Rust's
+        // `str::lines()` splits on `\n` and `\r\n` but NOT bare `\r`, so
+        // without this normalization a bare carriage return in a comment
+        // becomes a wire-format separator and injects whatever follows.
         if let Some(ref comment) = self.comment {
-            for line in comment.lines() {
+            let normalized = comment.replace("\r\n", "\n").replace('\r', "\n");
+            for line in normalized.lines() {
                 let _ = writeln!(buf, ":{line}");
             }
         }
@@ -383,6 +390,32 @@ mod tests {
     fn event_multiline_comment() {
         let event = SseEvent::default().comment("line1\nline2");
         assert_eq!(event.to_string(), ":line1\n:line2\n\n");
+    }
+
+    #[test]
+    fn event_comment_normalizes_bare_cr_to_block_field_injection() {
+        // A bare \r in a comment must be treated as a line break so the
+        // browser's EventSource parser cannot interpret the second half as
+        // a real `data:` / `event:` / `id:` field. Without normalization,
+        // Rust's .lines() leaves the \r in place and the injected payload
+        // appears verbatim in the wire format.
+        let event = SseEvent::default().comment("safe\rdata: injected");
+        let body = event.to_string();
+        assert!(
+            !body.contains('\r'),
+            "comment normalization should remove bare CR; got: {body:?}"
+        );
+        // The injected payload, if present at all, must appear inside a
+        // comment line (prefixed with `:`), never as a top-level data field.
+        assert_eq!(body, ":safe\n:data: injected\n\n");
+    }
+
+    #[test]
+    fn event_comment_normalizes_crlf() {
+        // CRLF in a comment should produce two clean comment lines, not
+        // a stray \r followed by a separate \n.
+        let event = SseEvent::default().comment("first\r\nsecond");
+        assert_eq!(event.to_string(), ":first\n:second\n\n");
     }
 
     // ================================================================
