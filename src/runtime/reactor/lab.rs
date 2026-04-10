@@ -323,7 +323,10 @@ impl LabReactor {
             .time
             .saturating_add_nanos(duration_to_nanos_saturating(delay));
         let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
+        inner.next_sequence = inner
+            .next_sequence
+            .checked_add(1)
+            .expect("lab reactor sequence counter exhausted");
         event.token = token;
         inner.pending.push(TimedEvent {
             time,
@@ -889,7 +892,9 @@ impl Reactor for LabReactor {
                             let delay = chaos.rng.next_delay(config);
                             if !delay.is_zero() {
                                 let sequence = *next_sequence;
-                                *next_sequence += 1;
+                                *next_sequence = next_sequence
+                                    .checked_add(1)
+                                    .expect("lab reactor sequence counter exhausted");
                                 let delayed_time = timed
                                     .time
                                     .saturating_add_nanos(duration_to_nanos_saturating(delay));

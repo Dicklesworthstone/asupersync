@@ -217,7 +217,7 @@ pub struct LockFuture<'a, 'b, T> {
     completed: bool,
 }
 
-impl<'a, T> LockFuture<'a, '_, T> {
+impl<T> LockFuture<'_, '_, T> {
     fn cleanup_waiter(&mut self) {
         if let Some(waiter_id) = self.waiter_id.take() {
             let waker_to_wake = {

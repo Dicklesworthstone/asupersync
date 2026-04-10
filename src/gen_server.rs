@@ -907,7 +907,23 @@ impl<S: GenServer> GenServerHandle<S> {
             reply_permit,
         };
 
-        send_permit.send(envelope);
+        // Use try_send so that if the receiver was dropped between reserve()
+        // and now, we can extract the envelope and explicitly abort the
+        // reply_permit obligation.  Calling SendPermit::send would silently
+        // discard the value on disconnection, dropping the still-armed
+        // obligation token and panicking.
+        if let Err(e) = send_permit.try_send(envelope) {
+            let envelope = match e {
+                mpsc::SendError::Disconnected(v)
+                | mpsc::SendError::Full(v)
+                | mpsc::SendError::Cancelled(v) => v,
+            };
+            if let Envelope::Call { reply_permit, .. } = envelope {
+                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
+            }
+            cx.trace("gen_server::call_send_failed");
+            return Err(CallError::ServerStopped);
+        }
 
         cx.trace("gen_server::call_enqueued");
 
@@ -1289,7 +1305,23 @@ impl<S: GenServer> GenServerRef<S> {
             reply_permit,
         };
 
-        send_permit.send(envelope);
+        // Use try_send so that if the receiver was dropped between reserve()
+        // and now, we can extract the envelope and explicitly abort the
+        // reply_permit obligation.  Calling SendPermit::send would silently
+        // discard the value on disconnection, dropping the still-armed
+        // obligation token and panicking.
+        if let Err(e) = send_permit.try_send(envelope) {
+            let envelope = match e {
+                mpsc::SendError::Disconnected(v)
+                | mpsc::SendError::Full(v)
+                | mpsc::SendError::Cancelled(v) => v,
+            };
+            if let Envelope::Call { reply_permit, .. } = envelope {
+                let _aborted = session::TrackedOneshotPermit::abort(reply_permit);
+            }
+            cx.trace("gen_server::call_send_failed");
+            return Err(CallError::ServerStopped);
+        }
 
         cx.trace("gen_server::call_enqueued");
 

@@ -658,7 +658,10 @@ impl NativeQuicConnection {
             PacketNumberSpace::ApplicationData => 2,
         };
         let out = self.next_packet_numbers[idx];
-        if out >= (1 << 62) - 1 {
+        // RFC 9000 §17.1: packet numbers are integers in [0, 2^62-1] inclusive.
+        // The exhaustion guard rejects when `out` is already past the last
+        // valid packet number, not when it equals the last valid one.
+        if out > (1u64 << 62) - 1 {
             return Err(NativeQuicConnectionError::InvalidState(
                 "packet number limit reached; connection must be closed",
             ));
@@ -1390,5 +1393,26 @@ mod tests {
         let inner = QuicStreamError::SendStopped { code: 100 };
         let err = NativeQuicConnectionError::Stream(inner.clone());
         assert_eq!(format!("{err}"), format!("{inner}"));
+    }
+
+    #[test]
+    fn next_packet_number_accepts_max_valid_then_rejects_overflow() {
+        // RFC 9000 §17.1: packet numbers in [0, 2^62-1] inclusive.
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        // Seed the Initial space cursor at 2^62 - 1: that exact value is the
+        // last valid packet number and must be issued exactly once before the
+        // exhaustion guard fires.
+        conn.next_packet_numbers[0] = (1u64 << 62) - 1;
+        let pn = conn
+            .next_packet_number(PacketNumberSpace::Initial)
+            .expect("max valid packet number must be issuable");
+        assert_eq!(pn, (1u64 << 62) - 1);
+        let err = conn
+            .next_packet_number(PacketNumberSpace::Initial)
+            .expect_err("packet number 2^62 must be rejected");
+        assert!(matches!(
+            err,
+            NativeQuicConnectionError::InvalidState("packet number limit reached; connection must be closed")
+        ));
     }
 }

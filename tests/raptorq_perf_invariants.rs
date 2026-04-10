@@ -66,6 +66,27 @@ fn beads_latest_status_by_id() -> BTreeMap<String, String> {
             .to_string();
         latest.insert(id, status);
     }
+    if let Ok(raw_overrides) = std::env::var("ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON") {
+        let overrides: BTreeMap<String, String> = if raw_overrides.trim_start().starts_with('{') {
+            serde_json::from_str(&raw_overrides).unwrap_or_else(|e| {
+                panic!("failed to parse ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON: {e}")
+            })
+        } else {
+            raw_overrides
+                .split(',')
+                .filter(|entry| !entry.trim().is_empty())
+                .map(|entry| {
+                    let (id, status) = entry.split_once('=').unwrap_or_else(|| {
+                        panic!(
+                            "ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON CSV entry must be id=status: {entry}"
+                        )
+                    });
+                    (id.trim().to_string(), status.trim().to_string())
+                })
+                .collect()
+        };
+        latest.extend(overrides);
+    }
     latest
 }
 const RAPTORQ_BASELINE_PROFILE_MD: &str = include_str!("../docs/raptorq_baseline_bench_profile.md");
@@ -4104,6 +4125,20 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         Some("asupersync-2cyx5"),
         "closure_readiness.track_g_handoff must stay anchored to Track-G bead"
     );
+    let track_g_status = closure_readiness["track_g_handoff"]["current_status"]
+        .as_str()
+        .expect("closure_readiness.track_g_handoff.current_status must be present");
+    let canonical_track_g_status = canonical_issue_statuses
+        .get("asupersync-2cyx5")
+        .expect("Track-G bead must exist in canonical Beads issue status map");
+    assert!(
+        matches!(track_g_status, "open" | "in_progress" | "closed"),
+        "closure_readiness.track_g_handoff.current_status must be open|in_progress|closed"
+    );
+    assert_eq!(
+        track_g_status, canonical_track_g_status,
+        "closure_readiness.track_g_handoff.current_status must match canonical Track-G Beads status"
+    );
 }
 
 /// Validate G7 deterministic decision replay samples are complete and coherent.
@@ -4316,6 +4351,7 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "raw_sample_mixed_signal_not_closure_grade",
         "current mixed-signal raw-sample blocker",
         "highconf_v1 + v2/v3 history + v4 blocker",
+        "track_g_handoff.current_status",
         "raw-sample",
         "asupersync-2zu9p",
         "argmin_expected_loss",
@@ -4720,6 +4756,10 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 .as_str()
                 .expect("track E must include status_reason");
             assert!(
+                status_reason.contains("asupersync-36m6p.23"),
+                "track E status_reason must still name the current active E5 leaf"
+            );
+            assert!(
                 status_reason.contains("asupersync-36m6p"),
                 "track E status_reason must still name the active E5 leaf"
             );
@@ -5087,7 +5127,7 @@ fn h2_closure_packet_dependency_status_alignment() {
     );
     assert_eq!(
         upstream_active_leaf_bead_ids,
-        &BTreeSet::from([String::from("asupersync-36m6p")]),
+        &BTreeSet::from([String::from("asupersync-36m6p.23")]),
         "RQ-H2-R2 must machine-link the active upstream Track-E blocker leaf"
     );
     let (_, _, upstream_active_leaf_bead_ids) = risks_by_id
@@ -5190,6 +5230,7 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "E4",
         "F8",
         "asupersync-36m6p",
+        "asupersync-36m6p.23",
         "rch exec --",
     ] {
         assert!(

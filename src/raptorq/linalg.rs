@@ -34,7 +34,7 @@
 
 use super::gf256::{
     Gf256, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2,
-    gf256_mul_slices2,
+    gf256_mul_slice, gf256_mul_slices2,
 };
 
 // ============================================================================
@@ -755,16 +755,7 @@ impl GaussianSolver {
                 self.swap_rows(pivot_col, pivot_row);
             }
 
-            // Eliminate below
-            let pivot_val = Gf256::new(self.matrix[pivot_col][pivot_col]);
-            let pivot_inv = pivot_val.inv();
-
-            // Scale pivot row so pivot element becomes 1
-            gf256_mul_slices2(
-                &mut self.matrix[pivot_col],
-                self.rhs[pivot_col].as_mut_slice(),
-                pivot_inv,
-            );
+            self.normalize_pivot_row(pivot_col);
 
             // Eliminate in rows below pivot
             for row in (pivot_col + 1)..self.rows {
@@ -810,15 +801,7 @@ impl GaussianSolver {
                 self.swap_rows(pivot_col, pivot_row);
             }
 
-            // Scale and eliminate
-            let pivot_val = Gf256::new(self.matrix[pivot_col][pivot_col]);
-            let pivot_inv = pivot_val.inv();
-
-            gf256_mul_slices2(
-                &mut self.matrix[pivot_col],
-                self.rhs[pivot_col].as_mut_slice(),
-                pivot_inv,
-            );
+            self.normalize_pivot_row(pivot_col);
 
             for row in (pivot_col + 1)..self.rows {
                 let factor = Gf256::new(self.matrix[row][pivot_col]);
@@ -909,6 +892,28 @@ impl GaussianSolver {
             return GaussianResult::Singular { row: pivot_count };
         }
         GaussianResult::Solved(self.rhs[..self.cols].to_vec())
+    }
+
+    /// Normalize the pivot row so `matrix[pivot][pivot] == 1`, scaling only
+    /// the active coefficient tail and RHS instead of the full row.
+    fn normalize_pivot_row(&mut self, pivot: usize) {
+        debug_assert!(
+            self.matrix[pivot][..pivot.min(self.matrix[pivot].len())]
+                .iter()
+                .all(|&coef| coef == 0),
+            "pivot normalization expects columns before the pivot to be structurally zero"
+        );
+        let pivot_val = Gf256::new(self.matrix[pivot][pivot]);
+        let pivot_inv = pivot_val.inv();
+        let rhs_len = self.rhs[pivot].len();
+        let coeff_tail = &mut self.matrix[pivot][pivot..];
+
+        if rhs_len == 0 {
+            gf256_mul_slice(coeff_tail, pivot_inv);
+            return;
+        }
+
+        gf256_mul_slices2(coeff_tail, self.rhs[pivot].as_mut_slice(), pivot_inv);
     }
 
     /// Swap two rows.
@@ -1790,6 +1795,72 @@ mod tests {
         assert_eq!(solver.matrix[0], vec![0xAA, 0]);
         assert_eq!(solver.rhs[0].as_slice(), &[expected_rhs.raw()]);
         assert_eq!(solver.stats.scale_adds, 1);
+    }
+
+    #[test]
+    fn normalize_pivot_row_scales_active_tail_only() {
+        let mut solver = GaussianSolver::new(4, 4);
+        solver.set_row(0, &[1, 0, 0, 0], DenseRow::zeros(0));
+        solver.set_row(1, &[0, 1, 0, 0], DenseRow::zeros(0));
+        solver.set_row(2, &[0, 0, 2, 4], DenseRow::new(vec![8, 16]));
+        solver.set_row(3, &[0, 0, 0, 1], DenseRow::zeros(0));
+
+        let inv = Gf256::new(2).inv();
+        let expected_col3 = (Gf256::new(4) * inv).raw();
+        let expected_rhs = [(Gf256::new(8) * inv).raw(), (Gf256::new(16) * inv).raw()];
+
+        solver.normalize_pivot_row(2);
+
+        assert_eq!(solver.matrix[2], vec![0, 0, 1, expected_col3]);
+        assert_eq!(solver.rhs[2].as_slice(), &expected_rhs);
+    }
+
+    #[test]
+    fn normalize_pivot_row_with_empty_rhs_scales_tail_only() {
+        let mut solver = GaussianSolver::new(4, 4);
+        solver.set_row(0, &[1, 0, 0, 0], DenseRow::zeros(0));
+        solver.set_row(1, &[0, 1, 0, 0], DenseRow::zeros(0));
+        solver.set_row(2, &[0, 0, 3, 6], DenseRow::zeros(0));
+        solver.set_row(3, &[0, 0, 0, 1], DenseRow::zeros(0));
+
+        let inv = Gf256::new(3).inv();
+        let expected = vec![0, 0, 1, (Gf256::new(6) * inv).raw()];
+
+        solver.normalize_pivot_row(2);
+
+        assert_eq!(solver.matrix[2], expected);
+        assert!(solver.rhs[2].as_slice().is_empty());
+    }
+
+    #[test]
+    fn solve_normalizes_late_pivot_without_touching_zero_prefix() {
+        let mut basic = GaussianSolver::new(3, 3);
+        basic.set_row(0, &[1, 0, 0], DenseRow::new(vec![0x10]));
+        basic.set_row(1, &[0, 5, 0], DenseRow::new(vec![0x20]));
+        basic.set_row(2, &[0, 0, 7], DenseRow::new(vec![0x30]));
+
+        let mut markowitz = GaussianSolver::new(3, 3);
+        markowitz.set_row(0, &[1, 0, 0], DenseRow::new(vec![0x10]));
+        markowitz.set_row(1, &[0, 5, 0], DenseRow::new(vec![0x20]));
+        markowitz.set_row(2, &[0, 0, 7], DenseRow::new(vec![0x30]));
+
+        match basic.solve() {
+            GaussianResult::Solved(solution) => {
+                assert_eq!(solution[0].as_slice(), &[0x10]);
+                assert_eq!(Gf256::new(5) * solution[1].get(0), Gf256::new(0x20));
+                assert_eq!(Gf256::new(7) * solution[2].get(0), Gf256::new(0x30));
+            }
+            other => panic!("unexpected basic result: {other:?}"),
+        }
+
+        match markowitz.solve_markowitz() {
+            GaussianResult::Solved(solution) => {
+                assert_eq!(solution[0].as_slice(), &[0x10]);
+                assert_eq!(Gf256::new(5) * solution[1].get(0), Gf256::new(0x20));
+                assert_eq!(Gf256::new(7) * solution[2].get(0), Gf256::new(0x30));
+            }
+            other => panic!("unexpected markowitz result: {other:?}"),
+        }
     }
 
     #[test]

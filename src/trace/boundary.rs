@@ -672,15 +672,12 @@ mod tests {
         let (birth, death) = square_pair.unwrap();
         assert!(
             (5..=8).contains(birth),
-            "birth {} should be an edge in the cycle (cols 5..=8), paired with {}",
-            birth,
-            death
+            "birth {birth} should be an edge in the cycle (cols 5..=8), paired with {death}"
         );
         assert_eq!(
             pairs.unpaired,
             Vec::<usize>::new(),
-            "the square should kill the only H1 class in this complex. birth was {}",
-            birth
+            "the square should kill the only H1 class in this complex. birth was {birth}"
         );
     }
 

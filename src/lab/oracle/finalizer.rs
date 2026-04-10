@@ -106,7 +106,10 @@ impl FinalizerOracle {
     /// Generates a unique finalizer ID.
     pub fn generate_id(&mut self) -> FinalizerId {
         let id = FinalizerId(self.next_id);
-        self.next_id += 1;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("finalizer oracle id counter exhausted");
         id
     }
 

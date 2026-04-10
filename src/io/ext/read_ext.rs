@@ -76,13 +76,11 @@ pub trait AsyncReadExt: AsyncRead {
     where
         Self: Unpin,
     {
-        let start_len = buf.len();
         ReadToString {
             reader: self,
             buf,
             pending_utf8: Vec::new(),
             read: 0,
-            start_len,
             yield_counter: 0,
             completed: false,
         }
@@ -351,17 +349,11 @@ pub struct ReadToString<'a, R: ?Sized> {
     buf: &'a mut String,
     pending_utf8: Vec<u8>,
     read: usize,
-    start_len: usize,
     yield_counter: u8,
     completed: bool,
 }
 
 impl<R: ?Sized> ReadToString<'_, R> {
-    fn rollback_utf8_error(&mut self) {
-        self.buf.truncate(self.start_len);
-        self.pending_utf8.clear();
-    }
-
     fn push_valid_prefix(&mut self) -> io::Result<()> {
         match std::str::from_utf8(&self.pending_utf8) {
             Ok(s) => {
@@ -430,7 +422,6 @@ where
                         if this.pending_utf8.is_empty() {
                             return Poll::Ready(Ok(this.read));
                         }
-                        this.rollback_utf8_error();
                         return Poll::Ready(Err(io::Error::new(
                             ErrorKind::InvalidData,
                             "incomplete utf-8 sequence",
@@ -440,7 +431,6 @@ where
                     this.pending_utf8.extend_from_slice(read_buf.filled());
                     if let Err(err) = this.push_valid_prefix() {
                         this.completed = true;
-                        this.rollback_utf8_error();
                         return Poll::Ready(Err(err));
                     }
                 }

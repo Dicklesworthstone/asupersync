@@ -33,8 +33,12 @@
 //! # Thread Safety
 //!
 //! `KqueueReactor` is `Send + Sync` and can be shared across threads via `Arc`.
-//! Internal state is protected by `Mutex` for registration/deregistration,
-//! while `poll()` and `wake()` are designed for concurrent access.
+//! Internal state is protected by `Mutex` for registration/deregistration.
+//! `wake()` is lock-free; `poll()` acquires a short-lived mutex on the
+//! reused event buffer for the duration of the kernel wait. Concurrent
+//! `poll()` callers are expected to be serialized externally (the runtime
+//! `IoDriver` uses an `is_polling` CAS to enforce this leader/follower
+//! discipline).
 //!
 //! # Example
 //!

@@ -440,7 +440,10 @@ impl Pool {
     /// Returns the connection ID for tracking.
     pub fn register_connecting(&mut self, key: PoolKey, now: Time, http_version: u8) -> u64 {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("http connection pool id counter exhausted");
 
         let meta = PooledConnectionMeta::new(id, now, http_version);
 

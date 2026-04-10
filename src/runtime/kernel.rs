@@ -593,7 +593,10 @@ impl ControllerRegistry {
         self.validate(&registration)?;
 
         let id = ControllerId(self.next_id);
-        self.next_id += 1;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("runtime kernel controller id counter exhausted");
 
         let mode = if (registration.initial_mode == ControllerMode::Active
             || registration.initial_mode == ControllerMode::Canary)

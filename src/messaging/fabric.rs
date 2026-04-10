@@ -628,7 +628,10 @@ impl FabricState {
             capacity,
         } = prepared;
         let sequence = self.next_sequence;
-        self.next_sequence += 1;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("fabric publish sequence counter exhausted");
         let local_candidates = self.local_candidates.clone();
 
         for cell_key in routed_cells {
@@ -3902,7 +3905,10 @@ impl ControlCapsuleV1 {
             epoch: self.cell_epoch,
             sequence: self.next_sequence,
         };
-        self.next_sequence += 1;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("fabric authoritative append sequence counter exhausted");
 
         let certificate = AppendCertificate {
             identity: identity.clone(),

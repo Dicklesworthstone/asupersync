@@ -1140,6 +1140,20 @@ mod tests {
     }
 
     #[test]
+    fn test_token_cancel_clamps_time_max_away_from_sentinel() {
+        let mut rng = DetRng::new(42);
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+
+        assert!(cancel_handle.cancel(&CancelReason::timeout(), Time::MAX));
+        assert!(cancel_handle.is_cancelled());
+        assert_eq!(cancel_handle.reason().unwrap().kind, CancelKind::Timeout);
+        assert_eq!(
+            cancel_handle.cancelled_at(),
+            Some(Time::from_nanos(u64::MAX - 1))
+        );
+    }
+
+    #[test]
     fn test_token_reason_propagates() {
         let mut rng = DetRng::new(42);
         let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);

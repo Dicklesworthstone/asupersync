@@ -367,7 +367,7 @@ pub struct Reserve<'a, T> {
     waiter_id: Option<u64>,
 }
 
-impl<'a, T> Reserve<'a, T> {
+impl<T> Reserve<'_, T> {
     fn cleanup_waiter(&mut self) {
         if let Some(id) = self.waiter_id.take() {
             let next_waker = {

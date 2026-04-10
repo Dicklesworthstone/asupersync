@@ -761,7 +761,10 @@ impl RegionBridge {
     /// Creates a snapshot of current region state.
     #[must_use]
     pub fn create_snapshot(&mut self, now: Time) -> RegionSnapshot {
-        self.sequence += 1;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .expect("distributed bridge snapshot sequence counter exhausted");
 
         let tasks: Vec<TaskSnapshot> = self
             .local
