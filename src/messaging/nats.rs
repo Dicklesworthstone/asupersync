@@ -1048,7 +1048,15 @@ impl NatsClient {
 
                 match message {
                     Some(NatsMessage::Ping) => {
-                        self.send_server_pong().await?;
+                        if let Err(err) = self.send_server_pong().await {
+                            self.cleanup_request_subscription(
+                                cx,
+                                sub.sid(),
+                                "server_ping_write_failed",
+                            )
+                            .await;
+                            return Err(err);
+                        }
                         processed_any = true;
                     }
                     Some(NatsMessage::Msg(m)) => {
@@ -1270,7 +1278,7 @@ impl NatsClient {
     }
 
     /// Handle any pending server messages (like PING).
-    async fn handle_pending_messages(&mut self, cx: &Cx) -> Result<(), NatsError> {
+    async fn handle_pending_messages(&mut self, _cx: &Cx) -> Result<(), NatsError> {
         // Non-blocking check for pending messages
         loop {
             match self.try_parse_message()? {
@@ -1281,7 +1289,7 @@ impl NatsClient {
                     self.dispatch_message(m);
                 }
                 Some(NatsMessage::Err(e)) => {
-                    cx.trace(&format!("nats: server error: {e}"));
+                    return Err(NatsError::Server(e));
                 }
                 Some(_) => {}
                 None => break,
@@ -2001,6 +2009,79 @@ mod tests {
     }
 
     #[test]
+    fn request_ping_write_failure_cleans_up_temporary_subscription() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream);
+
+            let subscribe = read_protocol_line(&mut reader);
+            assert!(
+                subscribe.starts_with("SUB _INBOX."),
+                "unexpected SUB: {subscribe:?}"
+            );
+
+            let publish = read_protocol_line(&mut reader);
+            assert!(
+                publish.starts_with("PUB svc.echo _INBOX."),
+                "unexpected PUB: {publish:?}"
+            );
+
+            let payload_len = parse_pub_payload_len(&publish);
+            let mut payload = vec![0_u8; payload_len + 2];
+            reader
+                .read_exact(&mut payload)
+                .expect("read request payload");
+            assert_eq!(&payload[..payload_len], b"ping");
+            assert_eq!(&payload[payload_len..], b"\r\n");
+
+            let stream = reader.into_inner();
+            SockRef::from(&stream)
+                .set_linger(Some(Duration::ZERO))
+                .expect("force reset on close");
+            drop(stream);
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let state = Arc::new(SharedState::new());
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::clone(&state),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+            };
+
+            client.read_buf.extend(b"PING\r\n").expect("buffer ping");
+
+            let err = client
+                .request(&cx, "svc.echo", b"ping")
+                .await
+                .expect_err("request must fail when PONG write fails");
+            assert!(
+                matches!(err, NatsError::Io(_)),
+                "expected I/O error, got {err:?}"
+            );
+            assert!(
+                state.subscriptions.lock().is_empty(),
+                "temporary request inbox subscription must be cleaned up after PONG write failure"
+            );
+            assert!(
+                !client.connected,
+                "client must remain disconnected after failed PONG write"
+            );
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
     fn nats_error_source_none_for_others() {
         assert!(std::error::Error::source(&NatsError::Cancelled).is_none());
         assert!(std::error::Error::source(&NatsError::Closed).is_none());
@@ -2280,5 +2361,46 @@ mod tests {
     fn test_config_from_url_ipv6_invalid() {
         let result = NatsConfig::from_url("nats://[::1");
         assert!(matches!(result, Err(NatsError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn handle_pending_messages_propagates_server_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            drop(stream);
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+            };
+
+            client
+                .read_buf
+                .extend(b"-ERR 'Permissions Violation'\r\n")
+                .expect("buffer server error");
+
+            let err = client
+                .handle_pending_messages(&cx)
+                .await
+                .expect_err("server -ERR must propagate as error");
+            assert!(
+                matches!(&err, NatsError::Server(msg) if msg.contains("Permissions Violation")),
+                "expected server error with permissions message, got {err:?}"
+            );
+        });
+
+        server.join().expect("server join");
     }
 }

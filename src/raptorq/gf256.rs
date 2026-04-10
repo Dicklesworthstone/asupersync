@@ -1124,7 +1124,10 @@ fn dual_policy() -> &'static DualKernelPolicy {
 fn parse_dual_policy_request(raw: &str) -> Option<DualKernelOverride> {
     match raw.trim() {
         "auto" => Some(DualKernelOverride::Auto),
-        "off" | "sequential" => Some(DualKernelOverride::ForceSequential),
+        // Historical Track-E baseline repro bundles use `never` for the
+        // sequential/disabled dual-policy path; keep that alias accepted so
+        // runtime parsing stays aligned with checked-in evidence commands.
+        "never" | "off" | "sequential" => Some(DualKernelOverride::ForceSequential),
         "fused" | "force_fused" => Some(DualKernelOverride::ForceFused),
         _ => None,
     }
@@ -5088,6 +5091,10 @@ mod tests {
         );
         assert_eq!(
             parse_dual_policy_request("off"),
+            Some(DualKernelOverride::ForceSequential)
+        );
+        assert_eq!(
+            parse_dual_policy_request(" never "),
             Some(DualKernelOverride::ForceSequential)
         );
         assert_eq!(
