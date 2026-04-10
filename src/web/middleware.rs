@@ -155,24 +155,21 @@ impl<H: Handler> CorsMiddleware<H> {
     }
 
     fn apply_common_headers(&self, mut resp: Response, allow_origin: &str) -> Response {
-        resp.headers.insert(
-            "access-control-allow-origin".to_string(),
-            allow_origin.to_string(),
-        );
+        // Use set_header() rather than direct headers.insert() to route
+        // through sanitize_header_value(), preventing CRLF injection from
+        // a reflected Origin value.
+        resp.set_header("access-control-allow-origin", allow_origin);
         // Cache key must vary by Origin when policy is origin-sensitive.
         // Use append (not insert) to preserve existing Vary tokens set by
         // the inner handler or other middleware (e.g., accept-encoding).
         append_vary_header(&mut resp, "origin");
         if self.policy.allow_credentials {
-            resp.headers.insert(
-                "access-control-allow-credentials".to_string(),
-                "true".to_string(),
-            );
+            resp.set_header("access-control-allow-credentials", "true");
         }
         if !self.policy.expose_headers.is_empty() {
-            resp.headers.insert(
-                "access-control-expose-headers".to_string(),
-                self.policy.expose_headers.join(", "),
+            resp.set_header(
+                "access-control-expose-headers",
+                &self.policy.expose_headers.join(", "),
             );
         }
         resp
