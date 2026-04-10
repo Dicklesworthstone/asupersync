@@ -305,13 +305,13 @@ impl SlidingWindow {
     fn record_success(&mut self, now_millis: u64) {
         self.cleanup(now_millis);
         self.entries.push_back((now_millis, false));
-        self.success_count += 1;
+        self.success_count = self.success_count.saturating_add(1);
     }
 
     fn record_failure(&mut self, now_millis: u64) {
         self.cleanup(now_millis);
         self.entries.push_back((now_millis, true));
-        self.failure_count += 1;
+        self.failure_count = self.failure_count.saturating_add(1);
     }
 
     fn failure_rate(&self) -> f64 {
@@ -618,7 +618,7 @@ impl CircuitBreaker {
                             probes_active,
                             successes,
                         } if epoch == permit_epoch => {
-                            let new_successes = successes + 1;
+                            let new_successes = successes.saturating_add(1);
                             if new_successes >= self.policy.success_threshold {
                                 // Transition to Closed
                                 let new_state = State::Closed { failures: 0 };
@@ -818,7 +818,7 @@ impl CircuitBreaker {
                     let state = State::from_bits(current_bits);
                     match state {
                         State::Closed { failures } => {
-                            let new_failures = failures + 1;
+                            let new_failures = failures.saturating_add(1);
 
                             if new_failures >= self.policy.failure_threshold || window_triggered {
                                 let new_state = State::Open {

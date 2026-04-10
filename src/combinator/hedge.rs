@@ -70,7 +70,7 @@ pub struct AdaptiveHedgePolicy {
     /// Sliding window of recent primary latencies (in microseconds).
     history: Vec<u64>,
     /// Number of observations recorded so far.
-    count: usize,
+    count: u64,
     /// Miscoverage target (e.g., 0.05 for P95 hedging).
     alpha: f64,
     /// Minimum threshold to prevent micro-hedging on extremely fast tasks.
@@ -126,8 +126,8 @@ impl AdaptiveHedgePolicy {
         } else {
             micros as u64
         };
-        let capacity = self.history.len();
-        self.history[self.count % capacity] = val;
+        let capacity = self.history.len() as u64;
+        self.history[(self.count % capacity) as usize] = val;
         self.count += 1;
     }
 
@@ -137,7 +137,7 @@ impl AdaptiveHedgePolicy {
     /// clamped between `min_delay` and `max_delay`.
     #[must_use]
     pub fn next_hedge_delay(&self) -> Duration {
-        let n = self.count.min(self.history.len());
+        let n = (self.count).min(self.history.len() as u64) as usize;
         if n < 10 {
             // Not enough data for a stable quantile; fallback to conservative max.
             return self.max_delay;
@@ -171,7 +171,7 @@ impl AdaptiveHedgePolicy {
     /// This value saturates at `window_size()`.
     #[must_use]
     pub fn sample_count(&self) -> usize {
-        self.count.min(self.history.len())
+        usize::try_from(self.count).unwrap_or(usize::MAX).min(self.history.len())
     }
 }
 
