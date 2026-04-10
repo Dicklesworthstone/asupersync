@@ -2795,3 +2795,6 @@
 {"file":"src/observability/otel.rs","lines":1590,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"No panics on malformed data, proper Result propagation"}
 {"file":"src/trace/integrity.rs","lines":1465,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Bounds checking with MAX_METADATA_LEN and MAX_EVENT_LEN"}
 {"file":"src/trace/event.rs","lines":3216,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"No memory leaks, proper Vec/Arc ownership"}
+{"file":"src/sync/pool.rs","lines":4255,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"No double-checkout, FIFO health check rejection, obligation tracking correct"}
+{"file":"src/sync/rwlock.rs","lines":1500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Writer-preference fairness via wrapping arithmetic, proper reader/writer wake ordering"}
+{"file":"src/trace/crashpack.rs","lines":3469,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Shell escaping correct (single-quote + escaped-quote pattern), prior shell escape key bug fixed"}
