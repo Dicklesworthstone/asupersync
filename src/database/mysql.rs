@@ -1861,7 +1861,12 @@ impl MySqlConnection {
                         self.inner.closed = false;
                         Outcome::Ok(affected_rows)
                     }
-                    Err(e) => Outcome::Err(e),
+                    Err(e) => {
+                        // OK packet was fully received; connection protocol
+                        // state is clean even though the payload is malformed.
+                        self.inner.closed = false;
+                        Outcome::Err(e)
+                    }
                 }
             }
             0xFF => {
