@@ -2762,3 +2762,14 @@
 {"file":"src/cx/cx.rs","lines":3156,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"checkpoint() mask_depth race is NOT real: single-threaded executor context, mask_depth captured under lock"}
 {"file":"src/cx/scope.rs","lines":2372,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"spawn() has proper rollback on region add failure, budget clamping correct"}
 {"file":"src/cx/registry.rs","lines":3434,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"commit_permit identity validation at lines 787-791 (prior HIGH fix applied)"}
+{"file": "src/web/middleware.rs", "status": "verified"}
+{"file": "src/web/session.rs", "status": "verified"}
+{"file": "src/web/router.rs", "status": "verified"}
+{"file": "src/web/extract.rs", "status": "verified"}
+{"file": "src/web/multipart.rs", "status": "verified"}
+{"file": "src/web/sse.rs", "status": "verified"}
+{"file": "src/web/security.rs", "status": "verified"}
+{"file":"src/stream/buffered.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cooperative budgets correct, no item loss, PolledAfterCompletion safe"}
+{"file":"src/stream/debounce.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Pending item always buffered, timer re-arm logic correct"}
+{"file":"src/stream/chunks.rs","lines":300,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Items preserved in buffer across yields"}
+{"file":"src/stream/throttle.rs","lines":400,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Intentional item drop during suppression by design, cooperative budget correct"}
