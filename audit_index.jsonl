@@ -2734,3 +2734,23 @@
 {"file":"src/raptorq/decoding.rs","lines":2085,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Decode logic correct, safe Rust"}
 {"file":"src/raptorq/systematic.rs","lines":1940,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Systematic encoder/decoder correct"}
 {"file":"src/raptorq/linalg.rs","lines":1500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"GF(256) linear algebra, Gaussian elimination, Markowitz pivot all correct"}
+{"file": "src/sync/rwlock.rs", "status": "verified"}
+{"file": "src/sync/mutex.rs", "status": "verified"}
+{"file": "src/channel/mpsc.rs", "status": "verified"}
+{"file": "src/channel/broadcast.rs", "status": "verified"}
+{"file": "src/channel/watch.rs", "status": "verified"}
+{"file": "src/channel/oneshot.rs", "status": "verified"}
+{"file": "src/runtime/scheduler/three_lane.rs", "status": "verified"}
+{"file": "src/runtime/region_heap.rs", "status": "verified"}
+{"file": "src/runtime/io_driver.rs", "status": "verified"}
+{"file": "src/io/copy.rs", "status": "verified"}
+{"file": "src/obligation/choreography/pipeline.rs", "status": "verified"}
+{"file":"src/net/tcp/stream.rs","lines":1391,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Write-before-register pattern prevents partial wire data on cancel"}
+{"file":"src/net/tcp/listener.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Accept loop cancel-safe, close-the-rearm-race correct, wake_others prevents lost connections"}
+{"file":"src/net/tcp/split.rs","lines":1466,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Half-close semantics correct, reunite prevents double-shutdown, registration serialized via Mutex"}
+{"file":"src/process.rs","lines":1863,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Zombie cleanup via blocking pool + detached thread fallback, fd safety on error paths"}
+{"file":"src/service/load_balance.rs","lines":1000,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"LoadMetric::decrement uses fetch_update+checked_sub, RAII guards prevent in-flight leak"}
+{"file":"src/service/retry.rs","lines":800,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cooperative budget (1024) with self-wake, no infinite loop"}
+{"file":"src/service/rate_limit.rs","lines":700,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Token guards restore on drop, saturating_add+min(max_tokens) prevents token inflation"}
+{"file":"src/combinator/circuit_breaker.rs","lines":1950,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic CAS with epoch tracking, probe accounting saturating_sub, no stuck states"}
+{"file":"src/combinator/bulkhead.rs","lines":1717,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"BulkheadPermit drop releases, barging prevention via pending_queue_count Acquire, saturating_add+min cap"}
