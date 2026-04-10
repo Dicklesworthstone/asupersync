@@ -236,11 +236,8 @@ impl DnsCache {
             return;
         }
 
-        self.put_ip_entry(
-            host,
-            CachedIpEntry::NegativeNoRecords,
-            self.config.negative_ttl,
-        );
+        let ttl = self.clamp_ttl(self.config.negative_ttl);
+        self.put_ip_entry(host, CachedIpEntry::NegativeNoRecords, ttl);
     }
 
     /// Removes an entry from the cache.
