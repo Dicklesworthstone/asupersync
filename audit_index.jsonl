@@ -2929,3 +2929,8 @@
 {"file":"src/lab/oracle/task_leak.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Task leak detection correct, no false positives"}
 {"file":"src/lab/oracle/quiescence.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Quiescence declaration correct"}
 {"file":"src/lab/oracle/region_tree.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Region tree oracle correct, late-parent scenario is expected error not false positive"}
+{"file":"src/stream/merge.rs","lines":300,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Round-robin fairness with cooperative budget, items can interleave (expected)"}
+{"file":"src/stream/zip.rs","lines":300,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Queued buffers, pairs only when both ready, exhaust clears both buffers"}
+{"file":"src/stream/scan.rs","lines":200,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"State lifecycle correct, exhausted upstream not repolled"}
+{"file":"src/stream/peekable.rs","lines":200,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PeekSlot tracks state, poll_next returns Ready synchronously (no cancel between ready and store)"}
+{"file":"src/stream/forward.rs","lines":200,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"cx.checkpoint() catches most cancellation, narrow race after checkpoint inherent to async model (design limitation)"}
