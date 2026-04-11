@@ -3917,6 +3917,30 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         Some("fallback"),
         "G7 fallback trigger must force fallback action"
     );
+    let fallback_trigger_reasons =
+        artifact["contract"]["decision_rule"]["deterministic_fallback_trigger"]["if_any"]
+            .as_array()
+            .expect("G7 fallback trigger if_any must be an array")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("G7 fallback trigger reasons must be strings")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+    for reason in [
+        "decode_mismatch_detected",
+        "proof_replay_mismatch",
+        "unknown_state_with_low_confidence",
+        "regression_state_with_low_confidence",
+        "conservative_fallback_reason_unclassified",
+    ] {
+        assert!(
+            fallback_trigger_reasons.contains(reason),
+            "G7 fallback trigger contract must include {reason}"
+        );
+    }
 
     let expected_levers = BTreeSet::from([
         "C5".to_string(),

@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-m7o6i",
   "parent_track_bead_id": "asupersync-2cyx5",
   "external_ref": "bd-2bd8e",
-  "generated_at_utc": "2026-04-10T19:52:00Z",
+  "generated_at_utc": "2026-04-11T18:06:45Z",
   "contract": {
     "states": [
       "healthy",
@@ -81,6 +81,7 @@
           "decode_mismatch_detected",
           "proof_replay_mismatch",
           "unknown_state_with_low_confidence",
+          "regression_state_with_low_confidence",
           "conservative_fallback_reason_unclassified"
         ],
         "then_action": "fallback"

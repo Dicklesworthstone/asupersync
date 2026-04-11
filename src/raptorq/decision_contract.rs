@@ -21,6 +21,10 @@ const PERMILLE_SCALE: u32 = 1000;
 const HEALTHY_FLOOR: u32 = 20;
 const MODE_MARGIN_CAP: u32 = 400;
 const ACTION_MARGIN_CAP: u32 = 200;
+const FALLBACK_REASON_POLICY_BUDGET_EXHAUSTED: &str = "policy_budget_exhausted";
+const FALLBACK_REASON_UNKNOWN_LOW_CONFIDENCE: &str = "unknown_state_with_low_confidence";
+const FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE: &str = "regression_state_with_low_confidence";
+const FALLBACK_REASON_UNCLASSIFIED: &str = "conservative_fallback_reason_unclassified";
 
 /// State indices into the posterior.
 pub mod state {
@@ -224,7 +228,7 @@ impl RaptorQDecisionContract {
             deterministic_fallback_triggered: outcome.fallback_active,
             deterministic_fallback_reason: if outcome.fallback_active {
                 if fallback_reason == "none" {
-                    "conservative_fallback_reason_unclassified"
+                    FALLBACK_REASON_UNCLASSIFIED
                 } else {
                     fallback_reason
                 }
@@ -276,17 +280,7 @@ impl DecisionContract for RaptorQDecisionContract {
         if posterior.len() != state::COUNT {
             return self.fallback_action();
         }
-        // G7 uses a conservative deterministic tie-breaker:
-        // fallback > rollback > canary_hold > continue.
-        (0..action::COUNT)
-            .min_by(|&a, &b| {
-                self.losses
-                    .expected_loss(posterior, a)
-                    .partial_cmp(&self.losses.expected_loss(posterior, b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.cmp(&a))
-            })
-            .unwrap_or(action::FALLBACK)
+        choose_action_from_expected_loss_terms(expected_loss_terms(&self.losses, posterior))
     }
 
     fn fallback_action(&self) -> usize {
@@ -436,6 +430,18 @@ fn expected_loss_terms(losses: &LossMatrix, posterior: &Posterior) -> [u32; acti
     terms
 }
 
+fn choose_action_from_expected_loss_terms(expected_loss_terms: [u32; action::COUNT]) -> usize {
+    // G7 uses a conservative deterministic tie-breaker:
+    // fallback > rollback > canary_hold > continue.
+    (0..action::COUNT)
+        .min_by(|&a, &b| {
+            expected_loss_terms[a]
+                .cmp(&expected_loss_terms[b])
+                .then_with(|| b.cmp(&a))
+        })
+        .unwrap_or(action::FALLBACK)
+}
+
 fn concentration_score(posterior_permille: [u16; state::COUNT]) -> u16 {
     let max_prob = posterior_permille.into_iter().max().unwrap_or(250);
     if max_prob <= 250 {
@@ -466,13 +472,13 @@ fn deterministic_fallback_reason(
     confidence_score: u16,
 ) -> &'static str {
     if snapshot.budget_exhausted {
-        return "policy_budget_exhausted";
+        return FALLBACK_REASON_POLICY_BUDGET_EXHAUSTED;
     }
 
     match dominant_state(posterior_permille) {
-        state::UNKNOWN if confidence_score < 350 => "unknown_state_with_low_confidence",
+        state::UNKNOWN if confidence_score < 350 => FALLBACK_REASON_UNKNOWN_LOW_CONFIDENCE,
         state::REGRESSION if snapshot.rank_deficit_permille >= 600 && confidence_score < 500 => {
-            "conservative_fallback_reason_unclassified"
+            FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE
         }
         _ => "none",
     }
@@ -640,6 +646,36 @@ mod tests {
     }
 
     #[test]
+    fn surfaced_expected_loss_ties_drive_the_reported_action() {
+        let telemetry = evaluate_governance(&GovernanceSnapshot {
+            n_rows: 24,
+            n_cols: 16,
+            density_permille: 0,
+            rank_deficit_permille: 0,
+            inactivation_pressure_permille: 0,
+            overhead_ratio_permille: 150,
+            budget_exhausted: false,
+            baseline_loss: 520,
+            high_support_loss: 900,
+            block_schur_loss: 900,
+        });
+
+        assert!(!telemetry.deterministic_fallback_triggered);
+        assert_eq!(
+            telemetry.expected_loss_terms[action::CONTINUE],
+            telemetry.expected_loss_terms[action::CANARY_HOLD],
+            "regression fixture requires a surfaced tie on the minimum expected-loss terms"
+        );
+        assert_eq!(
+            telemetry.chosen_action,
+            action_label(choose_action_from_expected_loss_terms(
+                telemetry.expected_loss_terms,
+            )),
+        );
+        assert_eq!(telemetry.chosen_action, "canary_hold");
+    }
+
+    #[test]
     fn exact_canary_hold_action_is_reported_without_fallback() {
         let contract = RaptorQDecisionContract::new();
         let snapshot = GovernanceSnapshot {
@@ -702,7 +738,7 @@ mod tests {
         assert!(telemetry.deterministic_fallback_triggered);
         assert_eq!(
             telemetry.deterministic_fallback_reason,
-            "policy_budget_exhausted"
+            FALLBACK_REASON_POLICY_BUDGET_EXHAUSTED
         );
     }
 
@@ -727,7 +763,7 @@ mod tests {
         );
         assert_eq!(telemetry.chosen_action, "fallback");
         assert_eq!(
-            telemetry.deterministic_fallback_reason, "conservative_fallback_reason_unclassified",
+            telemetry.deterministic_fallback_reason, FALLBACK_REASON_UNCLASSIFIED,
             "fallback-active telemetry must never report reason=none"
         );
     }
@@ -767,13 +803,13 @@ mod tests {
         );
         assert_eq!(
             deterministic_fallback_reason(&snapshot, posterior_permille, preliminary_confidence),
-            "conservative_fallback_reason_unclassified"
+            FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE
         );
         assert!(telemetry.deterministic_fallback_triggered);
         assert_eq!(telemetry.chosen_action, "fallback");
         assert_eq!(
             telemetry.deterministic_fallback_reason,
-            "conservative_fallback_reason_unclassified"
+            FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE
         );
         assert!(
             telemetry.confidence_score <= 250,
@@ -979,7 +1015,7 @@ mod tests {
         assert_eq!(telemetry.chosen_action, "fallback");
         assert_eq!(
             telemetry.deterministic_fallback_reason,
-            "unknown_state_with_low_confidence"
+            FALLBACK_REASON_UNKNOWN_LOW_CONFIDENCE
         );
     }
 
@@ -1254,6 +1290,48 @@ mod tests {
         assert!(
             probs[state::REGRESSION] > probs[state::HEALTHY],
             "regression probability should exceed healthy after observing regression"
+        );
+    }
+
+    #[test]
+    fn choose_action_fails_closed_for_malformed_posterior_length() {
+        let contract = RaptorQDecisionContract::new();
+        let malformed = Posterior::new(vec![0.34, 0.33, 0.33]).unwrap();
+
+        assert_eq!(
+            contract.choose_action(&malformed),
+            action::FALLBACK,
+            "malformed posterior length must fail closed to fallback"
+        );
+    }
+
+    #[test]
+    fn posterior_update_ignores_malformed_length() {
+        let contract = RaptorQDecisionContract::new();
+        let mut malformed = Posterior::new(vec![0.34, 0.33, 0.33]).unwrap();
+        let before = malformed.probs().to_vec();
+
+        contract.update_posterior(&mut malformed, state::REGRESSION);
+
+        assert_eq!(
+            malformed.probs(),
+            before.as_slice(),
+            "malformed posterior length must remain unchanged after update"
+        );
+    }
+
+    #[test]
+    fn posterior_update_ignores_out_of_range_observation() {
+        let contract = RaptorQDecisionContract::new();
+        let mut posterior = Posterior::uniform(state::COUNT);
+        let before = posterior.probs().to_vec();
+
+        contract.update_posterior(&mut posterior, usize::MAX);
+
+        assert_eq!(
+            posterior.probs(),
+            before.as_slice(),
+            "out-of-range observations must not perturb posterior state"
         );
     }
 
