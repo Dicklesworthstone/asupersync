@@ -402,12 +402,11 @@ impl ConformalCalibrator {
         if !was_already_calibrated {
             // Add to calibration set first.
             self.calibrate(report);
-            if !self.is_calibrated() {
-                // Still not enough data — no prediction yet.
-                return None;
-            }
-            // Just became calibrated — fall through to produce a prediction
-            // using the calibration set that now includes this observation.
+            // Whether we just became calibrated or still need more data,
+            // skip the prediction for this observation: it is part of the
+            // calibration set and testing it against the same set violates
+            // the exchangeability assumption of split conformal prediction.
+            return None;
         }
 
         let mut prediction_sets = Vec::new();
@@ -975,9 +974,15 @@ mod tests {
         for _ in 0..4 {
             assert!(cal.predict(&make_clean_report(10, 50)).is_none());
         }
-        // 5th: now calibrated.
+        // 5th: completes calibration, but returns None to avoid testing
+        // the calibration-completing observation against a set that
+        // includes it (exchangeability requirement).
         let report = cal.predict(&make_clean_report(10, 50));
-        assert!(report.is_some());
+        assert!(report.is_none(), "calibration-completing observation must be skipped");
+
+        // 6th: now truly post-calibration — returns a prediction.
+        let report = cal.predict(&make_clean_report(10, 50));
+        assert!(report.is_some(), "post-calibration observation should produce prediction");
     }
 
     #[test]

@@ -2924,3 +2924,8 @@
 {"file":"src/web/response.rs","lines":675,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"set_header/ensure_header both sanitize CRLF, Redirect location sanitized"}
 {"file":"src/service/concurrency_limit.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Permit released on error/pending, poll_ready enforced before call"}
 {"file":"src/service/timeout.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ready_observed flag enforces precondition, state machine correct"}
+{"file":"src/lab/conformal.rs","lines":1652,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"predict() tested calibration-completing observation against set that included it, violating exchangeability. Fixed by returning None for that observation."}
+{"file":"src/lab/oracle/mod.rs","lines":2000,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Oracle framework correct, no false negatives in invariant checking"}
+{"file":"src/lab/oracle/task_leak.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Task leak detection correct, no false positives"}
+{"file":"src/lab/oracle/quiescence.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Quiescence declaration correct"}
+{"file":"src/lab/oracle/region_tree.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Region tree oracle correct, late-parent scenario is expected error not false positive"}
