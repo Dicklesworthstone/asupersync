@@ -95,7 +95,7 @@ Current artifact summary (`coverage_summary` in JSON):
 
 Closure blockers for `asupersync-3ltrv`:
 
-1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the historical broader directional packet for the checked-in `RQ-E-GF256-DUAL-*` corpus. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` remains the historical broader interval-proxy negative guardrail across `RQ-E-GF256-DUAL-001..008`. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json` is now the current broader raw-sample successor packet: `confidence_contract = raw_sample_mixed_signal_not_closure_grade`, `ready_for_e5_closure = false`, combined p95/p99 improve versus the scalar conservative baseline, but combined median still regresses and mul remains mixed. Any future closure attempt must publish a new artifact/schema version rather than silently repurposing the narrowed `highconf_v1` packet or mutating the historical broader packets in place.
+1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the historical broader directional packet for the checked-in `RQ-E-GF256-DUAL-*` corpus. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` remains the historical broader interval-proxy negative guardrail across `RQ-E-GF256-DUAL-001..008`. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json` remains the historical broader mixed-signal packet. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json` is now the current broader raw-sample successor packet: `confidence_contract = raw_sample_favorable_not_closure_grade`, `ready_for_e5_closure = false`, combined same-run median/p95/p99 improve versus the sequential baseline comparator, `addmul_slices2_auto` improves across all three metrics, and `mul_slices2_auto` still has mixed medians even as mul tails improve. Any future closure attempt must publish a new artifact/schema version rather than silently repurposing the narrowed `highconf_v1` packet or mutating the historical broader packets in place.
 
 `F7` and `F8` remain resolved and are no longer current blockers.
 
@@ -213,16 +213,16 @@ Recent evidence alignment updates (2026-03-21):
   - `mul_slices2_auto` stays slightly favorable on average, but `addmul_slices2_auto` regresses on six of eight scenarios
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the historical broader directional packet, while `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json` remains the historical broader interval-proxy negative guardrail.
 
-Recent evidence alignment updates (2026-04-07):
+Recent evidence alignment updates (2026-04-11):
 
-- Published `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json` as the current broader raw-sample successor packet for the eight-scenario `RQ-E-GF256-DUAL-001..008` corpus.
-- The new packet keeps the mixed current-head result machine-checkable instead of leaving it implicit in bead comments:
-  - `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v4`
+- Published `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json` as the current broader raw-sample successor packet for the eight-scenario `RQ-E-GF256-DUAL-001..008` corpus, superseding the older current-head mixed-signal v4 snapshot.
+- The new packet keeps the fresh current-head same-run result machine-checkable instead of leaving it implicit in bead comments:
+  - `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v5`
   - `evidence_role = broader_multiscenario_raw_sample_successor_guardrail`
   - `scope_contract = same_target_multi_scenario_raw_sample_corpus`
-  - `confidence_contract = raw_sample_mixed_signal_not_closure_grade`
-- Broader current-head raw-sample closure still fails for the canonical x86 defaults:
-  - combined auto median regresses by `+1.25%` versus baseline
-  - combined auto `p95/p99` improve by `-5.60%` / `-7.06%`
-  - `addmul_slices2_auto` improves overall, but `mul_slices2_auto` remains mixed with `6/8` median scenarios slower
-- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json` is now the current broader packet complementing `highconf_v1`; `v3` remains historical rather than being silently rewritten.
+  - `confidence_contract = raw_sample_favorable_not_closure_grade`
+- Broader current-head raw-sample evidence is now favorable on the direct same-run comparator for the canonical x86 defaults:
+  - combined auto median/p95/p99 improve by `-2.7464%` / `-4.5332%` / `-2.8112%`
+  - `addmul_slices2_auto` improves across all three metrics (`-4.9090%` / `-6.2161%` / `-4.6901%`)
+  - `mul_slices2_auto` still has mixed medians (`+1.0452%`, `7/8` slower) even though mul tails improve (`-4.8705%` / `-4.2149%`)
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json` is now the current broader packet complementing `highconf_v1`; `v4` remains the historical mixed-signal packet and `v3` remains the historical interval-proxy guardrail.
