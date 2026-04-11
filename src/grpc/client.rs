@@ -716,6 +716,9 @@ impl<T> ResponseStreamState<T> {
             .iter()
             .any(|existing| existing.will_wake(waker))
         {
+            if self.waiters.len() >= 32 {
+                self.waiters.remove(0);
+            }
             self.waiters.push(waker.clone());
         }
     }

@@ -32,41 +32,21 @@ fn listener_now() -> Time {
         .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
-struct AcceptWaiter {
-    id: u64,
-    waker: Waker,
-}
-
 #[derive(Debug, Default)]
 struct AcceptWaiters {
-    waiters: Mutex<Vec<AcceptWaiter>>,
-    next_id: std::sync::atomic::AtomicU64,
+    waiters: Mutex<Vec<Waker>>,
 }
 
 impl AcceptWaiters {
-    fn register(&self, cx_waker: &Waker, waiter_id: &mut Option<u64>) {
+    fn register(&self, waker: &Waker) {
         let mut waiters = self.waiters.lock();
-        if let Some(id) = waiter_id {
-            if let Some(existing) = waiters.iter_mut().find(|w| w.id == *id) {
-                if !existing.waker.will_wake(cx_waker) {
-                    existing.waker.clone_from(cx_waker);
-                }
-                return;
-            }
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
         }
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        waiters.push(AcceptWaiter {
-            id,
-            waker: cx_waker.clone(),
-        });
-        *waiter_id = Some(id);
-    }
-
-    fn remove(&self, id: u64) {
-        let mut waiters = self.waiters.lock();
-        if let Some(pos) = waiters.iter().position(|w| w.id == id) {
-            waiters.swap_remove(pos);
+        if waiters.len() >= 32 {
+            waiters.remove(0);
         }
+        waiters.push(waker.clone());
     }
 
     fn wake_all(&self) {
@@ -75,7 +55,7 @@ impl AcceptWaiters {
             std::mem::take(&mut *guard)
         };
         for waiter in waiters {
-            waiter.waker.wake();
+            waiter.wake();
         }
     }
 
@@ -85,8 +65,8 @@ impl AcceptWaiters {
             std::mem::take(&mut *guard)
         };
         for waiter in waiters {
-            if !waiter.waker.will_wake(current) {
-                waiter.waker.wake();
+            if !waiter.will_wake(current) {
+                waiter.wake();
             }
         }
     }
@@ -99,53 +79,6 @@ impl Wake for AcceptWaiters {
 
     fn wake_by_ref(self: &Arc<Self>) {
         self.wake_all();
-    }
-}
-
-/// Future returned by `TcpListener::accept`.
-#[derive(Debug)]
-pub struct AcceptFuture<'a> {
-    listener: &'a TcpListener,
-    waiter_id: Option<u64>,
-}
-
-impl<'a> std::future::Future for AcceptFuture<'a> {
-    type Output = io::Result<(TcpStream, SocketAddr)>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        match this.listener.inner.accept() {
-            Ok((stream, addr)) => {
-                this.listener.reset_accept_storm();
-                this.listener.accept_waiters.wake_others(cx.waker());
-                this.waiter_id = None;
-                Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)))
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                this.listener.accept_waiters.register(cx.waker(), &mut this.waiter_id);
-                let _storm_backoff = this.listener.note_accept_would_block();
-                let mode = match this.listener.register_interest() {
-                    Ok(mode) => mode,
-                    Err(err) => {
-                        this.listener.accept_waiters.wake_others(cx.waker());
-                        return Poll::Ready(Err(err));
-                    }
-                };
-                if let InterestRegistrationMode::FallbackPoll = mode {
-                    fallback_rewake_waiters(&this.listener.accept_waiters);
-                }
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
-        }
-    }
-}
-
-impl Drop for AcceptFuture<'_> {
-    fn drop(&mut self) {
-        if let Some(id) = self.waiter_id {
-            self.listener.accept_waiters.remove(id);
-        }
     }
 }
 

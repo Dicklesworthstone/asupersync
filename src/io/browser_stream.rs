@@ -1638,11 +1638,13 @@ impl WasmMessagePortState {
         let inbox_for_error = Rc::clone(&inbox);
         let on_message_error =
             wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: MessageEvent| {
-                inbox_for_error
-                    .borrow_mut()
-                    .push_back(QueuedBrowserMessage::Error(BrowserMessageError::HostError(
+                if let Ok(mut inbox) = inbox_for_error.try_borrow_mut() {
+                    inbox.push_back(QueuedBrowserMessage::Error(BrowserMessageError::HostError(
                         "browser messageerror event".to_owned(),
                     )));
+                } else {
+                    crate::error!("dropped incoming MessagePort error: RefCell collision");
+                }
             }) as Box<dyn FnMut(MessageEvent)>);
 
         let target: &EventTarget = AsRef::<EventTarget>::as_ref(port);
@@ -2025,11 +2027,13 @@ impl WasmBroadcastChannelState {
         let inbox_for_error = Rc::clone(&inbox);
         let on_message_error =
             wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: MessageEvent| {
-                inbox_for_error
-                    .borrow_mut()
-                    .push_back(QueuedBrowserMessage::Error(BrowserMessageError::HostError(
+                if let Ok(mut inbox) = inbox_for_error.try_borrow_mut() {
+                    inbox.push_back(QueuedBrowserMessage::Error(BrowserMessageError::HostError(
                         "broadcast channel messageerror event".to_owned(),
                     )));
+                } else {
+                    crate::error!("dropped incoming BroadcastChannel error: RefCell collision");
+                }
             }) as Box<dyn FnMut(MessageEvent)>);
 
         let target: &EventTarget = AsRef::<EventTarget>::as_ref(&channel);

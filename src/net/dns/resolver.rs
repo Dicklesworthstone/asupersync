@@ -2880,6 +2880,7 @@ mod tests {
         set_test_time(0);
         let config = ResolverConfig {
             cache_config: CacheConfig {
+                min_ttl: Duration::ZERO,
                 negative_ttl: Duration::from_millis(10),
                 ..CacheConfig::default()
             },

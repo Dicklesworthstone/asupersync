@@ -56,6 +56,9 @@ impl AcceptWaiters {
         if waiters.iter().any(|existing| existing.will_wake(waker)) {
             return;
         }
+        if waiters.len() >= 32 {
+            waiters.remove(0);
+        }
         waiters.push(waker.clone());
     }
 
