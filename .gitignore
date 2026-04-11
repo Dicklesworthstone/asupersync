@@ -317,3 +317,32 @@ src/test_*.rs
 # Root-level test shell scripts (catch remaining)
 /test_happy.sh
 /test_script.sh
+
+# Remote compilation helper worktrees (broader than .rch-target-*/ above;
+# covers .rch-azure-*, .rch-gentlesnow-*, .rch-yellowdeer/, etc.)
+.rch-*/
+
+# Per-IDE MCP configs (CONTAIN BEARER TOKENS — must never be committed)
+*.mcp.json
+opencode.json
+
+# Clippy scratch outputs (single-file variants, complement /clippy_*.txt above)
+/clippy.json
+/clippy.out
+
+# UBS scratch outputs (.out variants, complement ubs_*.txt/json above)
+/ubs.out
+/ubs_*.out
+
+# Build/check scratch logs
+/check_*.txt
+/out.txt
+
+# Additional root-level scratch test binaries and logs
+/test_cast
+/test_move
+/test_prefix
+/test_dns.txt
+/test_obligation_results.txt
+/test_out.txt
+/test_results_all.txt
