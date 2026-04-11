@@ -2919,3 +2919,8 @@
 {"file":"src/io/ext/write_ext.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"write_all tracks pos, not cancel-safe (documented), completed flag on error"}
 {"file":"src/io/stream_adapters.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Error deferred until buffer consumed, empty chunks skipped, done=true on error return"}
 {"file":"src/bin/asupersync.rs","lines":5314,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"184 expects all on internal hardcoded values, user input paths use Result/map_err, trace file ops properly validated"}
+{"file":"src/web/debug.rs","lines":688,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Binds 127.0.0.1 by default, snapshot content is user-provided"}
+{"file":"src/web/health.rs","lines":672,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"JSON escaping correct, mutex-guarded checks"}
+{"file":"src/web/response.rs","lines":675,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"set_header/ensure_header both sanitize CRLF, Redirect location sanitized"}
+{"file":"src/service/concurrency_limit.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Permit released on error/pending, poll_ready enforced before call"}
+{"file":"src/service/timeout.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ready_observed flag enforces precondition, state machine correct"}
