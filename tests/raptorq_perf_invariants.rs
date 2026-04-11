@@ -5231,11 +5231,13 @@ fn h2_closure_packet_dependency_status_alignment() {
         .expect("H2 closure packet artifact must be valid JSON");
 
     // Validate the artifact's internal consistency using its own data.
-    // The JSONL on shared rch build workers is unreliable because concurrent
-    // multi-agent syncs overwrite each other's copies, causing the file to
-    // contain stale data from whichever agent synced last. We therefore
-    // check the artifact's own status claims and structural invariants
-    // rather than cross-referencing with the JSONL.
+    // Shared rch workers can observe stale .beads/issues.jsonl snapshots
+    // from concurrent syncs, so blocking-dependency shape is still checked
+    // artifact-internally. Track status equality below uses
+    // beads_latest_status_by_id(), which honors
+    // ASUPERSYNC_BEADS_STATUS_OVERRIDES_JSON for the documented shared-rch
+    // replay contract when the caller needs to pin an authoritative status
+    // snapshot from the local workspace.
 
     let blocking_dependencies = artifact["packet_state"]["blocking_dependencies"]
         .as_array()
@@ -5277,6 +5279,7 @@ fn h2_closure_packet_dependency_status_alignment() {
         !track_completion_criteria.is_empty(),
         "track_completion_criteria must include at least one track entry"
     );
+    let canonical_issue_statuses = beads_latest_status_by_id();
     for track in track_completion_criteria {
         let track_code = track["track_code"]
             .as_str()
@@ -5290,6 +5293,16 @@ fn h2_closure_packet_dependency_status_alignment() {
         let closure_dependency_path = track["closure_dependency_path"]
             .as_str()
             .expect("track completion entry must include closure_dependency_path");
+        let canonical_status = canonical_issue_statuses
+            .get(track_bead_id)
+            .unwrap_or_else(|| {
+                panic!("track completion bead {track_bead_id} must exist in .beads/issues.jsonl")
+            });
+
+        assert_eq!(
+            current_status, canonical_status,
+            "track {track_code} current_status must match canonical Beads issue status"
+        );
 
         if current_status != "closed" && closure_dependency_path == "direct" {
             assert!(

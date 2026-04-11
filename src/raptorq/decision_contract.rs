@@ -802,6 +802,51 @@ mod tests {
     }
 
     #[test]
+    fn explicit_unknown_low_confidence_reason_is_reported() {
+        // Missing block_schur plus maximally conflicting policy losses make UNKNOWN
+        // the dominant posterior state, while high rank pressure keeps confidence low
+        // without relying on the separate budget-exhaustion fallback path.
+        let telemetry = evaluate_governance(&GovernanceSnapshot {
+            n_rows: 48,
+            n_cols: 32,
+            density_permille: 0,
+            rank_deficit_permille: 650,
+            inactivation_pressure_permille: 0,
+            overhead_ratio_permille: 190,
+            budget_exhausted: false,
+            baseline_loss: 500,
+            high_support_loss: 500,
+            block_schur_loss: u32::MAX,
+        });
+
+        assert!(
+            telemetry.state_posterior_permille[state::UNKNOWN]
+                > telemetry.state_posterior_permille[state::HEALTHY]
+        );
+        assert!(
+            telemetry.state_posterior_permille[state::UNKNOWN]
+                > telemetry.state_posterior_permille[state::DEGRADED]
+        );
+        assert!(
+            telemetry.state_posterior_permille[state::UNKNOWN]
+                > telemetry.state_posterior_permille[state::REGRESSION]
+        );
+        assert!(
+            telemetry.confidence_score < 350,
+            "test must stay on the low-confidence side of the explicit UNKNOWN fallback seam"
+        );
+        assert!(
+            telemetry.deterministic_fallback_triggered,
+            "explicit low-confidence UNKNOWN path must trigger deterministic fallback"
+        );
+        assert_eq!(telemetry.chosen_action, "fallback");
+        assert_eq!(
+            telemetry.deterministic_fallback_reason,
+            "unknown_state_with_low_confidence"
+        );
+    }
+
+    #[test]
     fn conflicting_evidence_raises_uncertainty() {
         // All policy losses are nearly identical → high conflict → high unknown
         let telemetry = evaluate_governance(&GovernanceSnapshot {

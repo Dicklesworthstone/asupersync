@@ -73,7 +73,7 @@ The packet includes an explicit Track D/E/F/G/H completion matrix in
 Current state snapshot in the artifact:
 
 1. Track D (`asupersync-np1co`): `closed`
-2. Track E (`asupersync-2ncba`): `in_progress` (the unresolved upstream lane, consumed via Track G; active leaf: `asupersync-36m6p.23` under `asupersync-36m6p`; current broader blocker packet: `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`)
+2. Track E (`asupersync-2ncba`): `open` (the unresolved upstream lane, consumed via Track G after stale-triage reopen; active leaf: `asupersync-36m6p.23` under `asupersync-36m6p`; current broader blocker packet: `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`)
 3. Track F (`asupersync-mg1qh`): `closed`
 4. Track G (`asupersync-2cyx5`): `open` (the sole remaining direct H2 blocker after stale-triage reopen)
 5. Track H (`asupersync-p8o9m`): `closed`
