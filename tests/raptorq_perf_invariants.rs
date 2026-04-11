@@ -2363,6 +2363,50 @@ fn e3_track_e_gf256_multiscenario_refresh_contract_and_linkage() {
     );
 }
 
+/// Validate the top-level Track-E benchmark artifact keeps its
+/// baseline/auto/rollback comparator commands on the SIMD bench surface.
+#[test]
+fn e5_bench_artifact_top_level_runs_exercise_simd_surface() {
+    let artifact: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/raptorq_track_e_gf256_bench_v1.json"
+    ))
+    .expect("Track-E benchmark artifact must be valid JSON");
+    let runs = artifact["runs"]
+        .as_array()
+        .expect("Track-E benchmark artifact must include runs");
+
+    assert_eq!(
+        runs.len(),
+        3,
+        "Track-E benchmark artifact must keep baseline/auto/rollback runs"
+    );
+
+    for run in runs {
+        let run_id = run["run_id"]
+            .as_str()
+            .expect("Track-E benchmark runs must include run_id");
+        let command = run["command"]
+            .as_str()
+            .expect("Track-E benchmark runs must include command");
+        assert!(
+            command.starts_with("rch exec -- env "),
+            "Track-E benchmark {run_id} command must stay rch-offloaded: {command}"
+        );
+        assert!(
+            command.contains("cargo bench --bench raptorq_benchmark"),
+            "Track-E benchmark {run_id} command must stay on the canonical benchmark: {command}"
+        );
+        assert!(
+            command.contains("--features simd-intrinsics"),
+            "Track-E benchmark {run_id} command must exercise the SIMD surface: {command}"
+        );
+        assert!(
+            command.contains("-- gf256_primitives"),
+            "Track-E benchmark {run_id} command must stay anchored to gf256_primitives: {command}"
+        );
+    }
+}
+
 /// Validate the E5 SIMD ablation artifact pins the current x86 default-window
 /// decision and keeps the comparator command bundle reproducible.
 #[test]

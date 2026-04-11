@@ -1724,6 +1724,37 @@ mod tests {
     }
 
     #[test]
+    fn eliminate_row_target_after_pivot_resizes_rhs_and_updates_tail() {
+        let mut solver = GaussianSolver::new(3, 4);
+        solver.set_row(
+            1,
+            &[0xCC, 1, 0x04, 0x05],
+            DenseRow::new(vec![0x33, 0x44, 0x55]),
+        );
+        solver.set_row(2, &[0xAA, 7, 0x10, 0x20], DenseRow::new(vec![0x11]));
+
+        let factor = Gf256::new(0x0F);
+        solver.eliminate_row(2, 1, factor);
+
+        let expected_tail = [
+            (Gf256::new(0x10) + factor * Gf256::new(0x04)).raw(),
+            (Gf256::new(0x20) + factor * Gf256::new(0x05)).raw(),
+        ];
+        let expected_rhs = [
+            (Gf256::new(0x11) + factor * Gf256::new(0x33)).raw(),
+            (factor * Gf256::new(0x44)).raw(),
+            (factor * Gf256::new(0x55)).raw(),
+        ];
+
+        assert_eq!(
+            solver.matrix[2],
+            vec![0xAA, 0, expected_tail[0], expected_tail[1]]
+        );
+        assert_eq!(solver.rhs[2].as_slice(), &expected_rhs);
+        assert_eq!(solver.stats.scale_adds, 1);
+    }
+
+    #[test]
     fn eliminate_row_factor_zero_is_noop() {
         let mut solver = GaussianSolver::new(2, 4);
         solver.set_row(0, &[7, 9, 4, 5], DenseRow::new(vec![11, 22, 33]));

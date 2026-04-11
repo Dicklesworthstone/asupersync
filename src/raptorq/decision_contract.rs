@@ -640,6 +640,50 @@ mod tests {
     }
 
     #[test]
+    fn exact_canary_hold_action_is_reported_without_fallback() {
+        let contract = RaptorQDecisionContract::new();
+        let snapshot = GovernanceSnapshot {
+            n_rows: 24,
+            n_cols: 16,
+            density_permille: 0,
+            rank_deficit_permille: 0,
+            inactivation_pressure_permille: 0,
+            overhead_ratio_permille: 0,
+            budget_exhausted: false,
+            baseline_loss: 500,
+            high_support_loss: 520,
+            block_schur_loss: 540,
+        };
+
+        let telemetry = contract.telemetry(&snapshot);
+        let ctx = eval_context(
+            &snapshot,
+            telemetry.confidence_score,
+            telemetry.uncertainty_score,
+        );
+        let fallback = contract.fallback_policy();
+
+        assert_eq!(telemetry.chosen_action, "canary_hold");
+        assert!(!telemetry.deterministic_fallback_triggered);
+        assert_eq!(telemetry.deterministic_fallback_reason, "none");
+        assert!(
+            telemetry.expected_loss_terms[action::CANARY_HOLD]
+                < telemetry.expected_loss_terms[action::CONTINUE]
+        );
+        assert!(
+            telemetry.expected_loss_terms[action::CANARY_HOLD]
+                < telemetry.expected_loss_terms[action::ROLLBACK]
+        );
+        assert!(
+            telemetry.expected_loss_terms[action::CANARY_HOLD]
+                < telemetry.expected_loss_terms[action::FALLBACK]
+        );
+        assert!(ctx.calibration_score >= fallback.calibration_drift_threshold);
+        assert!(ctx.e_process <= fallback.e_process_breach_threshold);
+        assert!(ctx.ci_width <= fallback.confidence_width_threshold);
+    }
+
+    #[test]
     fn budget_exhaustion_forces_fallback() {
         let telemetry = evaluate_governance(&GovernanceSnapshot {
             n_rows: 65,
@@ -685,6 +729,55 @@ mod tests {
         assert_eq!(
             telemetry.deterministic_fallback_reason, "conservative_fallback_reason_unclassified",
             "fallback-active telemetry must never report reason=none"
+        );
+    }
+
+    #[test]
+    fn explicit_regression_low_confidence_reason_is_reported() {
+        let contract = RaptorQDecisionContract::new();
+        let snapshot = GovernanceSnapshot {
+            n_rows: 48,
+            n_cols: 32,
+            density_permille: 0,
+            rank_deficit_permille: 650,
+            inactivation_pressure_permille: 150,
+            overhead_ratio_permille: 100,
+            budget_exhausted: false,
+            baseline_loss: 500,
+            high_support_loss: 520,
+            block_schur_loss: 540,
+        };
+
+        let posterior_permille = RaptorQDecisionContract::state_posterior_permille(&snapshot);
+        let posterior = posterior_from_permille(posterior_permille);
+        let preliminary_confidence = (((u32::from(concentration_score(posterior_permille)) * 7)
+            + (u32::from(action_margin_score(expected_loss_terms(
+                contract.loss_matrix(),
+                &posterior,
+            ))) * 3))
+            / 10) as u16;
+        let telemetry = contract.telemetry(&snapshot);
+
+        assert!(posterior_permille[state::REGRESSION] > posterior_permille[state::HEALTHY]);
+        assert!(posterior_permille[state::REGRESSION] > posterior_permille[state::DEGRADED]);
+        assert!(posterior_permille[state::REGRESSION] > posterior_permille[state::UNKNOWN]);
+        assert!(
+            preliminary_confidence < 500,
+            "test must stay on the low-confidence side of the explicit REGRESSION fallback seam"
+        );
+        assert_eq!(
+            deterministic_fallback_reason(&snapshot, posterior_permille, preliminary_confidence),
+            "conservative_fallback_reason_unclassified"
+        );
+        assert!(telemetry.deterministic_fallback_triggered);
+        assert_eq!(telemetry.chosen_action, "fallback");
+        assert_eq!(
+            telemetry.deterministic_fallback_reason,
+            "conservative_fallback_reason_unclassified"
+        );
+        assert!(
+            telemetry.confidence_score <= 250,
+            "fallback-reason path should clamp surfaced confidence"
         );
     }
 
@@ -752,6 +845,50 @@ mod tests {
                 > telemetry.state_posterior_permille[state::HEALTHY],
             "regression posterior should exceed healthy under high pressure"
         );
+    }
+
+    #[test]
+    fn exact_rollback_action_is_reported_without_fallback() {
+        let contract = RaptorQDecisionContract::new();
+        let snapshot = GovernanceSnapshot {
+            n_rows: 40,
+            n_cols: 32,
+            density_permille: 500,
+            rank_deficit_permille: 50,
+            inactivation_pressure_permille: 400,
+            overhead_ratio_permille: 600,
+            budget_exhausted: false,
+            baseline_loss: 100,
+            high_support_loss: 800,
+            block_schur_loss: 900,
+        };
+
+        let telemetry = contract.telemetry(&snapshot);
+        let ctx = eval_context(
+            &snapshot,
+            telemetry.confidence_score,
+            telemetry.uncertainty_score,
+        );
+        let fallback = contract.fallback_policy();
+
+        assert_eq!(telemetry.chosen_action, "rollback");
+        assert!(!telemetry.deterministic_fallback_triggered);
+        assert_eq!(telemetry.deterministic_fallback_reason, "none");
+        assert!(
+            telemetry.expected_loss_terms[action::ROLLBACK]
+                < telemetry.expected_loss_terms[action::CONTINUE]
+        );
+        assert!(
+            telemetry.expected_loss_terms[action::ROLLBACK]
+                < telemetry.expected_loss_terms[action::CANARY_HOLD]
+        );
+        assert!(
+            telemetry.expected_loss_terms[action::ROLLBACK]
+                < telemetry.expected_loss_terms[action::FALLBACK]
+        );
+        assert!(ctx.calibration_score >= fallback.calibration_drift_threshold);
+        assert!(ctx.e_process <= fallback.e_process_breach_threshold);
+        assert!(ctx.ci_width <= fallback.confidence_width_threshold);
     }
 
     #[test]

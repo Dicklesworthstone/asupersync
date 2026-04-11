@@ -21,7 +21,7 @@
         "ASUPERSYNC_GF256_DUAL_POLICY": "never",
         "CARGO_TARGET_DIR": "/tmp/rch-e5-baseline"
       },
-      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
       "log_path": "/tmp/e5_gf256_primitives_baseline.log",
       "remote_exit": {
         "status": 0,
@@ -37,7 +37,7 @@
         "ASUPERSYNC_GF256_DUAL_POLICY": "auto",
         "CARGO_TARGET_DIR": "/tmp/rch-e5-auto"
       },
-      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
       "log_path": "/tmp/e5_gf256_primitives_auto.log",
       "remote_exit": {
         "status": 0,
@@ -53,7 +53,7 @@
         "ASUPERSYNC_GF256_DUAL_POLICY": "never",
         "CARGO_TARGET_DIR": "/tmp/rch-e5-rollback"
       },
-      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
       "log_path": "/tmp/e5_gf256_primitives_rollback.log",
       "remote_exit": {
         "status": 0,

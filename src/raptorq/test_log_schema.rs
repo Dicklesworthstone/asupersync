@@ -32,7 +32,7 @@
 //! fail the run if any required field is missing or has the wrong type/version.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ============================================================================
 // Schema version constants
@@ -63,6 +63,7 @@ pub const REQUIRED_PHASE_MARKERS: &[&str] = &["encode", "loss", "decode", "proof
 
 const GOVERNANCE_STATE_KEYS: &[&str] = &["healthy", "degraded", "regression", "unknown"];
 const GOVERNANCE_ACTION_KEYS: &[&str] = &["continue", "canary_hold", "rollback", "fallback"];
+const GOVERNANCE_PERMILLE_SCALE: u64 = 1000;
 
 // ============================================================================
 // E2E log entry — full pipeline report
@@ -974,6 +975,12 @@ fn validate_decode_stats_governance_field(
         "unsigned integer",
         violations,
     );
+    validate_governance_permille_sum_field(
+        governance,
+        "state_posterior",
+        GOVERNANCE_STATE_KEYS,
+        violations,
+    );
     validate_governance_map_field(
         governance,
         "expected_loss_terms",
@@ -982,8 +989,9 @@ fn validate_decode_stats_governance_field(
         violations,
     );
     validate_governance_canonical_action_field(governance, "chosen_action", violations);
-    validate_governance_unsigned_integer_field(governance, "confidence_score", violations);
-    validate_governance_unsigned_integer_field(governance, "uncertainty_score", violations);
+    validate_governance_permille_field(governance, "confidence_score", violations);
+    validate_governance_permille_field(governance, "uncertainty_score", violations);
+    validate_governance_score_complement(governance, violations);
     validate_governance_string_field(governance, "replay_ref", violations);
 
     match governance.get("top_evidence_contributors") {
@@ -1012,6 +1020,7 @@ fn validate_decode_stats_governance_field(
                     violations,
                 );
             }
+            validate_governance_contributor_consistency(items, violations);
         }
         Some(_) => violations
             .push("decode_stats.governance.top_evidence_contributors must be an array".to_string()),
@@ -1086,6 +1095,73 @@ fn validate_governance_string_field(
     validate_governance_string_field_in(governance, field, violations);
 }
 
+fn validate_governance_permille_sum_field(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    required_keys: &[&str],
+    violations: &mut Vec<String>,
+) {
+    let Some(map) = governance.get(field).and_then(serde_json::Value::as_object) else {
+        return;
+    };
+
+    let mut total = 0u64;
+    for key in required_keys {
+        let Some(value) = map.get(*key).and_then(serde_json::Value::as_u64) else {
+            return;
+        };
+        total = total.saturating_add(value);
+    }
+
+    if total != GOVERNANCE_PERMILLE_SCALE {
+        violations.push(format!(
+            "decode_stats.governance.{field} values must sum to {GOVERNANCE_PERMILLE_SCALE}"
+        ));
+    }
+}
+
+fn validate_governance_permille_field(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    validate_governance_unsigned_integer_field(governance, field, violations);
+
+    let Some(value) = governance.get(field).and_then(serde_json::Value::as_u64) else {
+        return;
+    };
+    if value > GOVERNANCE_PERMILLE_SCALE {
+        violations.push(format!(
+            "decode_stats.governance.{field} must be <= {GOVERNANCE_PERMILLE_SCALE}"
+        ));
+    }
+}
+
+fn validate_governance_score_complement(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    violations: &mut Vec<String>,
+) {
+    let Some(confidence) = governance
+        .get("confidence_score")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return;
+    };
+    let Some(uncertainty) = governance
+        .get("uncertainty_score")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return;
+    };
+
+    if confidence.saturating_add(uncertainty) != GOVERNANCE_PERMILLE_SCALE {
+        violations.push(
+            "decode_stats.governance.confidence_score + uncertainty_score must equal 1000"
+                .to_string(),
+        );
+    }
+}
+
 fn validate_governance_canonical_action_field(
     governance: &serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -1158,6 +1234,48 @@ fn validate_governance_unsigned_integer_field_in(
         violations.push(format!(
             "decode_stats.governance.{field} is missing or null"
         ));
+    }
+}
+
+fn validate_governance_contributor_consistency(
+    items: &[serde_json::Value],
+    violations: &mut Vec<String>,
+) {
+    let mut names = BTreeSet::new();
+    let mut total = 0u64;
+
+    for (index, contributor) in items.iter().enumerate() {
+        let Some(contributor) = contributor.as_object() else {
+            return;
+        };
+
+        let Some(name) = contributor
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+        else {
+            return;
+        };
+        if !name.is_empty() && !names.insert(name.to_string()) {
+            violations.push(format!(
+                "decode_stats.governance.top_evidence_contributors[{index}].name must be distinct"
+            ));
+        }
+
+        let Some(weight) = contributor
+            .get("contribution_permille")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            return;
+        };
+        total = total.saturating_add(weight);
+    }
+
+    if total != GOVERNANCE_PERMILLE_SCALE {
+        violations.push(
+            "decode_stats.governance.top_evidence_contributors contribution_permille values must sum to 1000"
+                .to_string(),
+        );
     }
 }
 
@@ -1279,6 +1397,41 @@ mod tests {
             },
             replay_ref: "replay:rq-g7-structured-governance-v1".to_string(),
         }
+    }
+
+    fn valid_unit_log_value_with_governance() -> serde_json::Value {
+        serde_json::to_value(
+            UnitLogEntry::new(
+                "RQ-U-G7-GOVERNANCE-VALIDATOR",
+                42,
+                "k=8,symbol_size=32",
+                "replay:rq-u-g7-governance-validator-v1",
+                "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_invalid_governance_permille_ranges -- --nocapture",
+                "ok",
+            )
+            .with_decode_stats(UnitDecodeStats {
+                k: 8,
+                loss_pct: 25,
+                dropped: 2,
+                peeled: 6,
+                inactivated: 1,
+                gauss_ops: 12,
+                pivots: 4,
+                peel_queue_pushes: 9,
+                peel_queue_pops: 9,
+                peel_frontier_peak: 3,
+                dense_core_rows: 4,
+                dense_core_cols: 4,
+                dense_core_dropped_rows: 1,
+                fallback_reason: "none".to_string(),
+                hard_regime_activated: false,
+                hard_regime_branch: "markowitz".to_string(),
+                hard_regime_fallbacks: 0,
+                conservative_fallback_reason: "none".to_string(),
+                governance: Some(sample_governance_decision()),
+            }),
+        )
+        .expect("serialize to value")
     }
 
     fn valid_e2e_log_value() -> serde_json::Value {
@@ -1943,38 +2096,7 @@ mod tests {
 
     #[test]
     fn validate_unit_log_rejects_empty_governance_strings() {
-        let mut entry = serde_json::to_value(
-            UnitLogEntry::new(
-                "RQ-U-G7-EMPTY-STRINGS",
-                42,
-                "k=8,symbol_size=32",
-                "replay:rq-u-g7-empty-strings-v1",
-                "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_empty_governance_strings -- --nocapture",
-                "ok",
-            )
-            .with_decode_stats(UnitDecodeStats {
-                k: 8,
-                loss_pct: 25,
-                dropped: 2,
-                peeled: 6,
-                inactivated: 1,
-                gauss_ops: 12,
-                pivots: 4,
-                peel_queue_pushes: 9,
-                peel_queue_pops: 9,
-                peel_frontier_peak: 3,
-                dense_core_rows: 4,
-                dense_core_cols: 4,
-                dense_core_dropped_rows: 1,
-                fallback_reason: "none".to_string(),
-                hard_regime_activated: false,
-                hard_regime_branch: "markowitz".to_string(),
-                hard_regime_fallbacks: 0,
-                conservative_fallback_reason: "none".to_string(),
-                governance: Some(sample_governance_decision()),
-            }),
-        )
-        .expect("serialize to value");
+        let mut entry = valid_unit_log_value_with_governance();
         entry["decode_stats"]["governance"]["replay_ref"] = json!("   ");
         entry["decode_stats"]["governance"]["top_evidence_contributors"][1]["name"] = json!("\t");
         entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
@@ -2002,6 +2124,63 @@ mod tests {
                 )
             }),
             "should reject empty governance fallback reason: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_invalid_governance_permille_ranges() {
+        let mut entry = valid_unit_log_value_with_governance();
+        entry["decode_stats"]["governance"]["state_posterior"]["unknown"] = json!(21);
+        entry["decode_stats"]["governance"]["confidence_score"] = json!(1001);
+        entry["decode_stats"]["governance"]["uncertainty_score"] = json!(0);
+        entry["decode_stats"]["governance"]["top_evidence_contributors"][2]["contribution_permille"] =
+            json!(211);
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations.iter().any(|v| {
+                v.contains("decode_stats.governance.state_posterior values must sum to 1000")
+            }),
+            "should reject non-normalized governance posterior: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("decode_stats.governance.confidence_score must be <= 1000")),
+            "should reject out-of-range governance confidence: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.confidence_score + uncertainty_score must equal 1000",
+                )
+            }),
+            "should reject non-complementary governance scores: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.top_evidence_contributors contribution_permille values must sum to 1000",
+                )
+            }),
+            "should reject non-normalized contributor weights: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_duplicate_governance_contributor_names() {
+        let mut entry = valid_unit_log_value_with_governance();
+        entry["decode_stats"]["governance"]["top_evidence_contributors"][1]["name"] =
+            json!("decode_success_rate");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.top_evidence_contributors[1].name must be distinct",
+                )
+            }),
+            "should reject duplicate contributor names: {violations:?}"
         );
     }
 

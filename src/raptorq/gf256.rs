@@ -2022,6 +2022,10 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
+        if dst_a.len().min(dst_b.len()) < 32 {
+            mul_slices2_sequential_with_shared_setup(dst_a, dst_b, c, dispatch);
+            return;
+        }
         // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
         // detection succeeds; pointers remain within provided slice bounds.
         unsafe {
@@ -2032,6 +2036,10 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
+        if dst_a.len().min(dst_b.len()) < 16 {
+            mul_slices2_sequential_with_shared_setup(dst_a, dst_b, c, dispatch);
+            return;
+        }
         // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
         // detection succeeds; pointers remain within provided slice bounds.
         unsafe {
@@ -2572,6 +2580,11 @@ pub fn gf256_addmul_slices2(
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
+        if src_a.len().min(src_b.len()) < 32 {
+            (dispatch.addmul_slice)(dst_a, src_a, c);
+            (dispatch.addmul_slice)(dst_b, src_b, c);
+            return;
+        }
         // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
         // detection succeeds; both pairs are length-checked.
         unsafe {
@@ -2590,6 +2603,11 @@ pub fn gf256_addmul_slices2(
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
+        if src_a.len().min(src_b.len()) < 16 {
+            (dispatch.addmul_slice)(dst_a, src_a, c);
+            (dispatch.addmul_slice)(dst_b, src_b, c);
+            return;
+        }
         // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
         // detection succeeds; both pairs are length-checked.
         unsafe {
@@ -3817,6 +3835,38 @@ mod tests {
     }
 
     #[test]
+    fn mul_slices2_shorter_lane_below_simd_width_matches_two_independent_mul_slice_calls() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let c = Gf256(173);
+
+        for &(len_a, len_b, scenario) in &[
+            (7usize, 95usize, "left-short-tiny"),
+            (95usize, 7usize, "right-short-tiny"),
+            (31usize, 95usize, "left-short-avx2-window"),
+            (95usize, 31usize, "right-short-avx2-window"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "mul_slices2_shorter_lane_below_simd_width_matches_two_independent_mul_slice_calls",
+                replay_ref,
+            );
+            let mut actual_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(7)) as u8).collect();
+            let mut actual_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(11)) as u8).collect();
+            let mut expected_a = actual_a.clone();
+            let mut expected_b = actual_b.clone();
+
+            gf256_mul_slices2(&mut actual_a, &mut actual_b, c);
+            gf256_mul_slice(&mut expected_a, c);
+            gf256_mul_slice(&mut expected_b, c);
+
+            assert_eq!(actual_a, expected_a, "{scenario}: {context}");
+            assert_eq!(actual_b, expected_b, "{scenario}: {context}");
+        }
+    }
+
+    #[test]
     fn addmul_slices2_matches_two_independent_addmul_slice_calls() {
         const LEN_A: usize = 79;
         const LEN_B: usize = 149;
@@ -3863,6 +3913,41 @@ mod tests {
                 "RQ-U-GF256-ALGEBRA",
                 seed,
                 "addmul_slices2_handles_empty_and_asymmetric_lane_pairs",
+                replay_ref,
+            );
+            let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(13)) as u8).collect();
+            let src_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(17)) as u8).collect();
+            let mut actual_left: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(19)) as u8).collect();
+            let mut actual_right: Vec<u8> =
+                (0..len_b).map(|i| (i.wrapping_mul(23)) as u8).collect();
+            let mut expected_left = actual_left.clone();
+            let mut expected_right = actual_right.clone();
+
+            gf256_addmul_slices2(&mut actual_left, &src_a, &mut actual_right, &src_b, c);
+            gf256_addmul_slice(&mut expected_left, &src_a, c);
+            gf256_addmul_slice(&mut expected_right, &src_b, c);
+
+            assert_eq!(actual_left, expected_left, "{scenario}: {context}");
+            assert_eq!(actual_right, expected_right, "{scenario}: {context}");
+        }
+    }
+
+    #[test]
+    fn addmul_slices2_shorter_lane_below_simd_width_matches_two_independent_addmul_slice_calls() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let c = Gf256(181);
+
+        for &(len_a, len_b, scenario) in &[
+            (7usize, 95usize, "left-short-tiny"),
+            (95usize, 7usize, "right-short-tiny"),
+            (31usize, 95usize, "left-short-avx2-window"),
+            (95usize, 31usize, "right-short-avx2-window"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "addmul_slices2_shorter_lane_below_simd_width_matches_two_independent_addmul_slice_calls",
                 replay_ref,
             );
             let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(13)) as u8).collect();
