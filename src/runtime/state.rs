@@ -2235,7 +2235,7 @@ impl RuntimeState {
 
     fn allocate_finalizer_id(&mut self) -> u64 {
         let id = self.next_finalizer_id;
-        self.next_finalizer_id += 1;
+        self.next_finalizer_id = self.next_finalizer_id.checked_add(1).expect("finalizer ID overflow");
         id
     }
 

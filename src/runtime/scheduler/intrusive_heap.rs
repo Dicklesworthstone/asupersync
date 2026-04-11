@@ -317,7 +317,7 @@ impl IntrusivePriorityHeap {
         match prio_a.cmp(&prio_b) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => gen_a < gen_b, // Earlier generation = higher priority (FIFO)
+            std::cmp::Ordering::Equal => gen_b.wrapping_sub(gen_a).cast_signed() > 0, // Earlier generation = higher priority (FIFO)
         }
     }
 

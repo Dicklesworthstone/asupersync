@@ -1293,6 +1293,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Sleep polled after completion")]
     fn future_repoll_after_completion_panics() {
         init_test("future_repoll_after_completion_panics");
         CURRENT_TIME.store(Time::from_secs(10).as_nanos(), Ordering::SeqCst);
@@ -1304,10 +1305,7 @@ mod tests {
         let first = Pin::new(&mut sleep).poll(&mut task_cx);
         crate::assert_with_log!(first.is_ready(), "first ready", true, first.is_ready());
 
-        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut sleep).poll(&mut task_cx);
-        }));
-        crate::assert_with_log!(repoll.is_err(), "repoll panics", true, repoll.is_err());
+        let _ = Pin::new(&mut sleep).poll(&mut task_cx);
 
         crate::test_complete!("future_repoll_after_completion_panics");
     }
