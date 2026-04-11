@@ -2918,3 +2918,4 @@
 {"file":"src/io/ext/read_ext.rs","lines":1200,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"read_exact tracks pos across cancellation, read_to_end 8KiB chunks, UTF-8 pending buffer correct"}
 {"file":"src/io/ext/write_ext.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"write_all tracks pos, not cancel-safe (documented), completed flag on error"}
 {"file":"src/io/stream_adapters.rs","lines":500,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Error deferred until buffer consumed, empty chunks skipped, done=true on error return"}
+{"file":"src/bin/asupersync.rs","lines":5314,"batch":"piwhi5","date":"2026-04-10","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"184 expects all on internal hardcoded values, user input paths use Result/map_err, trace file ops properly validated"}
