@@ -632,8 +632,11 @@ impl Connection {
             return Err(H2Error::protocol("DATA received on idle stream"));
         }
 
-        // Track stream ID only after the idle check passes.
-        self.track_stream_id(frame.stream_id);
+        let refused = self.goaway_sent && frame.stream_id > self.last_stream_id;
+        if !refused {
+            // Track stream ID only after the idle check passes, and only if not refused.
+            self.track_stream_id(frame.stream_id);
+        }
 
         let payload_len =
             u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
@@ -688,12 +691,16 @@ impl Connection {
                 increment,
             });
         }
-
-        Ok(Some(ReceivedFrame::Data {
-            stream_id: frame.stream_id,
-            data: frame.data,
-            end_stream: frame.end_stream,
-        }))
+        
+        if refused {
+            Ok(None)
+        } else {
+            Ok(Some(ReceivedFrame::Data {
+                stream_id: frame.stream_id,
+                data: frame.data,
+                end_stream: frame.end_stream,
+            }))
+        }
     }
 
     /// Process HEADERS frame.
@@ -701,13 +708,9 @@ impl Connection {
         // RFC 9113 §6.8: After sending GOAWAY, refuse new streams with IDs
         // above the advertised last_stream_id. Without this, a misbehaving
         // peer could open unbounded streams during the drain phase.
-        if self.goaway_sent && frame.stream_id > self.last_stream_id {
-            self.pending_ops.push_back(PendingOp::RstStream {
-                stream_id: frame.stream_id,
-                error_code: ErrorCode::RefusedStream,
-            });
-            return Ok(None);
-        }
+        // We MUST still process the headers through HPACK to keep compression state
+        // synchronized, but we will discard the result and send a RST_STREAM.
+        let refused = self.goaway_sent && frame.stream_id > self.last_stream_id;
 
         // Validate stream creation before tracking last_stream_id.
         // If get_or_create fails (e.g., invalid stream parity or monotonicity
@@ -716,7 +719,10 @@ impl Connection {
         {
             let _ = self.streams.get_or_create(frame.stream_id)?;
         }
-        self.track_stream_id(frame.stream_id);
+        
+        if !refused {
+            self.track_stream_id(frame.stream_id);
+        }
 
         // Re-borrow the stream (guaranteed to exist after get_or_create).
         let stream = self.streams.get_mut(frame.stream_id).ok_or_else(|| {
@@ -736,7 +742,17 @@ impl Connection {
         if frame.end_headers {
             self.continuation_stream_id = None;
             self.continuation_started_at = None;
-            self.decode_headers(frame.stream_id, frame.end_stream)
+            let result = self.decode_headers(frame.stream_id, frame.end_stream);
+            if refused {
+                self.pending_ops.push_back(PendingOp::RstStream {
+                    stream_id: frame.stream_id,
+                    error_code: ErrorCode::RefusedStream,
+                });
+                result?; // bubble up compression errors
+                Ok(None)
+            } else {
+                result
+            }
         } else {
             self.continuation_stream_id = Some(frame.stream_id);
             self.continuation_started_at = Some((self.time_getter)());
@@ -787,7 +803,18 @@ impl Connection {
                 stream.state(),
                 StreamState::HalfClosedRemote | StreamState::Closed
             );
-            self.decode_headers(frame.stream_id, end_stream)
+            let refused = self.goaway_sent && frame.stream_id > self.last_stream_id;
+            let result = self.decode_headers(frame.stream_id, end_stream);
+            if refused {
+                self.pending_ops.push_back(PendingOp::RstStream {
+                    stream_id: frame.stream_id,
+                    error_code: ErrorCode::RefusedStream,
+                });
+                result?; // bubble up compression errors
+                Ok(None)
+            } else {
+                result
+            }
         } else {
             Ok(None)
         }

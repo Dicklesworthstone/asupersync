@@ -277,7 +277,11 @@ fn get_static(index: usize) -> Option<(&'static str, &'static str)> {
 pub struct Encoder {
     dynamic_table: DynamicTable,
     use_huffman: bool,
-    /// Pending dynamic table size update to emit at the start of the next header block.
+    /// Minimum dynamic table size observed since the last header block.
+    /// RFC 7541 Section 4.2 requires emitting a size reduction if the size
+    /// dropped and then increased between blocks.
+    min_size_update: Option<usize>,
+    /// Pending final dynamic table size update to emit at the start of the next header block.
     /// RFC 7541 Section 6.3 requires this when the table size changes.
     pending_size_update: Option<usize>,
 }
@@ -289,6 +293,7 @@ impl Encoder {
         Self {
             dynamic_table: DynamicTable::new(),
             use_huffman: true,
+            min_size_update: None,
             pending_size_update: None,
         }
     }
@@ -299,6 +304,7 @@ impl Encoder {
         Self {
             dynamic_table: DynamicTable::with_max_size(max_size),
             use_huffman: true,
+            min_size_update: None,
             pending_size_update: None,
         }
     }
@@ -315,6 +321,12 @@ impl Encoder {
     pub fn set_max_table_size(&mut self, size: usize) {
         let capped = size.min(MAX_ALLOWED_TABLE_SIZE);
         self.dynamic_table.set_max_size(capped);
+        
+        if let Some(min_so_far) = self.min_size_update {
+            self.min_size_update = Some(min_so_far.min(capped));
+        } else {
+            self.min_size_update = Some(capped);
+        }
         self.pending_size_update = Some(capped);
     }
 
@@ -345,8 +357,13 @@ impl Encoder {
 
     /// Emit a pending dynamic table size update instruction on the wire.
     fn emit_pending_size_update(&mut self, dst: &mut BytesMut) {
-        if let Some(new_size) = self.pending_size_update.take() {
-            encode_integer(dst, new_size, 5, 0x20);
+        if let Some(min_size) = self.min_size_update.take() {
+            if let Some(final_size) = self.pending_size_update.take() {
+                if min_size < final_size {
+                    encode_integer(dst, min_size, 5, 0x20);
+                }
+                encode_integer(dst, final_size, 5, 0x20);
+            }
         }
     }
 
