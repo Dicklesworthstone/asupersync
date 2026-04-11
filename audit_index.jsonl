@@ -2974,3 +2974,8 @@
 {"file":"src/grpc/service.rs","lines":600,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trait definitions correct"}
 {"file":"src/grpc/health.rs","lines":1000,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Dual-lock pattern correct, load-bearing comments document atomicity"}
 {"file":"src/grpc/reflection.rs","lines":600,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reflection limited to registered services, no information disclosure"}
+{"file":"src/distributed/assignment.rs","lines":1500,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MinimumK overlap is correct: with insufficient symbols, every replica must have all to decode. Striped strategy is for non-overlap (different goal)"}
+{"file":"src/distributed/distribution.rs","lines":1000,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Always uses Full strategy (line 231), no skewing"}
+{"file":"src/distributed/encoding.rs","lines":1500,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Each block has unique block_sbn ensuring distinct SymbolIds"}
+{"file":"src/migration/mod.rs","lines":643,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ensure_symbols handles errors before state mutation"}
+{"file":"src/conformance/mod.rs","lines":649,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"catch_unwind detects panics, no false PASS reports"}
