@@ -2968,3 +2968,9 @@
 {"file":"src/raptorq/rfc6330.rs","lines":670,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RFC 6330 spec compliance verified"}
 {"file":"src/raptorq/builder.rs","lines":600,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Block builder correct"}
 {"file":"src/raptorq/test_log_schema.rs","lines":700,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Profile strict-equality and command substring checks both correct (whitespace handling intentional)"}
+{"file":"src/net/quic/connection.rs","lines":1300,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Legacy wrapper, stream management correct"}
+{"file":"src/net/quic/stream.rs","lines":1500,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Tracker-based cleanup, cancel-correct"}
+{"file":"src/net/quic/config.rs","lines":500,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Configuration validation correct"}
+{"file":"src/grpc/service.rs","lines":600,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trait definitions correct"}
+{"file":"src/grpc/health.rs","lines":1000,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Dual-lock pattern correct, load-bearing comments document atomicity"}
+{"file":"src/grpc/reflection.rs","lines":600,"batch":"piwhi5","date":"2026-04-11","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Reflection limited to registered services, no information disclosure"}
