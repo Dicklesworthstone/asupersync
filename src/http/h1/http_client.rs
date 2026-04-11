@@ -372,6 +372,12 @@ impl ParsedUrl {
                     "unexpected characters after IPv6 address: {rest}"
                 )));
             }
+        } else if authority.matches(':').count() > 1 {
+            let default_port = match scheme {
+                Scheme::Http => 80,
+                Scheme::Https => 443,
+            };
+            (authority.to_owned(), default_port)
         } else if let Some(i) = authority.rfind(':') {
             let port_str = &authority[i + 1..];
             let port: u16 = port_str
@@ -2408,6 +2414,13 @@ mod tests {
         let url = ParsedUrl::parse("http://[::1]:8765/healthz").expect("parse url");
         let socket_addr = parsed_numeric_socket_addr(&url).expect("numeric addr");
         assert_eq!(socket_addr, "[::1]:8765".parse().unwrap());
+    }
+
+    #[test]
+    fn parse_url_handles_unbracketed_ipv6_host() {
+        let url = ParsedUrl::parse("http://::1/healthz").expect("parse url");
+        assert_eq!(url.host, "::1");
+        assert_eq!(url.port, 80);
     }
 
     #[test]
