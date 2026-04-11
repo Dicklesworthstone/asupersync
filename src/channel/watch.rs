@@ -42,8 +42,8 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -484,15 +484,15 @@ impl<T> Receiver<T> {
         if current_after_register != self.seen_version {
             self.seen_version = current_after_register;
             cx.trace("watch::changed received update after register");
-            
-            // Fast path: we registered, but actually the value arrived. 
+
+            // Fast path: we registered, but actually the value arrived.
             // We should mark ourselves as no longer waiting so our drop doesn't take the lock.
             if let Some(w) = self.waiter.as_ref() {
                 w.store(false, Ordering::Release);
             }
             return Poll::Ready(Ok(()));
         }
-        
+
         if self.inner.is_sender_dropped() {
             // Also fast path for drop
             if let Some(w) = self.waiter.as_ref() {
@@ -617,8 +617,9 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
 impl<T> Drop for ChangedFuture<'_, '_, T> {
     fn drop(&mut self) {
         if let Some(waiter) = self.receiver.waiter.as_ref() {
-            if waiter.load(Ordering::Acquire) {
-                // Clear the flag so subsequent `changed()` calls or `drop`s don't re-lock unnecessarily.
+            // The post-register fast paths can clear the queued flag before Drop runs
+            // while the waiter entry is still linked from the shared waiter list.
+            if waiter.load(Ordering::Acquire) || Arc::strong_count(waiter) > 1 {
                 waiter.store(false, Ordering::Release);
                 let mut waiters = self.receiver.inner.waiters.lock();
                 waiters.retain(|entry| {
@@ -1555,6 +1556,63 @@ mod tests {
             receiver_count
         );
         crate::test_complete!("dropped_receiver_eagerly_removes_pending_waiter");
+    }
+
+    #[test]
+    fn completed_future_drop_cleans_false_flag_waiter_entry() {
+        init_test("completed_future_drop_cleans_false_flag_waiter_entry");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waiter = Arc::new(AtomicBool::new(false));
+        let waiter_waker = Waker::from(Arc::new(CountWake {
+            count: Arc::clone(&wake_count),
+        }));
+
+        // This state is reachable when poll_changed() registers a waiter and then
+        // returns Ready from the post-register update/close fast path.
+        tx.inner.register_waker(WatchWaiter {
+            waker: waiter_waker,
+            queued: Arc::clone(&waiter),
+        });
+        rx.waiter = Some(Arc::clone(&waiter));
+
+        let waiter_count = tx.inner.waiters.lock().len();
+        crate::assert_with_log!(
+            waiter_count == 1,
+            "stale waiter entry present before drop",
+            1,
+            waiter_count
+        );
+        crate::assert_with_log!(
+            !waiter.load(Ordering::Acquire),
+            "queued flag already cleared before drop",
+            false,
+            waiter.load(Ordering::Acquire)
+        );
+
+        let future = ChangedFuture {
+            receiver: &mut rx,
+            cx: &cx,
+            completed: true,
+        };
+        drop(future);
+
+        let waiter_count = tx.inner.waiters.lock().len();
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "completed future drop removes stale waiter entry",
+            0,
+            waiter_count
+        );
+        let wake_total = wake_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            wake_total == 0,
+            "drop does not spuriously wake",
+            0,
+            wake_total
+        );
+        crate::test_complete!("completed_future_drop_cleans_false_flag_waiter_entry");
     }
 
     struct CountWake {
