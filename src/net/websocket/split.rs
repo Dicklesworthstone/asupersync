@@ -207,6 +207,12 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
         !guard.write_buf.is_empty()
     } {
         let n = poll_fn(|poll_cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
             let mut guard = shared.lock();
             if guard.write_buf.is_empty() {
                 return Poll::Ready(Ok(0));
@@ -232,6 +238,12 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
 
     // Ensure the underlying I/O stream is flushed
     poll_fn(|poll_cx| {
+        if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let mut guard = shared.lock();
         Pin::new(&mut guard.io).poll_flush(poll_cx)
     })
@@ -254,6 +266,12 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     }
 
     let n = poll_fn(|poll_cx| {
+        if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let mut guard = shared.lock();
         Pin::new(&mut guard.io).poll_write(poll_cx, &buf[..])
     })
@@ -277,6 +295,12 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     }
 
     poll_fn(|poll_cx| {
+        if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let mut guard = shared.lock();
         Pin::new(&mut guard.io).poll_flush(poll_cx)
     })
@@ -581,6 +605,12 @@ where
         use std::future::poll_fn;
 
         poll_fn(|poll_cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                return Poll::Ready(Err(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ))));
+            }
             let mut temp = [0u8; 4096];
             let mut shared = self.shared.lock();
             let mut read_buf = ReadBuf::new(&mut temp);

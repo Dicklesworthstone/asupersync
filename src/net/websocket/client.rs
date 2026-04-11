@@ -445,7 +445,26 @@ where
         }
 
         let frame = Frame::from(msg);
-        self.send_frame_with_entropy(&frame, cx.entropy()).await
+        match self.send_frame_with_entropy(&frame, cx.entropy()).await {
+            Err(WsError::Io(e)) if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() => {
+                let timeout_duration = self.close_handshake.close_timeout();
+                let current_time = || {
+                    cx.timer_driver()
+                        .map_or_else(crate::time::wall_now, |driver| driver.now())
+                };
+                let _ = crate::time::timeout(
+                    current_time(),
+                    timeout_duration,
+                    self.initiate_close(CloseReason::going_away()),
+                )
+                .await;
+                Err(WsError::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "cancelled",
+                )))
+            }
+            res => res,
+        }
     }
 
     /// Receive a message.
@@ -533,7 +552,13 @@ where
                     return Ok(None);
                 }
 
-                let n = self.read_more().await?;
+                let n = match self.read_more().await {
+                    Ok(n) => n,
+                    Err(WsError::Io(e)) if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() => {
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 if n == 0 {
                     // EOF - connection closed
                     self.close_handshake
@@ -656,8 +681,13 @@ where
         use std::future::poll_fn;
 
         while !self.write_buf.is_empty() {
-            let n =
-                poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &self.write_buf[..])).await?;
+            let n = poll_fn(|cx| {
+                if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                }
+                Pin::new(&mut self.io).poll_write(cx, &self.write_buf[..])
+            })
+            .await?;
             if n == 0 {
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -667,7 +697,13 @@ where
             let _ = self.write_buf.split_to(n);
         }
 
-        poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
+        poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            Pin::new(&mut self.io).poll_flush(cx)
+        })
+        .await?;
 
         Ok(())
     }
@@ -679,22 +715,34 @@ where
             return Ok(());
         }
 
-        let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &buf[..])).await?;
+        let n = poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            Pin::new(&mut self.io).poll_write(cx, &buf[..])
+        })
+        .await?;
         if n == 0 {
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::WriteZero,
                 "write returned 0",
             )));
         }
-        let _ = buf.split_to(n);
 
+        let _ = buf.split_to(n);
         if !buf.is_empty() {
             self.write_buf.extend_from_slice(&buf[..]);
             buf.clear();
             return self.flush_write_buf().await;
         }
 
-        poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
+        poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            Pin::new(&mut self.io).poll_flush(cx)
+        })
+        .await?;
 
         Ok(())
     }
@@ -744,6 +792,12 @@ async fn read_some_io<IO: AsyncRead + Unpin>(
     use std::future::poll_fn;
 
     poll_fn(|cx| {
+        if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            return Poll::Ready(Err(WsError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            ))));
+        }
         let mut read_buf = ReadBuf::new(buf);
         match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
