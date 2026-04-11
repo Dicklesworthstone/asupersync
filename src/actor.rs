@@ -871,7 +871,17 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
 
     cx.trace("actor::on_stop");
     let inner = cx.inner.clone();
-    inner.write().mask_depth += 1;
+    {
+        let mut guard = inner.write();
+        assert!(
+            guard.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
+            "mask depth exceeded MAX_MASK_DEPTH ({}) in actor::on_stop: \
+             this violates INV-MASK-BOUNDED and prevents cancellation from ever \
+             being observed. Reduce nesting of masked sections.",
+            crate::types::task_context::MAX_MASK_DEPTH
+        );
+        guard.mask_depth += 1;
+    }
     let mask_guard = OnStopMaskGuard(inner);
     actor.on_stop(&cx).await;
     drop(mask_guard);
