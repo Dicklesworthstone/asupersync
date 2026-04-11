@@ -611,9 +611,8 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
         self.closed = true;
 
         async move {
-            let mut transport = match self.transport.take() {
-                Some(t) => t,
-                None => return Err(SessionError::NoTransport),
+            let Some(mut transport) = self.transport.take() else {
+                return Err(SessionError::NoTransport);
             };
 
             let boxed = match transport.rx.recv(cx).await {
@@ -2388,28 +2387,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "select_left_async called on non-transport-backed session channel")]
-    fn select_left_async_panics_without_transport_backing() {
+    fn select_left_async_fails_without_transport_backing() {
         let (sender, receiver) = send_permit::new_session::<u64>(309);
         receiver.disarm_for_test();
 
         futures_lite::future::block_on(async {
             let cx = Cx::for_testing();
             let sender = sender.send(send_permit::ReserveMsg);
-            let _ = sender.select_left_async(&cx).await;
+            let result = sender.select_left_async(&cx).await;
+            assert_eq!(result.map(|_| ()), Err(SessionError::NoTransport));
         });
     }
 
     #[test]
-    #[should_panic(expected = "select_right_async called on non-transport-backed session channel")]
-    fn select_right_async_panics_without_transport_backing() {
+    fn select_right_async_fails_without_transport_backing() {
         let (sender, receiver) = send_permit::new_session::<u64>(310);
         receiver.disarm_for_test();
 
         futures_lite::future::block_on(async {
             let cx = Cx::for_testing();
             let sender = sender.send(send_permit::ReserveMsg);
-            let _ = sender.select_right_async(&cx).await;
+            let result = sender.select_right_async(&cx).await;
+            assert_eq!(result.map(|_| ()), Err(SessionError::NoTransport));
         });
     }
 
