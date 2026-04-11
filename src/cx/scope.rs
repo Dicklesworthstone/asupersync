@@ -907,7 +907,23 @@ impl<P: Policy> Scope<'_, P> {
             .map_or(self.budget, crate::record::RegionRecord::budget);
         let child_scope = Scope::<P2>::new(child_region, child_budget);
 
-        let fut = f(child_scope, &mut *state);
+        let fut_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            f(child_scope, &mut *state)
+        }));
+
+        let fut = match fut_result {
+            Ok(fut) => fut,
+            Err(payload) => {
+                let reason = CancelReason::fail_fast().with_region(child_region);
+                let _ = state.cancel_request(child_region, &reason, None);
+                if let Some(region) = state.region(child_region) {
+                    region.begin_close(None);
+                }
+                state.advance_region_state(child_region);
+                std::panic::resume_unwind(payload);
+            }
+        };
+
         let pinned_fut = std::pin::pin!(CatchUnwind { inner: fut });
 
         let runner = RegionRunner {
