@@ -111,5 +111,11 @@ remain explicit cleanup targets under Track H until reconciled.
 After each track closes, append to `audit_index.jsonl`:
 
 ```json
-{"file":"<path>","lines":0,"batch":999,"date":"YYYY-MM-DD","agent":"<name>","verdict":"RESOLVED","bugs":0,"notes":"Stub resolution: <surface#> <disposition>"}
+{"file":"<path>","lines":0,"batch":"stub-closure-999","date":"YYYY-MM-DD","agent":"<name>","verdict":"FIXED","bugs":1,"notes":"Stub resolution: <surface#> <disposition>"}
 ```
+
+Use the same field contract documented in `AGENTS.md`: `verdict` should stay in
+the canonical `SOUND`/`FIXED` vocabulary, and `bugs` should reflect whether the
+closeout actually changed a broken surface versus only auditing it. `batch` may
+be a numeric audit batch or a stable string such as a bead id / closure-track
+identifier.

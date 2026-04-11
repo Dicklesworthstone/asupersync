@@ -73,9 +73,9 @@ The packet includes an explicit Track D/E/F/G/H completion matrix in
 Current state snapshot in the artifact:
 
 1. Track D (`asupersync-np1co`): `closed`
-2. Track E (`asupersync-2ncba`): `open` (the unresolved upstream lane, consumed via Track G after stale-triage reopen; active leaf: `asupersync-36m6p.23` under `asupersync-36m6p`; current broader blocker packet: `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`)
+2. Track E (`asupersync-2ncba`): `open` (the unresolved upstream lane, consumed via the still-in-progress Track G governance path; active blocker: `asupersync-36m6p`; current broader blocker packet: `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json`)
 3. Track F (`asupersync-mg1qh`): `closed`
-4. Track G (`asupersync-2cyx5`): `open` (the sole remaining direct H2 blocker after stale-triage reopen)
+4. Track G (`asupersync-2cyx5`): `in_progress` (the sole remaining direct H2 blocker under active ownership)
 5. Track H (`asupersync-p8o9m`): `closed`
 
 The Track-E entry's evidence refs intentionally include both
@@ -109,8 +109,8 @@ responsible for the final go/no-go publication once Track-G closes.
 the direct blocker owner and any still-active upstream closure-critical leaves
 are linked mechanically instead of only by prose. In the current blocked state,
 the open Track-G risk stays owned by `asupersync-2cyx5` and explicitly names
-`asupersync-36m6p.23` as the active upstream Track-E leaf under
-`asupersync-36m6p` that still gates final sign-off through governance closure.
+`asupersync-36m6p` as the active upstream Track-E blocker that still gates
+final sign-off through governance closure.
 
 Blocked-state ownership is explicit and stable while the packet stays
 `draft_blocked`:
@@ -187,7 +187,7 @@ The top-level H2 packet replay entry carries the same kind of
 `status_snapshot_contract` for
 `h2_closure_packet_dependency_status_alignment`, because that check also reads
 live Beads ownership/leaf ids (`asupersync-346lm`, `asupersync-2cyx5`,
-`asupersync-36m6p.23`) and can otherwise observe stale JSONL on shared rch
+`asupersync-36m6p`) and can otherwise observe stale JSONL on shared rch
 workers.
 
 ## Required Repro Commands

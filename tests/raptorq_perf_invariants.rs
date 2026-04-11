@@ -4231,7 +4231,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
             .collect::<BTreeSet<_>>();
     assert_eq!(
         attached_track_g_handoff_fields, expected_track_g_handoff_fields,
-        "closure_readiness.track_g_handoff.attached_packet_fields must match the required handoff fields while Track-G remains open"
+        "closure_readiness.track_g_handoff.attached_packet_fields must match the required handoff fields while Track-G remains non-closed"
     );
     assert_eq!(
         closure_readiness["track_g_handoff"]["attachment_status"].as_str(),
@@ -4879,12 +4879,12 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 .as_str()
                 .expect("track E must include status_reason");
             assert!(
-                status_reason.contains("asupersync-36m6p.23"),
-                "track E status_reason must still name the current active E5 leaf"
+                status_reason.contains("asupersync-36m6p"),
+                "track E status_reason must still name the active E5 blocker"
             );
             assert!(
-                status_reason.contains("asupersync-36m6p"),
-                "track E status_reason must still name the active E5 leaf"
+                !status_reason.contains("asupersync-36m6p.23"),
+                "track E status_reason must not name the closed historical E5 leaf"
             );
             assert!(
                 status_reason.contains("raptorq_track_e_gf256_multiscenario_refresh_v4.json"),
@@ -5115,7 +5115,7 @@ fn h2_closure_packet_schema_and_lever_coverage() {
         BTreeSet::from([
             "asupersync-2cyx5".to_string(),
             "asupersync-346lm".to_string(),
-            "asupersync-36m6p.23".to_string(),
+            "asupersync-36m6p".to_string(),
         ]),
         "H2 packet replay entry must list the live Beads ids needed for shared-rch dependency-status replay"
     );
@@ -5383,8 +5383,8 @@ fn h2_closure_packet_dependency_status_alignment() {
     );
     assert_eq!(
         upstream_active_leaf_bead_ids,
-        &BTreeSet::from([String::from("asupersync-36m6p.23")]),
-        "RQ-H2-R2 must machine-link the active upstream Track-E blocker leaf"
+        &BTreeSet::from([String::from("asupersync-36m6p")]),
+        "RQ-H2-R2 must machine-link the active upstream Track-E blocker"
     );
     let (_, _, upstream_active_leaf_bead_ids) = risks_by_id
         .get("RQ-H2-R1")
@@ -5496,7 +5496,6 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "E4",
         "F8",
         "asupersync-36m6p",
-        "asupersync-36m6p.23",
         "rch exec --",
     ] {
         assert!(

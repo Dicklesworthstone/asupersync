@@ -462,7 +462,7 @@
     ],
     "track_g_handoff": {
       "bead_id": "asupersync-2cyx5",
-      "current_status": "open",
+      "current_status": "in_progress",
       "required_packet_fields": [
         "gate_verdict_table",
         "artifact_replay_index",

@@ -284,18 +284,25 @@ cargo test -p frankenlab
 
 ### Querying the index
 
+Some legacy lines in `audit_index.jsonl` are malformed or off-contract, so use
+raw-line parsing that ignores bad rows instead of raw `jq -r .file
+audit_index.jsonl`.
+
 ```bash
 # Check if a file has been audited
 grep '"src/util/arena.rs"' audit_index.jsonl
 
 # List all files with bugs found
-grep '"FIXED"' audit_index.jsonl | jq -r .file
+jq -Rr 'fromjson? | objects | select(.verdict? == "FIXED" and .file?) | .file' audit_index.jsonl
 
-# Count audited files
-wc -l audit_index.jsonl
+# Count valid audit records
+jq -Rnr '[inputs | fromjson? | objects | select(.file? and .lines? != null and .batch? != null and .date? and .agent? and (.verdict? == "SOUND" or .verdict? == "FIXED") and .bugs? != null and .notes? != null)] | length' audit_index.jsonl
+
+# Count unique audited files
+jq -Rnr '[inputs | fromjson? | objects | .file? // empty] | unique | length' audit_index.jsonl
 
 # Find unaudited .rs files (compare against src/)
-comm -23 <(find src -name '*.rs' | sort) <(jq -r .file audit_index.jsonl | sort) | head -20
+comm -23 <(find src -name '*.rs' | sort) <(jq -Rr 'fromjson? | objects | .file? // empty' audit_index.jsonl | sort -u) | head -20
 ```
 
 ### Adding entries
@@ -309,9 +316,9 @@ echo '{"file":"src/foo/bar.rs","lines":500,"batch":378,"date":"2026-03-15","agen
 **Fields:**
 | Field | Description |
 |-------|-------------|
-| `file` | Path relative to project root (`src/...`) |
+| `file` | Path relative to project root (for example `src/...`, `tests/...`, `docs/...`) |
 | `lines` | Line count at audit time (0 for diff audits) |
-| `batch` | Audit batch number |
+| `batch` | Audit batch identifier (numeric batch, bead id, or other stable string) |
 | `date` | ISO date of the audit |
 | `agent` | Agent name who performed the audit |
 | `verdict` | `SOUND` (no bugs) or `FIXED` (bugs found and fixed) |
