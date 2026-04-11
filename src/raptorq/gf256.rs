@@ -1493,13 +1493,19 @@ fn dual_addmul_decision_detail_with_policy(
 /// Returns a deterministic snapshot of the active dual-lane fused-kernel policy.
 #[must_use]
 pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
-    let policy = dual_policy();
+    dual_kernel_policy_snapshot_for(dual_policy(), dispatch().kind)
+}
+
+fn dual_kernel_policy_snapshot_for(
+    policy: &DualKernelPolicy,
+    kernel: Gf256Kernel,
+) -> DualKernelPolicySnapshot {
     let effective_profile = effective_profile_pack_metadata(policy);
     DualKernelPolicySnapshot {
         profile_schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
         profile_pack: policy.profile_pack,
         architecture_class: policy.architecture_class,
-        kernel: dispatch().kind,
+        kernel,
         tuning_corpus_id: policy.tuning_corpus_id,
         selected_tuning_candidate_id: policy.selected_tuning_candidate_id,
         rejected_tuning_candidate_ids: policy.rejected_tuning_candidate_ids,
@@ -1525,10 +1531,17 @@ pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
 /// Returns a deterministic snapshot of active profile-pack manifest and policy selection.
 #[must_use]
 pub fn gf256_profile_pack_manifest_snapshot() -> Gf256ProfilePackManifestSnapshot {
-    let active_policy = dual_kernel_policy_snapshot();
+    gf256_profile_pack_manifest_snapshot_for(dual_policy(), dispatch().kind)
+}
+
+fn gf256_profile_pack_manifest_snapshot_for(
+    policy: &DualKernelPolicy,
+    kernel: Gf256Kernel,
+) -> Gf256ProfilePackManifestSnapshot {
+    let active_policy = dual_kernel_policy_snapshot_for(policy, kernel);
     Gf256ProfilePackManifestSnapshot {
         schema_version: GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION,
-        active_profile_metadata: effective_profile_pack_metadata(dual_policy()),
+        active_profile_metadata: effective_profile_pack_metadata(policy),
         active_selected_tuning_candidate: tuning_candidate_metadata(
             active_policy.selected_tuning_candidate_id,
         ),
@@ -5933,6 +5946,167 @@ mod tests {
         if let Some(reason) = snapshot.mode_fallback_reason {
             assert!(!reason.as_str().is_empty());
         }
+    }
+
+    #[test]
+    fn unsupported_profile_pack_snapshot_preserves_canonical_manifest_provenance() {
+        let selection = select_profile_pack(
+            Gf256Kernel::Scalar,
+            Some(ProfilePackRequest::X86Avx2BalancedV1),
+        );
+        let mut policy = policy_fixture_from_selection(selection);
+        let expected_profile = profile_pack_metadata(policy.profile_pack);
+        policy.override_mask.set_profile_pack_env_requested();
+
+        apply_effective_selection_contract(&mut policy);
+        let snapshot = dual_kernel_policy_snapshot_for(&policy, Gf256Kernel::Scalar);
+        let manifest = gf256_profile_pack_manifest_snapshot_for(&policy, Gf256Kernel::Scalar);
+
+        assert_eq!(
+            snapshot.fallback_reason,
+            Some(Gf256ProfileFallbackReason::UnsupportedProfileForHost)
+        );
+        assert!(snapshot.override_mask.profile_pack_env_requested());
+        assert_eq!(snapshot.kernel, Gf256Kernel::Scalar);
+        assert_eq!(snapshot.profile_pack, expected_profile.profile_pack);
+        assert_eq!(
+            snapshot.selected_tuning_candidate_id,
+            expected_profile.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            snapshot.decision_artifact_id,
+            expected_profile.decision_artifact_id
+        );
+        assert_eq!(snapshot.decision_role, expected_profile.decision_role);
+        assert_eq!(
+            snapshot.decision_evidence_status,
+            expected_profile.decision_evidence_status
+        );
+        assert_eq!(
+            manifest.active_policy.fallback_reason,
+            Some(Gf256ProfileFallbackReason::UnsupportedProfileForHost)
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.profile_pack,
+            expected_profile.profile_pack
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.architecture_class,
+            expected_profile.architecture_class
+        );
+        assert_eq!(
+            manifest
+                .active_profile_metadata
+                .selected_tuning_candidate_id,
+            expected_profile.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.decision_artifact_id,
+            expected_profile.decision_artifact_id
+        );
+        assert_eq!(
+            manifest.active_selected_tuning_candidate,
+            tuning_candidate_metadata(expected_profile.selected_tuning_candidate_id)
+        );
+    }
+
+    #[test]
+    fn unknown_profile_pack_snapshot_preserves_canonical_manifest_provenance() {
+        let selection = select_profile_pack(Gf256Kernel::Scalar, None);
+        let mut policy = policy_fixture_from_selection(selection);
+        let expected_profile = profile_pack_metadata(policy.profile_pack);
+        policy.override_mask.set_profile_pack_env_requested();
+        policy.fallback_reason = Some(Gf256ProfileFallbackReason::UnknownRequestedProfile);
+
+        apply_effective_selection_contract(&mut policy);
+        let snapshot = dual_kernel_policy_snapshot_for(&policy, Gf256Kernel::Scalar);
+        let manifest = gf256_profile_pack_manifest_snapshot_for(&policy, Gf256Kernel::Scalar);
+
+        assert_eq!(
+            snapshot.fallback_reason,
+            Some(Gf256ProfileFallbackReason::UnknownRequestedProfile)
+        );
+        assert!(snapshot.override_mask.profile_pack_env_requested());
+        assert_eq!(snapshot.kernel, Gf256Kernel::Scalar);
+        assert_eq!(snapshot.profile_pack, expected_profile.profile_pack);
+        assert_eq!(
+            snapshot.selected_tuning_candidate_id,
+            expected_profile.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            snapshot.rejected_tuning_candidate_ids,
+            expected_profile.rejected_tuning_candidate_ids
+        );
+        assert_eq!(
+            manifest.active_policy.fallback_reason,
+            Some(Gf256ProfileFallbackReason::UnknownRequestedProfile)
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.profile_pack,
+            expected_profile.profile_pack
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.architecture_class,
+            expected_profile.architecture_class
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.selected_candidate_summary,
+            expected_profile.selected_candidate_summary
+        );
+        assert_eq!(
+            manifest
+                .active_profile_metadata
+                .rejected_candidate_set_summary,
+            expected_profile.rejected_candidate_set_summary
+        );
+        assert_eq!(
+            manifest.active_selected_tuning_candidate,
+            tuning_candidate_metadata(expected_profile.selected_tuning_candidate_id)
+        );
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    fn supported_profile_pack_snapshot_keeps_host_and_selected_profile_architectures_distinct() {
+        let selection = ProfilePackSelection {
+            profile_pack: Gf256ProfilePackId::ScalarConservativeV1,
+            architecture_class: Gf256ArchitectureClass::X86Avx2,
+            fallback_reason: None,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_SCALAR,
+        };
+        let mut policy = policy_fixture_from_selection(selection);
+        policy.override_mask.set_profile_pack_env_requested();
+
+        apply_effective_selection_contract(&mut policy);
+        let snapshot = dual_kernel_policy_snapshot_for(&policy, Gf256Kernel::X86Avx2);
+        let manifest = gf256_profile_pack_manifest_snapshot_for(&policy, Gf256Kernel::X86Avx2);
+
+        assert_eq!(snapshot.kernel, Gf256Kernel::X86Avx2);
+        assert_eq!(snapshot.architecture_class, Gf256ArchitectureClass::X86Avx2);
+        assert_eq!(
+            snapshot.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.architecture_class,
+            Gf256ArchitectureClass::GenericScalar
+        );
+        assert_ne!(
+            snapshot.architecture_class,
+            manifest.active_profile_metadata.architecture_class
+        );
+        assert_eq!(manifest.active_policy, snapshot);
+        assert_eq!(
+            manifest.active_selected_tuning_candidate,
+            tuning_candidate_metadata(snapshot.selected_tuning_candidate_id)
+        );
     }
 
     #[test]
