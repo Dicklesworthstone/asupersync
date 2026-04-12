@@ -705,9 +705,10 @@ mod tests {
         }
 
         fn call(&mut self, _req: ()) -> Self::Future {
-            if self.panic_on_call {
-                panic!("panic during reconnect call construction");
-            }
+            assert!(
+                !self.panic_on_call,
+                "panic during reconnect call construction"
+            );
             if self.id == 0 {
                 Box::pin(PanicOnPollFuture)
             } else {
