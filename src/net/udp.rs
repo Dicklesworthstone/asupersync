@@ -115,6 +115,9 @@ impl UdpSocket {
 
             let mut last_err = None;
             for addr in addrs {
+                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+                }
                 match self.inner.connect(addr) {
                     Ok(()) => return Ok(()),
                     Err(err) => last_err = Some(err),
@@ -168,6 +171,12 @@ impl UdpSocket {
         {
             let mut last_err = None;
             for addr in addrs {
+                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "cancelled",
+                    )));
+                }
                 match self.inner.send_to(buf, addr) {
                     Ok(n) => return Poll::Ready(Ok(n)),
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -217,6 +226,9 @@ impl UdpSocket {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.recv_from(buf) {
             Ok(res) => Poll::Ready(Ok(res)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -250,6 +262,9 @@ impl UdpSocket {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.send(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -288,6 +303,9 @@ impl UdpSocket {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.recv(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -330,6 +348,9 @@ impl UdpSocket {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.peek_from(buf) {
             Ok(res) => Poll::Ready(Ok(res)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -772,6 +793,74 @@ mod tests {
             let (n, _) = server.recv_from(&mut buf).await.unwrap();
             assert_eq!(n, 8192);
             assert!(buf[..n].iter().all(|&b| b == 0xAB));
+        });
+    }
+
+    #[test]
+    fn udp_cancelled_operations_return_interrupted_without_registration() {
+        future::block_on(async {
+            let mut poll_recv_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let poll_recv_addr = poll_recv_socket.local_addr().unwrap();
+
+            let mut poll_send_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let poll_send_addr = poll_send_socket.local_addr().unwrap();
+
+            poll_send_socket.connect(poll_recv_addr).await.unwrap();
+            poll_recv_socket.connect(poll_send_addr).await.unwrap();
+
+            let mut send_to_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer_addr = peer_socket.local_addr().unwrap();
+
+            let connect_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            let cx = Cx::for_testing();
+            cx.set_cancel_requested(true);
+            let _guard = Cx::set_current(Some(cx));
+
+            let waker = noop_waker();
+            let task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 16];
+
+            let connect_err = connect_socket.connect(peer_addr).await.unwrap_err();
+            assert_eq!(connect_err.kind(), io::ErrorKind::Interrupted);
+            assert!(connect_socket.peer_addr().is_err());
+
+            let send_to =
+                send_to_socket.poll_send_to(&task_cx, b"ping", std::slice::from_ref(&peer_addr));
+            assert!(matches!(
+                send_to,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ));
+            assert!(send_to_socket.registration.is_none());
+
+            let recv_from = poll_recv_socket.poll_recv_from(&task_cx, &mut buf);
+            assert!(matches!(
+                recv_from,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ));
+            assert!(poll_recv_socket.registration.is_none());
+
+            let send = poll_send_socket.poll_send(&task_cx, b"hello");
+            assert!(matches!(
+                send,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ));
+            assert!(poll_send_socket.registration.is_none());
+
+            let recv = poll_recv_socket.poll_recv(&task_cx, &mut buf);
+            assert!(matches!(
+                recv,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ));
+            assert!(poll_recv_socket.registration.is_none());
+
+            let peek_from = poll_recv_socket.poll_peek_from(&task_cx, &mut buf);
+            assert!(matches!(
+                peek_from,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ));
+            assert!(poll_recv_socket.registration.is_none());
         });
     }
 }

@@ -69,6 +69,9 @@ impl AsyncRead for ReadHalf<'_> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let mut inner = self.inner;
         match inner.read(buf.unfilled()) {
             Ok(n) => {
@@ -105,6 +108,9 @@ impl AsyncReadVectored for ReadHalf<'_> {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let mut inner = self.inner;
         match inner.read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -163,6 +169,9 @@ impl AsyncWrite for WriteHalf<'_> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let mut inner = self.inner;
         match inner.write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -179,6 +188,9 @@ impl AsyncWrite for WriteHalf<'_> {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let mut inner = self.inner;
         match inner.write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -195,6 +207,9 @@ impl AsyncWrite for WriteHalf<'_> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let mut inner = self.inner;
         match inner.flush() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -207,6 +222,9 @@ impl AsyncWrite for WriteHalf<'_> {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
             Err(e) if e.kind() == io::ErrorKind::NotConnected => Poll::Ready(Ok(())),
@@ -664,6 +682,9 @@ impl AsyncRead for OwnedReadHalf {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::TcpStream = &self.inner.stream;
         match (&*inner).read(buf.unfilled()) {
             Ok(n) => {
@@ -700,6 +721,9 @@ impl AsyncReadVectored for OwnedReadHalf {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::TcpStream = &self.inner.stream;
         match (&*inner).read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -779,6 +803,9 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::TcpStream = &self.inner.stream;
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -797,6 +824,9 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::TcpStream = &self.inner.stream;
         match (&*inner).write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -815,6 +845,9 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::TcpStream = &self.inner.stream;
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -829,6 +862,9 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.stream.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
             Err(e) if e.kind() == io::ErrorKind::NotConnected => Poll::Ready(Ok(())),
@@ -1090,6 +1126,55 @@ mod tests {
         // Just verify the types compile and basic operations work
         crate::assert_with_log!(true, "borrowed split compiles", true, true);
         crate::test_complete!("borrowed_split_read_write");
+    }
+
+    #[test]
+    fn borrowed_split_halves_return_interrupted_when_cancel_requested() {
+        init_test("borrowed_split_halves_return_interrupted_when_cancel_requested");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (_server, _) = listener.accept().expect("accept");
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut read_half = ReadHalf::new(&client);
+        let mut write_half = WriteHalf::new(&client);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 8];
+        let mut read_buf = crate::io::ReadBuf::new(&mut buf);
+
+        let read =
+            crate::io::AsyncRead::poll_read(Pin::new(&mut read_half), &mut task_cx, &mut read_buf);
+        assert!(matches!(
+            read,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let write =
+            crate::io::AsyncWrite::poll_write(Pin::new(&mut write_half), &mut task_cx, b"hello");
+        assert!(matches!(
+            write,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let flush = crate::io::AsyncWrite::poll_flush(Pin::new(&mut write_half), &mut task_cx);
+        assert!(matches!(
+            flush,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let shutdown =
+            crate::io::AsyncWrite::poll_shutdown(Pin::new(&mut write_half), &mut task_cx);
+        assert!(matches!(
+            shutdown,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
     }
 
     fn read_vectored_payload<R: AsyncReadVectored + Unpin>(reader: &mut R, payload: &[u8]) {
@@ -1678,5 +1763,54 @@ mod tests {
             write_hits.load(Ordering::SeqCst) >= 1,
             "write waiter must be woken when shared registration drops on not-connected"
         );
+    }
+
+    #[test]
+    fn owned_split_halves_return_interrupted_when_cancel_requested() {
+        init_test("owned_split_halves_return_interrupted_when_cancel_requested");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (_server, _) = listener.accept().expect("accept");
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+
+        let stream = TcpStream::from_std(client).expect("wrap stream");
+        let (mut read_half, mut write_half) = stream.into_split();
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 8];
+        let mut read_buf = crate::io::ReadBuf::new(&mut buf);
+
+        let read =
+            crate::io::AsyncRead::poll_read(Pin::new(&mut read_half), &mut task_cx, &mut read_buf);
+        assert!(matches!(
+            read,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let write =
+            crate::io::AsyncWrite::poll_write(Pin::new(&mut write_half), &mut task_cx, b"hello");
+        assert!(matches!(
+            write,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let flush = crate::io::AsyncWrite::poll_flush(Pin::new(&mut write_half), &mut task_cx);
+        assert!(matches!(
+            flush,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let shutdown =
+            crate::io::AsyncWrite::poll_shutdown(Pin::new(&mut write_half), &mut task_cx);
+        assert!(matches!(
+            shutdown,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
     }
 }

@@ -85,6 +85,13 @@ where
         let mut steps = 0;
 
         loop {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                this.completed = true;
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
             if steps > 32 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
@@ -259,6 +266,13 @@ where
         let mut steps = 0;
 
         loop {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                this.completed = true;
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
             if steps > 32 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
@@ -404,6 +418,13 @@ where
         let mut steps = 0;
 
         loop {
+            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                this.completed = true;
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
             if steps > 32 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;

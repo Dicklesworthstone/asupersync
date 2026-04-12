@@ -628,6 +628,9 @@ impl AsyncRead for UnixStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::UnixStream = &self.inner;
         // std::os::unix::net::UnixStream implements Read for &UnixStream
         match (&*inner).read(buf.unfilled()) {
@@ -652,6 +655,9 @@ impl AsyncReadVectored for UnixStream {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -672,6 +678,9 @@ impl AsyncWrite for UnixStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -690,6 +699,9 @@ impl AsyncWrite for UnixStream {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -708,6 +720,9 @@ impl AsyncWrite for UnixStream {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -722,6 +737,9 @@ impl AsyncWrite for UnixStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
             Err(e) if e.kind() == io::ErrorKind::NotConnected => Poll::Ready(Ok(())),
@@ -858,6 +876,8 @@ mod tests {
     use super::*;
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::io::{self, IoSlice, IoSliceMut, Read};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -912,6 +932,33 @@ mod tests {
         // Shutdown should succeed
         s1.shutdown(Shutdown::Write).expect("shutdown failed");
         crate::test_complete!("test_shutdown");
+    }
+
+    #[test]
+    fn test_poll_flush_and_shutdown_return_interrupted_when_cancel_requested() {
+        init_test("test_poll_flush_and_shutdown_return_interrupted_when_cancel_requested");
+        let (s1, _s2) = net::UnixStream::pair().expect("pair failed");
+        s1.set_nonblocking(true).expect("set_nonblocking failed");
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut stream = UnixStream::from_std(s1).expect("wrap stream");
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+
+        let flush = Pin::new(&mut stream).poll_flush(&mut task_cx);
+        assert!(matches!(
+            flush,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let shutdown = Pin::new(&mut stream).poll_shutdown(&mut task_cx);
+        assert!(matches!(
+            shutdown,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
     }
 
     #[test]

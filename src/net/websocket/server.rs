@@ -348,7 +348,9 @@ where
 
         let frame = Frame::from(msg);
         match self.send_frame(frame).await {
-            Err(WsError::Io(e)) if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() => {
+            Err(WsError::Io(e))
+                if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() =>
+            {
                 let timeout_duration = self.close_handshake.close_timeout();
                 let current_time = || {
                     cx.timer_driver()
@@ -453,7 +455,9 @@ where
 
                 let n = match self.read_more().await {
                     Ok(n) => n,
-                    Err(WsError::Io(e)) if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() => {
+                    Err(WsError::Io(e))
+                        if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() =>
+                    {
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -566,9 +570,13 @@ where
         use std::future::poll_fn;
 
         while !self.write_buf.is_empty() {
+            let is_open = self.close_handshake.is_open();
             let n = poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "cancelled",
+                    )));
                 }
                 Pin::new(&mut self.io).poll_write(cx, &self.write_buf[..])
             })
@@ -582,8 +590,9 @@ where
             let _ = self.write_buf.split_to(n);
         }
 
+        let is_open = self.close_handshake.is_open();
         poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             Pin::new(&mut self.io).poll_flush(cx)
@@ -600,8 +609,9 @@ where
             return Ok(());
         }
 
+        let is_open = self.close_handshake.is_open();
         let n = poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             Pin::new(&mut self.io).poll_write(cx, &buf[..])
@@ -621,8 +631,9 @@ where
             return self.flush_write_buf().await;
         }
 
+        let is_open = self.close_handshake.is_open();
         poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             Pin::new(&mut self.io).poll_flush(cx)
@@ -651,7 +662,7 @@ where
 
         // Create a temporary buffer for reading
         let mut temp = [0u8; 4096];
-        let n = read_some_io(&mut self.io, &mut temp).await?;
+        let n = read_some_io(&mut self.io, &mut temp, self.close_handshake.is_open()).await?;
 
         if n > 0 {
             self.read_buf.extend_from_slice(&temp[..n]);
@@ -665,11 +676,12 @@ where
 async fn read_some_io<IO: AsyncRead + Unpin>(
     io: &mut IO,
     buf: &mut [u8],
+    is_open: bool,
 ) -> Result<usize, WsError> {
     use std::future::poll_fn;
 
     poll_fn(|cx| {
-        if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
             return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",

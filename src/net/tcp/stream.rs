@@ -18,7 +18,7 @@ use crate::types::Time;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 #[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
-use std::io::{self, IoSlice, IoSliceMut};
+use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -185,39 +185,16 @@ impl TcpStream {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let addrs = lookup_all(addr).await?;
-            if addrs.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "no socket addresses found",
-                ));
-            }
-
-            let mut last_err = None;
-            for addr in addrs {
+            connect_resolved_addrs(lookup_all(addr).await?, |addr| async move {
                 let domain = if addr.is_ipv4() {
                     Domain::IPV4
                 } else {
                     Domain::IPV6
                 };
-
-                let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        last_err = Some(e);
-                        continue;
-                    }
-                };
-
-                match Self::connect_from_socket(socket, addr).await {
-                    Ok(stream) => return Ok(stream),
-                    Err(e) => {
-                        last_err = Some(e);
-                    }
-                }
-            }
-
-            Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+                let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+                Self::connect_from_socket(socket, addr).await
+            })
+            .await
         }
     }
 
@@ -274,57 +251,21 @@ impl TcpStream {
         timeout_duration: Duration,
         time_getter: fn() -> Time,
     ) -> io::Result<Self> {
-        let addrs = lookup_all(addr).await?;
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no socket addresses found",
-            ));
-        }
-
-        let deadline = time_getter() + timeout_duration;
-        let mut last_err = None;
-
-        for addr in addrs {
-            let now = time_getter();
-            if now >= deadline {
-                last_err = Some(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "tcp connect timeout",
-                ));
-                break;
-            }
-            let remaining = std::time::Duration::from_nanos(deadline.duration_since(now));
-
-            let domain = if addr.is_ipv4() {
-                Domain::IPV4
-            } else {
-                Domain::IPV6
-            };
-
-            let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-                Ok(s) => s,
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
-                }
-            };
-
-            let connect_future = Box::pin(Self::connect_from_socket(socket, addr));
-            match future_with_timeout(connect_future, remaining, time_getter).await {
-                Ok(Ok(stream)) => return Ok(stream),
-                Ok(Err(err)) => last_err = Some(err),
-                Err(_) => {
-                    last_err = Some(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "tcp connect timeout",
-                    ));
-                    break; // Timed out waiting, so no time left for subsequent attempts
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+        connect_resolved_addrs_with_timeout(
+            lookup_all(addr).await?,
+            timeout_duration,
+            time_getter,
+            |addr| async move {
+                let domain = if addr.is_ipv4() {
+                    Domain::IPV4
+                } else {
+                    Domain::IPV6
+                };
+                let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+                Self::connect_from_socket(socket, addr).await
+            },
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -515,6 +456,90 @@ impl TcpStream {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn connect_error_is_cancellation(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::Interrupted
+        && Cx::current().is_some_and(|cx| cx.checkpoint().is_err())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn connect_resolved_addrs<F, Fut>(
+    addrs: Vec<SocketAddr>,
+    mut connect_one: F,
+) -> io::Result<TcpStream>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = io::Result<TcpStream>>,
+{
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no socket addresses found",
+        ));
+    }
+
+    let mut last_err = None;
+    for addr in addrs {
+        match connect_one(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) if connect_error_is_cancellation(&err) => return Err(err),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn connect_resolved_addrs_with_timeout<F, Fut>(
+    addrs: Vec<SocketAddr>,
+    timeout_duration: Duration,
+    time_getter: fn() -> Time,
+    mut connect_one: F,
+) -> io::Result<TcpStream>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = io::Result<TcpStream>> + 'static,
+{
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no socket addresses found",
+        ));
+    }
+
+    let deadline = time_getter() + timeout_duration;
+    let mut last_err = None;
+
+    for addr in addrs {
+        let now = time_getter();
+        if now >= deadline {
+            last_err = Some(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "tcp connect timeout",
+            ));
+            break;
+        }
+        let remaining = Duration::from_nanos(deadline.duration_since(now));
+
+        match future_with_timeout(Box::pin(connect_one(addr)), remaining, time_getter).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) if connect_error_is_cancellation(&err) => return Err(err),
+            Ok(Err(err)) => last_err = Some(err),
+            Err(_) => {
+                last_err = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "tcp connect timeout",
+                ));
+                break;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+}
+
 #[inline]
 pub(crate) fn fallback_rewake(cx: &Context<'_>) {
     if let Some(timer) = Cx::current().and_then(|c| c.timer_driver()) {
@@ -587,6 +612,10 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     let mut registration: Option<IoRegistration> = None;
     let mut fallback = false;
     std::future::poll_fn(|cx| {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+
         if let Some(err) = socket.take_error()? {
             return Poll::Ready(Err(err));
         }
@@ -688,7 +717,9 @@ impl AsyncRead for TcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        use std::io::Read;
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         // std::net::TcpStream implements Read for &TcpStream
@@ -729,7 +760,9 @@ impl AsyncReadVectored for TcpStream {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
-        use std::io::Read;
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
 
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
@@ -767,7 +800,10 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        use std::io::Write;
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).write(buf) {
@@ -788,7 +824,9 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        use std::io::Write;
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
 
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
@@ -811,7 +849,9 @@ impl AsyncWrite for TcpStream {
 
     #[inline]
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        use std::io::Write;
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).flush() {
@@ -828,6 +868,9 @@ impl AsyncWrite for TcpStream {
 
     #[inline]
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
             Err(e) if e.kind() == io::ErrorKind::NotConnected => Poll::Ready(Ok(())),
@@ -1215,6 +1258,113 @@ mod tests {
         .expect_err("deadline should expire before the first socket attempt");
 
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn connect_resolved_addrs_stops_after_cancelled_interrupt() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let err = future::block_on(super::connect_resolved_addrs(
+            vec![
+                "192.0.2.1:81".parse().expect("addr"),
+                "192.0.2.2:81".parse().expect("addr"),
+            ],
+            {
+                let attempts = Arc::clone(&attempts);
+                move |_addr| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::ConnectionRefused,
+                                "should not try the next address after cancellation",
+                            ))
+                        }
+                    }
+                }
+            },
+        ))
+        .expect_err("cancelled connect should stop immediately");
+
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn connect_resolved_addrs_with_timeout_stops_after_cancelled_interrupt() {
+        fn test_time() -> Time {
+            Time::from_nanos(0)
+        }
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let err = future::block_on(super::connect_resolved_addrs_with_timeout(
+            vec![
+                "192.0.2.1:81".parse().expect("addr"),
+                "192.0.2.2:81".parse().expect("addr"),
+            ],
+            Duration::from_secs(1),
+            test_time,
+            {
+                let attempts = Arc::clone(&attempts);
+                move |_addr| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::ConnectionRefused,
+                                "should not try the next address after cancellation",
+                            ))
+                        }
+                    }
+                }
+            },
+        ))
+        .expect_err("cancelled timed connect should stop immediately");
+
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tcp_stream_poll_flush_and_shutdown_return_interrupted_when_cancel_requested() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut stream = TcpStream::from_std(client).expect("wrap stream");
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let flush = Pin::new(&mut stream).poll_flush(&mut task_cx);
+        assert!(matches!(
+            flush,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let shutdown = Pin::new(&mut stream).poll_shutdown(&mut task_cx);
+        assert!(matches!(
+            shutdown,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
     }
 
     #[test]

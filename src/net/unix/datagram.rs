@@ -349,15 +349,20 @@ impl UnixDatagram {
     /// ```
     pub async fn send_to<P: AsRef<Path>>(&mut self, buf: &[u8], path: P) -> io::Result<usize> {
         let path = path.as_ref().to_path_buf();
-        std::future::poll_fn(|cx| match self.inner.send_to(buf, &path) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+            match self.inner.send_to(buf, &path) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         })
         .await
     }
@@ -394,15 +399,20 @@ impl UnixDatagram {
             return Err(empty_datagram_recv_from_buffer_error());
         }
 
-        std::future::poll_fn(|cx| match self.inner.recv_from(buf) {
-            Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+            match self.inner.recv_from(buf) {
+                Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         })
         .await
     }
@@ -439,15 +449,20 @@ impl UnixDatagram {
     /// let n = a.send(b"hello").await?;
     /// ```
     pub async fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
-        std::future::poll_fn(|cx| match self.inner.send(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+            match self.inner.send(buf) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         })
         .await
     }
@@ -483,15 +498,20 @@ impl UnixDatagram {
     /// let n = b.recv(&mut buf).await?;
     /// ```
     pub async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        std::future::poll_fn(|cx| match self.inner.recv(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+            match self.inner.recv(buf) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         })
         .await
     }
@@ -596,6 +616,10 @@ impl UnixDatagram {
     pub fn poll_recv_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::os::unix::io::AsRawFd;
 
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+
         // For datagrams, a 1-byte MSG_PEEK probe checks readiness without consuming data.
         let mut buf = [0u8; 1];
         match socket::recv(
@@ -620,6 +644,10 @@ impl UnixDatagram {
     pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
         use std::os::unix::io::AsFd;
+
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
 
         let mut fds = [PollFd::new(self.inner.as_fd(), PollFlags::POLLOUT)];
         match poll(&mut fds, PollTimeout::ZERO) {
@@ -663,6 +691,9 @@ impl UnixDatagram {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
             match socket::recv(
                 self.inner.as_raw_fd(),
                 buf,
@@ -721,6 +752,9 @@ impl UnixDatagram {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
             let mut iov = [IoSliceMut::new(buf)];
             match socket::recvmsg::<socket::UnixAddr>(
                 self.inner.as_raw_fd(),
@@ -1371,6 +1405,158 @@ mod tests {
         }
 
         crate::test_complete!("test_datagram_send_registers_on_wouldblock");
+    }
+
+    #[test]
+    fn test_cancelled_datagram_ops_return_interrupted_without_registration() {
+        use crate::cx::Cx;
+
+        init_test("test_cancelled_datagram_ops_return_interrupted_without_registration");
+
+        let dir = tempdir().expect("create temp dir");
+        let server_path = dir.path().join("cancel-server.sock");
+        let client_path = dir.path().join("cancel-client.sock");
+
+        let mut path_server = UnixDatagram::bind(&server_path).expect("bind server failed");
+        let mut path_client = UnixDatagram::bind(&client_path).expect("bind client failed");
+        let (mut connected_a, mut connected_b) = UnixDatagram::pair().expect("pair failed");
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+
+        let err = futures_lite::future::block_on(path_client.send_to(b"hello", &server_path))
+            .expect_err("cancelled send_to must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "send_to cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            path_client.registration.is_none(),
+            "send_to registration skipped",
+            true,
+            path_client.registration.is_none()
+        );
+
+        let mut buf = [0u8; 8];
+
+        let err = futures_lite::future::block_on(path_server.recv_from(&mut buf))
+            .expect_err("cancelled recv_from must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "recv_from cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            path_server.registration.is_none(),
+            "recv_from registration skipped",
+            true,
+            path_server.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(connected_a.send(b"hello"))
+            .expect_err("cancelled send must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "send cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            connected_a.registration.is_none(),
+            "send registration skipped",
+            true,
+            connected_a.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(connected_b.recv(&mut buf))
+            .expect_err("cancelled recv must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "recv cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            connected_b.registration.is_none(),
+            "recv registration skipped",
+            true,
+            connected_b.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(connected_b.peek(&mut buf))
+            .expect_err("cancelled peek must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "peek cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            connected_b.registration.is_none(),
+            "peek registration skipped",
+            true,
+            connected_b.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(path_server.peek_from(&mut buf))
+            .expect_err("cancelled peek_from must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "peek_from cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            path_server.registration.is_none(),
+            "peek_from registration skipped",
+            true,
+            path_server.registration.is_none()
+        );
+
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        let recv_ready = path_server.poll_recv_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(
+                recv_ready,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ),
+            "poll_recv_ready cancelled",
+            "Poll::Ready(Interrupted)",
+            format!("{recv_ready:?}")
+        );
+        crate::assert_with_log!(
+            path_server.registration.is_none(),
+            "poll_recv_ready registration skipped",
+            true,
+            path_server.registration.is_none()
+        );
+
+        let send_ready = connected_a.poll_send_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(
+                send_ready,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ),
+            "poll_send_ready cancelled",
+            "Poll::Ready(Interrupted)",
+            format!("{send_ready:?}")
+        );
+        crate::assert_with_log!(
+            connected_a.registration.is_none(),
+            "poll_send_ready registration skipped",
+            true,
+            connected_a.registration.is_none()
+        );
+
+        crate::test_complete!(
+            "test_cancelled_datagram_ops_return_interrupted_without_registration"
+        );
     }
 
     #[cfg(any(
