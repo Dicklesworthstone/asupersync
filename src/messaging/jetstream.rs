@@ -87,7 +87,10 @@ impl fmt::Display for JsError {
             }
             Self::NotAcked => write!(f, "JetStream message not acknowledged"),
             Self::AlreadyAcknowledged => {
-                write!(f, "JetStream message already acknowledged/nacked/terminated")
+                write!(
+                    f,
+                    "JetStream message already acknowledged/nacked/terminated"
+                )
             }
             Self::InvalidConfig(msg) => write!(f, "JetStream invalid config: {msg}"),
             Self::ParseError(msg) => write!(f, "JetStream parse error: {msg}"),

@@ -321,7 +321,7 @@ impl Encoder {
     pub fn set_max_table_size(&mut self, size: usize) {
         let capped = size.min(MAX_ALLOWED_TABLE_SIZE);
         self.dynamic_table.set_max_size(capped);
-        
+
         if let Some(min_so_far) = self.min_size_update {
             self.min_size_update = Some(min_so_far.min(capped));
         } else {

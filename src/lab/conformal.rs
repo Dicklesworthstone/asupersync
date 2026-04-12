@@ -978,11 +978,17 @@ mod tests {
         // the calibration-completing observation against a set that
         // includes it (exchangeability requirement).
         let report = cal.predict(&make_clean_report(10, 50));
-        assert!(report.is_none(), "calibration-completing observation must be skipped");
+        assert!(
+            report.is_none(),
+            "calibration-completing observation must be skipped"
+        );
 
         // 6th: now truly post-calibration — returns a prediction.
         let report = cal.predict(&make_clean_report(10, 50));
-        assert!(report.is_some(), "post-calibration observation should produce prediction");
+        assert!(
+            report.is_some(),
+            "post-calibration observation should produce prediction"
+        );
     }
 
     #[test]

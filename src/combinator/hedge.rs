@@ -171,7 +171,9 @@ impl AdaptiveHedgePolicy {
     /// This value saturates at `window_size()`.
     #[must_use]
     pub fn sample_count(&self) -> usize {
-        usize::try_from(self.count).unwrap_or(usize::MAX).min(self.history.len())
+        usize::try_from(self.count)
+            .unwrap_or(usize::MAX)
+            .min(self.history.len())
     }
 }
 

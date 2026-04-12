@@ -275,12 +275,7 @@ impl SymbolCancelToken {
                 let stored_nanos = now.as_nanos().min(u64::MAX - 1);
                 self.state
                     .cancelled_at
-                    .compare_exchange(
-                        u64::MAX,
-                        stored_nanos,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange(u64::MAX, stored_nanos, Ordering::Release, Ordering::Relaxed)
                     .ok();
             }
 

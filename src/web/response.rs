@@ -673,20 +673,24 @@ mod tests {
         // CRLF in the name is stripped before lowercasing/insertion so the
         // wire-format encoder never sees an injection vector.
         assert!(resp.headers.contains_key("x-testevil-header: injected"));
-        assert!(!resp
-            .headers
-            .keys()
-            .any(|k| k.contains('\r') || k.contains('\n')));
+        assert!(
+            !resp
+                .headers
+                .keys()
+                .any(|k| k.contains('\r') || k.contains('\n'))
+        );
     }
 
     #[test]
     fn ensure_header_strips_crlf_from_name() {
         let mut resp = Response::empty(StatusCode::OK);
         resp.ensure_header("x-test\r\nEvil:", "value");
-        assert!(!resp
-            .headers
-            .keys()
-            .any(|k| k.contains('\r') || k.contains('\n')));
+        assert!(
+            !resp
+                .headers
+                .keys()
+                .any(|k| k.contains('\r') || k.contains('\n'))
+        );
     }
 
     #[test]
@@ -697,10 +701,12 @@ mod tests {
             "body",
         )
             .into_response();
-        assert!(!resp
-            .headers
-            .keys()
-            .any(|k| k.contains('\r') || k.contains('\n')));
+        assert!(
+            !resp
+                .headers
+                .keys()
+                .any(|k| k.contains('\r') || k.contains('\n'))
+        );
     }
 
     #[test]

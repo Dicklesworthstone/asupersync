@@ -907,9 +907,8 @@ impl<P: Policy> Scope<'_, P> {
             .map_or(self.budget, crate::record::RegionRecord::budget);
         let child_scope = Scope::<P2>::new(child_region, child_budget);
 
-        let fut_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            f(child_scope, &mut *state)
-        }));
+        let fut_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(child_scope, &mut *state)));
 
         let fut = match fut_result {
             Ok(fut) => fut,

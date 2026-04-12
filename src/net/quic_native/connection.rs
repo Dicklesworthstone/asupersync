@@ -1412,7 +1412,9 @@ mod tests {
             .expect_err("packet number 2^62 must be rejected");
         assert!(matches!(
             err,
-            NativeQuicConnectionError::InvalidState("packet number limit reached; connection must be closed")
+            NativeQuicConnectionError::InvalidState(
+                "packet number limit reached; connection must be closed"
+            )
         ));
     }
 }

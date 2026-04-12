@@ -691,7 +691,7 @@ impl Connection {
                 increment,
             });
         }
-        
+
         if refused {
             Ok(None)
         } else {
@@ -719,7 +719,7 @@ impl Connection {
         {
             let _ = self.streams.get_or_create(frame.stream_id)?;
         }
-        
+
         if !refused {
             self.track_stream_id(frame.stream_id);
         }

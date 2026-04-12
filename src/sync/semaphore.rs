@@ -116,14 +116,10 @@ fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64)
         // if clone() panics, our waiter remains in the queue for Drop cleanup.
         let next_waker = state.waiters.get(1).map(|w| w.waker.clone());
         state.waiters.pop_front();
-        
+
         // Only pass the baton if there are actually permits available.
         // Otherwise, we just cause a cascade of spurious wakeups.
-        if state.permits > 0 {
-            next_waker
-        } else {
-            None
-        }
+        if state.permits > 0 { next_waker } else { None }
     } else {
         // Non-front waiter: targeted removal stops at first match instead of
         // scanning the entire deque like retain() would.
