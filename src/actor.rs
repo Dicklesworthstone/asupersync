@@ -1824,7 +1824,7 @@ mod tests {
         // Request stop
         ctx.stop_self();
         assert!(ctx.is_stopping());
-        assert!(ctx.is_cancel_requested());
+        assert!(ctx.checkpoint().is_err());
         assert!(ctx.is_cancel_requested());
 
         crate::test_complete!("actor_context_stopping");
