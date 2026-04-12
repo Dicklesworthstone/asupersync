@@ -2091,6 +2091,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_unit_log_accepts_unknown_state_with_low_confidence_governance_fallback_reason() {
+        let mut entry = valid_unit_log_value_with_governance();
+        entry["decode_stats"]["governance"]["chosen_action"] = json!("fallback");
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["fired"] =
+            json!(true);
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
+            json!("unknown_state_with_low_confidence");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations.is_empty(),
+            "unknown_state_with_low_confidence is a canonical runtime fallback reason: {violations:?}"
+        );
+    }
+
+    #[test]
     fn validate_unit_log_rejects_whitespace_padded_governance_action() {
         let mut entry = serde_json::to_value(
             UnitLogEntry::new(
