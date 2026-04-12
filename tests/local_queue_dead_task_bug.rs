@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Regression test for local queue dead task stealing bug.
 
 use asupersync::runtime::scheduler::local_queue::LocalQueue;

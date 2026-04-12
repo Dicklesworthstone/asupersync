@@ -203,7 +203,9 @@ impl IntrusiveRing {
         let head_id = self.head?;
 
         let next = {
-            let record = arena.get_mut(head_id.arena_index())?;
+            let record = arena
+                .get_mut(head_id.arena_index())
+                .expect("intrusive list broken: task removed from arena while in queue");
 
             // Verify the task is actually in this queue
             debug_assert!(
@@ -542,7 +544,9 @@ impl IntrusiveStack {
         let top_id = self.top?;
 
         let (next_down, is_local) = {
-            let record = arena.get_mut(top_id.arena_index())?;
+            let record = arena
+                .get_mut(top_id.arena_index())
+                .expect("intrusive list broken: task removed from arena while in queue");
             let is_local = record.is_local();
             let next_down = record.next_in_queue; // Points down to older task
             record.clear_queue_links();

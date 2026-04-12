@@ -873,6 +873,12 @@ impl Child {
         // Starts at 1ms, doubles up to 50ms between checks.
         let mut backoff_ms = 1u64;
         loop {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Err(ProcessError::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
             if let Some(status) = self.try_wait()? {
                 return Ok(status);
             }
@@ -909,6 +915,13 @@ impl Child {
         let mut stderr_done = stderr_handle.is_none();
 
         while status.is_none() || !stdout_done || !stderr_done {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Err(ProcessError::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
+
             let mut progressed = false;
 
             if status.is_none() {
@@ -992,6 +1005,13 @@ impl Child {
         let mut backoff_ms = 1u64;
 
         while status.is_none() || !stdout_done || !stderr_done {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Err(ProcessError::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
+
             let mut progressed = false;
 
             if status.is_none() {
@@ -1373,6 +1393,12 @@ impl AsyncWrite for ChildStdin {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let this = self.get_mut();
         #[cfg(unix)]
         {
@@ -1411,6 +1437,12 @@ impl AsyncWrite for ChildStdin {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let this = self.get_mut();
         #[cfg(unix)]
         {
@@ -1446,6 +1478,12 @@ impl AsyncWrite for ChildStdin {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let this = self.get_mut();
         this.registration = None;
         drop(this.inner.take());
@@ -1518,6 +1556,12 @@ impl AsyncRead for ChildStdout {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let this = self.get_mut();
         #[cfg(unix)]
         {
@@ -1617,6 +1661,12 @@ impl AsyncRead for ChildStderr {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
         let this = self.get_mut();
         #[cfg(unix)]
         {
