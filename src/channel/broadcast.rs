@@ -158,7 +158,7 @@ impl<T: Clone> Sender<T> {
     ///
     /// Returns `SendError::Closed(())` if there are no active receivers.
     pub fn reserve(&self, cx: &Cx) -> Result<SendPermit<'_, T>, SendError<()>> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             cx.trace("broadcast::reserve called with cancel pending");
         }
 

@@ -2155,7 +2155,7 @@ impl MySqlConnection {
         let mut pos = 0;
         while pos < data.len() {
             let written = std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",
@@ -2183,7 +2183,7 @@ impl MySqlConnection {
         while pos < buf.len() {
             let mut read_buf = ReadBuf::new(&mut buf[pos..]);
             std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",

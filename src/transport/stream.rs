@@ -276,7 +276,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for NextWithCancelFuture<'_, S> {
             return Poll::Ready(Err(StreamError::PolledAfterCompletion));
         }
 
-        if this.cx.is_cancel_requested() {
+        if this.cx.checkpoint().is_err() {
             this.completed = true;
             return Poll::Ready(Err(StreamError::Cancelled));
         }

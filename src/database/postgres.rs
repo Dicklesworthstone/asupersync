@@ -1952,7 +1952,7 @@ impl PgConnection {
             let mut pos = 0;
             while pos < ssl_request.len() {
                 let written = std::future::poll_fn(|cx| {
-                    if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                    if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                         return Poll::Ready(Err(std::io::Error::new(
                             std::io::ErrorKind::Interrupted,
                             "cancelled",
@@ -1977,7 +1977,7 @@ impl PgConnection {
         {
             let mut read_buf = ReadBuf::new(&mut response);
             std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",
@@ -1985,8 +1985,8 @@ impl PgConnection {
                 }
                 Pin::new(&mut tcp).poll_read(cx, &mut read_buf)
             })
-                .await
-                .map_err(PgError::Io)?;
+            .await
+            .map_err(PgError::Io)?;
             if read_buf.filled().is_empty() {
                 return Err(PgError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -3090,7 +3090,7 @@ impl PgConnection {
         let mut pos = 0;
         while pos < data.len() {
             let written = std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",
@@ -3110,7 +3110,7 @@ impl PgConnection {
             pos += written;
         }
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled",
@@ -3118,8 +3118,8 @@ impl PgConnection {
             }
             Pin::new(&mut self.inner.stream).poll_flush(cx)
         })
-            .await
-            .map_err(PgError::Io)?;
+        .await
+        .map_err(PgError::Io)?;
         Ok(())
     }
 
@@ -3129,7 +3129,7 @@ impl PgConnection {
         while pos < buf.len() {
             let mut read_buf = ReadBuf::new(&mut buf[pos..]);
             std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",
