@@ -22,9 +22,9 @@ use crate::console::Console;
 use crate::observability::spectral_health::{
     SpectralHealthMonitor, SpectralHealthReport, SpectralThresholds,
 };
-use crate::record::ObligationState;
 use crate::record::region::RegionState;
 use crate::record::task::TaskState;
+use crate::record::ObligationState;
 use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, trace, warn};
@@ -64,11 +64,16 @@ impl Diagnostics {
         }
     }
 
-    /// Get the current logical time from the timer driver, or ZERO if unavailable.
+    /// Get the current runtime time for observability.
+    ///
+    /// Live runtimes advance time through the timer driver, while timerless
+    /// runtimes and many direct tests only move `RuntimeState::now`.
+    /// Prefer the timer driver when present and fall back to the logical state
+    /// clock so leak ages remain meaningful in both modes.
     fn now(&self) -> Time {
         self.state
             .timer_driver()
-            .map_or(Time::ZERO, TimerDriverHandle::now)
+            .map_or(self.state.now, TimerDriverHandle::now)
     }
 
     fn build_task_wait_graph(&self) -> TaskWaitGraph {
@@ -2336,6 +2341,38 @@ mod tests {
         crate::test_complete!("test_find_leaked_obligations_sorted_and_aged");
     }
 
+    #[test]
+    fn test_find_leaked_obligations_uses_state_clock_without_timer_driver() {
+        init_test("test_find_leaked_obligations_uses_state_clock_without_timer_driver");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Running);
+        state.now = Time::from_millis(250);
+
+        let obligation_id = insert_obligation(
+            &mut state,
+            root,
+            task_id,
+            ObligationKind::Lease,
+            Time::from_millis(10),
+        );
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let leaks = diagnostics.find_leaked_obligations();
+        crate::assert_with_log!(leaks.len() == 1, "single leak", 1usize, leaks.len());
+        crate::assert_with_log!(
+            leaks[0].obligation_id == obligation_id,
+            "obligation id preserved",
+            true,
+            leaks[0].obligation_id == obligation_id
+        );
+
+        let age_ms = leaks[0].age.as_millis();
+        crate::assert_with_log!(age_ms == 240, "age uses state clock", 240u128, age_ms);
+
+        crate::test_complete!("test_find_leaked_obligations_uses_state_clock_without_timer_driver");
+    }
+
     // Pure data-type tests (wave 18 – CyanBarn)
 
     #[test]
@@ -2613,11 +2650,9 @@ mod tests {
         assert_eq!(classified.event_class, AdvancedEventClass::CommandLifecycle);
         assert_eq!(classified.severity, AdvancedSeverity::Info);
         assert!(classified.conflicts.is_empty());
-        assert!(
-            classified
-                .dimensions
-                .contains(&TroubleshootingDimension::OperatorAction)
-        );
+        assert!(classified
+            .dimensions
+            .contains(&TroubleshootingDimension::OperatorAction));
     }
 
     #[test]
@@ -2716,12 +2751,10 @@ mod tests {
             TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION
         );
         assert_eq!(contract.unknown_bucket_key, "tail.unknown.unmeasured_ns");
-        assert!(
-            contract
-                .required_log_fields
-                .iter()
-                .any(|field| field.key == contract.unknown_bucket_key && field.required)
-        );
+        assert!(contract
+            .required_log_fields
+            .iter()
+            .any(|field| field.key == contract.unknown_bucket_key && field.required));
         assert!(contract.terms.iter().any(|term| {
             term.term_id == "unknown"
                 && term.direct_duration_key == "tail.unknown.unmeasured_ns"
