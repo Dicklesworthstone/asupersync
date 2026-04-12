@@ -404,24 +404,30 @@ where
                 refresh_pending,
                 service_epoch,
                 call_epoch,
-            } => match Pin::new(&mut future).poll(cx) {
-                Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
-                Poll::Ready(Err(error)) => {
-                    if service_epoch.load(Ordering::Acquire) == call_epoch {
-                        refresh_pending.store(true, Ordering::Release);
+            } => {
+                let guard = RefreshPendingGuard::new(&refresh_pending, &service_epoch, call_epoch);
+                match Pin::new(&mut future).poll(cx) {
+                    Poll::Ready(Ok(value)) => {
+                        guard.defuse();
+                        Poll::Ready(Ok(value))
                     }
-                    Poll::Ready(Err(ReconnectError::Inner(error)))
+                    Poll::Ready(Err(error)) => {
+                        // Let the guard drop naturally (armed) to trigger reconnect.
+                        drop(guard);
+                        Poll::Ready(Err(ReconnectError::Inner(error)))
+                    }
+                    Poll::Pending => {
+                        guard.defuse();
+                        this.state = ReconnectFutureState::Inner {
+                            future,
+                            refresh_pending,
+                            service_epoch,
+                            call_epoch,
+                        };
+                        Poll::Pending
+                    }
                 }
-                Poll::Pending => {
-                    this.state = ReconnectFutureState::Inner {
-                        future,
-                        refresh_pending,
-                        service_epoch,
-                        call_epoch,
-                    };
-                    Poll::Pending
-                }
-            },
+            }
             ReconnectFutureState::Error(error) => Poll::Ready(Err(error)),
             ReconnectFutureState::Done => Poll::Ready(Err(ReconnectError::PolledAfterCompletion)),
         }
@@ -692,18 +698,31 @@ mod tests {
     impl Service<()> for PanicReconnectSvc {
         type Response = u32;
         type Error = ReconnectingCallError;
-        type Future = std::future::Ready<Result<u32, ReconnectingCallError>>;
+        type Future = Pin<Box<dyn Future<Output = Result<u32, ReconnectingCallError>>>>;
 
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
         fn call(&mut self, _req: ()) -> Self::Future {
-            assert!(
-                !self.panic_on_call,
-                "panic during reconnect call construction"
-            );
-            std::future::ready(Ok(self.id))
+            if self.panic_on_call {
+                panic!("panic during reconnect call construction");
+            }
+            if self.id == 0 {
+                Box::pin(PanicOnPollFuture)
+            } else {
+                Box::pin(std::future::ready(Ok(self.id)))
+            }
+        }
+    }
+
+    struct PanicOnPollFuture;
+
+    impl Future for PanicOnPollFuture {
+        type Output = Result<u32, ReconnectingCallError>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!("panic in future poll");
         }
     }
 
@@ -927,6 +946,45 @@ mod tests {
         ));
 
         crate::test_complete!("reconnects_after_call_panic");
+    }
+
+    #[test]
+    fn reconnects_after_poll_panic() {
+        init_test("reconnects_after_poll_panic");
+        let maker = PanicReconnectMaker::new(1);
+        let initial = PanicReconnectSvc {
+            id: 0,
+            panic_on_call: false, // will panic during poll instead
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut call = rc.call(());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _f = Pin::new(&mut call).poll(&mut cx);
+        }));
+        assert!(panic.is_err(), "inner poll should panic");
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(0));
+        assert_eq!(rc.reconnect_count(), 0);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(
+            rc.inner().map(|svc| svc.id),
+            Some(1),
+            "next poll_ready should reconnect after a future poll panic"
+        );
+        assert_eq!(rc.reconnect_count(), 1);
+
+        let mut call2 = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call2).poll(&mut cx),
+            Poll::Ready(Ok(1))
+        ));
+
+        crate::test_complete!("reconnects_after_poll_panic");
     }
 
     #[test]
