@@ -296,7 +296,7 @@ impl UnixListener {
 
     /// Polls for an incoming connection using reactor wakeups.
     pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         match self.inner.accept() {
