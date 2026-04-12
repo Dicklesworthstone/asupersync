@@ -13,7 +13,7 @@
 
 mod common;
 
-use asupersync::raptorq::decision_contract::G7_DECISION_REPLAY_REF;
+use asupersync::raptorq::decision_contract::{G7_DECISION_REPLAY_REF, G7_RUNTIME_FALLBACK_REASONS};
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
     Gf256, Gf256ProfilePackId, dual_kernel_policy_snapshot, gf256_profile_pack_catalog,
@@ -3929,13 +3929,13 @@ fn g7_expected_loss_contract_schema_and_coverage() {
                     .to_string()
             })
             .collect::<BTreeSet<_>>();
-    for reason in [
-        "decode_mismatch_detected",
-        "proof_replay_mismatch",
-        "unknown_state_with_low_confidence",
-        "regression_state_with_low_confidence",
-        "conservative_fallback_reason_unclassified",
-    ] {
+    for reason in G7_RUNTIME_FALLBACK_REASONS {
+        assert!(
+            fallback_trigger_reasons.contains(*reason),
+            "G7 fallback trigger contract must include the runtime reason {reason}"
+        );
+    }
+    for reason in ["decode_mismatch_detected", "proof_replay_mismatch"] {
         assert!(
             fallback_trigger_reasons.contains(reason),
             "G7 fallback trigger contract must include {reason}"
@@ -4542,6 +4542,10 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "asupersync-2zu9p",
         "argmin_expected_loss",
         "deterministic_fallback_trigger",
+        "policy_budget_exhausted",
+        "regression_state_with_low_confidence",
+        "decode_mismatch_detected",
+        "proof_replay_mismatch",
         "conflicting_evidence",
         "g7_expected_loss_contract_replay_bundle_is_well_formed",
         "status_snapshot_contract",

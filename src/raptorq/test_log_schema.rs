@@ -1342,6 +1342,11 @@ fn validate_governance_fallback_consistency(
                 "decode_stats.governance.deterministic_fallback_trigger.reason must be a non-empty non-'none' string when fired is true"
                     .to_string(),
             );
+        } else if !crate::raptorq::decision_contract::is_runtime_fallback_reason(reason) {
+            violations.push(format!(
+                "decode_stats.governance.deterministic_fallback_trigger.reason must be one of {:?} when fired is true",
+                crate::raptorq::decision_contract::G7_RUNTIME_FALLBACK_REASONS
+            ));
         }
     } else if reason != "none" {
         violations.push(
@@ -2046,6 +2051,42 @@ mod tests {
                 v.contains("reason must be a non-empty non-'none' string when fired is true")
             }),
             "should reject fired fallback trigger with non-canonical reason: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_non_runtime_governance_fallback_reason() {
+        let mut entry = valid_unit_log_value_with_governance();
+        entry["decode_stats"]["governance"]["chosen_action"] = json!("fallback");
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["fired"] =
+            json!(true);
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
+            json!("decode_mismatch_detected");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.deterministic_fallback_trigger.reason must be one of",
+                )
+            }),
+            "should reject non-runtime governance fallback reason: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_accepts_policy_budget_exhausted_governance_fallback_reason() {
+        let mut entry = valid_unit_log_value_with_governance();
+        entry["decode_stats"]["governance"]["chosen_action"] = json!("fallback");
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["fired"] =
+            json!(true);
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
+            json!("policy_budget_exhausted");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations.is_empty(),
+            "policy_budget_exhausted is a canonical runtime fallback reason: {violations:?}"
         );
     }
 

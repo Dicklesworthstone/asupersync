@@ -670,43 +670,43 @@ impl DualKernelOverrideMask {
         (self.0 & Self::DUAL_POLICY_ENV_REQUESTED) != 0
     }
 
-    /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL` overrode catalog defaults.
+    /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL` was provided as an env override request.
     #[must_use]
     pub const fn mul_min_total_env_override(self) -> bool {
         (self.0 & Self::MUL_MIN_TOTAL_ENV_OVERRIDE) != 0
     }
 
-    /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL` overrode catalog defaults.
+    /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL` was provided as an env override request.
     #[must_use]
     pub const fn mul_max_total_env_override(self) -> bool {
         (self.0 & Self::MUL_MAX_TOTAL_ENV_OVERRIDE) != 0
     }
 
-    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL` overrode catalog defaults.
+    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL` was provided as an env override request.
     #[must_use]
     pub const fn addmul_min_total_env_override(self) -> bool {
         (self.0 & Self::ADDMUL_MIN_TOTAL_ENV_OVERRIDE) != 0
     }
 
-    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL` overrode catalog defaults.
+    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL` was provided as an env override request.
     #[must_use]
     pub const fn addmul_max_total_env_override(self) -> bool {
         (self.0 & Self::ADDMUL_MAX_TOTAL_ENV_OVERRIDE) != 0
     }
 
-    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE` overrode catalog defaults.
+    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE` was provided as an env override request.
     #[must_use]
     pub const fn addmul_min_lane_env_override(self) -> bool {
         (self.0 & Self::ADDMUL_MIN_LANE_ENV_OVERRIDE) != 0
     }
 
-    /// Whether `ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO` overrode catalog defaults.
+    /// Whether `ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO` was provided as an env override request.
     #[must_use]
     pub const fn max_lane_ratio_env_override(self) -> bool {
         (self.0 & Self::MAX_LANE_RATIO_ENV_OVERRIDE) != 0
     }
 
-    /// Whether any numeric dual-policy env override changed the tuned window contract.
+    /// Whether any numeric dual-policy env override request changed or attempted to change the tuned window contract.
     #[must_use]
     pub const fn numeric_window_env_override(self) -> bool {
         (self.0
@@ -1282,38 +1282,77 @@ fn detect_dual_policy() -> DualKernelPolicy {
         max_lane_ratio: metadata.max_lane_ratio,
     };
 
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL") {
-        policy.override_mask.set_mul_min_total_env_override();
-        policy.mul_min_total = v;
-    }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL") {
-        policy.override_mask.set_mul_max_total_env_override();
-        policy.mul_max_total = v;
-    }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL") {
-        policy.override_mask.set_addmul_min_total_env_override();
-        policy.addmul_min_total = v;
-    }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL") {
-        policy.override_mask.set_addmul_max_total_env_override();
-        policy.addmul_max_total = v;
-    }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE") {
-        policy.override_mask.set_addmul_min_lane_env_override();
-        policy.addmul_min_lane = v;
-    }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO") {
-        policy.override_mask.set_max_lane_ratio_env_override();
-        policy.max_lane_ratio = v.max(1);
-    }
+    apply_numeric_env_override(
+        &mut policy,
+        "ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL",
+        DualKernelOverrideMask::set_mul_min_total_env_override,
+        |policy, value| policy.mul_min_total = value,
+    );
+    apply_numeric_env_override(
+        &mut policy,
+        "ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL",
+        DualKernelOverrideMask::set_mul_max_total_env_override,
+        |policy, value| policy.mul_max_total = value,
+    );
+    apply_numeric_env_override(
+        &mut policy,
+        "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL",
+        DualKernelOverrideMask::set_addmul_min_total_env_override,
+        |policy, value| policy.addmul_min_total = value,
+    );
+    apply_numeric_env_override(
+        &mut policy,
+        "ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL",
+        DualKernelOverrideMask::set_addmul_max_total_env_override,
+        |policy, value| policy.addmul_max_total = value,
+    );
+    apply_numeric_env_override(
+        &mut policy,
+        "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE",
+        DualKernelOverrideMask::set_addmul_min_lane_env_override,
+        |policy, value| policy.addmul_min_lane = value,
+    );
+    apply_numeric_env_override(
+        &mut policy,
+        "ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO",
+        DualKernelOverrideMask::set_max_lane_ratio_env_override,
+        |policy, value| policy.max_lane_ratio = value.max(1),
+    );
 
     apply_effective_selection_contract(&mut policy);
 
     policy
 }
 
-fn parse_usize_env(key: &str) -> Option<usize> {
-    std::env::var(key).ok()?.parse::<usize>().ok()
+enum NumericEnvOverride {
+    Unset,
+    Parsed(usize),
+    Invalid,
+}
+
+fn apply_numeric_env_override(
+    policy: &mut DualKernelPolicy,
+    key: &str,
+    mark_override: fn(&mut DualKernelOverrideMask),
+    apply_value: impl FnOnce(&mut DualKernelPolicy, usize),
+) {
+    match parse_usize_env(key) {
+        NumericEnvOverride::Unset => {}
+        NumericEnvOverride::Parsed(value) => {
+            mark_override(&mut policy.override_mask);
+            apply_value(policy, value);
+        }
+        NumericEnvOverride::Invalid => {
+            mark_override(&mut policy.override_mask);
+        }
+    }
+}
+
+fn parse_usize_env(key: &str) -> NumericEnvOverride {
+    std::env::var(key).map_or(NumericEnvOverride::Unset, |raw| {
+        raw.parse::<usize>()
+            .map_or(NumericEnvOverride::Invalid, NumericEnvOverride::Parsed)
+    })
 }
 
 fn policy_uses_canonical_selection_contract(policy: &DualKernelPolicy) -> bool {
@@ -3401,6 +3440,63 @@ mod tests {
             addmul_min_lane: metadata.addmul_min_lane,
             max_lane_ratio: metadata.max_lane_ratio,
         }
+    }
+
+    const GF256_ENV_KEYS: [&str; 8] = [
+        "ASUPERSYNC_GF256_DUAL_POLICY",
+        "ASUPERSYNC_GF256_PROFILE_PACK",
+        "ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL",
+        "ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL",
+        "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL",
+        "ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL",
+        "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE",
+        "ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO",
+    ];
+
+    #[allow(unsafe_code)]
+    fn with_clean_gf256_env<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = crate::test_utils::env_lock();
+        let saved = GF256_ENV_KEYS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+
+        for key in GF256_ENV_KEYS {
+            // SAFETY: tests serialize environment mutation with env_lock.
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let result = f();
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => {
+                    // SAFETY: tests serialize environment mutation with env_lock.
+                    unsafe { std::env::set_var(key, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize environment mutation with env_lock.
+                    unsafe { std::env::remove_var(key) };
+                }
+            }
+        }
+
+        result
+    }
+
+    #[allow(unsafe_code)]
+    fn with_gf256_env<F, R>(key: &str, value: &str, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        with_clean_gf256_env(|| {
+            // SAFETY: tests serialize environment mutation with env_lock.
+            unsafe { std::env::set_var(key, value) };
+            f()
+        })
     }
 
     // -- Table sanity --
@@ -5813,6 +5909,60 @@ mod tests {
             tuning_candidate_metadata(policy.selected_tuning_candidate_id),
             None
         );
+    }
+
+    #[test]
+    fn malformed_numeric_addmul_floor_request_scrubs_canonical_selection_metadata() {
+        with_gf256_env(
+            "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL",
+            "not-a-number",
+            || {
+                let policy = detect_dual_policy();
+                let catalog_profile = profile_pack_metadata(policy.profile_pack);
+                let metadata = effective_profile_pack_metadata(&policy);
+
+                assert!(policy.override_mask.addmul_min_total_env_override());
+                assert!(!policy_uses_canonical_selection_contract(&policy));
+                assert_eq!(policy.addmul_min_total, catalog_profile.addmul_min_total);
+                assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
+                assert_eq!(
+                    policy.selected_tuning_candidate_id,
+                    MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+                );
+                assert!(policy.rejected_tuning_candidate_ids.is_empty());
+                assert_eq!(
+                    metadata.decision_artifact_id,
+                    MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+                );
+                assert_eq!(
+                    metadata.decision_evidence_status,
+                    MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn malformed_numeric_lane_ratio_request_preserves_catalog_value_but_scrubs_provenance() {
+        with_gf256_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO", "eight", || {
+            let policy = detect_dual_policy();
+            let catalog_profile = profile_pack_metadata(policy.profile_pack);
+            let metadata = effective_profile_pack_metadata(&policy);
+
+            assert!(policy.override_mask.max_lane_ratio_env_override());
+            assert!(!policy_uses_canonical_selection_contract(&policy));
+            assert_eq!(policy.max_lane_ratio, catalog_profile.max_lane_ratio);
+            assert_eq!(policy.replay_pointer, MANUAL_OVERRIDE_REPLAY_POINTER);
+            assert_eq!(policy.command_bundle, MANUAL_OVERRIDE_COMMAND_BUNDLE);
+            assert_eq!(
+                metadata.selected_candidate_summary,
+                MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY
+            );
+            assert_eq!(
+                metadata.rejected_candidate_set_summary,
+                MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY
+            );
+        });
     }
 
     #[test]

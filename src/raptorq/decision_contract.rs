@@ -26,6 +26,18 @@ const FALLBACK_REASON_UNKNOWN_LOW_CONFIDENCE: &str = "unknown_state_with_low_con
 const FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE: &str = "regression_state_with_low_confidence";
 const FALLBACK_REASON_UNCLASSIFIED: &str = "conservative_fallback_reason_unclassified";
 
+/// Canonical fallback reasons the live G7 runtime can emit when fallback is active.
+///
+/// The broader artifact contract may list additional hard-trigger reasons owned by
+/// downstream decode/replay validation surfaces. This list is intentionally narrower:
+/// it describes only the reasons surfaced by [`GovernanceTelemetry`] today.
+pub const G7_RUNTIME_FALLBACK_REASONS: &[&str] = &[
+    FALLBACK_REASON_POLICY_BUDGET_EXHAUSTED,
+    FALLBACK_REASON_UNKNOWN_LOW_CONFIDENCE,
+    FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE,
+    FALLBACK_REASON_UNCLASSIFIED,
+];
+
 /// State indices into the posterior.
 pub mod state {
     /// Runtime signals are nominal and consistent with approved behavior.
@@ -338,6 +350,12 @@ impl fmt::Display for GovernanceTelemetry {
 #[must_use]
 pub fn evaluate_governance(snapshot: &GovernanceSnapshot) -> GovernanceTelemetry {
     RaptorQDecisionContract::new().telemetry(snapshot)
+}
+
+/// Returns true when `reason` is a canonical runtime-emittable G7 fallback reason.
+#[must_use]
+pub fn is_runtime_fallback_reason(reason: &str) -> bool {
+    G7_RUNTIME_FALLBACK_REASONS.contains(&reason)
 }
 
 fn clamp_permille(value: usize) -> u32 {

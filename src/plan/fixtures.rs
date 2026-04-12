@@ -734,26 +734,56 @@ impl SharedLabHandle {
     }
 }
 
-/// Returns true if the DAG has fan-in (any node used as a child by
-/// multiple parents).
+/// Returns true if the reachable DAG has fan-in (any root-reachable node used
+/// as a child by multiple reachable parents).
+///
+/// Rewrites append replacement nodes and leave the pre-rewrite shape orphaned in
+/// the arena for certificate/debug purposes. Fan-in detection must therefore
+/// walk only the subgraph reachable from the current root; otherwise stale
+/// orphaned edges can incorrectly suppress dynamic execution of a rewritten DAG
+/// that is now a tree.
 #[must_use]
 pub fn dag_has_fan_in(dag: &PlanDag) -> bool {
     use super::PlanNode;
+    let Some(root) = dag.root() else {
+        return false;
+    };
+
     let mut ref_counts = vec![0u32; dag.nodes.len()];
-    for node in &dag.nodes {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(node) = dag.node(id) else {
+            continue;
+        };
         match node {
             PlanNode::Leaf { .. } => {}
             PlanNode::Join { children } | PlanNode::Race { children } => {
                 for c in children {
-                    ref_counts[c.index()] += 1;
+                    if let Some(count) = ref_counts.get_mut(c.index()) {
+                        *count += 1;
+                        if *count > 1 {
+                            return true;
+                        }
+                    }
+                    stack.push(*c);
                 }
             }
             PlanNode::Timeout { child, .. } => {
-                ref_counts[child.index()] += 1;
+                if let Some(count) = ref_counts.get_mut(child.index()) {
+                    *count += 1;
+                    if *count > 1 {
+                        return true;
+                    }
+                }
+                stack.push(*child);
             }
         }
     }
-    ref_counts.iter().any(|&c| c > 1)
+    false
 }
 
 /// Execute a [`PlanDag`] dynamically in the lab runtime under a deterministic
@@ -1143,39 +1173,15 @@ pub fn run_lab_dynamic_equivalence(
     let mut optimized_universe = BTreeSet::new();
     let mut all_dynamic_ok = true;
 
-    // DAGs with fan-in (shared children) cannot be executed by the handle-based
-    // lab harness because task handles are consumed on join. Execute each DAG
-    // only if it has no fan-in; for fan-in DAGs rely on static analysis +
-    // certificate verification.
-    let orig_has_fan_in = dag_has_fan_in(&original_dag);
-    let opt_has_fan_in = dag_has_fan_in(&optimized_dag);
-
     for &seed in seeds {
-        let orig_labels = if orig_has_fan_in {
-            BTreeSet::new()
-        } else {
-            execute_plan_in_lab(seed, &original_dag)
-        };
-        let opt_labels = if opt_has_fan_in {
-            BTreeSet::new()
-        } else {
-            execute_plan_in_lab(seed, &optimized_dag)
-        };
-        // Only compare dynamic results if both DAGs were executed.
-        // When exactly one DAG has fan-in, comparison is meaningless
-        // (one side is empty, the other has real results).
-        let both_skipped = orig_has_fan_in && opt_has_fan_in;
-        let both_executed = !orig_has_fan_in && !opt_has_fan_in;
-        let ok = both_skipped || (both_executed && orig_labels == opt_labels);
+        let orig_labels = execute_plan_in_lab(seed, &original_dag);
+        let opt_labels = execute_plan_in_lab(seed, &optimized_dag);
+        let ok = orig_labels == opt_labels;
         if !ok {
             all_dynamic_ok = false;
         }
-        if !orig_has_fan_in {
-            original_universe.insert(orig_labels.iter().cloned().collect::<Vec<_>>());
-        }
-        if !opt_has_fan_in {
-            optimized_universe.insert(opt_labels.iter().cloned().collect::<Vec<_>>());
-        }
+        original_universe.insert(orig_labels.iter().cloned().collect::<Vec<_>>());
+        optimized_universe.insert(opt_labels.iter().cloned().collect::<Vec<_>>());
         per_seed_results.push((orig_labels, opt_labels, ok));
     }
 
@@ -1425,29 +1431,11 @@ pub fn run_e2e_pipeline(
     };
 
     // Dynamic lab execution with tracing (seed 42).
-    // DAGs with fan-in (shared children) cannot be reliably executed by the
-    // handle-based lab harness -- aborted tasks may not quiesce within the step
-    // limit.  For fan-in DAGs we rely on static analysis + certificate
-    // verification and skip dynamic execution (matching run_lab_dynamic_equivalence).
-    let orig_has_fan_in = dag_has_fan_in(&original_dag);
-    let opt_has_fan_in = dag_has_fan_in(&optimized_dag);
-
-    let (dynamic_original_labels, original_trace_fingerprint) = if orig_has_fan_in {
-        (BTreeSet::new(), 0)
-    } else {
-        execute_plan_in_lab_traced(42, &original_dag)
-    };
-    let (dynamic_optimized_labels, optimized_trace_fingerprint) = if opt_has_fan_in {
-        (BTreeSet::new(), 0)
-    } else {
-        execute_plan_in_lab_traced(42, &optimized_dag)
-    };
-    // When exactly one DAG has fan-in, one side is empty and the other has
-    // real execution results — comparing them is meaningless.
-    let both_skipped = orig_has_fan_in && opt_has_fan_in;
-    let both_executed = !orig_has_fan_in && !opt_has_fan_in;
-    let dynamic_outcomes_equivalent =
-        both_skipped || (both_executed && dynamic_original_labels == dynamic_optimized_labels);
+    let (dynamic_original_labels, original_trace_fingerprint) =
+        execute_plan_in_lab_traced(42, &original_dag);
+    let (dynamic_optimized_labels, optimized_trace_fingerprint) =
+        execute_plan_in_lab_traced(42, &optimized_dag);
+    let dynamic_outcomes_equivalent = dynamic_original_labels == dynamic_optimized_labels;
 
     E2ePipelineReport {
         fixture_name: fixture.name,
@@ -2046,10 +2034,9 @@ mod tests {
         init_test();
         let rules = [RewriteRule::DedupRaceJoin];
         let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
-        // Fan-in fixtures skip dynamic execution (labels will be empty).
         let mut have_dynamic = 0;
         for report in &reports {
-            // Skip if either side was skipped due to fan-in (empty labels).
+            // Some fixtures legitimately time out/cancel to an empty label set.
             if report.dynamic_original_labels.is_empty()
                 || report.dynamic_optimized_labels.is_empty()
             {
@@ -2065,10 +2052,9 @@ mod tests {
         init_test();
         let rules = [RewriteRule::DedupRaceJoin];
         let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
-        // Fan-in fixtures skip dynamic execution (fingerprints will be zero).
         let mut have_traces = 0;
         for report in &reports {
-            // Skip if either side was skipped due to fan-in (zero fingerprint).
+            // Zero fingerprints would mean tracing failed to capture an execution.
             if report.original_trace_fingerprint == 0 || report.optimized_trace_fingerprint == 0 {
                 continue;
             }
@@ -2203,12 +2189,56 @@ mod tests {
     }
 
     #[test]
+    fn dag_has_fan_in_ignores_unreachable_rewrite_orphans() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let mut fixture = simple_join_race_dedup();
+        assert!(
+            dag_has_fan_in(&fixture.dag),
+            "original fixture must have live fan-in"
+        );
+
+        let (_report, _cert) = fixture
+            .dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
+
+        assert!(
+            !dag_has_fan_in(&fixture.dag),
+            "rewritten reachable DAG should be a tree; orphaned pre-rewrite nodes must not count as live fan-in"
+        );
+    }
+
+    #[test]
+    fn dynamic_lab_executes_fan_in_fixture() {
+        init_test();
+        let fixture = simple_join_race_dedup();
+        assert!(
+            dag_has_fan_in(&fixture.dag),
+            "fixture should exercise fan-in"
+        );
+
+        for seed in &ORACLE_SEEDS {
+            let result = execute_plan_in_lab(*seed, &fixture.dag);
+            assert_eq!(
+                result.len(),
+                2,
+                "seed {seed}: dedup witness race should produce the shared leaf plus one branch winner"
+            );
+            assert!(
+                result.contains("shared"),
+                "seed {seed}: shared leaf must complete"
+            );
+            assert!(
+                result.contains("left") || result.contains("right"),
+                "seed {seed}: winner must include exactly one branch leaf"
+            );
+        }
+    }
+
+    #[test]
     fn dynamic_lab_deterministic_same_seed() {
         init_test();
         for fixture in all_fixtures() {
-            if dag_has_fan_in(&fixture.dag) {
-                continue; // Handle-based lab harness cannot execute DAGs with shared children
-            }
             let r1 = execute_plan_in_lab(42, &fixture.dag);
             let r2 = execute_plan_in_lab(42, &fixture.dag);
             assert_eq!(
@@ -2270,9 +2300,7 @@ mod tests {
     fn dynamic_lab_report_fields_populated() {
         init_test();
         let rules = [RewriteRule::DedupRaceJoin];
-        // Use no_shared_child (a tree without fan-in) so the handle-based
-        // lab harness can execute both original and optimized DAGs.
-        let fixture = no_shared_child();
+        let fixture = simple_join_race_dedup();
         let report = run_lab_dynamic_equivalence(
             fixture,
             RewritePolicy::conservative(),
@@ -2280,13 +2308,10 @@ mod tests {
             &ORACLE_SEEDS,
         );
 
-        assert_eq!(report.fixture_name, "no_shared_child");
+        assert_eq!(report.fixture_name, "simple_join_race_dedup");
         assert_eq!(report.seeds.len(), ORACLE_SEEDS.len());
         assert_eq!(report.per_seed_results.len(), ORACLE_SEEDS.len());
-        // no_shared_child is a tree, so dynamic execution populates results.
         assert!(!report.original_outcome_universe.is_empty());
-        // No rewrite fires (no shared children), so optimized DAG is the
-        // same tree and should also be dynamically executable.
         assert!(!report.optimized_outcome_universe.is_empty());
     }
 }
