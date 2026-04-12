@@ -227,6 +227,11 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
             return Poll::Ready(Err(StreamError::PolledAfterCompletion));
         }
 
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            this.completed = true;
+            return Poll::Ready(Err(StreamError::Cancelled));
+        }
+
         let mut collected_this_poll = 0usize;
         loop {
             match Pin::new(&mut *this.stream).poll_next(cx) {
@@ -290,7 +295,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for NextWithCancelFuture<'_, S> {
                 Poll::Ready(Ok(None))
             }
             Poll::Pending => {
-                if this.cx.is_cancel_requested() {
+                if this.cx.checkpoint().is_err() {
                     this.completed = true;
                     Poll::Ready(Err(StreamError::Cancelled))
                 } else {
@@ -368,6 +373,10 @@ where
         }
         let mut rejected = 0usize;
         loop {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Some(Err(StreamError::Cancelled)));
+            }
+
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(s))) => {
                     if (this.f)(&s) {
@@ -431,6 +440,10 @@ impl<S: SymbolStream + Unpin> SymbolStream for MergedStream<S> {
         let mut idx = self.current;
 
         while checked < self.streams.len() {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Some(Err(StreamError::Cancelled)));
+            }
+
             if idx >= self.streams.len() {
                 idx = 0;
             }

@@ -1554,6 +1554,55 @@ impl SymbolDispatcher {
             .insert(endpoint, Arc::new(Mutex::new(sink)));
     }
 
+    fn send_failed(endpoint: EndpointId) -> DispatchError {
+        DispatchError::SendFailed {
+            endpoint,
+            reason: "Send failed".into(),
+        }
+    }
+
+    async fn send_to_endpoint(
+        &self,
+        cx: &Cx,
+        endpoint: EndpointId,
+        symbol: AuthenticatedSymbol,
+    ) -> Result<(), DispatchError> {
+        let sink = {
+            let sinks = self.sinks.read();
+            sinks.get(&endpoint).cloned()
+        };
+
+        let Some(sink) = sink else {
+            // Simulation mode when no concrete sink is registered.
+            return Ok(());
+        };
+
+        if cx.checkpoint().is_err() {
+            return Err(DispatchError::Cancelled);
+        }
+
+        match OwnedMutexGuard::lock(sink, cx).await {
+            Ok(mut guard) => {
+                let guard: &mut Box<dyn SymbolSink> = &mut guard;
+                match guard.send(symbol).await {
+                    Ok(()) => Ok(()),
+                    Err(crate::transport::error::SinkError::Cancelled) => {
+                        Err(DispatchError::Cancelled)
+                    }
+                    Err(crate::transport::error::SinkError::Io { source })
+                        if source.kind() == std::io::ErrorKind::Interrupted
+                            && cx.checkpoint().is_err() =>
+                    {
+                        Err(DispatchError::Cancelled)
+                    }
+                    Err(_) => Err(Self::send_failed(endpoint)),
+                }
+            }
+            Err(crate::sync::LockError::Cancelled) => Err(DispatchError::Cancelled),
+            Err(_) => Err(DispatchError::Timeout),
+        }
+    }
+
     /// Dispatches a symbol using the default strategy.
     pub async fn dispatch(
         &self,
@@ -1619,52 +1668,24 @@ impl SymbolDispatcher {
     ) -> Result<DispatchResult, DispatchError> {
         let route = self.router.route(symbol.symbol())?;
 
-        // Get sink
-        let sink = {
-            let sinks = self.sinks.read();
-            sinks.get(&route.endpoint.id).cloned()
-        };
-
         let _guard = route.endpoint.acquire_connection_guard();
 
-        if let Some(sink) = sink {
-            let send_result = match OwnedMutexGuard::lock(sink, cx).await {
-                Ok(mut guard) => guard
-                    .send(symbol)
-                    .await
-                    .map_err(|_| DispatchError::SendFailed {
-                        endpoint: route.endpoint.id,
-                        reason: "Send failed".into(),
-                    }),
-                Err(_) => Err(DispatchError::Timeout),
-            };
-
-            match send_result {
-                Ok(()) => {
-                    route.endpoint.record_success(Time::ZERO);
-                    Ok(DispatchResult {
-                        successes: 1,
-                        failures: 0,
-                        sent_to: smallvec![route.endpoint.id],
-                        failed_endpoints: SmallVec::new(),
-                        duration: Time::ZERO,
-                    })
-                }
-                Err(err) => {
-                    route.endpoint.record_failure(Time::ZERO);
-                    Err(err)
-                }
+        match self.send_to_endpoint(cx, route.endpoint.id, symbol).await {
+            Ok(()) => {
+                route.endpoint.record_success(Time::ZERO);
+                Ok(DispatchResult {
+                    successes: 1,
+                    failures: 0,
+                    sent_to: smallvec![route.endpoint.id],
+                    failed_endpoints: SmallVec::new(),
+                    duration: Time::ZERO,
+                })
             }
-        } else {
-            // Fallback to simulation if no sink registered (for existing logic)
-            route.endpoint.record_success(Time::ZERO);
-            Ok(DispatchResult {
-                successes: 1,
-                failures: 0,
-                sent_to: smallvec![route.endpoint.id],
-                failed_endpoints: SmallVec::new(),
-                duration: Time::ZERO,
-            })
+            Err(DispatchError::Cancelled) => Err(DispatchError::Cancelled),
+            Err(err) => {
+                route.endpoint.record_failure(Time::ZERO);
+                Err(err)
+            }
         }
         // _guard dropped here, releasing connection
     }
@@ -1705,42 +1726,25 @@ impl SymbolDispatcher {
         let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
 
         for route in routes {
+            if cx.checkpoint().is_err() {
+                return Err(DispatchError::Cancelled);
+            }
+
             let endpoint = route.endpoint;
             let _guard = endpoint.acquire_connection_guard();
 
-            // Attempt send
-            let success = if let Some(sink) = {
-                let sinks = self.sinks.read();
-                sinks.get(&endpoint.id).cloned()
-            } {
-                match OwnedMutexGuard::lock(sink, cx).await {
-                    Ok(mut guard) => {
-                        let guard: &mut Box<dyn SymbolSink> = &mut guard;
-                        guard.send(symbol.clone()).await.is_ok()
-                    }
-                    Err(_) => false,
+            match self.send_to_endpoint(cx, endpoint.id, symbol.clone()).await {
+                Ok(()) => {
+                    endpoint.record_success(Time::ZERO);
+                    successes += 1;
+                    sent_to.push(endpoint.id);
                 }
-            } else {
-                // Simulation mode
-                true
-            };
-
-            // Release is implicit on loop continue/exit
-
-            if success {
-                endpoint.record_success(Time::ZERO);
-                successes += 1;
-                sent_to.push(endpoint.id);
-            } else {
-                endpoint.record_failure(Time::ZERO);
-                failures += 1;
-                failed.push((
-                    endpoint.id,
-                    DispatchError::SendFailed {
-                        endpoint: endpoint.id,
-                        reason: "Send failed".into(),
-                    },
-                ));
+                Err(DispatchError::Cancelled) => return Err(DispatchError::Cancelled),
+                Err(err) => {
+                    endpoint.record_failure(Time::ZERO);
+                    failures += 1;
+                    failed.push((endpoint.id, err));
+                }
             }
         }
 
@@ -1772,39 +1776,24 @@ impl SymbolDispatcher {
         let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
 
         for route in endpoints {
+            if cx.checkpoint().is_err() {
+                return Err(DispatchError::Cancelled);
+            }
+
             let _guard = route.acquire_connection_guard();
 
-            // Attempt send
-            let success = if let Some(sink) = {
-                let sinks = self.sinks.read();
-                sinks.get(&route.id).cloned()
-            } {
-                match OwnedMutexGuard::lock(sink, cx).await {
-                    Ok(mut guard) => {
-                        let guard: &mut Box<dyn SymbolSink> = &mut guard;
-                        guard.send(symbol.clone()).await.is_ok()
-                    }
-                    Err(_) => false,
+            match self.send_to_endpoint(cx, route.id, symbol.clone()).await {
+                Ok(()) => {
+                    route.record_success(Time::ZERO);
+                    successes += 1;
+                    sent_to.push(route.id);
                 }
-            } else {
-                // Simulation
-                true
-            };
-
-            if success {
-                route.record_success(Time::ZERO);
-                successes += 1;
-                sent_to.push(route.id);
-            } else {
-                route.record_failure(Time::ZERO);
-                failures += 1;
-                failed.push((
-                    route.id,
-                    DispatchError::SendFailed {
-                        endpoint: route.id,
-                        reason: "Send failed".into(),
-                    },
-                ));
+                Err(DispatchError::Cancelled) => return Err(DispatchError::Cancelled),
+                Err(err) => {
+                    route.record_failure(Time::ZERO);
+                    failures += 1;
+                    failed.push((route.id, err));
+                }
             }
         }
 
@@ -1840,41 +1829,28 @@ impl SymbolDispatcher {
         let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
 
         for route in endpoints {
+            if cx.checkpoint().is_err() {
+                return Err(DispatchError::Cancelled);
+            }
+
             if successes >= required {
                 break;
             }
 
             let _guard = route.acquire_connection_guard();
 
-            let success = if let Some(sink) = {
-                let sinks = self.sinks.read();
-                sinks.get(&route.id).cloned()
-            } {
-                match OwnedMutexGuard::lock(sink, cx).await {
-                    Ok(mut guard) => {
-                        let guard: &mut Box<dyn SymbolSink> = &mut guard;
-                        guard.send(symbol.clone()).await.is_ok()
-                    }
-                    Err(_) => false,
+            match self.send_to_endpoint(cx, route.id, symbol.clone()).await {
+                Ok(()) => {
+                    route.record_success(Time::ZERO);
+                    successes += 1;
+                    sent_to.push(route.id);
                 }
-            } else {
-                true
-            };
-
-            if success {
-                route.record_success(Time::ZERO);
-                successes += 1;
-                sent_to.push(route.id);
-            } else {
-                route.record_failure(Time::ZERO);
-                failures += 1;
-                failed.push((
-                    route.id,
-                    DispatchError::SendFailed {
-                        endpoint: route.id,
-                        reason: "Send failed".into(),
-                    },
-                ));
+                Err(DispatchError::Cancelled) => return Err(DispatchError::Cancelled),
+                Err(err) => {
+                    route.record_failure(Time::ZERO);
+                    failures += 1;
+                    failed.push((route.id, err));
+                }
             }
         }
 
@@ -2002,6 +1978,9 @@ pub enum DispatchError {
 
     /// Timeout.
     Timeout,
+
+    /// Cancelled by context.
+    Cancelled,
 }
 
 impl std::fmt::Display for DispatchError {
@@ -2026,6 +2005,7 @@ impl std::fmt::Display for DispatchError {
                 write!(f, "quorum not reached: {achieved} of {required} required")
             }
             Self::Timeout => write!(f, "dispatch timeout"),
+            Self::Cancelled => write!(f, "dispatch cancelled"),
         }
     }
 }
@@ -2057,9 +2037,13 @@ mod tests {
     use crate::Cx;
     use crate::security::authenticated::AuthenticatedSymbol;
     use crate::security::tag::AuthenticationTag;
+    use crate::transport::error::SinkError;
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
     use std::collections::HashSet;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     fn test_endpoint(id: u64) -> Endpoint {
         Endpoint::new(EndpointId(id), format!("node-{id}:8080"))
@@ -2069,6 +2053,61 @@ mod tests {
         let id = SymbolId::new_for_test(1, 0, esi);
         let symbol = Symbol::new(id, vec![esi as u8], SymbolKind::Source);
         AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero())
+    }
+
+    struct InterruptedSink;
+
+    impl SymbolSink for InterruptedSink {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Err(SinkError::Io {
+                source: io::Error::new(io::ErrorKind::Interrupted, "synthetic interrupt"),
+            }))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct CancellingInterruptedSink {
+        cancel_cx: Cx,
+    }
+
+    impl SymbolSink for CancellingInterruptedSink {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            self.cancel_cx.set_cancel_requested(true);
+            Poll::Ready(Err(SinkError::Io {
+                source: io::Error::new(io::ErrorKind::Interrupted, "cancelled"),
+            }))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
     }
 
     // Test 1: Endpoint state predicates
@@ -2876,6 +2915,64 @@ mod tests {
         assert_eq!(result.failures, 0);
         assert!(result.quorum_reached(2));
         assert!(!sent_to.contains(&degraded.id));
+    }
+
+    #[test]
+    fn test_symbol_dispatcher_unicast_interrupted_io_without_cancel_stays_send_failure() {
+        let table = Arc::new(RoutingTable::new());
+        let endpoint = table.register_endpoint(test_endpoint(41));
+        table.add_route(
+            RouteKey::Default,
+            RoutingEntry::new(vec![endpoint.clone()], Time::ZERO),
+        );
+
+        let router = Arc::new(SymbolRouter::new(table));
+        let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+        dispatcher.add_sink(endpoint.id, Box::new(InterruptedSink));
+
+        let cx: Cx = Cx::for_testing();
+        let result = future::block_on(dispatcher.dispatch_with_strategy(
+            &cx,
+            test_authenticated_symbol(41),
+            DispatchStrategy::Unicast,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::SendFailed {
+                endpoint: failed_endpoint,
+                ..
+            }) if failed_endpoint == endpoint.id
+        ));
+        assert_eq!(endpoint.failures.load(Ordering::Relaxed), 1);
+        assert!(!cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn test_symbol_dispatcher_broadcast_mid_send_cancel_returns_cancelled() {
+        let table = Arc::new(RoutingTable::new());
+        let endpoint = table.register_endpoint(test_endpoint(52));
+
+        let router = Arc::new(SymbolRouter::new(table));
+        let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+
+        let cx: Cx = Cx::for_testing();
+        dispatcher.add_sink(
+            endpoint.id,
+            Box::new(CancellingInterruptedSink {
+                cancel_cx: cx.clone(),
+            }),
+        );
+
+        let result = future::block_on(dispatcher.dispatch_with_strategy(
+            &cx,
+            test_authenticated_symbol(52),
+            DispatchStrategy::Broadcast,
+        ));
+
+        assert!(matches!(result, Err(DispatchError::Cancelled)));
+        assert_eq!(endpoint.failures.load(Ordering::Relaxed), 0);
+        assert!(cx.is_cancel_requested());
     }
 
     // Test 14: RoutingError display

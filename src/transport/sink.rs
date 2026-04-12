@@ -147,6 +147,13 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for SendFuture<'_, S> {
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
         }
 
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            this.completed = true;
+            return Poll::Ready(Err(SinkError::Io {
+                source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
+            }));
+        }
+
         // First wait for ready
         match Pin::new(&mut *this.sink).poll_ready(cx) {
             Poll::Ready(Ok(())) => {}
@@ -200,6 +207,13 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
+        }
+
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            self.completed = true;
+            return Poll::Ready(Err(SinkError::Io {
+                source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
+            }));
         }
 
         let mut sent_this_poll = 0usize;
@@ -277,6 +291,13 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for FlushFuture<'_, S> {
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
         }
 
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            self.completed = true;
+            return Poll::Ready(Err(SinkError::Io {
+                source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
+            }));
+        }
+
         match Pin::new(&mut *self.sink).poll_flush(cx) {
             Poll::Ready(result) => {
                 self.completed = true;
@@ -299,6 +320,13 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for CloseFuture<'_, S> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
+        }
+
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            self.completed = true;
+            return Poll::Ready(Err(SinkError::Io {
+                source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
+            }));
         }
 
         match Pin::new(&mut *self.sink).poll_close(cx) {
