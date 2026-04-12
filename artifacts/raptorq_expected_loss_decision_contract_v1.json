@@ -80,6 +80,7 @@
         "if_any": [
           "decode_mismatch_detected",
           "proof_replay_mismatch",
+          "policy_budget_exhausted",
           "unknown_state_with_low_confidence",
           "regression_state_with_low_confidence",
           "conservative_fallback_reason_unclassified"

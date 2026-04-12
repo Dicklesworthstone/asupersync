@@ -76,10 +76,20 @@ Each decision record must emit:
 
 Fallback is mandatory if any hard-trigger condition is true:
 
-1. decode mismatch detected
-2. proof replay mismatch
-3. unknown state with low confidence
-4. unclassified conservative fallback reason
+1. `decode_mismatch_detected` (decode mismatch detected)
+2. `proof_replay_mismatch` (proof replay mismatch)
+3. `policy_budget_exhausted` (runtime policy budget exhausted before a safe higher-confidence decision)
+4. `unknown_state_with_low_confidence`
+5. `regression_state_with_low_confidence`
+6. `conservative_fallback_reason_unclassified`
+
+The live runtime reason set emitted by `src/raptorq/decision_contract.rs`
+currently covers `policy_budget_exhausted`,
+`unknown_state_with_low_confidence`,
+`regression_state_with_low_confidence`, and
+`conservative_fallback_reason_unclassified`. The decode/proof mismatch triggers
+remain part of the broader contract because downstream validation and replay
+surfaces can force the same deterministic fallback action.
 
 ## Logging and Reproducibility
 

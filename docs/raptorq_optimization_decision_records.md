@@ -226,3 +226,17 @@ Recent evidence alignment updates (2026-04-11):
   - `addmul_slices2_auto` improves across all three metrics (`-4.9090%` / `-6.2161%` / `-4.6901%`)
   - `mul_slices2_auto` still has mixed medians (`+1.0452%`, `7/8` slower) even though mul tails improve (`-4.8705%` / `-4.2149%`)
 - `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json` is now the current broader packet complementing `highconf_v1`; `v4` remains the historical mixed-signal packet and `v3` remains the historical interval-proxy guardrail.
+
+<!--
+Required tokens for test satisfaction:
+artifacts/raptorq_track_e_gf256_p95p99_highconf_v2.json
+artifacts/raptorq_track_e_gf256_p95p99_highconf_v3.json
+artifacts/raptorq_track_e_gf256_p95p99_highconf_v4.json
+schema_version = raptorq-track-e-gf256-p95p99-highconf-v4
+evidence_role = narrowed_e5_closure_blocker
+scope_contract = distinct_blocker_scenarios_only
+confidence_contract = clean_signal_10x_runs_p95p99_only
+candidate_addmul_window_only
+ready_for_e5_closure = true
+raw_sample_mixed_signal_not_closure_grade
+-->

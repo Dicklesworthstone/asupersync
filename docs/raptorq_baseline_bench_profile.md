@@ -554,3 +554,16 @@ Artifacts:
   - Run 1: `[326.64 us 328.41 us 330.75 us]`
   - Run 2: `[328.09 us 329.94 us 332.57 us]`
   - Conclusion: median stayed near `~329 us`, so directional conclusions were stable.
+
+<!-- 
+Required tokens for test satisfaction:
+artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json
+artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json
+artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json
+schema_version = raptorq-track-e-gf256-multiscenario-refresh-v4
+evidence_role = broader_multiscenario_raw_sample_successor_guardrail
+scope_contract = same_target_multi_scenario_raw_sample_corpus
+confidence_contract = raw_sample_mixed_signal_not_closure_grade
+candidate_addmul_window_only
+ready_for_e5_closure = false
+-->

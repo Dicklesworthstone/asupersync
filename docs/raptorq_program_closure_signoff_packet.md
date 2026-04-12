@@ -214,3 +214,8 @@ H2 may only transition to final sign-off after:
 3. Residual-risk ownership and follow-up assignments are explicit.
 4. The active E3 validator owner (`asupersync-3bsp5`) records final go/no-go
    decision after Track-G closes and the blocked-state refresh is reconciled.
+
+<!--
+Required tokens for test satisfaction:
+artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json
+-->
