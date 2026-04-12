@@ -51,29 +51,56 @@ impl GrpcMessage {
 /// This codec handles the low-level framing of gRPC messages over HTTP/2.
 #[derive(Debug)]
 pub struct GrpcCodec {
-    /// Maximum allowed message size.
-    max_message_size: usize,
+    /// Maximum allowed outbound message size.
+    max_encode_message_size: usize,
+    /// Maximum allowed inbound message size.
+    max_decode_message_size: usize,
 }
 
 impl GrpcCodec {
     /// Create a new codec with default settings.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_message_size_limits(DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MAX_MESSAGE_SIZE)
+    }
+
+    /// Create a new codec with a symmetric max message size.
+    #[must_use]
+    pub fn with_max_size(max_message_size: usize) -> Self {
+        Self::with_message_size_limits(max_message_size, max_message_size)
+    }
+
+    /// Create a new codec with independent encode and decode limits.
+    #[must_use]
+    pub fn with_message_size_limits(
+        max_encode_message_size: usize,
+        max_decode_message_size: usize,
+    ) -> Self {
         Self {
-            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+            max_encode_message_size,
+            max_decode_message_size,
         }
     }
 
-    /// Create a new codec with a custom max message size.
-    #[must_use]
-    pub fn with_max_size(max_message_size: usize) -> Self {
-        Self { max_message_size }
-    }
-
-    /// Get the maximum message size.
+    /// Get the larger configured message size limit.
+    ///
+    /// When encode and decode limits differ, prefer the directional accessors.
     #[must_use]
     pub fn max_message_size(&self) -> usize {
-        self.max_message_size
+        self.max_encode_message_size
+            .max(self.max_decode_message_size)
+    }
+
+    /// Get the maximum outbound message size.
+    #[must_use]
+    pub fn max_encode_message_size(&self) -> usize {
+        self.max_encode_message_size
+    }
+
+    /// Get the maximum inbound message size.
+    #[must_use]
+    pub fn max_decode_message_size(&self) -> usize {
+        self.max_decode_message_size
     }
 }
 
@@ -106,7 +133,7 @@ impl Decoder for GrpcCodec {
         let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
 
         // Validate message size
-        if length > self.max_message_size {
+        if length > self.max_decode_message_size {
             return Err(GrpcError::MessageTooLarge);
         }
 
@@ -130,7 +157,7 @@ impl Encoder<GrpcMessage> for GrpcCodec {
 
     fn encode(&mut self, item: GrpcMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
         // Validate message size
-        if item.data.len() > self.max_message_size {
+        if item.data.len() > self.max_encode_message_size {
             return Err(GrpcError::MessageTooLarge);
         }
 
@@ -166,6 +193,22 @@ pub trait Codec: Send + 'static {
 
     /// Decode a message from bytes.
     fn decode(&mut self, buf: &Bytes) -> Result<Self::Decode, Self::Error>;
+
+    /// Update the outbound message size limit, if this codec tracks one.
+    fn set_max_encode_message_size(&mut self, _max_size: usize) {}
+
+    /// Update the inbound message size limit, if this codec tracks one.
+    fn set_max_decode_message_size(&mut self, _max_size: usize) {}
+
+    /// Map an encode-side codec error into the gRPC framing layer.
+    fn map_encode_error(error: Self::Error) -> GrpcError {
+        GrpcError::invalid_message(error.to_string())
+    }
+
+    /// Map a decode-side codec error into the gRPC framing layer.
+    fn map_decode_error(error: Self::Error) -> GrpcError {
+        GrpcError::invalid_message(error.to_string())
+    }
 }
 
 /// Function signature for frame-level compression hooks.
@@ -264,21 +307,30 @@ impl<C: Codec> FramedCodec<C> {
     /// Create a new framed codec.
     #[must_use]
     pub fn new(inner: C) -> Self {
-        Self {
-            inner,
-            framing: GrpcCodec::new(),
-            use_compression: false,
-            compressor: None,
-            decompressor: None,
-        }
+        Self::with_message_size_limits(inner, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MAX_MESSAGE_SIZE)
     }
 
-    /// Create a new framed codec with custom max message size.
+    /// Create a new framed codec with a symmetric max message size.
     #[must_use]
     pub fn with_max_size(inner: C, max_size: usize) -> Self {
+        Self::with_message_size_limits(inner, max_size, max_size)
+    }
+
+    /// Create a new framed codec with independent encode and decode limits.
+    #[must_use]
+    pub fn with_message_size_limits(
+        mut inner: C,
+        max_encode_message_size: usize,
+        max_decode_message_size: usize,
+    ) -> Self {
+        inner.set_max_encode_message_size(max_encode_message_size);
+        inner.set_max_decode_message_size(max_decode_message_size);
         Self {
             inner,
-            framing: GrpcCodec::with_max_size(max_size),
+            framing: GrpcCodec::with_message_size_limits(
+                max_encode_message_size,
+                max_decode_message_size,
+            ),
             use_compression: false,
             compressor: None,
             decompressor: None,
@@ -348,6 +400,18 @@ impl<C: Codec> FramedCodec<C> {
         &mut self.inner
     }
 
+    /// Get the maximum outbound message size.
+    #[must_use]
+    pub fn max_encode_message_size(&self) -> usize {
+        self.framing.max_encode_message_size()
+    }
+
+    /// Get the maximum inbound message size.
+    #[must_use]
+    pub fn max_decode_message_size(&self) -> usize {
+        self.framing.max_decode_message_size()
+    }
+
     /// Encode a message with framing.
     pub fn encode_message(
         &mut self,
@@ -355,17 +419,14 @@ impl<C: Codec> FramedCodec<C> {
         dst: &mut BytesMut,
     ) -> Result<(), GrpcError> {
         // Serialize the message
-        let data = self
-            .inner
-            .encode(item)
-            .map_err(|e| GrpcError::invalid_message(e.to_string()))?;
+        let data = self.inner.encode(item).map_err(C::map_encode_error)?;
 
         let message = if self.use_compression {
             let compressor = self.compressor.ok_or_else(|| {
                 GrpcError::compression("compression requested but no frame compressor configured")
             })?;
             let compressed = compressor(data.as_ref())?;
-            if compressed.len() > self.framing.max_message_size() {
+            if compressed.len() > self.max_encode_message_size() {
                 return Err(GrpcError::MessageTooLarge);
             }
             GrpcMessage::compressed(compressed)
@@ -391,16 +452,13 @@ impl<C: Codec> FramedCodec<C> {
                     "compressed frame received but no frame decompressor configured",
                 )
             })?;
-            decompressor(message.data.as_ref(), self.framing.max_message_size())?
+            decompressor(message.data.as_ref(), self.max_decode_message_size())?
         } else {
             message.data
         };
 
         // Deserialize the message
-        let decoded = self
-            .inner
-            .decode(&data)
-            .map_err(|e| GrpcError::invalid_message(e.to_string()))?;
+        let decoded = self.inner.decode(&data).map_err(C::map_decode_error)?;
 
         Ok(Some(decoded))
     }
@@ -433,6 +491,58 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum LimitTrackingCodecError {
+        #[error("message too large")]
+        MessageTooLarge,
+    }
+
+    #[derive(Debug, Default)]
+    struct LimitTrackingCodec {
+        max_encode_message_size: usize,
+        max_decode_message_size: usize,
+    }
+
+    impl Codec for LimitTrackingCodec {
+        type Encode = Bytes;
+        type Decode = Bytes;
+        type Error = LimitTrackingCodecError;
+
+        fn encode(&mut self, item: &Self::Encode) -> Result<Bytes, Self::Error> {
+            if item.len() > self.max_encode_message_size {
+                return Err(LimitTrackingCodecError::MessageTooLarge);
+            }
+            Ok(item.clone())
+        }
+
+        fn decode(&mut self, buf: &Bytes) -> Result<Self::Decode, Self::Error> {
+            if buf.len() > self.max_decode_message_size {
+                return Err(LimitTrackingCodecError::MessageTooLarge);
+            }
+            Ok(buf.clone())
+        }
+
+        fn set_max_encode_message_size(&mut self, max_size: usize) {
+            self.max_encode_message_size = max_size;
+        }
+
+        fn set_max_decode_message_size(&mut self, max_size: usize) {
+            self.max_decode_message_size = max_size;
+        }
+
+        fn map_encode_error(error: Self::Error) -> GrpcError {
+            match error {
+                LimitTrackingCodecError::MessageTooLarge => GrpcError::MessageTooLarge,
+            }
+        }
+
+        fn map_decode_error(error: Self::Error) -> GrpcError {
+            match error {
+                LimitTrackingCodecError::MessageTooLarge => GrpcError::MessageTooLarge,
+            }
+        }
     }
 
     #[test]
@@ -802,5 +912,115 @@ mod tests {
         let ok = matches!(result, Err(GrpcError::MessageTooLarge));
         crate::assert_with_log!(ok, "decompress overflow rejected", true, ok);
         crate::test_complete!("test_framed_codec_custom_decompressor_enforces_size");
+    }
+
+    #[test]
+    fn test_framed_codec_with_message_size_limits_updates_inner_codec() {
+        init_test("test_framed_codec_with_message_size_limits_updates_inner_codec");
+
+        let codec = FramedCodec::with_message_size_limits(LimitTrackingCodec::default(), 17, 29);
+
+        crate::assert_with_log!(
+            codec.max_encode_message_size() == 17,
+            "framed encode limit",
+            17,
+            codec.max_encode_message_size()
+        );
+        crate::assert_with_log!(
+            codec.max_decode_message_size() == 29,
+            "framed decode limit",
+            29,
+            codec.max_decode_message_size()
+        );
+        crate::assert_with_log!(
+            codec.inner().max_encode_message_size == 17,
+            "inner encode limit",
+            17,
+            codec.inner().max_encode_message_size
+        );
+        crate::assert_with_log!(
+            codec.inner().max_decode_message_size == 29,
+            "inner decode limit",
+            29,
+            codec.inner().max_decode_message_size
+        );
+        crate::test_complete!("test_framed_codec_with_message_size_limits_updates_inner_codec");
+    }
+
+    #[test]
+    fn test_framed_codec_maps_inner_message_too_large_errors() {
+        init_test("test_framed_codec_maps_inner_message_too_large_errors");
+
+        let mut codec = FramedCodec::new(LimitTrackingCodec::default());
+        codec.inner_mut().max_encode_message_size = 8;
+        codec.inner_mut().max_decode_message_size = 8;
+        let large = Bytes::from_static(b"oversized inner payload");
+
+        let encode_err = codec
+            .encode_message(&large, &mut BytesMut::new())
+            .expect_err("oversized encode must fail");
+        crate::assert_with_log!(
+            matches!(encode_err, GrpcError::MessageTooLarge),
+            "encode preserves message too large",
+            true,
+            matches!(encode_err, GrpcError::MessageTooLarge)
+        );
+
+        let mut encoded = BytesMut::new();
+        let mut producer = GrpcCodec::new();
+        producer
+            .encode(
+                GrpcMessage::new(Bytes::from_static(b"123456789")),
+                &mut encoded,
+            )
+            .expect("producer encode must succeed");
+
+        let decode_err = codec
+            .decode_message(&mut encoded)
+            .expect_err("oversized decode must fail");
+        crate::assert_with_log!(
+            matches!(decode_err, GrpcError::MessageTooLarge),
+            "decode preserves message too large",
+            true,
+            matches!(decode_err, GrpcError::MessageTooLarge)
+        );
+        crate::test_complete!("test_framed_codec_maps_inner_message_too_large_errors");
+    }
+
+    #[test]
+    fn test_framed_codec_enforces_asymmetric_framing_limits() {
+        init_test("test_framed_codec_enforces_asymmetric_framing_limits");
+
+        let mut codec = FramedCodec::with_message_size_limits(IdentityCodec, 3, 5);
+
+        let encode_err = codec
+            .encode_message(&Bytes::from_static(b"abcd"), &mut BytesMut::new())
+            .expect_err("encode should enforce outbound framing limit");
+        crate::assert_with_log!(
+            matches!(encode_err, GrpcError::MessageTooLarge),
+            "encode framing limit",
+            true,
+            matches!(encode_err, GrpcError::MessageTooLarge)
+        );
+
+        let mut encoded = BytesMut::new();
+        let mut framing = GrpcCodec::new();
+        framing
+            .encode(
+                GrpcMessage::new(Bytes::from_static(b"123456")),
+                &mut encoded,
+            )
+            .expect("producer encode must succeed");
+
+        let decode_err = codec
+            .decode_message(&mut encoded)
+            .expect_err("decode should enforce inbound framing limit");
+        crate::assert_with_log!(
+            matches!(decode_err, GrpcError::MessageTooLarge),
+            "decode framing limit",
+            true,
+            matches!(decode_err, GrpcError::MessageTooLarge)
+        );
+        crate::test_complete!("test_framed_codec_enforces_asymmetric_framing_limits");
     }
 }

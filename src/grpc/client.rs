@@ -103,7 +103,12 @@ fn client_framed_codec<C: Codec>(channel: &Channel, codec: C) -> FramedCodec<C> 
         .find(|encoding| *encoding != CompressionEncoding::Identity)
         .and_then(CompressionEncoding::frame_decompressor);
 
-    FramedCodec::new(codec).with_frame_hooks(compressor, decompressor)
+    FramedCodec::with_message_size_limits(
+        codec,
+        channel.config().max_send_message_size,
+        channel.config().max_recv_message_size,
+    )
+    .with_frame_hooks(compressor, decompressor)
 }
 
 /// gRPC channel configuration.
@@ -1144,6 +1149,7 @@ impl ClientInterceptor for MetadataInterceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::Encoder;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
@@ -1518,6 +1524,43 @@ mod tests {
                 ..crate::grpc::codec::MESSAGE_HEADER_SIZE + 2],
             &[0x1f, 0x8b]
         );
+    }
+
+    #[test]
+    fn grpc_client_codec_applies_channel_message_limits() {
+        let channel = futures_lite::future::block_on(
+            Channel::builder("http://loopback:80")
+                .max_send_message_size(3)
+                .max_recv_message_size(5)
+                .connect(),
+        )
+        .expect("channel");
+
+        let mut client = GrpcClient::new(channel);
+
+        let encode_err = client
+            .codec
+            .encode_message(
+                &Bytes::from_static(b"abcd"),
+                &mut crate::bytes::BytesMut::new(),
+            )
+            .expect_err("send limit should be applied to the live client codec");
+        assert!(matches!(encode_err, GrpcError::MessageTooLarge));
+
+        let mut encoded = crate::bytes::BytesMut::new();
+        let mut framing = crate::grpc::codec::GrpcCodec::new();
+        framing
+            .encode(
+                crate::grpc::codec::GrpcMessage::new(Bytes::from_static(b"123456")),
+                &mut encoded,
+            )
+            .expect("producer encode must succeed");
+
+        let decode_err = client
+            .codec
+            .decode_message(&mut encoded)
+            .expect_err("recv limit should be applied to the live client codec");
+        assert!(matches!(decode_err, GrpcError::MessageTooLarge));
     }
 
     #[test]
