@@ -1520,7 +1520,7 @@ async fn run_gen_server_loop<S: GenServer>(
     // Phase 1: Initialization
     // Skip init when either the Cx is cancelled or the server was pre-stopped
     // (stop() sets Stopping before scheduling, but does not cancel the Cx).
-    if cx.is_cancel_requested() || cell.state.load() == ActorState::Stopping {
+    if cx.checkpoint().is_err() || cell.state.load() == ActorState::Stopping {
         cx.trace("gen_server::init_skipped_cancelled");
     } else {
         cx.trace("gen_server::init");
@@ -1530,7 +1530,7 @@ async fn run_gen_server_loop<S: GenServer>(
 
     // Phase 2: Message loop
     loop {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             cx.trace("gen_server::cancel_requested");
             break;
         }
@@ -1577,7 +1577,7 @@ async fn run_gen_server_loop<S: GenServer>(
     // Phase 3: Drain remaining messages.
     // Calls during drain: reply with error (caller should not depend on drain).
     // Casts during drain: process normally if gracefully stopped, skip if aborted.
-    let is_aborted = cx.is_cancel_requested();
+    let is_aborted = cx.checkpoint().is_err();
 
     cell.mailbox.close();
 

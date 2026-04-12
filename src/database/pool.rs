@@ -880,7 +880,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             }
 
             let chunk = duration.min(CANCEL_POLL_INTERVAL);
-            crate::time::sleep(crate::time::wall_now(), chunk).await;
+            crate::time::sleep(cx.now(), chunk).await;
             duration = duration.saturating_sub(chunk);
         }
 
