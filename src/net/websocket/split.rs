@@ -208,7 +208,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     } {
         let is_open = shared.lock().close_handshake.is_open();
         let n = poll_fn(|poll_cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled",
@@ -240,8 +240,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     // Ensure the underlying I/O stream is flushed
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
-            return Poll::Ready(Err(std::io::Error::new(
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {            return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             )));
@@ -269,8 +268,7 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
 
     let is_open = shared.lock().close_handshake.is_open();
     let n = poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
-            return Poll::Ready(Err(std::io::Error::new(
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {            return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             )));
@@ -299,8 +297,7 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
 
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
-            return Poll::Ready(Err(std::io::Error::new(
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {            return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             )));
@@ -610,7 +607,7 @@ where
 
         let is_open = self.shared.lock().close_handshake.is_open();
         poll_fn(|poll_cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled",

@@ -572,7 +572,7 @@ where
         while !self.write_buf.is_empty() {
             let is_open = self.close_handshake.is_open();
             let n = poll_fn(|cx| {
-                if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+                if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::Interrupted,
                         "cancelled",
@@ -592,7 +592,7 @@ where
 
         let is_open = self.close_handshake.is_open();
         poll_fn(|cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             Pin::new(&mut self.io).poll_flush(cx)
@@ -611,7 +611,7 @@ where
 
         let is_open = self.close_handshake.is_open();
         let n = poll_fn(|cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             Pin::new(&mut self.io).poll_write(cx, &buf[..])
@@ -633,7 +633,7 @@ where
 
         let is_open = self.close_handshake.is_open();
         poll_fn(|cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             Pin::new(&mut self.io).poll_flush(cx)
