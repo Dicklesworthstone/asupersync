@@ -479,7 +479,7 @@ impl Scheduler {
     pub fn pop_with_lane(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         // For lab determinism, we want tie-breaking to vary with a seed while still being fully
         // deterministic for a given `rng_hint` sequence. We do this by selecting uniformly among
-        // the set of max-priority (or earliest-deadline) tasks in the chosen lane.
+        // the bounded equal-priority (or equal-deadline) frontier materialized in scratch space.
         loop {
             if let Some(entry) =
                 Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)
@@ -663,6 +663,7 @@ impl Scheduler {
         if lane.peek().is_some_and(|peek| peek.priority != priority) {
             return Some(first);
         }
+
         scratch.clear();
         scratch.push(first);
 
@@ -695,6 +696,7 @@ impl Scheduler {
         if lane.peek().is_some_and(|peek| peek.deadline != deadline) {
             return Some(first);
         }
+
         scratch.clear();
         scratch.push(first);
 
@@ -1943,6 +1945,67 @@ mod tests {
             );
         }
         crate::test_complete!("pop_with_lane_rng_tiebreak_among_equal_priority");
+    }
+
+    #[test]
+    fn pop_with_lane_rng_can_select_beyond_first_two_equal_priority_entries() {
+        init_test("pop_with_lane_rng_can_select_beyond_first_two_equal_priority_entries");
+
+        for (hint, expected) in [(2_u64, task(2)), (3_u64, task(3))] {
+            let mut sched = Scheduler::new();
+            for i in 0..4 {
+                sched.schedule(task(i), 50);
+            }
+
+            let (popped, lane) = sched
+                .pop_with_lane(hint)
+                .expect("scheduler should return a ready task");
+            crate::assert_with_log!(
+                matches!(lane, DispatchLane::Ready),
+                "equal-priority dispatch stays in ready lane",
+                true,
+                true
+            );
+            crate::assert_with_log!(
+                popped == expected,
+                "rng tie-break can reach later equal-priority entries",
+                expected,
+                popped
+            );
+        }
+
+        crate::test_complete!(
+            "pop_with_lane_rng_can_select_beyond_first_two_equal_priority_entries"
+        );
+    }
+
+    #[test]
+    fn pop_timed_only_with_hint_can_select_beyond_first_two_equal_deadline_entries() {
+        init_test("pop_timed_only_with_hint_can_select_beyond_first_two_equal_deadline_entries");
+
+        let deadline = Time::from_secs(10);
+        let now = Time::from_secs(100);
+
+        for (hint, expected) in [(2_u64, task(2)), (3_u64, task(3))] {
+            let mut sched = Scheduler::new();
+            for i in 0..4 {
+                sched.schedule_timed(task(i), deadline);
+            }
+
+            let popped = sched
+                .pop_timed_only_with_hint(hint, now)
+                .expect("scheduler should return a timed task");
+            crate::assert_with_log!(
+                popped == expected,
+                "rng tie-break can reach later equal-deadline entries",
+                expected,
+                popped
+            );
+        }
+
+        crate::test_complete!(
+            "pop_timed_only_with_hint_can_select_beyond_first_two_equal_deadline_entries"
+        );
     }
 
     // ── steal_ready_batch_into tests ──────────────────────────────────────

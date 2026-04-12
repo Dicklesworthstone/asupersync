@@ -698,7 +698,7 @@ fn wait_graph_signals_from_state(state: &RuntimeState) -> (usize, Vec<(usize, us
 
 #[inline]
 pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
-    // Fast path: O(1) push to LocalQueue IntrusiveStack
+    // Fast path: O(1) push to LocalQueue VecDeque
     if LocalQueue::schedule_local(task) {
         return true;
     }
@@ -882,7 +882,7 @@ impl ThreeLaneScheduler {
         }
         let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone(), io_driver.clone()));
 
-        // Create fast queues (O(1) IntrusiveStack) for ready-lane fast path.
+        // Create fast queues (O(1) VecDeque) for ready-lane fast path.
         // When a sharded TaskTable is available, back the queues directly
         // against it so push/pop/steal avoid the full RuntimeState lock.
         let fast_queues: Vec<LocalQueue> = (0..worker_count)
@@ -1239,7 +1239,7 @@ impl ThreeLaneScheduler {
     /// Spawns a task (shorthand for inject_ready).
     ///
     /// Fast path: when called on a worker thread, pushes to the worker's
-    /// `LocalQueue` (O(1) IntrusiveStack) instead of the global injector
+    /// `LocalQueue` (O(1) VecDeque) instead of the global injector
     /// or the PriorityScheduler heap.
     ///
     /// # Local Tasks
@@ -1419,7 +1419,7 @@ pub struct ThreeLaneWorker {
     /// O(1) local queue for ready tasks (work-stealing fast path).
     ///
     /// Ready tasks spawned/woken on the worker thread are pushed here
-    /// (IntrusiveStack, O(1)) instead of the PriorityScheduler (BinaryHeap,
+    /// (VecDeque, O(1)) instead of the PriorityScheduler (BinaryHeap,
     /// O(log n)). Stealers use FIFO ordering for cache-friendliness.
     pub fast_queue: LocalQueue,
     /// Stealers for other workers' fast queues (O(1) steal).
@@ -2641,7 +2641,7 @@ impl ThreeLaneWorker {
             }
         }
 
-        // Fast path: O(1) pop from local IntrusiveStack (LIFO, cache-friendly).
+        // Fast path: O(1) pop from local VecDeque (LIFO, cache-friendly).
         if let Some(task) = self.fast_queue.pop() {
             return Some(task);
         }
@@ -2659,7 +2659,7 @@ impl ThreeLaneWorker {
 
     /// Tries to steal work from other workers.
     ///
-    /// Fast path: O(1) steal from other workers' `LocalQueue` IntrusiveStacks.
+    /// Fast path: O(1) steal from other workers' `LocalQueue` VecDeques.
     /// Slow path: O(k log n) steal from PriorityScheduler heaps.
     /// Only steals from ready lanes to preserve cancel/timed priority semantics.
     ///
@@ -6349,7 +6349,7 @@ mod tests {
 
     #[test]
     fn local_ready_queue_drains_before_fast_queue() {
-        // Use test_state to preallocate TaskRecords needed by fast_queue (IntrusiveStack).
+        // Use test_state to preallocate TaskRecords needed by fast_queue (VecDeque).
         let state = LocalQueue::test_state(10);
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         let mut workers = scheduler.take_workers();

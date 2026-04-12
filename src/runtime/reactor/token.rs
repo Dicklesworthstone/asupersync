@@ -401,14 +401,14 @@ impl TokenSlab {
         for index in 0..self.entries.len() {
             let mut remove = false;
             let current_generation = self.entries[index].generation();
-            
+
             if let Entry::Occupied { waker, generation } = &self.entries[index] {
                 let token = SlabToken::new(index as u32, *generation);
                 if !f(token, waker) {
                     remove = true;
                 }
             }
-            
+
             if remove {
                 let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
                 if current_generation == SlabToken::MAX_GENERATION {

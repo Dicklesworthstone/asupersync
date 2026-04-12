@@ -1117,7 +1117,10 @@ impl ControllerRegistry {
             policy_id: self.promotion_policy.policy_id.clone(),
             timestamp: Time::ZERO, // Logical time injected by caller in production
         };
-        self.next_ledger_id = self.next_ledger_id.checked_add(1).expect("ledger ID overflow");
+        self.next_ledger_id = self
+            .next_ledger_id
+            .checked_add(1)
+            .expect("ledger ID overflow");
         self.evidence_ledger.push(entry);
     }
 

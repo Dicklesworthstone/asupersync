@@ -283,6 +283,9 @@ impl Stealer {
                     stolen += 1;
                     continue; // Skip incrementing i because elements shifted left
                 }
+            } else {
+                src.remove(i);
+                continue; // Skip incrementing i because elements shifted left
             }
             i += 1;
         }
@@ -302,12 +305,8 @@ impl Stealer {
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stack = self.inner.lock();
-            let len = stack.len();
-            if len == 0 {
-                return None;
-            }
             let mut i = 0;
-            while i < len && i < Self::SKIPPED_LOCALS_INLINE_CAP {
+            while i < stack.len() && i < Self::SKIPPED_LOCALS_INLINE_CAP {
                 let task_id = stack[i];
                 if let Some(record) = arena.get(task_id.arena_index()) {
                     if !record.is_local() {
@@ -315,6 +314,9 @@ impl Stealer {
                         drop(stack);
                         return removed;
                     }
+                } else {
+                    stack.remove(i);
+                    continue;
                 }
                 i += 1;
             }

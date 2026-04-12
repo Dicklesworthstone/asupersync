@@ -2235,7 +2235,10 @@ impl RuntimeState {
 
     fn allocate_finalizer_id(&mut self) -> u64 {
         let id = self.next_finalizer_id;
-        self.next_finalizer_id = self.next_finalizer_id.checked_add(1).expect("finalizer ID overflow");
+        self.next_finalizer_id = self
+            .next_finalizer_id
+            .checked_add(1)
+            .expect("finalizer ID overflow");
         id
     }
 
@@ -2470,16 +2473,14 @@ impl RuntimeState {
                         break; // Async finalizer pending; stop advancing
                     }
 
-                    // If finalizing and obligations remain with no live tasks, mark leaks.
-                    // Use map_or(false, ...) to prevent ghost tasks (removed from arena
-                    // but still in region list during task_completed mid-cleanup) from
-                    // triggering premature leak detection.
+                    // If finalizing and obligations remain with no tracked tasks, mark leaks.
+                    // Terminal task state is not enough here: `task_completed` still has to
+                    // abort or leak-resolve orphaned obligations and unlink the task from the
+                    // region. Finalizing leak detection must therefore wait for full task
+                    // cleanup, not just a terminal outcome.
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         if region.pending_obligations() > 0 {
-                            let tasks_done = region.task_ids_small().iter().all(|&task_id| {
-                                self.task(task_id).is_some_and(|t| t.state.is_terminal())
-                            });
-                            if tasks_done {
+                            if region.task_count() == 0 {
                                 let leaks = self
                                     .collect_obligation_leaks(|record| record.region == region_id);
                                 if !leaks.is_empty() {
@@ -7151,6 +7152,86 @@ mod tests {
             leak_events
         );
         crate::test_complete!("task_completed_ok_with_leaked_obligations_closes_region");
+    }
+
+    #[test]
+    fn finalizing_leak_detection_waits_for_task_cleanup() {
+        // Regression: Finalizing leak detection used to treat "all tracked
+        // tasks are terminal" as equivalent to "task cleanup has finished".
+        // That is too early because task_completed still owns orphan abort/leak
+        // handling and region unlinking. We must not mark leaks until the task
+        // is fully removed from the owning region.
+        init_test("finalizing_leak_detection_waits_for_task_cleanup");
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(ObligationLeakResponse::Silent);
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("create obligation");
+
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Ok(()));
+
+        // Advancing the Finalizing region before task_completed runs must not
+        // leak-resolve the obligation yet, even though the task is terminal.
+        state.advance_region_state(region);
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 1,
+            "pending obligation preserved until task cleanup",
+            1usize,
+            state.pending_obligation_count()
+        );
+        crate::assert_with_log!(
+            state.leak_count() == 0,
+            "no leaks emitted before task cleanup",
+            0u64,
+            state.leak_count()
+        );
+        let early_leak_events = state
+            .trace
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == TraceEventKind::ObligationLeak)
+            .count();
+        crate::assert_with_log!(
+            early_leak_events == 0,
+            "no leak trace events before task cleanup",
+            0usize,
+            early_leak_events
+        );
+
+        let _ = state.task_completed(task);
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "task_completed resolves leaked obligation",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::assert_with_log!(
+            state.leak_count() == 1,
+            "exactly one leak emitted after task cleanup",
+            1u64,
+            state.leak_count()
+        );
+        let region_state_removed = state.regions.get(region.arena_index()).is_none();
+        crate::assert_with_log!(
+            region_state_removed,
+            "region closes after task cleanup handles leak",
+            true,
+            region_state_removed
+        );
+        crate::test_complete!("finalizing_leak_detection_waits_for_task_cleanup");
     }
 
     #[test]
