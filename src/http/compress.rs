@@ -282,6 +282,48 @@ impl Decompressor for IdentityDecompressor {
     }
 }
 
+/// A writer that wraps a `Vec<u8>` and strictly limits its maximum size.
+/// This prevents decompression bomb attacks by returning an error before
+/// unbounded memory allocation occurs.
+#[derive(Debug, Default)]
+#[cfg(feature = "compression")]
+#[allow(dead_code)]
+struct LimitedWriter {
+    inner: Vec<u8>,
+    max_size: Option<usize>,
+}
+
+#[cfg(feature = "compression")]
+#[allow(dead_code)]
+impl LimitedWriter {
+    fn new(max_size: Option<usize>) -> Self {
+        Self {
+            inner: Vec::new(),
+            max_size,
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl io::Write for LimitedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(max) = self.max_size {
+            if self.inner.len().saturating_add(buf.len()) > max {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decompressed size exceeds limit",
+                ));
+            }
+        }
+        self.inner.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(feature = "compression")]
 const BROTLI_BUFFER_SIZE: usize = 4096;
 
@@ -368,7 +410,7 @@ impl Compressor for GzipCompressor {
 pub struct GzipDecompressor {
     max_size: Option<usize>,
     total: usize,
-    decoder: flate2::write::GzDecoder<Vec<u8>>,
+    decoder: flate2::write::GzDecoder<LimitedWriter>,
 }
 
 #[cfg(feature = "compression")]
@@ -379,7 +421,7 @@ impl GzipDecompressor {
         Self {
             max_size,
             total: 0,
-            decoder: flate2::write::GzDecoder::new(Vec::new()),
+            decoder: flate2::write::GzDecoder::new(LimitedWriter::new(max_size)),
         }
     }
 }
@@ -388,31 +430,26 @@ impl GzipDecompressor {
 impl Decompressor for GzipDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
-        // Cap the internal buffer before decompressing to prevent transient
-        // unbounded allocation from decompression bombs.  The cap is the
-        // remaining budget (max_size - total) plus a small margin so flate2
-        // can finish a partial block without hitting an artificial limit.
-        if let Some(max) = self.max_size {
-            let remaining = max.saturating_sub(self.total).saturating_add(4096);
-            let buf = self.decoder.get_mut();
-            if buf.capacity() > remaining {
-                buf.shrink_to(remaining);
-            }
-        }
+
+        let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
+        self.decoder.get_mut().max_size = remaining;
+
         self.decoder.write_all(input)?;
         self.decoder.flush()?;
-        let buf = std::mem::take(self.decoder.get_mut());
+        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.extend_from_slice(&buf);
+        output.append(&mut buf);
         Ok(())
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
-        let mut dummy = flate2::write::GzDecoder::new(Vec::new());
+        let mut dummy = flate2::write::GzDecoder::new(LimitedWriter::new(None));
         std::mem::swap(&mut self.decoder, &mut dummy);
-        let buf = dummy.finish()?;
+        dummy.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
+
+        let mut buf = dummy.finish()?.inner;
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.extend_from_slice(&buf);
+        output.append(&mut buf);
         Ok(())
     }
 
@@ -497,7 +534,7 @@ impl Compressor for DeflateCompressor {
 pub struct DeflateDecompressor {
     max_size: Option<usize>,
     total: usize,
-    decoder: flate2::write::DeflateDecoder<Vec<u8>>,
+    decoder: flate2::write::DeflateDecoder<LimitedWriter>,
 }
 
 #[cfg(feature = "compression")]
@@ -508,7 +545,7 @@ impl DeflateDecompressor {
         Self {
             max_size,
             total: 0,
-            decoder: flate2::write::DeflateDecoder::new(Vec::new()),
+            decoder: flate2::write::DeflateDecoder::new(LimitedWriter::new(max_size)),
         }
     }
 }
@@ -517,29 +554,26 @@ impl DeflateDecompressor {
 impl Decompressor for DeflateDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
-        // Cap the internal buffer before decompressing to prevent transient
-        // unbounded allocation from decompression bombs.
-        if let Some(max) = self.max_size {
-            let remaining = max.saturating_sub(self.total).saturating_add(4096);
-            let buf = self.decoder.get_mut();
-            if buf.capacity() > remaining {
-                buf.shrink_to(remaining);
-            }
-        }
+
+        let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
+        self.decoder.get_mut().max_size = remaining;
+
         self.decoder.write_all(input)?;
         self.decoder.flush()?;
-        let buf = std::mem::take(self.decoder.get_mut());
+        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.extend_from_slice(&buf);
+        output.append(&mut buf);
         Ok(())
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
-        let mut dummy = flate2::write::DeflateDecoder::new(Vec::new());
+        let mut dummy = flate2::write::DeflateDecoder::new(LimitedWriter::new(None));
         std::mem::swap(&mut self.decoder, &mut dummy);
-        let buf = dummy.finish()?;
+        dummy.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
+
+        let mut buf = dummy.finish()?.inner;
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.extend_from_slice(&buf);
+        output.append(&mut buf);
         Ok(())
     }
 
@@ -630,7 +664,7 @@ impl Compressor for BrotliCompressor {
 pub struct BrotliDecompressor {
     max_size: Option<usize>,
     total: usize,
-    decoder: brotli::DecompressorWriter<Vec<u8>>,
+    decoder: brotli::DecompressorWriter<LimitedWriter>,
     finished: bool,
 }
 
@@ -642,7 +676,10 @@ impl BrotliDecompressor {
         Self {
             max_size,
             total: 0,
-            decoder: brotli::DecompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE),
+            decoder: brotli::DecompressorWriter::new(
+                LimitedWriter::new(max_size),
+                BROTLI_BUFFER_SIZE,
+            ),
             finished: false,
         }
     }
@@ -652,21 +689,15 @@ impl BrotliDecompressor {
 impl Decompressor for BrotliDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
-        if let Some(max) = self.max_size {
-            let remaining = max
-                .saturating_sub(self.total)
-                .saturating_add(BROTLI_BUFFER_SIZE);
-            let buf = self.decoder.get_mut();
-            if buf.capacity() > remaining {
-                buf.shrink_to(remaining);
-            }
-        }
+
+        let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
+        self.decoder.get_mut().max_size = remaining;
+
         self.decoder.write_all(input)?;
         self.decoder.flush()?;
-        let buf = self.decoder.get_mut();
+        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.extend_from_slice(buf);
-        buf.clear();
+        output.append(&mut buf);
         Ok(())
     }
 
@@ -675,11 +706,15 @@ impl Decompressor for BrotliDecompressor {
         if self.finished {
             return Ok(());
         }
+
+        let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
+        self.decoder.get_mut().max_size = remaining;
+
         self.decoder.flush()?;
         self.decoder.close()?;
-        let buf = std::mem::take(self.decoder.get_mut());
+        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.extend_from_slice(&buf);
+        output.append(&mut buf);
         self.finished = true;
         Ok(())
     }
@@ -1299,7 +1334,7 @@ mod tests {
         let mut dec = GzipDecompressor {
             max_size: None,
             total: usize::MAX,
-            decoder: flate2::write::GzDecoder::new(Vec::new()),
+            decoder: flate2::write::GzDecoder::new(LimitedWriter::new(None)),
         };
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
@@ -1397,7 +1432,7 @@ mod tests {
         let mut dec = DeflateDecompressor {
             max_size: None,
             total: usize::MAX,
-            decoder: flate2::write::DeflateDecoder::new(Vec::new()),
+            decoder: flate2::write::DeflateDecoder::new(LimitedWriter::new(None)),
         };
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
@@ -1581,7 +1616,7 @@ mod tests {
         let mut dec = BrotliDecompressor {
             max_size: None,
             total: usize::MAX,
-            decoder: brotli::DecompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE),
+            decoder: brotli::DecompressorWriter::new(LimitedWriter::new(None), BROTLI_BUFFER_SIZE),
             finished: false,
         };
         let mut decompressed = Vec::new();
