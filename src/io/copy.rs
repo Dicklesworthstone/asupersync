@@ -85,7 +85,7 @@ where
         let mut steps = 0;
 
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 this.completed = true;
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
@@ -266,7 +266,7 @@ where
         let mut steps = 0;
 
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 this.completed = true;
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
@@ -418,7 +418,7 @@ where
         let mut steps = 0;
 
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 this.completed = true;
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
@@ -766,6 +766,14 @@ where
 
         // Poll both directions, interleaved, until both block or are done
         loop {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                this.completed = true;
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
+
             // Check yield budget to prevent starvation
             if steps >= YIELD_BUDGET {
                 cx.waker().wake_by_ref();

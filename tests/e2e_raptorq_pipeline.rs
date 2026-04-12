@@ -15,6 +15,7 @@ use asupersync::security::{AuthenticatedSymbol, AuthenticationTag};
 use asupersync::types::{RegionId, TaskId, Time};
 use asupersync::util::DetRng;
 use common::e2e_harness::E2eLabHarness;
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,6 +71,36 @@ fn encode_snapshot(snapshot: &RegionSnapshot, symbol_size: u16, seed: u64) -> En
     StateEncoder::new(config, DetRng::new(seed))
         .encode(snapshot, Time::ZERO)
         .expect("encoding should succeed")
+}
+
+fn deterministic_exact_budget_symbols(
+    encoded: &EncodedState,
+) -> (Vec<AuthenticatedSymbol>, BTreeMap<u8, usize>) {
+    let mut repair_counts = BTreeMap::new();
+    for symbol in encoded.repair_symbols() {
+        *repair_counts.entry(symbol.id().sbn()).or_insert(0usize) += 1;
+    }
+
+    let mut dropped_source_counts = BTreeMap::new();
+    let mut kept = Vec::with_capacity(encoded.min_symbols_for_decode() as usize);
+    for symbol in &encoded.symbols {
+        if symbol.kind().is_source() {
+            let block = symbol.id().sbn();
+            let drop_budget = repair_counts.get(&block).copied().unwrap_or(0);
+            let dropped = dropped_source_counts.entry(block).or_insert(0);
+            if *dropped < drop_budget {
+                *dropped += 1;
+                continue;
+            }
+        }
+
+        kept.push(AuthenticatedSymbol::new_verified(
+            symbol.clone(),
+            AuthenticationTag::zero(),
+        ));
+    }
+
+    (kept, dropped_source_counts)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +278,77 @@ fn e2e_raptorq_deterministic_encoding() {
         "different seed produces different encoding",
         true,
         any_different
+    );
+
+    let root = h.create_root();
+    h.spawn(root, async {});
+    h.run_until_quiescent();
+    h.finish();
+}
+
+// ---------------------------------------------------------------------------
+// T4.1d: Deterministic exact-budget recovery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_raptorq_recovery_exact_budget_deterministic() {
+    let mut h = E2eLabHarness::new(
+        "e2e_raptorq_recovery_exact_budget_deterministic",
+        0xE2E4_1004,
+    );
+    h.phase("setup");
+
+    let snapshot = make_realistic_snapshot(50, 5);
+    let original_hash = snapshot.content_hash();
+
+    h.phase("encode");
+    let encoded = encode_snapshot(&snapshot, 64, 0xE2E4_1004);
+
+    h.phase("select exact decode budget");
+    let (kept_symbols, dropped_source_counts) = deterministic_exact_budget_symbols(&encoded);
+    let total_symbols = encoded.symbols.len();
+    let kept_count = kept_symbols.len();
+    let dropped_count = total_symbols - kept_count;
+    let min_symbols = encoded.min_symbols_for_decode() as usize;
+
+    tracing::info!(
+        total_symbols,
+        kept_count,
+        dropped_count,
+        min_symbols,
+        dropped_source_counts = ?dropped_source_counts,
+        "selected deterministic exact-budget symbol set"
+    );
+
+    assert_with_log!(
+        kept_count == min_symbols,
+        "kept symbol count matches exact decode budget",
+        min_symbols,
+        kept_count
+    );
+    assert_with_log!(
+        dropped_count == usize::from(encoded.repair_count),
+        "dropped source count matches total repair budget",
+        usize::from(encoded.repair_count),
+        dropped_count
+    );
+
+    h.phase("decode");
+    let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+    for symbol in &kept_symbols {
+        decoder.add_symbol(symbol).unwrap();
+    }
+    let recovered = decoder
+        .decode_snapshot(&encoded.params)
+        .expect("decode should succeed at exact budget");
+
+    h.phase("verify");
+    let recovered_hash = recovered.content_hash();
+    assert_with_log!(
+        original_hash == recovered_hash,
+        "byte-perfect recovery at exact budget",
+        original_hash,
+        recovered_hash
     );
 
     let root = h.create_root();
