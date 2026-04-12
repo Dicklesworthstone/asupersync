@@ -351,7 +351,12 @@ impl Caveat {
     pub fn chain_bytes(&self) -> Vec<u8> {
         match self {
             Self::FirstParty { predicate } => predicate.to_bytes(),
-            Self::ThirdParty { vid, .. } => vid.clone(),
+            Self::ThirdParty { vid, identifier, .. } => {
+                let mut bytes = Vec::with_capacity(vid.len() + identifier.len());
+                bytes.extend_from_slice(vid);
+                bytes.extend_from_slice(identifier.as_bytes());
+                bytes
+            }
         }
     }
 
@@ -494,7 +499,10 @@ impl MacaroonToken {
     ) -> Self {
         let vid = xor_pad(self.signature.as_bytes(), caveat_key.as_bytes());
         let current_key = AuthKey::from_bytes(*self.signature.as_bytes());
-        let new_sig = hmac_compute(&current_key, &vid);
+        let mut chain_bytes = Vec::with_capacity(vid.len() + tp_identifier.len());
+        chain_bytes.extend_from_slice(&vid);
+        chain_bytes.extend_from_slice(tp_identifier.as_bytes());
+        let new_sig = hmac_compute(&current_key, &chain_bytes);
         self.signature = MacaroonSignature::from_bytes(*new_sig.as_bytes());
         self.caveats.push(Caveat::ThirdParty {
             location: location.to_string(),
@@ -716,7 +724,10 @@ impl MacaroonToken {
             )
             .map_err(|err| Self::map_discharge_error(index, tp_id, err))?;
 
-        Ok(hmac_compute(sig, vid))
+        let mut chain_bytes = Vec::with_capacity(vid.len() + tp_id.len());
+        chain_bytes.extend_from_slice(vid);
+        chain_bytes.extend_from_slice(tp_id.as_bytes());
+        Ok(hmac_compute(sig, &chain_bytes))
     }
 
     fn find_discharge<'a>(
