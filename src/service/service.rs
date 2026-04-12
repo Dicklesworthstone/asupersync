@@ -785,7 +785,7 @@ where
         use std::future::poll_fn;
 
         // Check if already cancelled
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(TowerAdapterError::Cancelled);
         }
 
@@ -820,7 +820,7 @@ where
         }
 
         // Check cancellation again before calling
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(TowerAdapterError::Cancelled);
         }
 
@@ -842,7 +842,7 @@ where
                 let result = future.await.map_err(TowerAdapterError::Service);
 
                 // After completion, check if we were cancelled
-                if cx.is_cancel_requested() {
+                if cx.checkpoint().is_err() {
                     // In strict mode, we report this as an error
                     return Err(TowerAdapterError::CancellationIgnored);
                 }

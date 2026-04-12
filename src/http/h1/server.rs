@@ -357,7 +357,7 @@ where
                 break;
             }
 
-            if Cx::current().is_some_and(|cx| cx.is_cancel_requested()) {
+            if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
                 state.phase = ConnectionPhase::Closing;
                 break;
             }

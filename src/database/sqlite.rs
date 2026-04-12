@@ -456,7 +456,7 @@ impl SqliteConnection {
     /// If cancelled during execution, the connection may or may not be opened.
     pub async fn open(cx: &Cx, path: impl AsRef<Path>) -> Outcome<Self, SqliteError> {
         // Check for cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -510,7 +510,7 @@ impl SqliteConnection {
     /// This operation checks for cancellation before starting.
     pub async fn open_in_memory(cx: &Cx) -> Outcome<Self, SqliteError> {
         // Check for cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -570,7 +570,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -633,7 +633,7 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn execute_batch(&self, cx: &Cx, sql: &str) -> Outcome<(), SqliteError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -695,7 +695,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Vec<SqliteRow>, SqliteError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -798,7 +798,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Option<SqliteRow>, SqliteError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -945,7 +945,7 @@ impl SqliteConnection {
 
     /// Updates SQLite busy timeout for lock-contention retries.
     pub async fn set_busy_timeout(&self, cx: &Cx, timeout: Duration) -> Outcome<(), SqliteError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),

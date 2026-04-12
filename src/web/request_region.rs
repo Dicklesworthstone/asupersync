@@ -99,7 +99,7 @@ impl<'a> RequestRegion<'a> {
         };
 
         // Check cancellation before running the handler.
-        if self.cx.is_cancel_requested() {
+        if self.cx.checkpoint().is_err() {
             return RegionOutcome::Cancelled;
         }
 
@@ -108,7 +108,7 @@ impl<'a> RequestRegion<'a> {
 
         match result {
             Ok(response) => {
-                if self.cx.is_cancel_requested() {
+                if self.cx.checkpoint().is_err() {
                     RegionOutcome::Cancelled
                 } else {
                     RegionOutcome::Ok(response)
@@ -140,7 +140,7 @@ impl<'a> RequestRegion<'a> {
             request: &self.request,
         };
 
-        if self.cx.is_cancel_requested() {
+        if self.cx.checkpoint().is_err() {
             return RegionOutcome::Cancelled;
         }
 
@@ -148,14 +148,14 @@ impl<'a> RequestRegion<'a> {
 
         match result {
             Ok(Ok(response)) => {
-                if self.cx.is_cancel_requested() {
+                if self.cx.checkpoint().is_err() {
                     RegionOutcome::Cancelled
                 } else {
                     RegionOutcome::Ok(response)
                 }
             }
             Ok(Err(err)) => {
-                if self.cx.is_cancel_requested() {
+                if self.cx.checkpoint().is_err() {
                     RegionOutcome::Cancelled
                 } else {
                     RegionOutcome::Error(err)

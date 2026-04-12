@@ -630,7 +630,7 @@ where
             // WARNING: We must NOT force-drop the inner future if we are in Polling state,
             // because asupersync requires futures to be drained to Outcome::Cancelled.
             let cancel_reason = Cx::current().and_then(|c| {
-                if c.is_cancel_requested() {
+                if c.checkpoint().is_err() {
                     Some(c.cancel_reason().unwrap_or_default())
                 } else {
                     None

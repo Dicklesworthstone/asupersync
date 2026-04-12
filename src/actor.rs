@@ -708,7 +708,7 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
     /// Checks both actor stopping flag and Cx cancellation.
     #[must_use]
     pub fn is_cancel_requested(&self) -> bool {
-        self.stopping || self.cx.is_cancel_requested()
+        self.stopping || self.cx.checkpoint().is_err()
     }
 
     /// Returns the current budget.
@@ -803,7 +803,7 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // Phase 2: Message loop
     loop {
         // Check for cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             cx.trace("actor::cancel_requested");
             break;
         }
@@ -842,7 +842,7 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
 
     cell.state.store(ActorState::Stopping);
 
-    let is_aborted = cx.is_cancel_requested();
+    let is_aborted = cx.checkpoint().is_err();
 
     // Phase 3: Drain remaining buffered messages.
     // Two-phase mailbox guarantee: no message silently dropped (unless aborted).
@@ -1824,7 +1824,7 @@ mod tests {
         // Request stop
         ctx.stop_self();
         assert!(ctx.is_stopping());
-        assert!(ctx.checkpoint().is_err());
+        assert!(ctx.is_cancel_requested());
         assert!(ctx.is_cancel_requested());
 
         crate::test_complete!("actor_context_stopping");

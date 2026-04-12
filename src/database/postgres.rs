@@ -1820,7 +1820,7 @@ impl PgConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn connect(cx: &Cx, url: &str) -> Outcome<Self, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
         }
 
@@ -1837,7 +1837,7 @@ impl PgConnection {
         cx: &Cx,
         options: PgConnectOptions,
     ) -> Outcome<Self, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
         }
 
@@ -1894,7 +1894,7 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
         }
 
@@ -2054,7 +2054,7 @@ impl PgConnection {
     /// Handle the authentication handshake.
     async fn authenticate(&mut self, cx: &Cx, options: &PgConnectOptions) -> Result<(), PgError> {
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
             }
 
@@ -2165,7 +2165,7 @@ impl PgConnection {
         let msg = buf.build_message(FrontendMessage::Password as u8)?;
         self.write_all(&msg).await?;
 
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(PgError::Cancelled(cancelled_reason(cx)));
         }
 
@@ -2198,7 +2198,7 @@ impl PgConnection {
         let msg = buf.build_message(FrontendMessage::Password as u8)?;
         self.write_all(&msg).await?;
 
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(PgError::Cancelled(cancelled_reason(cx)));
         }
 
@@ -2227,7 +2227,7 @@ impl PgConnection {
         // Verify server signature
         scram.verify_server_final(server_final)?;
 
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(PgError::Cancelled(cancelled_reason(cx)));
         }
 
@@ -2282,7 +2282,7 @@ impl PgConnection {
     /// Wait for ReadyForQuery message (handles ParameterStatus, BackendKeyData).
     async fn wait_for_ready(&mut self, cx: &Cx) -> Result<(), PgError> {
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
             }
 
@@ -2328,7 +2328,7 @@ impl PgConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -2366,7 +2366,7 @@ impl PgConnection {
         let mut rows = Vec::with_capacity(16);
 
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
@@ -2454,7 +2454,7 @@ impl PgConnection {
 
     /// Execute a command (INSERT, UPDATE, DELETE) and return affected rows.
     pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -2490,7 +2490,7 @@ impl PgConnection {
         let mut affected_rows = 0u64;
 
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
@@ -2608,7 +2608,7 @@ impl PgConnection {
         sql: &str,
         params: &[&dyn ToSql],
     ) -> Outcome<Vec<PgRow>, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -2701,7 +2701,7 @@ impl PgConnection {
         sql: &str,
         params: &[&dyn ToSql],
     ) -> Outcome<u64, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -2767,7 +2767,7 @@ impl PgConnection {
     /// conn.close_statement(cx, &stmt).await?;
     /// ```
     pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<PgStatement, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -2816,7 +2816,7 @@ impl PgConnection {
         let mut columns = Vec::new();
 
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
@@ -2872,7 +2872,7 @@ impl PgConnection {
         stmt: &PgStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<Vec<PgRow>, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -2927,7 +2927,7 @@ impl PgConnection {
         stmt: &PgStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<u64, PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -2972,7 +2972,7 @@ impl PgConnection {
 
     /// Close a prepared statement, freeing server-side resources.
     pub async fn close_statement(&mut self, cx: &Cx, stmt: &PgStatement) -> Outcome<(), PgError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -3007,7 +3007,7 @@ impl PgConnection {
         }
 
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
@@ -3479,7 +3479,7 @@ impl PgConnection {
         let mut rows = Vec::with_capacity(16);
 
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
@@ -3544,7 +3544,7 @@ impl PgConnection {
         let mut affected_rows = 0u64;
 
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
@@ -3591,7 +3591,7 @@ impl PgConnection {
     /// connection hit an I/O error before reaching synchronization.
     async fn drain_to_ready(&mut self, cx: &Cx) -> Result<(), PgError> {
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
             }
             let (msg_type, data) = self.read_message().await?;

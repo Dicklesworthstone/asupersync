@@ -412,7 +412,7 @@ where
     /// be closed if cancellation occurs mid-send.
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             let timeout_duration = self.close_handshake.close_timeout();
             let current_time = || {
                 cx.timer_driver()
@@ -447,7 +447,7 @@ where
         let frame = Frame::from(msg);
         match self.send_frame_with_entropy(&frame, cx.entropy()).await {
             Err(WsError::Io(e))
-                if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() =>
+                if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
             {
                 let timeout_duration = self.close_handshake.close_timeout();
                 let current_time = || {
@@ -479,7 +479,7 @@ where
     pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
         loop {
             // Check cancellation
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 let timeout_duration = self.close_handshake.close_timeout();
                 let current_time = || {
                     cx.timer_driver()
@@ -557,7 +557,7 @@ where
                 let n = match self.read_more().await {
                     Ok(n) => n,
                     Err(WsError::Io(e))
-                        if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() =>
+                        if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
                     {
                         continue;
                     }
@@ -804,7 +804,7 @@ async fn read_some_io<IO: AsyncRead + Unpin>(
     use std::future::poll_fn;
 
     poll_fn(|cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
             return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
@@ -845,7 +845,7 @@ impl WebSocket<TcpStream> {
         }
 
         // Check cancellation before connecting
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(WsConnectError::Cancelled);
         }
 
@@ -888,7 +888,7 @@ impl WebSocket<TcpStream> {
         }
 
         // Check cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(WsConnectError::Cancelled);
         }
 
@@ -916,7 +916,7 @@ impl WebSocket<TcpStream> {
 }
 
 fn map_tcp_connect_error(cx: &Cx, err: io::Error) -> WsConnectError {
-    if err.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() {
+    if err.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() {
         WsConnectError::Cancelled
     } else {
         WsConnectError::Io(err)
@@ -1507,6 +1507,31 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_tcp_connect_stays_io_when_cx_is_cancelled_but_masked() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let err = cx.masked(|| {
+            super::map_tcp_connect_error(
+                &cx,
+                io::Error::new(io::ErrorKind::Interrupted, "cancelled"),
+            )
+        });
+
+        assert!(
+            matches!(err, WsConnectError::Io(ref io_err) if io_err.kind() == io::ErrorKind::Interrupted)
+        );
+        assert!(
+            cx.is_cancel_requested(),
+            "masking should defer, not clear, the pending cancellation"
+        );
+        assert!(
+            cx.checkpoint().is_err(),
+            "cancellation must still be observed once the mask is released"
+        );
+    }
+
+    #[test]
     fn message_constructors() {
         let msg = Message::text("hello");
         assert!(matches!(msg, Message::Text(s) if s == "hello"));
@@ -1900,6 +1925,33 @@ mod tests {
             None,
             Some(entropy),
         )
+    }
+
+    #[test]
+    fn send_ignores_cancel_while_masked() {
+        let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0xAA, 0xBB, 0xCC, 0xDD]));
+        let cx = test_cx_with_entropy(Arc::clone(&entropy));
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx.clone()));
+        let mut ws = WebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default());
+        let masked = Message::text("masked");
+
+        cx.masked(|| future::block_on(ws.send(&cx, masked.clone())))
+            .expect("masked send should defer cancellation");
+
+        assert_eq!(
+            ws.io.written,
+            encode_client_frame_with_entropy(&Frame::from(masked), entropy.as_ref()),
+            "masked send should still flush the original frame"
+        );
+        assert!(
+            cx.is_cancel_requested(),
+            "masked send must not clear the pending cancellation"
+        );
+        assert!(
+            cx.checkpoint().is_err(),
+            "cancellation must still surface after the mask is released"
+        );
     }
 
     #[test]

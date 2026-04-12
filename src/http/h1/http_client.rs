@@ -131,7 +131,7 @@ impl ClientError {
 
 /// Check if the Cx has been cancelled and return `ClientError::Cancelled` if so.
 fn check_cx(cx: &Cx) -> Result<(), ClientError> {
-    if cx.is_cancel_requested() {
+    if cx.checkpoint().is_err() {
         Err(ClientError::Cancelled)
     } else {
         Ok(())

@@ -240,7 +240,8 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     // Ensure the underlying I/O stream is flushed
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {            return Poll::Ready(Err(std::io::Error::new(
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             )));
@@ -268,7 +269,8 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
 
     let is_open = shared.lock().close_handshake.is_open();
     let n = poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {            return Poll::Ready(Err(std::io::Error::new(
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             )));
@@ -297,7 +299,8 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
 
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {            return Poll::Ready(Err(std::io::Error::new(
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             )));
@@ -411,7 +414,7 @@ where
     pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
         loop {
             // Check cancellation
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -648,7 +651,7 @@ where
     /// be closed if cancellation occurs mid-send.
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
@@ -1361,6 +1364,35 @@ mod tests {
                 "later flushes must not emit bytes from a cancelled split send"
             );
         });
+    }
+
+    #[test]
+    fn write_half_send_ignores_cancel_while_masked() {
+        let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read, mut write) = ws.split();
+        let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0xDE, 0xAD, 0xBE, 0xEF]));
+        let cx = test_cx_with_entropy(Arc::clone(&entropy));
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx.clone()));
+        let masked = Message::text("masked");
+
+        cx.masked(|| future::block_on(write.send(&cx, masked.clone())))
+            .expect("masked split send should defer cancellation");
+
+        let ws = read.reunite(write).expect("split halves must reunite");
+        assert_eq!(
+            ws.io.written,
+            encode_client_frame_with_entropy(&Frame::from(masked), entropy.as_ref()),
+            "masked split send should still flush the original frame"
+        );
+        assert!(
+            cx.is_cancel_requested(),
+            "masked send must not clear the pending cancellation"
+        );
+        assert!(
+            cx.checkpoint().is_err(),
+            "cancellation must still surface after the mask is released"
+        );
     }
 
     #[test]

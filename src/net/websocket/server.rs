@@ -144,7 +144,7 @@ impl WebSocketAcceptor {
         IO: AsyncRead + AsyncWrite + Unpin,
     {
         // Check cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(WsAcceptError::Cancelled);
         }
 
@@ -155,7 +155,7 @@ impl WebSocketAcceptor {
         let accept_response = self.handshake.accept(&request)?;
 
         // Check cancellation before sending response
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(WsAcceptError::Cancelled);
         }
 
@@ -183,7 +183,7 @@ impl WebSocketAcceptor {
         IO: AsyncRead + AsyncWrite + Unpin,
     {
         // Check cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(WsAcceptError::Cancelled);
         }
 
@@ -191,7 +191,7 @@ impl WebSocketAcceptor {
         let accept_response = self.handshake.accept(request)?;
 
         // Check cancellation before sending response
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Err(WsAcceptError::Cancelled);
         }
 
@@ -314,7 +314,7 @@ where
     /// be closed if cancellation occurs mid-send.
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             let timeout_duration = self.close_handshake.close_timeout();
             let current_time = || {
                 cx.timer_driver()
@@ -349,7 +349,7 @@ where
         let frame = Frame::from(msg);
         match self.send_frame(frame).await {
             Err(WsError::Io(e))
-                if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() =>
+                if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
             {
                 let timeout_duration = self.close_handshake.close_timeout();
                 let current_time = || {
@@ -381,7 +381,7 @@ where
     pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
         loop {
             // Check cancellation
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 let timeout_duration = self.close_handshake.close_timeout();
                 let current_time = || {
                     cx.timer_driver()
@@ -456,7 +456,7 @@ where
                 let n = match self.read_more().await {
                     Ok(n) => n,
                     Err(WsError::Io(e))
-                        if e.kind() == io::ErrorKind::Interrupted && cx.is_cancel_requested() =>
+                        if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
                     {
                         continue;
                     }
@@ -681,7 +681,7 @@ async fn read_some_io<IO: AsyncRead + Unpin>(
     use std::future::poll_fn;
 
     poll_fn(|cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.is_cancel_requested()) {
+        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
             return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
@@ -1148,6 +1148,38 @@ mod tests {
         fn wake(self: Arc<Self>) {}
 
         fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    #[test]
+    fn send_ignores_cancel_while_masked() {
+        let accept = AcceptResponse {
+            accept_key: String::new(),
+            protocol: None,
+            extensions: Vec::new(),
+        };
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx.clone()));
+        let mut ws =
+            ServerWebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default(), accept, &[]);
+        let masked = Message::text("masked");
+
+        cx.masked(|| future::block_on(ws.send(&cx, masked.clone())))
+            .expect("masked server send should defer cancellation");
+
+        assert_eq!(
+            ws.io.written,
+            encode_server_frame(Frame::from(masked)),
+            "masked server send should still flush the original frame"
+        );
+        assert!(
+            cx.is_cancel_requested(),
+            "masked send must not clear the pending cancellation"
+        );
+        assert!(
+            cx.checkpoint().is_err(),
+            "cancellation must still surface after the mask is released"
+        );
     }
 
     #[test]

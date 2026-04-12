@@ -1090,7 +1090,7 @@ impl MySqlConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn connect(cx: &Cx, url: &str) -> Outcome<Self, MySqlError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -1110,7 +1110,7 @@ impl MySqlConnection {
         cx: &Cx,
         options: MySqlConnectOptions,
     ) -> Outcome<Self, MySqlError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -1466,7 +1466,7 @@ impl MySqlConnection {
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -1634,7 +1634,7 @@ impl MySqlConnection {
         let mut rows = Vec::new();
 
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 // The server is still streaming row packets. Mark the
                 // connection as closed to prevent protocol desync on reuse
                 // (same as the max-rows guard below).
@@ -1896,7 +1896,7 @@ impl MySqlConnection {
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
     pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -1993,7 +1993,7 @@ impl MySqlConnection {
 
     /// Ping the server.
     pub async fn ping(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
-        if cx.is_cancel_requested() {
+        if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),

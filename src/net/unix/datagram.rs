@@ -1408,6 +1408,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_cancelled_datagram_ops_return_interrupted_without_registration() {
         use crate::cx::Cx;
 

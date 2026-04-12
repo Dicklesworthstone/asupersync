@@ -875,7 +875,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
         while !duration.is_zero() {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return false;
             }
 
@@ -884,7 +884,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             duration = duration.saturating_sub(chunk);
         }
 
-        !cx.is_cancel_requested()
+        !cx.checkpoint().is_err()
     }
 
     /// Acquire a connection from the pool.
@@ -893,7 +893,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
         loop {
-            if cx.is_cancel_requested() {
+            if cx.checkpoint().is_err() {
                 return Err(DbPoolError::Timeout);
             }
 
@@ -930,7 +930,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         .is_valid(cx, guard.conn.as_mut().unwrap())
                         .await;
 
-                    if cx.is_cancel_requested() {
+                    if cx.checkpoint().is_err() {
                         return Err(DbPoolError::Timeout);
                     }
 
@@ -963,7 +963,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
             match self.manager.connect(cx).await {
                 Outcome::Ok(conn) => {
-                    if cx.is_cancel_requested() {
+                    if cx.checkpoint().is_err() {
                         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                         self.manager.disconnect(conn);
                         return Err(DbPoolError::Timeout);
@@ -1007,7 +1007,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     let remaining = std::time::Duration::from_nanos(
                         deadline.duration_since(crate::time::wall_now()),
                     );
-                    if remaining.is_zero() || cx.is_cancel_requested() {
+                    if remaining.is_zero() || cx.checkpoint().is_err() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
                     }
@@ -1018,7 +1018,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         return Err(DbPoolError::Timeout);
                     }
 
-                    if crate::time::wall_now() >= deadline || cx.is_cancel_requested() {
+                    if crate::time::wall_now() >= deadline || cx.checkpoint().is_err() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
                     }
