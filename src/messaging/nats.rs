@@ -685,6 +685,12 @@ impl NatsClient {
     async fn read_more(&mut self) -> Result<(), NatsError> {
         let mut tmp = [0u8; 4096];
         let n = std::future::poll_fn(|task_cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
             let mut read_buf = ReadBuf::new(&mut tmp);
             match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
                 Poll::Pending => Poll::Pending,

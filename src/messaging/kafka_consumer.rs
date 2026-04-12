@@ -913,6 +913,9 @@ impl KafkaConsumer {
                 }
 
                 () = std::future::poll_fn(|task_cx| {
+                    if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(());
+                    }
                     if Pin::new(&mut sleep).poll(task_cx).is_ready() {
                         return Poll::Ready(());
                     }
@@ -961,6 +964,9 @@ impl KafkaConsumer {
                 }
 
                 () = std::future::poll_fn(|task_cx| {
+                    if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(());
+                    }
                     if Pin::new(&mut sleep).poll(task_cx).is_ready() {
                         return Poll::Ready(());
                     }
