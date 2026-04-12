@@ -257,7 +257,7 @@
         "pending_blockers": [
           "Current high-confidence guardrail packet (artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json) still records `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
           "Current broader raw-sample successor packet (artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json) is now published, and it explicitly remains non-closure-grade (`raw_sample_favorable_not_closure_grade`): combined same-run median/p95/p99 improve, addmul improves across all three metrics, and mul tails improve, but mul medians remain mixed and highconf_v1 still owns the narrowed not-ready closure status. artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json remains the historical short-window directional packet, artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json remains the historical broader interval-proxy negative guardrail, and artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json remains the historical broader mixed-signal packet.",
-          "Current broader negative-guardrail contract: raw_sample_mixed_signal_not_closure_grade",
+          "Current broader raw-sample successor contract: raw_sample_favorable_not_closure_grade",
           "current broader raw-sample successor packet"
         ]
       },
@@ -268,7 +268,7 @@
         "post_change_command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-post cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
       },
       "measured_comparator_artifacts": [
-        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json"
       ]
     },

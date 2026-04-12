@@ -3355,8 +3355,8 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
     assert!(
         artifact_refs
             .iter()
-            .any(|entry| entry.contains("raptorq_track_e_gf256_multiscenario_refresh_v4.json")),
-        "E5 decision card must reference the current broader multiscenario negative guardrail artifact"
+            .any(|entry| entry.contains("raptorq_track_e_gf256_multiscenario_refresh_v5.json")),
+        "E5 decision card must reference the current broader raw-sample successor artifact"
     );
     assert!(
         pending_blockers.iter().any(|entry| {
@@ -3368,8 +3368,8 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
     assert!(
         pending_blockers
             .iter()
-            .any(|entry| entry.contains("raw_sample_mixed_signal_not_closure_grade")),
-        "E5 pending blockers must preserve the current broader negative-guardrail contract"
+            .any(|entry| entry.contains("raw_sample_favorable_not_closure_grade")),
+        "E5 pending blockers must preserve the current broader raw-sample successor contract"
     );
     assert!(
         pending_blockers
@@ -3386,8 +3386,8 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
         "G3 closure remains blocked by E5",
         "new artifact/schema version",
         "highconf_v1",
-        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
-        "raw_sample_mixed_signal_not_closure_grade",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
+        "raw_sample_favorable_not_closure_grade",
     ] {
         assert!(
             RAPTORQ_OPT_DECISIONS_MD.contains(required),
@@ -3404,10 +3404,11 @@ fn e5_profile_pack_doc_explains_multiscenario_refresh_contract() {
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
-        "schema_version = raptorq-track-e-gf256-multiscenario-refresh-v4",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
+        "schema_version = raptorq-track-e-gf256-multiscenario-refresh-v5",
         "evidence_role = broader_multiscenario_raw_sample_successor_guardrail",
         "scope_contract = same_target_multi_scenario_raw_sample_corpus",
-        "confidence_contract = raw_sample_mixed_signal_not_closure_grade",
+        "confidence_contract = raw_sample_favorable_not_closure_grade",
         "candidate_addmul_window_only",
         "ready_for_e5_closure = false",
     ] {
@@ -4959,8 +4960,12 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 "track E status_reason must not name the closed historical E5 leaf"
             );
             assert!(
-                status_reason.contains("raptorq_track_e_gf256_multiscenario_refresh_v4.json"),
-                "track E status_reason must point at the current broader v4 blocker packet"
+                status_reason.contains("raptorq_track_e_gf256_multiscenario_refresh_v5.json"),
+                "track E status_reason must point at the current broader v5 successor packet"
+            );
+            assert!(
+                !status_reason.contains("raptorq_track_e_gf256_multiscenario_refresh_v4.json"),
+                "track E status_reason must not retain the historical v4 packet as the current blocker"
             );
 
             let evidence_refs = track["evidence_refs"]
@@ -4976,7 +4981,7 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 .collect::<BTreeSet<_>>();
             for required in [
                 "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
-                "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+                "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
                 "artifacts/raptorq_optimization_decision_records_v1.json",
             ] {
                 assert!(
@@ -5548,7 +5553,7 @@ fn h2_closure_packet_docs_are_cross_linked() {
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
         "artifacts/raptorq_replay_catalog_v1.json",
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
-        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
         "follow_up_ownership",
         "upstream_active_leaf_bead_ids",
         "track_signoff_owner",

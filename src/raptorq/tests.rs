@@ -103,6 +103,35 @@ fn builder_failure_context(
     .to_context_string()
 }
 
+fn select_first_decodable_prefix(
+    decoder: &crate::raptorq::decoder::InactivationDecoder,
+    constraints: &[crate::raptorq::decoder::ReceivedSymbol],
+    preferred_symbols: &[crate::raptorq::decoder::ReceivedSymbol],
+    minimum_symbols: usize,
+    context: &str,
+) -> Result<Vec<crate::raptorq::decoder::ReceivedSymbol>, String> {
+    let mut selected = Vec::with_capacity(preferred_symbols.len());
+    let mut received = constraints.to_vec();
+
+    for symbol in preferred_symbols {
+        let symbol = symbol.clone();
+        received.push(symbol.clone());
+        selected.push(symbol);
+        if selected.len() < minimum_symbols {
+            continue;
+        }
+        if decoder.decode(&received).is_ok() {
+            return Ok(selected);
+        }
+    }
+
+    Err(format!(
+        "{context} no decodable prefix found in deterministic candidate order \
+         (minimum_symbols={minimum_symbols}, candidates={})",
+        preferred_symbols.len()
+    ))
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -1103,8 +1132,7 @@ mod property_tests {
         }
     }
 
-    /// Property: roundtrip with random symbol drops should succeed if ≥ L symbols remain.
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// Property: deterministic repair promotion after drops yields a decodable subset.
     #[test]
     fn property_roundtrip_with_drops() {
         let k = 16;
@@ -1140,54 +1168,49 @@ mod property_tests {
             let context = failure_context(
                 "RQ-U-ADVERSARIAL-LOSS",
                 effective_seed,
-                &format!("k={k},symbol_size={symbol_size},truncate_to_l=true"),
+                &format!(
+                    "k={k},symbol_size={symbol_size},minimum_symbols={l},candidate_order=keep_then_repair"
+                ),
                 replay_ref,
             );
             let mut rng = DetRng::new(drop_seed + 1000);
 
-            // Randomly drop symbols but keep at least L
-            let mut kept: Vec<ReceivedSymbol> = all_symbols
-                .iter()
-                .filter(|_| !rng.next_u64().is_multiple_of(3)) // Drop ~33%
-                .cloned()
-                .collect();
-
-            // Ensure we have at least L symbols
-            if kept.len() < l {
-                // Add back enough symbols
-                for sym in &all_symbols {
-                    if kept.len() >= l {
-                        break;
-                    }
-                    if !kept.iter().any(|s| s.esi == sym.esi) {
-                        kept.push(sym.clone());
-                    }
+            // Keep surviving symbols first, then append dropped symbols in
+            // deterministic order until the prefix is decodable. This keeps a
+            // loss-shaped frontier without treating decode failures as pass-like.
+            let mut preferred: Vec<ReceivedSymbol> = Vec::with_capacity(all_symbols.len());
+            let mut dropped: Vec<ReceivedSymbol> = Vec::new();
+            for symbol in &all_symbols {
+                if rng.next_u64().is_multiple_of(3) {
+                    dropped.push(symbol.clone());
+                } else {
+                    preferred.push(symbol.clone());
                 }
             }
+            preferred.extend(dropped);
 
-            // Truncate to exactly L symbols to stress the decoder
-            kept.truncate(l);
+            let selected = super::select_first_decodable_prefix(
+                &decoder,
+                &constraints,
+                &preferred,
+                l,
+                &context,
+            )
+            .unwrap_or_else(|err| panic!("{err} for drop_seed={drop_seed}"));
 
-            // Always include constraint symbols
             let mut with_constraints = constraints.clone();
-            with_constraints.extend(kept);
+            with_constraints.extend(selected);
 
-            let result = decoder.decode(&with_constraints);
-
-            // Decode should succeed with exactly L symbols
-            match result {
-                Ok(decoded_result) => {
-                    assert_eq!(
-                        decoded_result.source, source,
-                        "{context} decoded source must match for drop_seed={drop_seed}"
-                    );
-                }
-                Err(e) => {
-                    // Some drop patterns may create singular matrices - that's acceptable
-                    // as long as we don't panic
-                    let _ = (e, &context);
-                }
-            }
+            let decoded_result = decoder.decode(&with_constraints).unwrap_or_else(|err| {
+                panic!(
+                    "{context} decode should succeed after deterministic repair promotion for \
+                     drop_seed={drop_seed}; got {err:?}"
+                )
+            });
+            assert_eq!(
+                decoded_result.source, source,
+                "{context} decoded source must match for drop_seed={drop_seed}"
+            );
         }
     }
 
@@ -1347,46 +1370,37 @@ mod fuzz {
             all_symbols.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        // Drop symbols
-        let mut kept: Vec<ReceivedSymbol> = Vec::new();
-        for sym in &all_symbols {
+        // Prefer symbols that survived the deterministic drop pass, then
+        // append dropped symbols in source/repair order until the prefix
+        // becomes decodable.
+        let mut preferred: Vec<ReceivedSymbol> = Vec::with_capacity(all_symbols.len());
+        let mut dropped: Vec<ReceivedSymbol> = Vec::new();
+        for symbol in &all_symbols {
             if rng.next_u64() % 100 >= drop_percent as u64 {
-                kept.push(sym.clone());
+                preferred.push(symbol.clone());
+            } else {
+                dropped.push(symbol.clone());
             }
         }
+        preferred.extend(dropped);
 
-        // Ensure at least L symbols
-        if kept.len() < l {
-            for sym in &all_symbols {
-                if kept.len() >= l {
-                    break;
-                }
-                if !kept.iter().any(|s| s.esi == sym.esi) {
-                    kept.push(sym.clone());
-                }
-            }
-        }
+        let selected =
+            super::select_first_decodable_prefix(&decoder, &constraints, &preferred, l, &context)?;
 
         // Include constraint symbols and decode
         let mut with_constraints = constraints;
-        with_constraints.extend(kept);
+        with_constraints.extend(selected);
 
         match decoder.decode(&with_constraints) {
-            Ok(result) => {
-                if result.source != source {
-                    return Err(format!(
-                        "{context} decoded source mismatch: got {} symbols, expected {}",
-                        result.source.len(),
-                        source.len()
-                    ));
-                }
-                Ok(())
-            }
-            Err(e) => {
-                // Some configurations may legitimately fail (singular matrix)
-                // This is not a bug, just a limitation of the received symbol set
-                Err(format!("{context} decode error (may be acceptable): {e:?}"))
-            }
+            Ok(result) if result.source == source => Ok(()),
+            Ok(result) => Err(format!(
+                "{context} decoded source mismatch: got {} symbols, expected {}",
+                result.source.len(),
+                source.len()
+            )),
+            Err(e) => Err(format!(
+                "{context} decode failed after deterministic repair promotion: {e:?}"
+            )),
         }
     }
 
@@ -1394,8 +1408,6 @@ mod fuzz {
     #[test]
     fn fuzz_varied_parameters() {
         let replay_ref = "replay:rq-u-systematic-fuzz-varied-v1";
-        let mut successes = 0;
-        let mut acceptable_failures = 0;
 
         // Test matrix covering various parameter combinations
         let configs: Vec<FuzzConfig> = vec![
@@ -1476,27 +1488,13 @@ mod fuzz {
         ];
 
         for config in &configs {
-            match run_fuzz_iteration(config, "RQ-U-ADVERSARIAL-LOSS", replay_ref) {
-                Ok(()) => successes += 1,
-                Err(e) => {
-                    if e.contains("acceptable") {
-                        acceptable_failures += 1;
-                    } else {
-                        panic!(
-                            "Fuzz failure for k={}, seed={}: {}",
-                            config.k, config.seed, e
-                        );
-                    }
-                }
-            }
+            run_fuzz_iteration(config, "RQ-U-ADVERSARIAL-LOSS", replay_ref).unwrap_or_else(|e| {
+                panic!(
+                    "Fuzz failure for k={}, seed={}: {}",
+                    config.k, config.seed, e
+                )
+            });
         }
-
-        // Most iterations should succeed
-        assert!(
-            successes >= configs.len() / 2,
-            "Too few successes: {successes}/{} (acceptable failures: {acceptable_failures})",
-            configs.len()
-        );
     }
 
     /// Fuzz encoder determinism (works without decoder).
