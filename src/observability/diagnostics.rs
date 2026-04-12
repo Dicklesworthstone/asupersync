@@ -22,9 +22,9 @@ use crate::console::Console;
 use crate::observability::spectral_health::{
     SpectralHealthMonitor, SpectralHealthReport, SpectralThresholds,
 };
+use crate::record::ObligationState;
 use crate::record::region::RegionState;
 use crate::record::task::TaskState;
-use crate::record::ObligationState;
 use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, trace, warn};
@@ -2650,9 +2650,11 @@ mod tests {
         assert_eq!(classified.event_class, AdvancedEventClass::CommandLifecycle);
         assert_eq!(classified.severity, AdvancedSeverity::Info);
         assert!(classified.conflicts.is_empty());
-        assert!(classified
-            .dimensions
-            .contains(&TroubleshootingDimension::OperatorAction));
+        assert!(
+            classified
+                .dimensions
+                .contains(&TroubleshootingDimension::OperatorAction)
+        );
     }
 
     #[test]
@@ -2751,10 +2753,12 @@ mod tests {
             TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION
         );
         assert_eq!(contract.unknown_bucket_key, "tail.unknown.unmeasured_ns");
-        assert!(contract
-            .required_log_fields
-            .iter()
-            .any(|field| field.key == contract.unknown_bucket_key && field.required));
+        assert!(
+            contract
+                .required_log_fields
+                .iter()
+                .any(|field| field.key == contract.unknown_bucket_key && field.required)
+        );
         assert!(contract.terms.iter().any(|term| {
             term.term_id == "unknown"
                 && term.direct_duration_key == "tail.unknown.unmeasured_ns"

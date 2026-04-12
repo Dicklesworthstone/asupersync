@@ -351,7 +351,9 @@ impl Caveat {
     pub fn chain_bytes(&self) -> Vec<u8> {
         match self {
             Self::FirstParty { predicate } => predicate.to_bytes(),
-            Self::ThirdParty { vid, identifier, .. } => {
+            Self::ThirdParty {
+                vid, identifier, ..
+            } => {
                 let mut bytes = Vec::with_capacity(vid.len() + identifier.len());
                 bytes.extend_from_slice(vid);
                 bytes.extend_from_slice(identifier.as_bytes());

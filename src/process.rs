@@ -1394,10 +1394,7 @@ impl AsyncWrite for ChildStdin {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
         #[cfg(unix)]
@@ -1438,10 +1435,7 @@ impl AsyncWrite for ChildStdin {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
         #[cfg(unix)]
@@ -1479,10 +1473,7 @@ impl AsyncWrite for ChildStdin {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
         this.registration = None;
@@ -1557,10 +1548,7 @@ impl AsyncRead for ChildStdout {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
         #[cfg(unix)]
@@ -1662,10 +1650,7 @@ impl AsyncRead for ChildStderr {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
         #[cfg(unix)]
