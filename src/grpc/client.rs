@@ -717,7 +717,8 @@ impl<T> ResponseStreamState<T> {
             .any(|existing| existing.will_wake(waker))
         {
             if self.waiters.len() >= 32 {
-                self.waiters.remove(0);
+                let evicted = self.waiters.remove(0);
+                evicted.wake();
             }
             self.waiters.push(waker.clone());
         }

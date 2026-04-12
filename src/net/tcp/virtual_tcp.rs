@@ -49,7 +49,8 @@ impl AcceptWaiters {
             return;
         }
         if waiters.len() >= 32 {
-            waiters.remove(0);
+            let evicted = waiters.remove(0);
+            evicted.wake();
         }
         waiters.push(waker.clone());
     }

@@ -351,7 +351,7 @@ impl BoundaryMatrix {
         self.columns[dst].xor_assign(&src_col);
     }
 
-    /// Returns the pivot (lowest set bit index) of column `j`.
+    /// Returns the pivot (highest set bit index) of column `j`.
     #[must_use]
     pub fn column_pivot(&self, j: usize) -> Option<usize> {
         self.columns[j].highest_bit()
@@ -361,7 +361,7 @@ impl BoundaryMatrix {
     /// the reduced matrix along with the pivot map.
     ///
     /// The pivot map maps `pivot_row -> column_index` for non-zero columns.
-    /// A pair `(i, j)` in the pivot map means column `j` has its lowest
+    /// A pair `(i, j)` in the pivot map means column `j` has its highest
     /// set bit at row `i` after reduction.
     ///
     /// This is the standard algorithm for computing persistent homology.
