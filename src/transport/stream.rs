@@ -1,7 +1,5 @@
 //! Symbol stream traits and implementations.
 
-#![allow(clippy::drop_non_drop)]
-
 use crate::cx::Cx;
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::time::Sleep;
@@ -1732,6 +1730,87 @@ mod tests {
             queued_after
         );
         crate::test_complete!("test_channel_stream_drop_removes_queued_waiter");
+    }
+
+    #[test]
+    fn test_channel_stream_drop_wakes_next_waiter_for_pending_symbol() {
+        init_test("test_channel_stream_drop_wakes_next_waiter_for_pending_symbol");
+        let shared = Arc::new(SharedChannel::new(2));
+        let mut first_stream = ChannelStream::new(Arc::clone(&shared));
+        let mut second_stream = ChannelStream::new(Arc::clone(&shared));
+        let mut sink = crate::transport::sink::ChannelSink::new(Arc::clone(&shared));
+
+        let first_flag = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::new(AtomicBool::new(false));
+        let first_waker = flagged_waker(Arc::clone(&first_flag));
+        let second_waker = flagged_waker(Arc::clone(&second_flag));
+        let mut first_context = Context::from_waker(&first_waker);
+        let mut second_context = Context::from_waker(&second_waker);
+
+        let first_pending = Pin::new(&mut first_stream).poll_next(&mut first_context);
+        crate::assert_with_log!(
+            matches!(first_pending, Poll::Pending),
+            "first receiver pending",
+            true,
+            matches!(first_pending, Poll::Pending)
+        );
+        let second_pending = Pin::new(&mut second_stream).poll_next(&mut second_context);
+        crate::assert_with_log!(
+            matches!(second_pending, Poll::Pending),
+            "second receiver pending",
+            true,
+            matches!(second_pending, Poll::Pending)
+        );
+
+        let ready_waker = noop_waker();
+        let mut ready_context = Context::from_waker(&ready_waker);
+        let sent = Pin::new(&mut sink).poll_send(&mut ready_context, create_symbol(55));
+        crate::assert_with_log!(
+            matches!(sent, Poll::Ready(Ok(()))),
+            "send succeeds",
+            true,
+            matches!(sent, Poll::Ready(Ok(())))
+        );
+
+        let first_woke = first_flag.load(Ordering::Acquire);
+        let second_woke_before_drop = second_flag.load(Ordering::Acquire);
+        crate::assert_with_log!(first_woke, "first waiter woken", true, first_woke);
+        crate::assert_with_log!(
+            !second_woke_before_drop,
+            "second waiter still sleeping before baton pass",
+            false,
+            second_woke_before_drop
+        );
+
+        drop(first_stream);
+
+        let second_woke_after_drop = second_flag.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            second_woke_after_drop,
+            "drop baton wakes next receiver",
+            true,
+            second_woke_after_drop
+        );
+
+        let received = Pin::new(&mut second_stream).poll_next(&mut second_context);
+        crate::assert_with_log!(
+            matches!(received, Poll::Ready(Some(Ok(_)))),
+            "second receiver consumes pending symbol",
+            true,
+            matches!(received, Poll::Ready(Some(Ok(_))))
+        );
+        let received_esi = match received {
+            Poll::Ready(Some(Ok(symbol))) => symbol.symbol().esi(),
+            _ => panic!("expected pending symbol"), // ubs:ignore - test logic
+        };
+        crate::assert_with_log!(
+            received_esi == 55,
+            "pending symbol forwarded to next waiter",
+            55u32,
+            received_esi
+        );
+
+        crate::test_complete!("test_channel_stream_drop_wakes_next_waiter_for_pending_symbol");
     }
 
     #[test]

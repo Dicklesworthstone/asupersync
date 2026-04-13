@@ -101,6 +101,16 @@ struct BrowserWebSocketHostState {
     _on_error: Closure<dyn FnMut(Event)>,
 }
 
+#[cfg(target_arch = "wasm32")]
+impl Drop for BrowserWebSocketHostState {
+    fn drop(&mut self) {
+        self.socket.set_onmessage(None);
+        self.socket.set_onclose(None);
+        self.socket.set_onerror(None);
+        let _ = self.socket.close();
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct BrowserWebSocketHostState {
     inbox: VecDeque<WasmAbiOutcomeEnvelope>,
