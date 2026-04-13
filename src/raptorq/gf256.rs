@@ -5766,6 +5766,83 @@ mod tests {
     }
 
     #[test]
+    fn malformed_dual_policy_env_request_preserves_canonical_manifest_provenance() {
+        with_gf256_env(
+            "ASUPERSYNC_GF256_DUAL_POLICY",
+            "definitely-not-valid",
+            || {
+                let kernel = dispatch().kind;
+                let policy = detect_dual_policy();
+                let expected_profile = profile_pack_metadata(policy.profile_pack);
+                let snapshot = dual_kernel_policy_snapshot_for(&policy, kernel);
+                let manifest = gf256_profile_pack_manifest_snapshot_for(&policy, kernel);
+
+                assert_eq!(policy.mode, DualKernelOverride::Auto);
+                assert!(policy_uses_canonical_selection_contract(&policy));
+                assert!(snapshot.override_mask.dual_policy_env_requested());
+                assert_eq!(snapshot.mode, DualKernelMode::Auto);
+                assert_eq!(
+                    snapshot.mode_fallback_reason,
+                    Some(DualKernelModeFallbackReason::UnknownRequestedMode)
+                );
+                assert_eq!(snapshot.profile_pack, expected_profile.profile_pack);
+                assert_eq!(snapshot.replay_pointer, expected_profile.replay_pointer);
+                assert_eq!(snapshot.command_bundle, expected_profile.command_bundle);
+                assert_eq!(
+                    snapshot.selected_tuning_candidate_id,
+                    expected_profile.selected_tuning_candidate_id
+                );
+                assert_eq!(
+                    snapshot.rejected_tuning_candidate_ids,
+                    expected_profile.rejected_tuning_candidate_ids
+                );
+                assert_eq!(
+                    snapshot.decision_artifact_id,
+                    expected_profile.decision_artifact_id
+                );
+                assert_eq!(snapshot.decision_role, expected_profile.decision_role);
+                assert_eq!(
+                    snapshot.decision_evidence_status,
+                    expected_profile.decision_evidence_status
+                );
+                assert_eq!(
+                    manifest.active_policy.mode_fallback_reason,
+                    Some(DualKernelModeFallbackReason::UnknownRequestedMode)
+                );
+                assert!(
+                    manifest
+                        .active_policy
+                        .override_mask
+                        .dual_policy_env_requested()
+                );
+                assert_eq!(manifest.active_profile_metadata, *expected_profile);
+                assert_eq!(
+                    manifest.active_profile_metadata.profile_pack,
+                    expected_profile.profile_pack
+                );
+                assert_eq!(
+                    manifest.active_profile_metadata.architecture_class,
+                    expected_profile.architecture_class
+                );
+                assert_eq!(
+                    manifest
+                        .active_profile_metadata
+                        .selected_tuning_candidate_id,
+                    expected_profile.selected_tuning_candidate_id
+                );
+                assert_eq!(
+                    manifest.active_profile_metadata.decision_artifact_id,
+                    expected_profile.decision_artifact_id
+                );
+                assert_eq!(
+                    manifest.active_selected_tuning_candidate,
+                    tuning_candidate_metadata(expected_profile.selected_tuning_candidate_id)
+                );
+            },
+        );
+    }
+
+    #[test]
     fn supported_profile_pack_env_request_keeps_host_and_profile_architectures_truthful() {
         let selection = ProfilePackSelection {
             profile_pack: Gf256ProfilePackId::ScalarConservativeV1,

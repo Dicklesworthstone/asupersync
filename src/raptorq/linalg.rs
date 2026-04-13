@@ -747,7 +747,11 @@ impl GaussianSolver {
 
             // Find pivot row (first nonzero in column, starting from pivot_col)
             let Some(pivot_row) = self.find_pivot(pivot_col, pivot_col) else {
-                return GaussianResult::Singular { row: pivot_col };
+                return self
+                    .first_inconsistent_row_from(pivot_col)
+                    .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
+                        GaussianResult::Inconsistent { row }
+                    });
             };
 
             // Swap if needed
@@ -793,7 +797,11 @@ impl GaussianSolver {
 
             // Find best pivot (sparsest row with nonzero in column)
             let Some((pivot_row, _nnz)) = self.find_pivot_markowitz(pivot_col, pivot_col) else {
-                return GaussianResult::Singular { row: pivot_col };
+                return self
+                    .first_inconsistent_row_from(pivot_col)
+                    .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
+                        GaussianResult::Inconsistent { row }
+                    });
             };
 
             // Swap if needed
@@ -881,7 +889,11 @@ impl GaussianSolver {
     /// Returns the first transformed row that is all-zero in coefficients but
     /// has a non-zero RHS, indicating an inconsistent system.
     fn first_inconsistent_row(&self) -> Option<usize> {
-        (0..self.rows).find(|&row| {
+        self.first_inconsistent_row_from(0)
+    }
+
+    fn first_inconsistent_row_from(&self, start_row: usize) -> Option<usize> {
+        (start_row..self.rows).find(|&row| {
             self.matrix[row].iter().all(|&coef| coef == 0)
                 && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
         })
@@ -1539,6 +1551,50 @@ mod tests {
                 panic!("unexpected inconsistent system at row {row}")
             }
         }
+    }
+
+    #[test]
+    fn gaussian_zero_row_contradiction_before_first_pivot_reports_inconsistent() {
+        let mut basic = GaussianSolver::new(2, 2);
+        basic.set_row(0, &[0, 0], DenseRow::new(vec![0x41]));
+        basic.set_row(1, &[0, 7], DenseRow::new(vec![0x22]));
+
+        let mut markowitz = GaussianSolver::new(2, 2);
+        markowitz.set_row(0, &[0, 0], DenseRow::new(vec![0x41]));
+        markowitz.set_row(1, &[0, 7], DenseRow::new(vec![0x22]));
+
+        assert_eq!(
+            basic.solve(),
+            GaussianResult::Inconsistent { row: 0 },
+            "basic solver should surface an explicit zero-row contradiction before returning singular"
+        );
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Inconsistent { row: 0 },
+            "markowitz solver should surface the same zero-row contradiction before returning singular"
+        );
+    }
+
+    #[test]
+    fn gaussian_zero_rhs_free_variable_before_first_pivot_remains_singular() {
+        let mut basic = GaussianSolver::new(2, 2);
+        basic.set_row(0, &[0, 0], DenseRow::new(vec![0x00]));
+        basic.set_row(1, &[0, 7], DenseRow::new(vec![0x22]));
+
+        let mut markowitz = GaussianSolver::new(2, 2);
+        markowitz.set_row(0, &[0, 0], DenseRow::new(vec![0x00]));
+        markowitz.set_row(1, &[0, 7], DenseRow::new(vec![0x22]));
+
+        assert_eq!(
+            basic.solve(),
+            GaussianResult::Singular { row: 0 },
+            "basic solver should still report singular when the no-pivot frontier has no contradiction"
+        );
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Singular { row: 0 },
+            "markowitz solver should keep the same singular result when the zero row has a zero RHS"
+        );
     }
 
     #[test]

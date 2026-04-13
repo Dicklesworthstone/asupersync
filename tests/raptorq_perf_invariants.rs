@@ -5580,6 +5580,22 @@ fn h2_closure_packet_docs_are_cross_linked() {
             "H2 closure packet doc must mention {required}"
         );
     }
+    assert!(
+        RAPTORQ_H2_CLOSURE_PACKET_MD.contains("still-in-progress Track-G governance path"),
+        "H2 closure packet doc must describe the live Track-G governance path as in_progress"
+    );
+    assert!(
+        !RAPTORQ_H2_CLOSURE_PACKET_MD.contains("still-open Track-G governance path"),
+        "H2 closure packet doc must not describe the live Track-G governance path as open"
+    );
+    assert!(
+        RAPTORQ_H2_CLOSURE_PACKET_MD.contains("still-in-progress Track-G risk"),
+        "H2 closure packet doc must describe the live Track-G blocker risk as in_progress"
+    );
+    assert!(
+        !RAPTORQ_H2_CLOSURE_PACKET_MD.contains("open Track-G risk"),
+        "H2 closure packet doc must not describe the live Track-G blocker risk as open"
+    );
 }
 
 // ============================================================================
