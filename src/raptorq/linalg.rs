@@ -719,11 +719,14 @@ impl GaussianSolver {
 
     /// Set a single coefficient.
     pub fn set_coefficient(&mut self, row: usize, col: usize, value: Gf256) {
+        assert!(row < self.rows, "row out of bounds");
+        assert!(col < self.cols, "column out of bounds");
         self.matrix[row][col] = value.raw();
     }
 
     /// Set RHS for a row.
     pub fn set_rhs(&mut self, row: usize, rhs: DenseRow) {
+        assert!(row < self.rows, "row out of bounds");
         self.rhs[row] = rhs;
     }
 
@@ -1551,6 +1554,27 @@ mod tests {
                 panic!("unexpected inconsistent system at row {row}")
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "row out of bounds")]
+    fn gaussian_set_coefficient_rejects_out_of_range_row() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_coefficient(2, 0, Gf256::ONE);
+    }
+
+    #[test]
+    #[should_panic(expected = "column out of bounds")]
+    fn gaussian_set_coefficient_rejects_out_of_range_column() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_coefficient(0, 2, Gf256::ONE);
+    }
+
+    #[test]
+    #[should_panic(expected = "row out of bounds")]
+    fn gaussian_set_rhs_rejects_out_of_range_row() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_rhs(2, DenseRow::new(vec![1]));
     }
 
     #[test]

@@ -1363,6 +1363,42 @@ mod tests {
     }
 
     #[test]
+    fn runtime_fallback_reason_boundary_matches_live_contract() {
+        assert_eq!(
+            G7_RUNTIME_FALLBACK_REASONS,
+            &[
+                FALLBACK_REASON_POLICY_BUDGET_EXHAUSTED,
+                FALLBACK_REASON_UNKNOWN_LOW_CONFIDENCE,
+                FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE,
+                FALLBACK_REASON_UNCLASSIFIED,
+            ],
+            "live runtime fallback boundary must stay aligned with canonical telemetry reasons"
+        );
+
+        for reason in G7_RUNTIME_FALLBACK_REASONS {
+            assert!(
+                is_runtime_fallback_reason(reason),
+                "{reason} must remain runtime-emittable"
+            );
+        }
+    }
+
+    #[test]
+    fn broader_contract_only_triggers_are_not_runtime_emittable_reasons() {
+        for reason in [
+            "decode_mismatch_detected",
+            "proof_replay_mismatch",
+            "none",
+            "unknown_reason",
+        ] {
+            assert!(
+                !is_runtime_fallback_reason(reason),
+                "{reason} must stay outside the live runtime-emittable reason boundary"
+            );
+        }
+    }
+
+    #[test]
     fn evidence_contributors_are_always_three() {
         for budget_exhausted in [false, true] {
             let telemetry = evaluate_governance(&GovernanceSnapshot {

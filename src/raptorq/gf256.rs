@@ -3531,6 +3531,106 @@ mod tests {
         ))
     }
 
+    fn assert_supported_profile_request_scrubs_provenance_while_preserving_profile_truth(
+        policy: &DualKernelPolicy,
+        snapshot: &DualKernelPolicySnapshot,
+        manifest: &Gf256ProfilePackManifestSnapshot,
+        kernel: Gf256Kernel,
+    ) {
+        let host_architecture = architecture_class_for_kernel(kernel);
+        let expected_profile = profile_pack_metadata(Gf256ProfilePackId::ScalarConservativeV1);
+
+        assert_eq!(
+            policy.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(policy.architecture_class, host_architecture);
+        assert_eq!(policy.fallback_reason, None);
+        assert!(policy.override_mask.profile_pack_env_requested());
+        assert!(!policy_uses_canonical_selection_contract(policy));
+        assert_eq!(policy.rejected_candidates, REJECTED_PROFILE_SELECTED_SCALAR);
+        assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
+        assert_eq!(
+            policy.selected_tuning_candidate_id,
+            MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+        );
+        assert!(policy.rejected_tuning_candidate_ids.is_empty());
+        assert_eq!(policy.replay_pointer, MANUAL_OVERRIDE_REPLAY_POINTER);
+        assert_eq!(policy.command_bundle, MANUAL_OVERRIDE_COMMAND_BUNDLE);
+        assert_eq!(
+            tuning_candidate_metadata(policy.selected_tuning_candidate_id),
+            None
+        );
+
+        assert_eq!(
+            snapshot.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(snapshot.architecture_class, host_architecture);
+        assert_eq!(snapshot.fallback_reason, None);
+        assert_eq!(
+            snapshot.selected_tuning_candidate_id,
+            MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+        );
+        assert!(snapshot.rejected_tuning_candidate_ids.is_empty());
+        assert_eq!(
+            snapshot.rejected_candidates,
+            REJECTED_PROFILE_SELECTED_SCALAR
+        );
+        assert_eq!(
+            snapshot.decision_artifact_id,
+            MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+        );
+        assert_eq!(snapshot.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
+        assert_eq!(
+            snapshot.decision_evidence_status,
+            MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
+        );
+
+        assert_eq!(manifest.active_policy, *snapshot);
+        assert_eq!(
+            manifest.active_profile_metadata.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.architecture_class,
+            expected_profile.architecture_class
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.tuning_corpus_id,
+            MANUAL_OVERRIDE_TUNING_CORPUS_ID
+        );
+        assert_eq!(
+            manifest
+                .active_profile_metadata
+                .selected_tuning_candidate_id,
+            MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.decision_artifact_id,
+            MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.decision_role,
+            MANUAL_OVERRIDE_DECISION_ROLE
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.decision_evidence_status,
+            MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
+        );
+        assert_eq!(
+            manifest.active_profile_metadata.selected_candidate_summary,
+            MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY
+        );
+        assert_eq!(
+            manifest
+                .active_profile_metadata
+                .rejected_candidate_set_summary,
+            MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY
+        );
+        assert_eq!(manifest.active_selected_tuning_candidate, None);
+    }
+
     // -- Table sanity --
 
     #[test]
@@ -6078,6 +6178,56 @@ mod tests {
         assert_eq!(
             metadata.selected_targeted_addmul_average_delta_pct,
             NA_PROFILE_DELTA_PCT
+        );
+    }
+
+    #[test]
+    fn supported_profile_request_with_forced_mode_scrubs_provenance_while_preserving_profile_truth()
+    {
+        with_gf256_envs(
+            &[
+                ("ASUPERSYNC_GF256_PROFILE_PACK", "scalar-conservative-v1"),
+                ("ASUPERSYNC_GF256_DUAL_POLICY", "fused"),
+            ],
+            || {
+                let kernel = dispatch().kind;
+                let policy = detect_dual_policy();
+                let snapshot = dual_kernel_policy_snapshot_for(&policy, kernel);
+                let manifest = gf256_profile_pack_manifest_snapshot_for(&policy, kernel);
+
+                assert_eq!(policy.mode, DualKernelOverride::ForceFused);
+                assert!(policy.override_mask.dual_policy_env_requested());
+                assert_eq!(snapshot.mode, DualKernelMode::Fused);
+                assert_supported_profile_request_scrubs_provenance_while_preserving_profile_truth(
+                    &policy, &snapshot, &manifest, kernel,
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn supported_profile_request_with_numeric_override_scrubs_provenance_while_preserving_profile_truth()
+     {
+        with_gf256_envs(
+            &[
+                ("ASUPERSYNC_GF256_PROFILE_PACK", "scalar-conservative-v1"),
+                ("ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL", "16384"),
+            ],
+            || {
+                let kernel = dispatch().kind;
+                let policy = detect_dual_policy();
+                let snapshot = dual_kernel_policy_snapshot_for(&policy, kernel);
+                let manifest = gf256_profile_pack_manifest_snapshot_for(&policy, kernel);
+
+                assert_eq!(policy.mode, DualKernelOverride::Auto);
+                assert!(policy.override_mask.addmul_min_total_env_override());
+                assert_eq!(policy.addmul_min_total, 16 * 1024);
+                assert_eq!(snapshot.mode, DualKernelMode::Auto);
+                assert_eq!(manifest.active_profile_metadata.addmul_min_total, 16 * 1024);
+                assert_supported_profile_request_scrubs_provenance_while_preserving_profile_truth(
+                    &policy, &snapshot, &manifest, kernel,
+                );
+            },
         );
     }
 
