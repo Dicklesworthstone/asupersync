@@ -1,7 +1,8 @@
 //! Task inspection and debugging for runtime diagnostics.
 //!
-//! This module provides detailed task state inspection, including await points,
-//! waker information, and execution metrics for debugging and observability.
+//! This module provides task-state inspection for runtime diagnostics,
+//! including checkpoint-based idle-time heuristics, wake-pending state,
+//! obligation ownership, and deterministic wire snapshots.
 //!
 //! # Example
 //!
@@ -40,8 +41,6 @@ pub struct TaskInspectorConfig {
     pub stuck_task_threshold: Duration,
     /// Whether to include obligations in task details.
     pub show_obligations: bool,
-    /// Maximum number of recent events to include per task.
-    pub max_event_history: usize,
     /// Whether to highlight stuck tasks in output.
     pub highlight_stuck_tasks: bool,
 }
@@ -51,7 +50,6 @@ impl Default for TaskInspectorConfig {
         Self {
             stuck_task_threshold: Duration::from_secs(30),
             show_obligations: true,
-            max_event_history: 10,
             highlight_stuck_tasks: true,
         }
     }
@@ -69,13 +67,6 @@ impl TaskInspectorConfig {
     #[must_use]
     pub fn with_show_obligations(mut self, show: bool) -> Self {
         self.show_obligations = show;
-        self
-    }
-
-    /// Set maximum event history per task.
-    #[must_use]
-    pub fn with_max_event_history(mut self, max: usize) -> Self {
-        self.max_event_history = max;
         self
     }
 
@@ -884,7 +875,6 @@ mod tests {
         let config = TaskInspectorConfig::default();
         assert_eq!(config.stuck_task_threshold, Duration::from_secs(30));
         assert!(config.show_obligations);
-        assert_eq!(config.max_event_history, 10);
         assert!(config.highlight_stuck_tasks);
     }
 
@@ -893,12 +883,10 @@ mod tests {
         let config = TaskInspectorConfig::default()
             .with_stuck_threshold(Duration::from_secs(60))
             .with_show_obligations(false)
-            .with_max_event_history(20)
             .with_highlight_stuck_tasks(false);
 
         assert_eq!(config.stuck_task_threshold, Duration::from_secs(60));
         assert!(!config.show_obligations);
-        assert_eq!(config.max_event_history, 20);
         assert!(!config.highlight_stuck_tasks);
     }
 
