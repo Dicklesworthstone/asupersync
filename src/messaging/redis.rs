@@ -298,6 +298,100 @@ impl RespValue {
             Ok { value: RespValue, next: usize },
         }
 
+        // Fast-path to check if the complete structure is in the buffer without
+        // allocating any intermediate values. This prevents O(N^2) allocations
+        // on large fragmented arrays (Schlemiel the Painter's parsing).
+        fn check_complete(
+            buf: &[u8],
+            mut i: usize,
+            depth: usize,
+            limits: &RedisProtocolLimits,
+        ) -> Result<Option<usize>, RedisError> {
+            if depth > limits.max_nesting_depth {
+                return Err(RedisError::Protocol(format!(
+                    "RESP nesting depth exceeds maximum ({})",
+                    limits.max_nesting_depth
+                )));
+            }
+            if i >= buf.len() {
+                return Ok(None);
+            }
+
+            match buf[i] {
+                b'+' | b'-' | b':' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(None);
+                    };
+                    Ok(Some(end + 2))
+                }
+                b'$' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(None);
+                    };
+                    let len = parse_i64_ascii(&buf[i + 1..end])?;
+                    if len == -1 {
+                        return Ok(Some(end + 2));
+                    }
+                    if len < -1 {
+                        return Err(RedisError::Protocol(format!(
+                            "invalid bulk string length: {len}"
+                        )));
+                    }
+                    let len = usize::try_from(len).map_err(|_| {
+                        RedisError::Protocol(format!("invalid bulk string length: {len}"))
+                    })?;
+                    if len > limits.max_bulk_string_len {
+                        return Err(RedisError::Protocol(format!(
+                            "bulk string length {len} exceeds maximum {}",
+                            limits.max_bulk_string_len
+                        )));
+                    }
+                    let end_crlf = end.saturating_add(2).saturating_add(len).saturating_add(2);
+                    if buf.len() < end_crlf {
+                        return Ok(None);
+                    }
+                    Ok(Some(end_crlf))
+                }
+                b'*' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(None);
+                    };
+                    let n = parse_i64_ascii(&buf[i + 1..end])?;
+                    if n == -1 {
+                        return Ok(Some(end + 2));
+                    }
+                    if n < -1 {
+                        return Err(RedisError::Protocol(format!("invalid array length: {n}")));
+                    }
+                    let n = usize::try_from(n).map_err(|_| {
+                        RedisError::Protocol(format!("invalid array length: {n}"))
+                    })?;
+                    if n > limits.max_array_len {
+                        return Err(RedisError::Protocol(format!(
+                            "array length {n} exceeds maximum {}",
+                            limits.max_array_len
+                        )));
+                    }
+                    i = end + 2;
+                    for _ in 0..n {
+                        match check_complete(buf, i, depth + 1, limits)? {
+                            None => return Ok(None),
+                            Some(next) => i = next,
+                        }
+                    }
+                    Ok(Some(i))
+                }
+                other => Err(RedisError::Protocol(format!(
+                    "unknown RESP type byte: 0x{other:02x}"
+                ))),
+            }
+        }
+
+        // Only proceed with full allocation if the structure is completely buffered.
+        if check_complete(buf, 0, 0, limits)?.is_none() {
+            return Ok(None);
+        }
+
         #[allow(clippy::too_many_lines)]
         fn decode_at(
             buf: &[u8],
