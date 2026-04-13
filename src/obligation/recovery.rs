@@ -260,7 +260,7 @@ impl RecoveryGovernor {
 
         // 2a: Stale obligations (Reserved beyond timeout)
         if budget > 0 {
-            let stale_ids = self.find_stale(now_ns);
+            let stale_ids = self.find_stale(now_ns, budget);
             for id in stale_ids {
                 if budget == 0 {
                     break;
@@ -277,8 +277,11 @@ impl RecoveryGovernor {
         // 2b: Conflicts
         let mut unresolved_conflicts = BTreeSet::new();
         if budget > 0 {
-            let conflicts: Vec<ObligationId> =
-                ledger.conflicts().iter().map(|(id, _)| *id).collect();
+            let conflicts: Vec<ObligationId> = ledger
+                .conflicts_iter()
+                .take(budget)
+                .map(|(id, _)| id)
+                .collect();
             for id in conflicts {
                 if budget == 0 {
                     break;
@@ -300,7 +303,10 @@ impl RecoveryGovernor {
 
         // 2c: Linearity violations
         if budget > 0 {
-            let violations: Vec<LinearityViolation> = ledger.linearity_violations();
+            let violations: Vec<LinearityViolation> = ledger
+                .linearity_violations_iter()
+                .take(budget)
+                .collect();
             for v in violations {
                 if budget == 0 {
                     break;
@@ -363,12 +369,13 @@ impl RecoveryGovernor {
     }
 
     /// Returns obligations that have exceeded the stale timeout.
-    fn find_stale(&self, now_ns: u64) -> Vec<ObligationId> {
+    fn find_stale(&self, now_ns: u64, limit: usize) -> Vec<ObligationId> {
         self.first_seen_reserved
             .iter()
             .filter(|(_, first_seen)| {
                 now_ns.saturating_sub(**first_seen) >= self.config.stale_timeout_ns
             })
+            .take(limit)
             .map(|(id, _)| *id)
             .collect()
     }

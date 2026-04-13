@@ -370,17 +370,26 @@ impl CrdtObligationLedger {
     /// Returns all obligations in conflict.
     #[must_use]
     pub fn conflicts(&self) -> Vec<(ObligationId, &CrdtObligationEntry)> {
+        self.conflicts_iter().collect()
+    }
+
+    /// Returns an iterator over all obligations in conflict.
+    pub fn conflicts_iter(&self) -> impl Iterator<Item = (ObligationId, &CrdtObligationEntry)> {
         self.entries
             .iter()
             .filter(|(_, e)| e.state.is_conflict())
             .map(|(id, e)| (*id, e))
-            .collect()
     }
 
     /// Returns all obligations with linearity violations
     /// (acquired or resolved more than once across the cluster).
     #[must_use]
     pub fn linearity_violations(&self) -> Vec<LinearityViolation> {
+        self.linearity_violations_iter().collect()
+    }
+
+    /// Returns an iterator over all obligations with linearity violations.
+    pub fn linearity_violations_iter(&self) -> impl Iterator<Item = LinearityViolation> + '_ {
         self.entries
             .iter()
             .filter(|(_, e)| !e.is_linear())
@@ -390,7 +399,6 @@ impl CrdtObligationLedger {
                 total_resolves: e.total_resolves(),
                 witnesses: e.witnesses.clone(),
             })
-            .collect()
     }
 
     /// Returns true if no obligation has a linearity violation or conflict.
