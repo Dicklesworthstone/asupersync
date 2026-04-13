@@ -770,8 +770,13 @@ impl WorkerCoordinator {
         if self.shutdown_requested {
             return Err(WorkerChannelError::ShutdownInProgress);
         }
-        if !self.jobs.contains_key(&job_id) {
-            return Err(WorkerChannelError::UnknownJobId(job_id));
+        let state = self
+            .jobs
+            .get(&job_id)
+            .ok_or(WorkerChannelError::UnknownJobId(job_id))?
+            .state;
+        if state.is_terminal() {
+            return Err(WorkerChannelError::JobNotPollable { job_id, state });
         }
         self.enqueue_job_message(job_id, WorkerOp::PollStatus { job_id })
     }
@@ -1143,6 +1148,13 @@ pub enum WorkerChannelError {
     DuplicateJobId(u64),
     /// Unknown job ID.
     UnknownJobId(u64),
+    /// Job is terminal and can no longer accept poll requests.
+    JobNotPollable {
+        /// Job identifier whose poll request was rejected.
+        job_id: u64,
+        /// Terminal state that makes the job non-pollable.
+        state: JobState,
+    },
     /// Worker bootstrap failed.
     BootstrapFailed(String),
     /// Received a message in the wrong direction.
@@ -1229,6 +1241,9 @@ impl fmt::Display for WorkerChannelError {
             Self::ShutdownInProgress => write!(f, "shutdown already in progress"),
             Self::DuplicateJobId(id) => write!(f, "duplicate job id: {id}"),
             Self::UnknownJobId(id) => write!(f, "unknown job id: {id}"),
+            Self::JobNotPollable { job_id, state } => {
+                write!(f, "job {job_id} is terminal ({state}) and cannot be polled")
+            }
             Self::BootstrapFailed(reason) => write!(f, "worker bootstrap failed: {reason}"),
             Self::UnexpectedDirection { op } => {
                 write!(f, "received outbound-only operation as inbound: {op}")
@@ -1943,6 +1958,64 @@ mod tests {
         );
         coord.handle_inbound(&snapshot).unwrap();
         assert_eq!(coord.job_state(1), Some(JobState::Running));
+    }
+
+    #[test]
+    fn coordinator_rejects_poll_after_job_completed_without_enqueuing_follow_up() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let completed = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::JobCompleted(JobResult {
+                job_id: 1,
+                outcome: JobOutcome::Ok { payload: vec![7] },
+            }),
+        );
+        coord.handle_inbound(&completed).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Completed));
+
+        assert_eq!(
+            coord.poll_status(1),
+            Err(WorkerChannelError::JobNotPollable {
+                job_id: 1,
+                state: JobState::Completed,
+            })
+        );
+        assert!(coord.drain_outbox().is_none());
+    }
+
+    #[test]
+    fn coordinator_rejects_poll_after_rebootstrap_fails_prior_job_without_enqueuing_follow_up() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let reboot = worker_envelope(
+            "test-worker-2",
+            2,
+            2,
+            1,
+            WorkerOp::BootstrapReady {
+                worker_id: "test-worker-2".into(),
+            },
+        );
+        coord.handle_inbound(&reboot).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Failed));
+
+        assert_eq!(
+            coord.poll_status(1),
+            Err(WorkerChannelError::JobNotPollable {
+                job_id: 1,
+                state: JobState::Failed,
+            })
+        );
+        assert!(coord.drain_outbox().is_none());
     }
 
     #[test]
