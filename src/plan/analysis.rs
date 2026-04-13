@@ -1187,8 +1187,8 @@ impl<'a> SideConditionChecker<'a> {
                 },
                 PlanNode::Join { children: after_ch },
             ) => {
-                let before_obl = self.obligation_bearing_children(before_ch);
-                let after_obl = self.obligation_bearing_children(after_ch);
+                let before_obl = self.obligation_finalize_order(before_ch);
+                let after_obl = self.obligation_finalize_order(after_ch);
                 before_obl == after_obl
             }
             // Race has no finalize ordering, so Race → Join is always valid
@@ -1247,18 +1247,36 @@ impl<'a> SideConditionChecker<'a> {
         true
     }
 
-    /// Helper: returns the sub-sequence of children that bear obligations.
-    fn obligation_bearing_children(&self, children: &[PlanId]) -> Vec<PlanId> {
-        children
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.analysis.get(*id).is_some_and(|a| {
+    /// Helper: returns the left-to-right finalize order for obligation-bearing
+    /// units in a join frontier.
+    ///
+    /// Nested joins are flattened because associativity rewrites only regroup
+    /// the join tree; they do not change the relative finalize order of the
+    /// obligation-bearing descendants inside that tree.
+    fn obligation_finalize_order(&self, children: &[PlanId]) -> Vec<PlanId> {
+        let mut order = Vec::new();
+        for child in children {
+            self.collect_obligation_finalize_order(*child, &mut order);
+        }
+        order
+    }
+
+    fn collect_obligation_finalize_order(&self, id: PlanId, order: &mut Vec<PlanId>) {
+        match self.dag.node(id) {
+            Some(PlanNode::Join { children }) => {
+                for child in children {
+                    self.collect_obligation_finalize_order(*child, order);
+                }
+            }
+            Some(_) | None => {
+                if self.analysis.get(id).is_some_and(|a| {
                     !a.obligation_flow.must_resolve.is_empty()
                         || !a.obligation_flow.leak_on_cancel.is_empty()
-                })
-            })
-            .collect()
+                }) {
+                    order.push(id);
+                }
+            }
+        }
     }
 
     /// Check whether all children are pairwise independent.
@@ -2062,12 +2080,10 @@ mod tests {
         let analysis = PlanAnalyzer::analyze(&dag);
         let join_node = analysis.get(join).expect("join analyzed");
         // The join should track the obligation from the obl: leaf.
-        assert!(
-            join_node
-                .obligation_flow
-                .reserves
-                .contains(&"obl:permit".to_string())
-        );
+        assert!(join_node
+            .obligation_flow
+            .reserves
+            .contains(&"obl:permit".to_string()));
     }
 
     #[test]
@@ -2097,12 +2113,10 @@ mod tests {
 
         let analysis = PlanAnalyzer::analyze(&dag);
         let timeout_node = analysis.get(timeout).expect("timeout analyzed");
-        assert!(
-            timeout_node
-                .obligation_flow
-                .leak_on_cancel
-                .contains(&"obl:lease".to_string())
-        );
+        assert!(timeout_node
+            .obligation_flow
+            .leak_on_cancel
+            .contains(&"obl:lease".to_string()));
         assert_eq!(timeout_node.obligation, ObligationSafety::MayLeak);
         assert_eq!(timeout_node.cancel, CancelSafety::MayOrphan);
         assert!(!timeout_node.is_safe());
@@ -2276,7 +2290,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100)); // original
         let t2 = dag.timeout(b, Duration::from_millis(50)); // tighter (different leaf)
-        // Make both reachable via join at root
+                                                            // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -2291,7 +2305,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(50)); // original: tight
         let t2 = dag.timeout(b, Duration::from_millis(100)); // looser (different leaf)
-        // Make both reachable via join at root
+                                                             // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -2318,7 +2332,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100));
         let t2 = dag.timeout(b, Duration::from_millis(110)); // 10ms looser (different leaf)
-        // Make both reachable via join at root
+                                                             // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -2671,6 +2685,22 @@ mod tests {
         let checker = SideConditionChecker::new(&dag);
         // obligation-bearing order is [a, c] in both
         assert!(checker.rewrite_preserves_finalize_order(j1, j2));
+    }
+
+    #[test]
+    fn finalize_order_allows_flattening_nested_join_with_obligations() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("obl:a");
+        let b = dag.leaf("obl:b");
+        let c = dag.leaf("obl:c");
+        let inner = dag.join(vec![a, b]);
+        let nested = dag.join(vec![inner, c]);
+        let flat = dag.join(vec![a, b, c]);
+        let root = dag.join(vec![nested, flat]);
+        dag.set_root(root);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert!(checker.rewrite_preserves_finalize_order(nested, flat));
     }
 
     #[test]
