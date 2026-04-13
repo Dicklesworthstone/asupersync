@@ -407,29 +407,30 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
         }
 
         if this.buffer.len() >= this.capacity || !this.staged_symbols.is_empty() {
-            // Local capacity is already committed or an older staged backlog
-            // exists. Queue the symbol before flushing so direct poll_send()
-            // callers never lose ownership or leapfrog earlier staged work.
-            // Cap staged_symbols to prevent unbounded growth when the inner
-            // sink is blocked.
-            if this.staged_symbols.len() >= this.capacity.saturating_mul(2).max(16) {
-                return Poll::Pending;
-            }
-            this.staged_symbols.push_back(symbol);
+            // Try to flush existing backlog to make room. This also registers
+            // the waker if the inner sink is blocked.
             match Pin::new(&mut *this).poll_flush(cx) {
-                Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
-                Poll::Ready(Err(_)) => {
-                    // The symbol was accepted into the local buffer (staged or
-                    // moved to buffer during flush). Return Ok so callers do
-                    // not retry and cause duplicate delivery. The underlying
-                    // error will surface on the next poll_flush, poll_send, or
-                    // poll_ready call via poll_inner_terminal_error.
-                    return Poll::Ready(Ok(()));
-                }
-                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                _ => {} // Pending or Ready(Ok(()))
             }
         }
-        self.get_mut().buffer.push_back(symbol);
+
+        if this.buffer.len() < this.capacity && this.staged_symbols.is_empty() {
+            this.buffer.push_back(symbol);
+            return Poll::Ready(Ok(()));
+        }
+
+        // We couldn't clear the buffer, so we must stage it.
+        if this.staged_symbols.len() >= this.capacity.saturating_mul(2).max(16) {
+            // Staged backlog is full. Since we already called poll_flush,
+            // the waker is registered.
+            return Poll::Pending;
+        }
+
+        this.staged_symbols.push_back(symbol);
+        
+        // We accepted the symbol into our backlog. Return Ok so callers do
+        // not retry and cause duplicate delivery.
         Poll::Ready(Ok(()))
     }
 

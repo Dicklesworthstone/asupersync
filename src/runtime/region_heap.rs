@@ -372,10 +372,10 @@ impl RegionHeap {
             (entry.size_hint, entry.generation.wrapping_add(1))
         };
 
-        *slot = HeapSlot::Vacant {
+        let old_slot = std::mem::replace(slot, HeapSlot::Vacant {
             next_free: self.free_head,
             generation: new_gen,
-        };
+        });
         self.free_head = Some(index.index);
         self.len -= 1;
 
@@ -385,6 +385,7 @@ impl RegionHeap {
         self.stats.bytes_live = self.stats.bytes_live.saturating_sub(size_hint as u64);
         GLOBAL_ALLOC_COUNT.fetch_sub(1, Ordering::Relaxed);
 
+        drop(old_slot);
         true
     }
 
