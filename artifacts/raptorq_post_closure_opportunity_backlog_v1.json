@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-387as",
   "parent_track_bead_id": "asupersync-p8o9m",
   "external_ref": "bd-3gmf5",
-  "generated_at_utc": "2026-02-22T18:05:00Z",
+  "generated_at_utc": "2026-04-13T08:39:14Z",
   "command_policy": {
     "cargo_heavy_commands_must_use_rch": true,
     "required_prefix": "rch exec --"
@@ -22,6 +22,7 @@
     "artifacts/raptorq_controlled_rollout_policy_v1.json",
     "artifacts/raptorq_expected_loss_decision_contract_v1.json",
     "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+    "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
     "artifacts/raptorq_track_f_factor_cache_p95p99_v3.json",
     "artifacts/raptorq_track_f_wavefront_pipeline_v1.json"
   ],
@@ -50,6 +51,7 @@
         ],
         "artifact_prerequisites": [
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
           "artifacts/raptorq_optimization_decision_records_v1.json"
         ]
       },

@@ -3,8 +3,9 @@
 This document defines the current blocked-state refresh for the canonical H2
 closure packet:
 
-- Refresh bead: `asupersync-3bsp5.4`
+- Refresh bead: `asupersync-3bsp5`
 - Active validator owner: `asupersync-3bsp5`
+- Historical blocked-state refresh bead: `asupersync-3bsp5.4` (closed)
 - External ref: `bd-2finy`
 - Historical H2 lineage: `asupersync-2f71w` under `asupersync-p8o9m`
 - Canonical artifact: `artifacts/raptorq_program_closure_signoff_packet_v1.json`
@@ -20,10 +21,11 @@ This packet is intentionally execution-ready but not final until dependency
 closure conditions are satisfied.
 
 Track-G is the sole remaining blocker. The historical Track-H/H2 packet lineage
-is already closed, but the live blocked-state refresh is now owned by
-`asupersync-3bsp5` with `asupersync-3bsp5.4` curating the packet until the
-remaining Track-E convergence, especially `asupersync-36m6p`, settles through
-the still-in-progress Track-G governance path.
+is already closed, and the historical bounded refresh child
+`asupersync-3bsp5.4` is also closed, so the live blocked-state refresh is now
+curated directly on `asupersync-3bsp5` until the remaining Track-E
+convergence, especially `asupersync-36m6p`, settles through the
+still-in-progress Track-G governance path.
 
 ## Claim Boundaries
 
@@ -116,14 +118,14 @@ Blocked-state ownership is explicit and stable while the packet stays
 `draft_blocked`:
 
 1. `track_signoff_owner` -> `asupersync-3bsp5`
-2. `packet_curator` -> `asupersync-3bsp5.4`
+2. `packet_curator` -> `asupersync-3bsp5`
 
 `go_no_go_decision` is also a top-level packet record. In the current
 `draft_blocked` state it must mirror the packet-state verdict, carry the same
 blocking dependency set, and name both the decision owner bead and the packet
 curator bead so downstream Track-G/E3 consumers do not have to infer ownership
-from prose while still preserving the historical H2/Track-H lineage in the
-track matrix.
+from prose while still preserving the historical H2/Track-H lineage and the
+closed `asupersync-3bsp5.4` refresh slice in the surrounding documentation.
 
 ## Radical Lever Coverage Requirement
 
@@ -186,9 +188,9 @@ Before running them on shared workers, export
 The top-level H2 packet replay entry carries the same kind of
 `status_snapshot_contract` for
 `h2_closure_packet_dependency_status_alignment`, because that check also reads
-live Beads ownership/leaf ids (`asupersync-346lm`, `asupersync-2cyx5`,
-`asupersync-36m6p`) and can otherwise observe stale JSONL on shared rch
-workers.
+live Beads ownership/leaf ids (`asupersync-2ncba`, `asupersync-346lm`,
+`asupersync-2cyx5`, `asupersync-36m6p`) and can otherwise observe stale JSONL
+on shared rch workers.
 
 ## Required Repro Commands
 

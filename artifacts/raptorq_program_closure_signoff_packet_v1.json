@@ -1,10 +1,10 @@
 {
   "artifact_id": "raptorq-program-closure-signoff-packet-v1",
   "schema_version": "raptorq-h2-program-closure-signoff-packet-v1",
-  "track_bead_id": "asupersync-3bsp5.4",
+  "track_bead_id": "asupersync-3bsp5",
   "parent_track_bead_id": "asupersync-3bsp5",
   "external_ref": "bd-2finy",
-  "generated_at_utc": "2026-04-10T20:03:11Z",
+  "generated_at_utc": "2026-04-13T08:35:18Z",
   "packet_state": {
     "status": "draft_blocked",
     "go_no_go_decision": "no_go_pending_dependency_closure",
@@ -16,7 +16,7 @@
   "go_no_go_decision": {
     "current_verdict": "no_go_pending_dependency_closure",
     "decision_owner_bead_id": "asupersync-3bsp5",
-    "packet_curator_bead_id": "asupersync-3bsp5.4",
+    "packet_curator_bead_id": "asupersync-3bsp5",
     "blocking_dependency_ids": [
       "asupersync-2cyx5"
     ],
@@ -372,6 +372,7 @@
         "source_of_truth": ".beads/issues.jsonl from the caller workspace snapshot",
         "reason": "shared rch workers can observe stale .beads/issues.jsonl during multi-agent sync races",
         "required_bead_ids": [
+          "asupersync-2ncba",
           "asupersync-2cyx5",
           "asupersync-346lm",
           "asupersync-36m6p"
@@ -494,9 +495,9 @@
       "handoff_expectation": "Record the final go/no-go decision once Track-G closes and the remaining Track-E evidence bundle is reconciled."
     },
     {
-      "bead_id": "asupersync-3bsp5.4",
+      "bead_id": "asupersync-3bsp5",
       "role": "packet_curator",
-      "handoff_expectation": "Keep the blocked-state metadata, evidence pointers, and replay commands synchronized while Track-E/E5 remains active."
+      "handoff_expectation": "Keep the blocked-state metadata, evidence pointers, and replay commands synchronized directly on the parent E3 validator lane while Track-E/E5 remains active, because the historical child refresh bead asupersync-3bsp5.4 is already closed."
     }
   ]
 }

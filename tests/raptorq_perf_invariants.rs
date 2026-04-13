@@ -4777,7 +4777,7 @@ fn h2_closure_packet_schema_and_lever_coverage() {
     );
     assert_eq!(
         artifact["track_bead_id"].as_str(),
-        Some("asupersync-3bsp5.4"),
+        Some("asupersync-3bsp5"),
         "H2 closure packet must stay anchored to the active E3 curator bead"
     );
     assert_eq!(
@@ -4845,7 +4845,7 @@ fn h2_closure_packet_schema_and_lever_coverage() {
         go_no_go_decision
             .get("packet_curator_bead_id")
             .and_then(serde_json::Value::as_str),
-        Some("asupersync-3bsp5.4"),
+        Some("asupersync-3bsp5"),
         "H2 go/no-go decision must name the active E3 packet curator"
     );
     let go_no_go_blockers = go_no_go_decision
@@ -5224,6 +5224,7 @@ fn h2_closure_packet_schema_and_lever_coverage() {
     assert_eq!(
         h2_status_snapshot_beads,
         BTreeSet::from([
+            "asupersync-2ncba".to_string(),
             "asupersync-2cyx5".to_string(),
             "asupersync-346lm".to_string(),
             "asupersync-36m6p".to_string(),
@@ -5560,8 +5561,19 @@ fn h2_closure_packet_dependency_status_alignment() {
     );
     assert_eq!(
         follow_up_roles.get("packet_curator").map(String::as_str),
-        Some("asupersync-3bsp5.4"),
+        Some("asupersync-3bsp5"),
         "follow_up_ownership must name the active E3 packet curator bead"
+    );
+    let packet_curator_status = canonical_issue_statuses
+        .get(
+            follow_up_roles
+                .get("packet_curator")
+                .expect("follow_up_ownership must name a packet_curator bead"),
+        )
+        .expect("packet_curator bead must exist in canonical Beads state");
+    assert!(
+        matches!(packet_curator_status.as_str(), "open" | "in_progress"),
+        "active H2 packet curator bead must remain open or in_progress, not {packet_curator_status}"
     );
     let go_no_go_decision = artifact["go_no_go_decision"]
         .as_object()

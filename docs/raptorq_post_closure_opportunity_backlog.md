@@ -29,8 +29,14 @@ artifacts:
 2. `artifacts/raptorq_controlled_rollout_policy_v1.json`
 3. `artifacts/raptorq_expected_loss_decision_contract_v1.json`
 4. `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json`
-5. `artifacts/raptorq_track_f_factor_cache_p95p99_v3.json`
-6. `artifacts/raptorq_track_f_wavefront_pipeline_v1.json`
+5. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json`
+6. `artifacts/raptorq_track_f_factor_cache_p95p99_v3.json`
+7. `artifacts/raptorq_track_f_wavefront_pipeline_v1.json`
+
+For Track-E-derived opportunities, H3 keeps both current closure anchors visible:
+`highconf_v1` remains the narrowed not-ready guardrail, while
+`multiscenario_refresh_v5` is the broader favorable-but-not-closure-grade
+successor packet surfaced by the live H2 closure contract.
 
 ## Scoring Model
 
@@ -66,4 +72,7 @@ Every new H3 item must be execution-ready and include:
 - H3 is a planning/backlog lane, not a bypass for Track-G/H gates.
 - Opportunities should be promoted into concrete beads only when dependencies
   are satisfiable and closure evidence remains reproducible.
+- Track-E follow-on items must preserve the current `highconf_v1` plus
+  `multiscenario_refresh_v5` gating story until `asupersync-36m6p` actually
+  closes.
 - Cargo-heavy commands in this queue must continue to run via `rch exec --`.
