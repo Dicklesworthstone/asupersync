@@ -769,6 +769,12 @@ fn task_cancel_impl(
     let request: WasmTaskCancelRequest = parse_json(&request_json, "task_cancel.request")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
     let outcome = with_dispatcher(|dispatcher| dispatcher.task_cancel(&request, consumer_version))?;
+
+    #[cfg(target_arch = "wasm32")]
+    if let Some(controller) = take_inflight_fetch(&request.task) {
+        controller.abort();
+    }
+
     encode_json(&outcome, "task_cancel.response")
 }
 
