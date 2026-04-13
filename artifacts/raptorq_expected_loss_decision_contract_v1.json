@@ -427,7 +427,7 @@
       },
       {
         "bead_id": "asupersync-36m6p",
-        "name": "E5 Track-E evidence lineage (highconf_v1 + v2/v3 history + v4 blocker)",
+        "name": "E5 Track-E evidence lineage (highconf_v1 + v2/v3/v4 history + v5 successor)",
         "required_status": "closed",
         "current_status": "in_progress",
         "evidence_refs": [
@@ -435,6 +435,7 @@
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
           "thread:coord-2026-02-19"
         ]
       },
@@ -460,7 +461,7 @@
       }
     ],
     "remaining_requirements": [
-      "Close asupersync-36m6p (E5) with materially better broader multiscenario canonical-auto evidence than the current mixed-signal raw-sample v4 packet so closure_readiness dependencies all reach required_status=closed."
+      "Close asupersync-36m6p (E5) with materially better broader multiscenario canonical-auto evidence than the current broader raw-sample successor packet in artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json so closure_readiness dependencies all reach required_status=closed."
     ],
     "track_g_handoff": {
       "bead_id": "asupersync-2cyx5",

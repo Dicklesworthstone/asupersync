@@ -4204,7 +4204,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         .expect("closure_readiness.dependencies must include the E5 bead");
     assert_eq!(
         e5_dependency["name"].as_str(),
-        Some("E5 Track-E evidence lineage (highconf_v1 + v2/v3 history + v4 blocker)"),
+        Some("E5 Track-E evidence lineage (highconf_v1 + v2/v3/v4 history + v5 successor)"),
         "E5 closure dependency name must reflect the current multi-packet blocker lineage"
     );
     for required in [
@@ -4212,6 +4212,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
     ] {
         assert!(
             e5_evidence_refs.contains(required),
@@ -4239,9 +4240,15 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         assert!(
             remaining_requirements.iter().any(|entry| {
                 entry.contains("materially better broader")
-                    || entry.contains("mixed-signal raw-sample v4")
+                    && entry.contains("raptorq_track_e_gf256_multiscenario_refresh_v5.json")
             }),
-            "remaining_requirements must preserve the missing broader-improvement E5 requirement"
+            "remaining_requirements must preserve the missing broader-improvement E5 requirement against the current v5 successor packet"
+        );
+        assert!(
+            !remaining_requirements
+                .iter()
+                .any(|entry| entry.contains("mixed-signal raw-sample v4")),
+            "remaining_requirements must not describe v4 as the current broader blocker after the v5 refresh"
         );
     }
 
@@ -4523,6 +4530,7 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
         "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
         "closure_readiness",
         "ready_to_close",
         "asupersync-3ltrv",
@@ -4531,8 +4539,10 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "historical short-window directional packet",
         "historical broader interval-proxy negative guardrail",
         "raw_sample_mixed_signal_not_closure_grade",
-        "current mixed-signal raw-sample blocker",
-        "highconf_v1 + v2/v3 history + v4 blocker",
+        "historical broader mixed-signal packet",
+        "raw_sample_favorable_not_closure_grade",
+        "current broader raw-sample successor packet",
+        "highconf_v1 + v2/v3/v4 history + v5 successor",
         "track_g_handoff.current_status",
         "required_packet_fields",
         "attached_packet_fields",
@@ -4563,6 +4573,22 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
             "G7 expected-loss doc must mention {required}"
         );
     }
+    assert!(
+        RAPTORQ_G7_EXPECTED_LOSS_MD.contains("remains `in_progress` under active ownership"),
+        "G7 expected-loss doc must describe the live Track-G handoff status as in_progress"
+    );
+    assert!(
+        !RAPTORQ_G7_EXPECTED_LOSS_MD.contains("current mixed-signal raw-sample blocker"),
+        "G7 expected-loss doc must not describe v4 as the current broader blocker after the v5 refresh"
+    );
+    assert!(
+        !RAPTORQ_G7_EXPECTED_LOSS_MD.contains("highconf_v1 + v2/v3 history + v4 blocker"),
+        "G7 expected-loss doc must not preserve the stale v4-blocker shorthand"
+    );
+    assert!(
+        !RAPTORQ_G7_EXPECTED_LOSS_MD.contains("remains `open` after stale-triage reopen"),
+        "G7 expected-loss doc must not describe the live Track-G handoff status as open"
+    );
 }
 
 /// Validate H3 post-closure backlog artifact schema and deterministic ranking.
@@ -4951,6 +4977,14 @@ fn h2_closure_packet_schema_and_lever_coverage() {
             let status_reason = track["status_reason"]
                 .as_str()
                 .expect("track E must include status_reason");
+            assert!(
+                status_reason.contains("still-in-progress Track-G governance path"),
+                "track E status_reason must describe the live Track-G governance path as in_progress"
+            );
+            assert!(
+                !status_reason.contains("still-open Track-G governance path"),
+                "track E status_reason must not describe the live Track-G governance path as open"
+            );
             assert!(
                 status_reason.contains("asupersync-36m6p"),
                 "track E status_reason must still name the active E5 blocker"
@@ -5414,6 +5448,9 @@ fn h2_closure_packet_dependency_status_alignment() {
         let risk_status = risk["status"]
             .as_str()
             .expect("each residual risk must include status");
+        let mitigation = risk["mitigation"]
+            .as_str()
+            .expect("each residual risk must include mitigation");
         assert!(
             canonical_issue_statuses.contains_key(owner_bead_id),
             "residual risk owner bead {owner_bead_id} must exist in canonical Beads state"
@@ -5434,6 +5471,7 @@ fn h2_closure_packet_dependency_status_alignment() {
             risk_id.to_string(),
             (
                 risk_status.to_string(),
+                mitigation.to_string(),
                 owner_bead_id.to_string(),
                 upstream_active_leaf_bead_ids
                     .iter()
@@ -5447,7 +5485,7 @@ fn h2_closure_packet_dependency_status_alignment() {
             ),
         );
     }
-    let (risk_status, owner_bead_id, upstream_active_leaf_bead_ids) = risks_by_id
+    let (risk_status, mitigation, owner_bead_id, upstream_active_leaf_bead_ids) = risks_by_id
         .get("RQ-H2-R2")
         .expect("residual_risk_register must retain the open Track-G blocker risk");
     assert_eq!(
@@ -5463,12 +5501,24 @@ fn h2_closure_packet_dependency_status_alignment() {
         &BTreeSet::from([String::from("asupersync-36m6p")]),
         "RQ-H2-R2 must machine-link the active upstream Track-E blocker"
     );
-    let (_, _, upstream_active_leaf_bead_ids) = risks_by_id
+    assert!(
+        mitigation.contains("Track-G can transition from in_progress to closed."),
+        "RQ-H2-R2 mitigation must preserve the live Track-G in_progress handoff"
+    );
+    let (_, mitigation, _, upstream_active_leaf_bead_ids) = risks_by_id
         .get("RQ-H2-R1")
         .expect("residual_risk_register must retain the historical dossier drift risk");
     assert!(
         upstream_active_leaf_bead_ids.is_empty(),
         "RQ-H2-R1 should not name any active upstream blocker leaves once the dossier drift is mitigated"
+    );
+    assert!(
+        mitigation.contains("Track-G remains in_progress"),
+        "RQ-H2-R1 mitigation must describe the live Track-G state as in_progress"
+    );
+    assert!(
+        !mitigation.contains("Track-G remains open"),
+        "RQ-H2-R1 mitigation must not describe the live Track-G state as open"
     );
     let follow_up_ownership = artifact["follow_up_ownership"]
         .as_array()

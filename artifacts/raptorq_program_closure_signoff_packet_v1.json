@@ -103,7 +103,7 @@
       "track_bead_id": "asupersync-2ncba",
       "required_status": "closed",
       "current_status": "open",
-      "status_reason": "Track-E remains the unresolved upstream convergence lane; H2 closure consumes it only through the still-open Track-G governance path, with asupersync-36m6p itself currently in_progress as the active E5 closure-critical blocker, artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json recording the current broader favorable-but-not-closure-grade state, and highconf_v1 still acting as the narrowed not-ready guardrail.",
+      "status_reason": "Track-E remains the unresolved upstream convergence lane; H2 closure consumes it only through the still-in-progress Track-G governance path, with asupersync-36m6p itself currently in_progress as the active E5 closure-critical blocker, artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json recording the current broader favorable-but-not-closure-grade state, and highconf_v1 still acting as the narrowed not-ready guardrail.",
       "closure_dependency_path": "via asupersync-2cyx5",
       "evidence_refs": [
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
@@ -471,7 +471,7 @@
       "severity": "medium",
       "status": "mitigated",
       "description": "Track-H final dossier (`asupersync-346lm`) previously lagged closure, creating narrative drift risk before H1 consolidation.",
-      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G remains open and Track-H is closed.",
+      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G remains in_progress and Track-H is closed.",
       "owner_bead_id": "asupersync-346lm",
       "upstream_active_leaf_bead_ids": []
     },
