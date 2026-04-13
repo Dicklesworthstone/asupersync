@@ -995,15 +995,19 @@ impl CleanupCoordinator {
             handler_errors: Vec::new(),
         };
 
-        // Remove the handler up front so callback execution never happens
-        // while holding the handlers lock (avoids re-entrant deadlocks).
-        let handler = self.handlers.write().remove(&object_id);
-
-        // Get pending symbols and mark as completed
-        let pending_set = {
+        // Atomically extract the handler and pending symbols while marking as completed.
+        // The lock hierarchy (handlers -> pending -> completed) prevents deadlocks,
+        // and holding them all prevents concurrent cleanup calls from interleaving and
+        // losing symbols by finding a pending set without its handler.
+        let (handler, pending_set) = {
+            let mut handlers = self.handlers.write();
             let mut pending = self.pending.write();
-            self.completed.write().insert(object_id);
-            pending.remove(&object_id)
+            let mut completed = self.completed.write();
+
+            let h = handlers.remove(&object_id);
+            completed.insert(object_id);
+            let p = pending.remove(&object_id);
+            (h, p)
         };
 
         if let Some(set) = pending_set {

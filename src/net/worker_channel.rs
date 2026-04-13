@@ -866,11 +866,10 @@ impl WorkerCoordinator {
                 self.enqueue_job_message(*job_id, WorkerOp::FinalizeJob { job_id: *job_id })
             }
             WorkerOp::FinalizeCompleted { job_id } => {
-                let job = self
-                    .jobs
-                    .get_mut(job_id)
-                    .ok_or(WorkerChannelError::UnknownJobId(*job_id))?;
-                job.transition_to(JobState::Completed)?;
+                if !self.jobs.contains_key(job_id) {
+                    return Err(WorkerChannelError::UnknownJobId(*job_id));
+                }
+                self.remove_job(*job_id);
                 Ok(())
             }
             WorkerOp::ShutdownCompleted => {

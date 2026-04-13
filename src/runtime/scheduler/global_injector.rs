@@ -50,7 +50,7 @@ impl Ord for TimedTask {
         other.deadline.cmp(&self.deadline).then_with(|| {
             let diff = other.generation.wrapping_sub(self.generation).cast_signed();
             diff.cmp(&0)
-        })
+        }).then_with(|| other.task.cmp(&self.task))
     }
 }
 

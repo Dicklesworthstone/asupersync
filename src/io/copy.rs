@@ -779,6 +779,7 @@ where
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+            steps += 1;
 
             let mut made_progress = false;
 

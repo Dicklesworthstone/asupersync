@@ -984,8 +984,7 @@ impl Consumer {
                 break;
             }
             let item = if let Some(deadline) = client_deadline {
-                // Box::pin is required because timeout_at() needs Unpin
-                let next = Box::pin(sub.next(cx));
+                let next = std::pin::pin!(sub.next(cx));
                 timeout_at(deadline, next).await
             } else {
                 Ok(sub.next(cx).await)
