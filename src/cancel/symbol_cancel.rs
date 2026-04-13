@@ -768,7 +768,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         self.received.fetch_add(1, Ordering::Relaxed);
 
         // Cancel local token if present
-        let token = self.active_tokens.read().get(&msg.object_id()).cloned();
+        let token = self.active_tokens.read().get(&msg.object_id()).cloned(); // ubs:ignore - internal cancellation token, not a secret
         if let Some(token) = token {
             let reason = CancelReason::new(msg.kind()).with_timestamp(msg.initiated_at());
             token.cancel(&reason, now);

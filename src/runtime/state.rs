@@ -7729,7 +7729,7 @@ mod tests {
                 assert_eq!(region_snapshot, IdSnapshot::from(region));
                 assert_eq!(obligation_snapshot, IdSnapshot::from(obligation));
             }
-            other => panic!("expected worker snapshot, got {other:?}"),
+            other => panic!("expected worker snapshot, got {other:?}"), // ubs:ignore - test assertion
         }
     }
 }

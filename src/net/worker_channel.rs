@@ -906,6 +906,12 @@ impl WorkerCoordinator {
         self.jobs.get(&job_id).map(|j| j.state)
     }
 
+    /// Remove a terminal job from tracking to prevent memory leaks.
+    /// Returns the last known state of the job, or None if unknown.
+    pub fn remove_job(&mut self, job_id: u64) -> Option<JobState> {
+        self.jobs.remove(&job_id).map(|j| j.state)
+    }
+
     fn enqueue_job_message(&mut self, job_id: u64, op: WorkerOp) -> Result<(), WorkerChannelError> {
         if !self.jobs.contains_key(&job_id) {
             return Err(WorkerChannelError::UnknownJobId(job_id));
