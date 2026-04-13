@@ -258,6 +258,19 @@ pub enum WsError {
     InvalidClosePayload,
 }
 
+impl WsError {
+    /// Maps the error to the corresponding WebSocket close code.
+    #[must_use]
+    pub fn as_close_code(&self) -> CloseCode {
+        match self {
+            Self::PayloadTooLarge { .. } | Self::ControlFrameTooLarge(_) => CloseCode::MessageTooBig,
+            Self::InvalidUtf8 => CloseCode::InvalidPayload,
+            Self::Io(_) => CloseCode::Abnormal,
+            _ => CloseCode::ProtocolError,
+        }
+    }
+}
+
 impl std::fmt::Display for WsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

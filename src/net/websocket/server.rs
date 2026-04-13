@@ -440,7 +440,7 @@ where
                         Ok(None) => {}
                         Err(err) => {
                             self.close_handshake.force_close(CloseReason::new(
-                                super::CloseCode::ProtocolError,
+                                err.as_close_code(),
                                 None,
                             ));
                             return Err(err);

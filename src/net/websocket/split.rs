@@ -102,13 +102,13 @@ struct SplitWritePermit<IO> {
 
 impl<IO> Drop for SplitWritePermit<IO> {
     fn drop(&mut self) {
-        let waiters = {
+        let next_waker = {
             let mut shared = self.shared.lock();
             shared.writer_active = false;
-            std::mem::take(&mut shared.writer_waiters)
+            shared.writer_waiters.first().map(|w| w.waker.clone())
         };
-        for waiter in waiters {
-            waiter.waker.wake();
+        if let Some(waker) = next_waker {
+            waker.wake();
         }
     }
 }
@@ -490,7 +490,7 @@ where
                                     .lock()
                                     .close_handshake
                                     .force_close(CloseReason::new(
-                                        super::CloseCode::ProtocolError,
+                                        err.as_close_code(),
                                         None,
                                     ));
                                 return Err(err);
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_permit_release_wakes_all_waiters() {
+    fn writer_permit_release_wakes_first_waiter() {
         future::block_on(async {
             let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
             let (read, _write) = ws.split();
@@ -1255,9 +1255,10 @@ mod tests {
                 counter_a.count() > 0,
                 "first waiter must be woken when permit is released"
             );
-            assert!(
-                counter_b.count() > 0,
-                "second waiter must be woken when permit is released"
+            assert_eq!(
+                counter_b.count(),
+                0,
+                "second waiter must NOT be woken when permit is released (no thundering herd)"
             );
         });
     }
