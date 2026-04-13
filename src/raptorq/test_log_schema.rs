@@ -2107,6 +2107,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_unit_log_accepts_all_runtime_governance_fallback_reasons() {
+        for reason in crate::raptorq::decision_contract::G7_RUNTIME_FALLBACK_REASONS {
+            let mut entry = valid_unit_log_value_with_governance();
+            entry["decode_stats"]["governance"]["chosen_action"] = json!("fallback");
+            entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["fired"] =
+                json!(true);
+            entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
+                json!(*reason);
+
+            let violations = validate_unit_log_json(&entry.to_string());
+            assert!(
+                violations.is_empty(),
+                "{reason} should remain a canonical runtime fallback reason: {violations:?}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_unit_log_rejects_whitespace_padded_governance_action() {
         let mut entry = serde_json::to_value(
             UnitLogEntry::new(

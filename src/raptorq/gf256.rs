@@ -1350,7 +1350,8 @@ fn apply_numeric_env_override(
 
 fn parse_usize_env(key: &str) -> NumericEnvOverride {
     std::env::var(key).map_or(NumericEnvOverride::Unset, |raw| {
-        raw.parse::<usize>()
+        raw.trim()
+            .parse::<usize>()
             .map_or(NumericEnvOverride::Invalid, NumericEnvOverride::Parsed)
     })
 }
@@ -6038,6 +6039,114 @@ mod tests {
             assert_eq!(
                 metadata.rejected_candidate_set_summary,
                 MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY
+            );
+        });
+    }
+
+    #[test]
+    fn numeric_env_overrides_trim_surrounding_whitespace_before_parse() {
+        let cases = [
+            (
+                "ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL",
+                " 12345 ",
+                12_345usize,
+            ),
+            (
+                "ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL",
+                "\n23456\t",
+                23_456usize,
+            ),
+            (
+                "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL",
+                " 34567\n",
+                34_567usize,
+            ),
+            (
+                "ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL",
+                "\t45678 ",
+                45_678usize,
+            ),
+            (
+                "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE",
+                " 5678 ",
+                5_678usize,
+            ),
+            ("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO", "\n3 ", 3usize),
+        ];
+
+        for (key, raw_value, expected) in cases {
+            with_gf256_env(key, raw_value, || {
+                let policy = detect_dual_policy();
+                let metadata = effective_profile_pack_metadata(&policy);
+
+                assert!(
+                    !policy_uses_canonical_selection_contract(&policy),
+                    "numeric env overrides should still scrub canonical provenance: {key}"
+                );
+                assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
+                assert_eq!(policy.replay_pointer, MANUAL_OVERRIDE_REPLAY_POINTER);
+                assert_eq!(policy.command_bundle, MANUAL_OVERRIDE_COMMAND_BUNDLE);
+                assert_eq!(
+                    metadata.decision_artifact_id,
+                    MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+                );
+                assert_eq!(metadata.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
+                assert_eq!(
+                    metadata.decision_evidence_status,
+                    MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
+                );
+
+                match key {
+                    "ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL" => {
+                        assert!(policy.override_mask.mul_min_total_env_override());
+                        assert_eq!(policy.mul_min_total, expected);
+                    }
+                    "ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL" => {
+                        assert!(policy.override_mask.mul_max_total_env_override());
+                        assert_eq!(policy.mul_max_total, expected);
+                    }
+                    "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL" => {
+                        assert!(policy.override_mask.addmul_min_total_env_override());
+                        assert_eq!(policy.addmul_min_total, expected);
+                    }
+                    "ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL" => {
+                        assert!(policy.override_mask.addmul_max_total_env_override());
+                        assert_eq!(policy.addmul_max_total, expected);
+                    }
+                    "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE" => {
+                        assert!(policy.override_mask.addmul_min_lane_env_override());
+                        assert_eq!(policy.addmul_min_lane, expected);
+                    }
+                    "ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO" => {
+                        assert!(policy.override_mask.max_lane_ratio_env_override());
+                        assert_eq!(policy.max_lane_ratio, expected);
+                    }
+                    _ => unreachable!("unexpected numeric override key"),
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn max_lane_ratio_numeric_override_clamps_zero_to_one() {
+        with_gf256_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO", "0", || {
+            let policy = detect_dual_policy();
+            let metadata = effective_profile_pack_metadata(&policy);
+
+            assert!(policy.override_mask.max_lane_ratio_env_override());
+            assert_eq!(policy.max_lane_ratio, 1);
+            assert!(!policy_uses_canonical_selection_contract(&policy));
+            assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
+            assert_eq!(policy.replay_pointer, MANUAL_OVERRIDE_REPLAY_POINTER);
+            assert_eq!(policy.command_bundle, MANUAL_OVERRIDE_COMMAND_BUNDLE);
+            assert_eq!(
+                metadata.decision_artifact_id,
+                MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+            );
+            assert_eq!(metadata.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
+            assert_eq!(
+                metadata.decision_evidence_status,
+                MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
             );
         });
     }
