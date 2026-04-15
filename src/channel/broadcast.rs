@@ -73,6 +73,30 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
+/// Error returned by [`Receiver::try_recv`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvError {
+    /// The channel buffer is empty; no message is available right now.
+    Empty,
+    /// The receiver fell behind and missed messages.
+    /// The value is the number of skipped messages.
+    Lagged(u64),
+    /// All senders have been dropped and the buffer is drained.
+    Closed,
+}
+
+impl std::fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "broadcast channel empty"),
+            Self::Lagged(n) => write!(f, "receiver lagged by {n} messages"),
+            Self::Closed => write!(f, "broadcast channel closed"),
+        }
+    }
+}
+
+impl std::error::Error for TryRecvError {}
+
 /// Internal state shared between senders and receivers.
 #[derive(Debug)]
 struct Shared<T> {
@@ -184,6 +208,24 @@ impl<T: Clone> Sender<T> {
             Err(SendError::Closed(())) => return Err(SendError::Closed(msg)),
         };
         Ok(permit.send(msg))
+    }
+
+    /// Returns the number of active receivers.
+    #[must_use]
+    pub fn receiver_count(&self) -> usize {
+        self.channel.receiver_count.load(Ordering::Acquire)
+    }
+
+    /// Returns the number of messages currently buffered in the channel.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.channel.inner.lock().buffer.len()
+    }
+
+    /// Returns `true` if no messages are buffered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Creates a new receiver subscribed to this channel.
@@ -311,6 +353,51 @@ impl<T> Receiver<T> {
 }
 
 impl<T: Clone> Receiver<T> {
+    /// Receives the next message.
+    ///
+    /// # Errors
+    ///
+    /// - `RecvError::Lagged(n)`: The receiver fell behind.
+    /// - `RecvError::Closed`: All senders dropped.
+    /// - `RecvError::PolledAfterCompletion`: This specific future was already resolved.
+    /// Attempts to receive the next message without blocking.
+    ///
+    /// # Errors
+    ///
+    /// - `TryRecvError::Empty`: No message available right now.
+    /// - `TryRecvError::Lagged(n)`: The receiver fell behind. The cursor is
+    ///   advanced to the earliest available message; the next call may succeed.
+    /// - `TryRecvError::Closed`: All senders have been dropped and the buffer
+    ///   is drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let inner = self.channel.inner.lock();
+
+        // 1. Check for lag
+        let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
+        if self.next_index < earliest {
+            let missed = earliest - self.next_index;
+            self.next_index = earliest;
+            return Err(TryRecvError::Lagged(missed));
+        }
+
+        // 2. Try to get the message at the current cursor position.
+        let delta = self.next_index.saturating_sub(earliest);
+        if let Ok(offset) = usize::try_from(delta) {
+            if let Some(slot) = inner.buffer.get(offset) {
+                let msg = slot.msg.clone();
+                self.next_index += 1;
+                return Ok(msg);
+            }
+        }
+
+        // 3. No message available — closed or empty?
+        if self.channel.sender_count.load(Ordering::Acquire) == 0 {
+            Err(TryRecvError::Closed)
+        } else {
+            Err(TryRecvError::Empty)
+        }
+    }
+
     /// Receives the next message.
     ///
     /// # Errors
@@ -1628,5 +1715,144 @@ mod tests {
         }
         assert_ne!(errors[0], errors[1]);
         assert_ne!(errors[1], errors[2]);
+    }
+
+    // ---- Tests for new public APIs: try_recv, receiver_count, len, is_empty ----
+
+    #[test]
+    fn try_recv_empty_returns_empty() {
+        init_test("broadcast_try_recv_empty");
+        let (_tx, mut rx) = channel::<i32>(16);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn try_recv_returns_message() {
+        init_test("broadcast_try_recv_message");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(16);
+        tx.send(&cx, 42).expect("send");
+        assert_eq!(rx.try_recv(), Ok(42));
+        // Second try_recv should be empty
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn try_recv_fifo_ordering() {
+        init_test("broadcast_try_recv_fifo");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(16);
+        tx.send(&cx, 1).expect("send 1");
+        tx.send(&cx, 2).expect("send 2");
+        tx.send(&cx, 3).expect("send 3");
+        assert_eq!(rx.try_recv(), Ok(1));
+        assert_eq!(rx.try_recv(), Ok(2));
+        assert_eq!(rx.try_recv(), Ok(3));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn try_recv_closed_after_drain() {
+        init_test("broadcast_try_recv_closed");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(16);
+        tx.send(&cx, 99).expect("send");
+        drop(tx);
+        // First try_recv drains the buffered message.
+        assert_eq!(rx.try_recv(), Ok(99));
+        // Now closed.
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Closed));
+    }
+
+    #[test]
+    fn try_recv_lagged_receiver() {
+        init_test("broadcast_try_recv_lagged");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(2);
+        // Send 3 messages into a capacity-2 channel; first is evicted.
+        tx.send(&cx, 10).expect("send 1");
+        tx.send(&cx, 20).expect("send 2");
+        tx.send(&cx, 30).expect("send 3");
+        // Receiver was at index 0, earliest now at 1 → lagged by 1.
+        let err = rx.try_recv();
+        assert_eq!(err, Err(TryRecvError::Lagged(1)));
+        // After lag, cursor is advanced; next try_recv should succeed.
+        assert_eq!(rx.try_recv(), Ok(20));
+        assert_eq!(rx.try_recv(), Ok(30));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn receiver_count_tracks_active_receivers() {
+        init_test("broadcast_receiver_count");
+        let (tx, rx1) = channel::<i32>(16);
+        assert_eq!(tx.receiver_count(), 1);
+
+        let rx2 = tx.subscribe();
+        assert_eq!(tx.receiver_count(), 2);
+
+        let rx3 = rx1.clone();
+        assert_eq!(tx.receiver_count(), 3);
+
+        drop(rx2);
+        assert_eq!(tx.receiver_count(), 2);
+
+        drop(rx1);
+        drop(rx3);
+        assert_eq!(tx.receiver_count(), 0);
+    }
+
+    #[test]
+    fn len_tracks_buffered_messages() {
+        init_test("broadcast_len");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(16);
+        assert_eq!(tx.len(), 0);
+        assert!(tx.is_empty());
+
+        tx.send(&cx, 1).expect("send 1");
+        assert_eq!(tx.len(), 1);
+        assert!(!tx.is_empty());
+
+        tx.send(&cx, 2).expect("send 2");
+        assert_eq!(tx.len(), 2);
+
+        // Consuming from rx doesn't shrink the buffer (broadcast semantics).
+        let _ = rx.try_recv();
+        // len counts buffer slots, which are only reclaimed on eviction.
+        assert!(tx.len() >= 1);
+    }
+
+    #[test]
+    fn len_caps_at_capacity_on_eviction() {
+        init_test("broadcast_len_cap");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<i32>(3);
+        tx.send(&cx, 1).expect("send 1");
+        tx.send(&cx, 2).expect("send 2");
+        tx.send(&cx, 3).expect("send 3");
+        assert_eq!(tx.len(), 3);
+
+        // Fourth send evicts the oldest.
+        tx.send(&cx, 4).expect("send 4");
+        assert_eq!(tx.len(), 3);
+    }
+
+    #[test]
+    fn try_recv_error_traits() {
+        init_test("broadcast_try_recv_error_traits");
+        let errors = [TryRecvError::Empty, TryRecvError::Lagged(5), TryRecvError::Closed];
+        let expected = ["broadcast channel empty", "receiver lagged by 5 messages", "broadcast channel closed"];
+        for (e, exp) in errors.iter().zip(expected.iter()) {
+            let copied = *e;
+            let cloned = *e;
+            assert_eq!(copied, cloned);
+            assert!(!format!("{e:?}").is_empty());
+            assert_eq!(format!("{e}"), *exp);
+        }
+        assert_ne!(errors[0], errors[1]);
+        assert_ne!(errors[1], errors[2]);
+        // TryRecvError implements Error
+        let _ = <TryRecvError as std::error::Error>::source(&errors[0]);
     }
 }

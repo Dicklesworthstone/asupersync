@@ -366,7 +366,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use nix::unistd::{close, dup};
     use std::io::{self, Read, Write};
-    use std::os::unix::io::{AsRawFd, RawFd};
+    use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
@@ -778,8 +778,9 @@ mod tests {
         let reactor = KqueueReactor::new().expect("failed to create reactor");
         let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
 
-        let dup_fd = dup(sock1.as_raw_fd()).expect("dup failed");
-        close(dup_fd).expect("close failed");
+        let dup_fd = dup(&sock1).expect("dup failed").into_raw_fd();
+        // SAFETY: dup_fd is valid; we close it immediately to make it invalid for the test.
+        close(unsafe { std::os::unix::io::OwnedFd::from_raw_fd(dup_fd) }).expect("close failed");
 
         let invalid = RawFdSource(dup_fd);
         let result = reactor.register(&invalid, Token::new(99), Interest::READABLE);
@@ -832,7 +833,9 @@ mod tests {
             .expect("register failed");
 
         let poller_fd = reactor.poller.as_raw_fd();
-        let saved_poller_fd = dup(poller_fd).expect("dup poller fd failed");
+        // SAFETY: poller_fd is valid for the duration of this borrow.
+        let borrowed = unsafe { std::os::unix::io::BorrowedFd::borrow_raw(poller_fd) };
+        let saved_poller_fd = dup(borrowed).expect("dup poller fd failed").into_raw_fd();
         let mut poller_restore = FdRestoreGuard::new(poller_fd, saved_poller_fd);
         let close_result = unsafe { libc::close(poller_fd) };
         crate::assert_with_log!(close_result == 0, "close poller fd", 0, close_result);
