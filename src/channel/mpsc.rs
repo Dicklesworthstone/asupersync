@@ -65,6 +65,7 @@ pub enum RecvError {
 }
 
 impl std::fmt::Display for RecvError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disconnected => write!(f, "receiving on a closed mpsc channel"),

@@ -575,7 +575,7 @@ impl CancellationProtocolOracle {
             }
             EnforcementMode::Warn => {
                 eprintln!("⚠️  Cancel protocol violation: {}", violation);
-                if let Some(ref stack) = self
+                if let Some(stack) = self
                     .violation_records
                     .last()
                     .and_then(|r| r.stack_trace.as_ref())
@@ -742,10 +742,8 @@ impl CancellationProtocolOracle {
                         cancel.acknowledged = true;
                     }
                 }
-            } else {
-                if let Some(ref mut cancel) = record.cancel_request {
-                    cancel.acknowledged = true;
-                }
+            } else if let Some(ref mut cancel) = record.cancel_request {
+                cancel.acknowledged = true;
             }
         }
     }

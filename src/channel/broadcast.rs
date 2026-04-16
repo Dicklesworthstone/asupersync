@@ -35,6 +35,7 @@ pub enum SendError<T> {
 }
 
 impl<T> std::fmt::Display for SendError<T> {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed(_) => write!(f, "sending on a closed broadcast channel"),
@@ -59,6 +60,7 @@ pub enum RecvError {
 }
 
 impl std::fmt::Display for RecvError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Lagged(n) => write!(f, "receiver lagged by {n} messages"),
@@ -86,6 +88,7 @@ pub enum TryRecvError {
 }
 
 impl std::fmt::Display for TryRecvError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "broadcast channel empty"),
@@ -140,6 +143,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Channel<T> {
 ///
 /// Panics if `capacity` is 0.
 #[must_use]
+#[inline]
 pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "capacity must be non-zero");
 
@@ -181,6 +185,7 @@ impl<T: Clone> Sender<T> {
     /// # Errors
     ///
     /// Returns `SendError::Closed(())` if there are no active receivers.
+    #[inline]
     pub fn reserve(&self, cx: &Cx) -> Result<SendPermit<'_, T>, SendError<()>> {
         if cx.checkpoint().is_err() {
             cx.trace("broadcast::reserve called with cancel pending");
@@ -212,24 +217,28 @@ impl<T: Clone> Sender<T> {
 
     /// Returns the number of active receivers.
     #[must_use]
+    #[inline]
     pub fn receiver_count(&self) -> usize {
         self.channel.receiver_count.load(Ordering::Acquire)
     }
 
     /// Returns the number of messages currently buffered in the channel.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.channel.inner.lock().buffer.len()
     }
 
     /// Returns `true` if no messages are buffered.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Creates a new receiver subscribed to this channel.
     #[must_use]
+    #[inline]
     pub fn subscribe(&self) -> Receiver<T> {
         let (total_sent, _to_drop) = {
             let mut inner = self.channel.inner.lock();
@@ -289,6 +298,7 @@ impl<T: Clone> SendPermit<'_, T> {
     ///
     /// If all receivers drop before the final commit snapshot, this returns `0`
     /// and leaves channel state unchanged.
+    #[inline]
     pub fn send(self, msg: T) -> usize {
         let mut inner = self.sender.channel.inner.lock();
 

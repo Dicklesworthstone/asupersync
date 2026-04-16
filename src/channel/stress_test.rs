@@ -157,13 +157,13 @@ pub async fn mpsc_stress_test(
 
                 // Wait for consumer with timeout
                 match timeout(wall_now(), Duration::from_secs(5), consumer).await {
-                    Ok(Ok(received)) => {
+                    Ok(Ok(messages)) => {
                         println!(
                             "Round {} completed: received {} messages",
                             round + 1,
-                            received.len()
+                            messages.len()
                         );
-                        Some(received.len())
+                        Some(messages.len())
                     }
                     Ok(Err(e)) => {
                         eprintln!("Consumer error in round {}: {:?}", round + 1, e);
@@ -182,12 +182,12 @@ pub async fn mpsc_stress_test(
             Ok(Some(_received_count)) => {
                 let stats = oracle.stats();
                 let sent = stats.messages_sent.load(Ordering::Acquire);
-                let received = stats.messages_received.load(Ordering::Acquire);
+                let recv_count = stats.messages_received.load(Ordering::Acquire);
                 let violations = stats.invariant_violations.load(Ordering::Acquire);
 
                 println!(
                     "  Sent: {}, Received: {}, Violations: {}",
-                    sent, received, violations
+                    sent, recv_count, violations
                 );
 
                 total_messages += sent;
