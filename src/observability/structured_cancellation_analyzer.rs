@@ -542,7 +542,7 @@ mod tests {
         let trace_id = analyzer.start_trace(
             "test-task".to_string(),
             crate::observability::EntityType::Task,
-            &CancelReason::with_user_reason("test".to_string()),
+            &CancelReason::user("test"),
             CancelKind::User,
         );
 
@@ -550,7 +550,7 @@ mod tests {
             trace_id,
             "child-region".to_string(),
             crate::observability::EntityType::Region,
-            &CancelReason::with_user_reason("propagation".to_string()),
+            &CancelReason::user("propagation"),
             CancelKind::User,
             "Closing".to_string(),
             Some("test-task".to_string()),
@@ -575,7 +575,7 @@ mod tests {
             let trace_id = analyzer.start_trace(
                 "scenario-task".to_string(),
                 crate::observability::EntityType::Task,
-                &CancelReason::with_user_reason("scenario".to_string()),
+                &CancelReason::user("scenario"),
                 CancelKind::User,
             );
             analyzer.complete_trace(trace_id);

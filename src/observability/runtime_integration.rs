@@ -380,7 +380,7 @@ mod tests {
         let integration = CancellationTracerIntegration::new(config);
 
         let task_id = TaskId::new_for_test(1, 0);
-        let cancel_reason = CancelReason::with_user_reason("test".to_string());
+        let cancel_reason = CancelReason::user("test");
         let cancel_kind = CancelKind::User;
 
         // Initiate cancellation
@@ -415,7 +415,7 @@ mod tests {
         let integration = CancellationTracerIntegration::new(config);
 
         let region_id = RegionId::new_for_test(1, 0);
-        let cancel_reason = CancelReason::with_user_reason("region test".to_string());
+        let cancel_reason = CancelReason::user("region test");
         let cancel_kind = CancelKind::User;
 
         // Initiate region cancellation
