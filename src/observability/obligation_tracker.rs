@@ -36,6 +36,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "obligation-leak-detection")]
+use std::backtrace::Backtrace;
 
 /// Configuration for the obligation tracker.
 #[derive(Debug, Clone)]
@@ -94,6 +96,11 @@ pub struct ObligationInfo {
     pub state: ObligationStateInfo,
     /// Optional description.
     pub description: Option<String>,
+    /// Stack trace captured at obligation acquisition (if available).
+    #[cfg(feature = "obligation-leak-detection")]
+    pub acquisition_backtrace: Option<Arc<Backtrace>>,
+    /// Source location where the obligation was acquired.
+    pub acquired_at: crate::record::SourceLocation,
 }
 
 impl ObligationInfo {
@@ -158,6 +165,64 @@ pub struct TypeSummary {
     pub oldest_age: Duration,
     /// Primary holder (task or region).
     pub primary_holder: Option<String>,
+}
+
+/// Severity level for obligation leaks.
+#[cfg(feature = "obligation-leak-detection")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeakSeverity {
+    /// Minor leak (just above threshold).
+    Warning,
+    /// Serious leak (significantly aged).
+    Critical,
+}
+
+/// An obligation leak with full attribution.
+#[cfg(feature = "obligation-leak-detection")]
+#[derive(Debug, Clone)]
+pub struct AttributedLeak {
+    /// The leaked obligation.
+    pub obligation: ObligationInfo,
+    /// Stack trace at acquisition time (if captured).
+    pub stack_trace: Option<Arc<Backtrace>>,
+    /// Severity of the leak.
+    pub leak_severity: LeakSeverity,
+}
+
+/// Comprehensive leak detection report.
+#[cfg(feature = "obligation-leak-detection")]
+#[derive(Debug, Clone)]
+pub struct LeakDetectionReport {
+    /// All attributed leaks found.
+    pub attributed_leaks: Vec<AttributedLeak>,
+    /// Regions that have leaks.
+    pub affected_regions: Vec<RegionId>,
+    /// When the detection was performed.
+    pub detection_time: Time,
+    /// Age threshold used for detection.
+    pub threshold_used: Duration,
+}
+
+/// Detailed attribution for a single obligation leak.
+#[cfg(feature = "obligation-leak-detection")]
+#[derive(Debug, Clone)]
+pub struct LeakAttribution {
+    /// The obligation ID.
+    pub obligation_id: ObligationId,
+    /// Type of obligation.
+    pub obligation_type: String,
+    /// Task holding the obligation.
+    pub holder_task: TaskId,
+    /// Region owning the obligation.
+    pub holder_region: RegionId,
+    /// How long the obligation has been held.
+    pub age: Duration,
+    /// Source location where acquired.
+    pub acquired_at: crate::record::SourceLocation,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Stack trace at acquisition (if captured).
+    pub stack_trace: Option<Arc<Backtrace>>,
 }
 
 /// Real-time obligation tracker with leak detection.
@@ -233,6 +298,9 @@ impl ObligationTracker {
                     age,
                     state: record.state.into(),
                     description: record.description.clone(),
+                    #[cfg(feature = "obligation-leak-detection")]
+                    acquisition_backtrace: record.acquire_backtrace.clone(),
+                    acquired_at: record.acquired_at,
                 })
             })
             .collect()
@@ -360,6 +428,109 @@ impl ObligationTracker {
             potential_leaks,
             age_warnings,
         }
+    }
+
+    /// Check for obligation leaks at region close boundary.
+    ///
+    /// This method should be called when a region is about to close to detect
+    /// any uncommitted obligations that would constitute leaks.
+    #[must_use]
+    pub fn check_region_close_obligations(&self, region_id: RegionId) -> Vec<ObligationInfo> {
+        trace!(region_id = ?region_id, "checking obligations at region close");
+
+        let region_obligations = self.by_region(region_id);
+        let active_obligations: Vec<_> = region_obligations
+            .into_iter()
+            .filter(|o| o.is_active())
+            .collect();
+
+        if !active_obligations.is_empty() {
+            warn!(
+                region_id = ?region_id,
+                count = active_obligations.len(),
+                "region closing with active obligations (potential leak)"
+            );
+            for obligation in &active_obligations {
+                let _used = &obligation; // Ensure obligation is used in all feature configurations
+                warn!(
+                    obligation_id = ?obligation.id,
+                    type_name = %obligation.type_name,
+                    age_secs = obligation.age.as_secs_f64(),
+                    holder_task = ?obligation.holder_task,
+                    acquired_at = %obligation.acquired_at,
+                    description = ?obligation.description,
+                    "active obligation at region close"
+                );
+
+                #[cfg(feature = "obligation-leak-detection")]
+                if let Some(ref backtrace) = obligation.acquisition_backtrace {
+                    warn!(backtrace = %backtrace, "acquisition stack trace");
+                }
+            }
+        }
+
+        active_obligations
+    }
+
+    /// Enhanced leak detection with detailed attribution.
+    ///
+    /// Provides comprehensive diagnostics including stack traces when available.
+    #[cfg(feature = "obligation-leak-detection")]
+    #[must_use]
+    pub fn enhanced_leak_detection(&self, age_threshold: Duration) -> LeakDetectionReport {
+        debug!(
+            threshold_secs = age_threshold.as_secs(),
+            "performing enhanced leak detection with stack traces"
+        );
+
+        let potential_leaks = self.find_potential_leaks(age_threshold);
+        let mut attributed_leaks = Vec::new();
+        let mut regions_with_leaks = std::collections::BTreeSet::new();
+
+        for leak in potential_leaks {
+            attributed_leaks.push(AttributedLeak {
+                obligation: leak.clone(),
+                stack_trace: leak.acquisition_backtrace.clone(),
+                leak_severity: if leak.age > age_threshold * 2 {
+                    LeakSeverity::Critical
+                } else {
+                    LeakSeverity::Warning
+                },
+            });
+            regions_with_leaks.insert(leak.holder_region);
+        }
+
+        LeakDetectionReport {
+            attributed_leaks,
+            affected_regions: regions_with_leaks.into_iter().collect(),
+            detection_time: self.current_time(),
+            threshold_used: age_threshold,
+        }
+    }
+
+    /// Check if the runtime is in a clean state (no active obligations).
+    #[must_use]
+    pub fn is_runtime_clean(&self) -> bool {
+        self.list_obligations().is_empty()
+    }
+
+    /// Get detailed attribution for a specific obligation leak.
+    #[cfg(feature = "obligation-leak-detection")]
+    #[must_use]
+    pub fn get_leak_attribution(&self, obligation_id: ObligationId) -> Option<LeakAttribution> {
+        let obligations = self.list_obligations();
+        let obligation = obligations.iter().find(|o| o.id == obligation_id)?;
+
+        Some(LeakAttribution {
+            obligation_id,
+            obligation_type: obligation.type_name.clone(),
+            holder_task: obligation.holder_task,
+            holder_region: obligation.holder_region,
+            age: obligation.age,
+            acquired_at: obligation.acquired_at,
+            description: obligation.description.clone(),
+            stack_trace: obligation.acquisition_backtrace.clone(),
+        })
     }
 
     /// Render obligation summary to console (if available).
@@ -617,6 +788,9 @@ mod tests {
             age: Duration::from_secs(5),
             state: ObligationStateInfo::Reserved,
             description: None,
+            #[cfg(feature = "obligation-leak-detection")]
+            acquisition_backtrace: None,
+            acquired_at: crate::record::SourceLocation::unknown(),
         };
         let info2 = info;
         assert!(info2.is_active());
@@ -634,6 +808,9 @@ mod tests {
             age: Duration::from_secs(10),
             state: ObligationStateInfo::Committed,
             description: Some("test".into()),
+            #[cfg(feature = "obligation-leak-detection")]
+            acquisition_backtrace: None,
+            acquired_at: crate::record::SourceLocation::unknown(),
         };
         assert!(!info.is_active());
     }

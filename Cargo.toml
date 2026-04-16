@@ -73,6 +73,9 @@ config-file = ["dep:toml"]
 # Enable lock contention metrics for ContendedMutex (wait/hold time tracking).
 # Zero cost when disabled. Used for sharding before/after comparison.
 lock-metrics = []
+# Enable real-time obligation leak detection with stack traces and region boundary checks.
+# Zero cost when disabled. Adds comprehensive tracking and attribution for debugging obligation leaks.
+obligation-leak-detection = []
 # Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls
