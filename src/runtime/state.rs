@@ -709,7 +709,6 @@ impl RuntimeState {
     pub fn debt_monitor(&self) -> Arc<crate::observability::CancellationDebtMonitor> {
         self.debt_monitor.clone()
     }
-    }
 
     /// Returns a shared reference to a task record by ID.
     #[inline]
