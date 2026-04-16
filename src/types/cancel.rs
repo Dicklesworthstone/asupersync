@@ -233,6 +233,7 @@ pub enum CancelPhase {
 }
 
 impl CancelPhase {
+    #[inline]
     fn rank(self) -> u8 {
         match self {
             Self::Requested => 0,
@@ -387,6 +388,7 @@ impl CancelKind {
 }
 
 impl fmt::Display for CancelKind {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::User => write!(f, "user"),
@@ -520,12 +522,14 @@ impl CancelReason {
     }
 
     /// Creates a cost budget cancellation reason (budget cost quota exceeded).
+    #[inline]
     #[must_use]
     pub const fn cost_budget() -> Self {
         Self::new(CancelKind::CostBudget)
     }
 
     /// Creates a fail-fast cancellation reason (sibling failed).
+    #[inline]
     #[must_use]
     pub const fn sibling_failed() -> Self {
         Self::new(CancelKind::FailFast)
@@ -534,6 +538,7 @@ impl CancelReason {
     /// Creates a fail-fast cancellation reason (alias for sibling_failed).
     ///
     /// Used when a task is cancelled because a sibling failed in a fail-fast region.
+    #[inline]
     #[must_use]
     pub const fn fail_fast() -> Self {
         Self::new(CancelKind::FailFast)
@@ -542,6 +547,7 @@ impl CancelReason {
     /// Creates a race loser cancellation reason.
     ///
     /// Used when a task is cancelled because another task in a race completed first.
+    #[inline]
     #[must_use]
     pub const fn race_loser() -> Self {
         Self::new(CancelKind::RaceLost)
@@ -550,18 +556,21 @@ impl CancelReason {
     /// Creates a race lost cancellation reason (alias for race_loser).
     ///
     /// Used when a task is cancelled because another task in a race completed first.
+    #[inline]
     #[must_use]
     pub const fn race_lost() -> Self {
         Self::new(CancelKind::RaceLost)
     }
 
     /// Creates a parent-cancelled cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn parent_cancelled() -> Self {
         Self::new(CancelKind::ParentCancelled)
     }
 
     /// Creates a resource unavailable cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn resource_unavailable() -> Self {
         Self::new(CancelKind::ResourceUnavailable)
@@ -575,6 +584,7 @@ impl CancelReason {
     }
 
     /// Creates a linked-exit cancellation reason (Spork link propagation).
+    #[inline]
     #[must_use]
     pub const fn linked_exit() -> Self {
         Self::new(CancelKind::LinkedExit)

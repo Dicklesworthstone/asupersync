@@ -106,6 +106,7 @@ impl SerdeArenaIndex {
 }
 
 impl From<ArenaIndex> for SerdeArenaIndex {
+    #[inline]
     fn from(value: ArenaIndex) -> Self {
         Self {
             index: value.index(),

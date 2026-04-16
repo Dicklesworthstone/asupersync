@@ -38,6 +38,7 @@ impl Default for CheckpointState {
 
 impl CheckpointState {
     /// Creates a new checkpoint state with no recorded checkpoints.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -48,11 +49,13 @@ impl CheckpointState {
     }
 
     /// Records a checkpoint without a message.
+    #[inline]
     pub fn record(&mut self) {
         self.record_at(crate::time::wall_now());
     }
 
     /// Records a checkpoint at an explicit runtime time.
+    #[inline]
     pub fn record_at(&mut self, at: Time) {
         self.last_checkpoint = Some(at);
         self.last_message = None;
@@ -60,11 +63,13 @@ impl CheckpointState {
     }
 
     /// Records a checkpoint with a message.
+    #[inline]
     pub fn record_with_message(&mut self, message: String) {
         self.record_with_message_at(message, crate::time::wall_now());
     }
 
     /// Records a checkpoint with a message at an explicit runtime time.
+    #[inline]
     pub fn record_with_message_at(&mut self, message: String, at: Time) {
         self.last_checkpoint = Some(at);
         self.last_message = Some(message);

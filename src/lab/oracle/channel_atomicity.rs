@@ -347,16 +347,23 @@ impl std::fmt::Display for ChannelAtomicityViolation {
 }
 
 /// Enhanced violation record with diagnostics
+/// Record of a channel atomicity violation with metadata.
 #[derive(Debug, Clone)]
 pub struct ViolationRecord {
+    /// The specific violation that occurred.
     pub violation: ChannelAtomicityViolation,
+    /// Timestamp when the violation was recorded.
     pub timestamp: SystemTime,
+    /// Optional trace ID for correlation.
     pub trace_id: Option<TraceId>,
+    /// Optional stack trace at violation time.
     pub stack_trace: Option<String>,
+    /// Optional command to replay the violation scenario.
     pub replay_command: Option<String>,
 }
 
 impl ViolationRecord {
+    /// Creates a new violation record with metadata from the given violation and config.
     pub fn new(violation: ChannelAtomicityViolation, config: &ChannelAtomicityConfig) -> Self {
         let trace_id = match &violation {
             ChannelAtomicityViolation::ReservationLeak { trace_id, .. } => *trace_id,
@@ -390,6 +397,7 @@ impl ViolationRecord {
         }
     }
 
+    /// Emits a structured JSON log entry for this violation record.
     pub fn emit_structured_log(&self) {
         let timestamp_millis = self
             .timestamp
@@ -413,28 +421,53 @@ impl ViolationRecord {
 /// State tracking for a channel reservation
 #[derive(Debug, Clone)]
 pub struct ReservationState {
+    /// Unique identifier for this reservation.
     pub reservation_id: ReservationId,
+    /// ID of the channel this reservation belongs to.
     pub channel_id: ChannelId,
+    /// Timestamp when the reservation was created.
     pub created_at: SystemTime,
+    /// Optional trace ID for debugging context.
     pub trace_id: Option<TraceId>,
+    /// Current status of the reservation.
     pub status: ReservationStatus,
 }
 
+/// Status of a channel reservation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReservationStatus {
+    /// Reservation is active and can be used.
     Active,
-    Committed { at: SystemTime, data_size: usize },
-    Aborted { at: SystemTime, reason: String },
+    /// Reservation has been committed.
+    Committed {
+        /// Timestamp when the reservation was committed.
+        at: SystemTime,
+        /// Size of data committed with the reservation.
+        data_size: usize
+    },
+    /// Reservation has been aborted.
+    Aborted {
+        /// Timestamp when the reservation was aborted.
+        at: SystemTime,
+        /// Reason for the abort.
+        reason: String
+    },
 }
 
 /// State tracking for wakers
 #[derive(Debug, Clone)]
 pub struct WakerState {
+    /// Unique identifier for this waker.
     pub waker_id: WakerId,
+    /// ID of the channel this waker is associated with.
     pub channel_id: ChannelId,
+    /// Timestamp when the waker was registered.
     pub registered_at: SystemTime,
+    /// Optional timestamp when wakeup is expected.
     pub expected_wakeup_at: Option<SystemTime>,
+    /// Optional timestamp when wakeup actually occurred.
     pub actual_wakeup_at: Option<SystemTime>,
+    /// Optional trace ID for debugging context.
     pub trace_id: Option<TraceId>,
 }
 
@@ -458,17 +491,28 @@ pub struct ChannelAtomicityOracle {
     stats: ChannelAtomicityStatistics,
 }
 
+/// Statistics tracked by the Channel Atomicity Oracle.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelAtomicityStatistics {
+    /// Total number of reservations created.
     pub total_reservations_created: u64,
+    /// Total number of reservations successfully committed.
     pub total_reservations_committed: u64,
+    /// Total number of reservations aborted.
     pub total_reservations_aborted: u64,
+    /// Total number of reservations that leaked (never committed or aborted).
     pub total_reservations_leaked: u64,
+    /// Total number of wakers registered.
     pub total_wakers_registered: u64,
+    /// Total number of expected wakeups.
     pub total_wakeups_expected: u64,
+    /// Total number of actual wakeups that occurred.
     pub total_wakeups_actual: u64,
+    /// Total number of lost wakeups detected.
     pub total_lost_wakeups: u64,
+    /// Total number of spurious wakeups detected.
     pub total_spurious_wakeups: u64,
+    /// Total number of atomicity violations detected.
     pub total_violations: u64,
 }
 

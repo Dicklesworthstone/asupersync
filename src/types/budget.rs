@@ -302,6 +302,7 @@ impl Budget {
     /// Decrements the poll quota by one, returning the old value.
     ///
     /// Returns `None` if already at zero.
+    #[inline]
     pub fn consume_poll(&mut self) -> Option<u32> {
         if self.poll_quota > 0 {
             let old = self.poll_quota;
@@ -459,6 +460,7 @@ impl Budget {
     /// assert!(!budget.consume_cost(1));   // fails, quota exhausted
     /// ```
     #[allow(clippy::used_underscore_binding)]
+    #[inline]
     pub fn consume_cost(&mut self, cost: u64) -> bool {
         match self.cost_quota {
             None => {

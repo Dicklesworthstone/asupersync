@@ -49,6 +49,7 @@ pub struct ObjectId {
 
 impl ObjectId {
     /// Creates a new object ID from two 64-bit values.
+    #[inline]
     #[must_use]
     pub const fn new(high: u64, low: u64) -> Self {
         Self { high, low }
@@ -98,6 +99,7 @@ impl ObjectId {
 
     /// Creates an object ID for testing purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(value: u64) -> Self {
         Self {
@@ -145,6 +147,7 @@ pub struct SymbolId {
 
 impl SymbolId {
     /// Creates a new symbol ID.
+    #[inline]
     #[must_use]
     pub const fn new(object_id: ObjectId, sbn: u8, esi: u32) -> Self {
         Self {
@@ -191,6 +194,7 @@ impl SymbolId {
 
     /// Creates a symbol ID for testing purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(object_value: u64, sbn: u8, esi: u32) -> Self {
         Self {
@@ -279,12 +283,14 @@ impl Symbol {
     /// * `id` - The unique identifier for this symbol
     /// * `data` - The payload data (will be cloned)
     /// * `kind` - Whether this is a source or repair symbol
+    #[inline]
     #[must_use]
     pub fn new(id: SymbolId, data: Vec<u8>, kind: SymbolKind) -> Self {
         Self { id, kind, data }
     }
 
     /// Creates a symbol from a byte slice (copies the data).
+    #[inline]
     #[must_use]
     pub fn from_slice(id: SymbolId, data: &[u8], kind: SymbolKind) -> Self {
         Self {
@@ -295,6 +301,7 @@ impl Symbol {
     }
 
     /// Creates an empty symbol with the specified size.
+    #[inline]
     #[must_use]
     pub fn empty(id: SymbolId, size: usize, kind: SymbolKind) -> Self {
         Self {
@@ -381,6 +388,7 @@ impl Symbol {
     /// [`Self::new_repair_for_test`] explicitly because source-vs-repair depends
     /// on block `K`, not on `esi == 0`.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub fn new_for_test(object_value: u64, sbn: u8, esi: u32, data: &[u8]) -> Self {
         Self::new_source_for_test(object_value, sbn, esi, data)
@@ -388,6 +396,7 @@ impl Symbol {
 
     /// Creates an explicit source symbol for testing purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub fn new_source_for_test(object_value: u64, sbn: u8, esi: u32, data: &[u8]) -> Self {
         Self {

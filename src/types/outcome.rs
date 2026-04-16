@@ -606,6 +606,7 @@ impl<T, E> Outcome<T, E> {
     /// # Panics
     ///
     /// Panics if the outcome is not `Ok`.
+    #[inline]
     #[track_caller]
     pub fn unwrap(self) -> T
     where
