@@ -9,8 +9,9 @@ use super::atomicity_test::{
 };
 use crate::channel::{broadcast, mpsc, oneshot, watch};
 use crate::combinator::select::{Either, Select};
-use crate::test_utils::lab_with_config;
-use crate::time::{sleep, timeout};
+use crate::cx::Cx;
+use crate::runtime::RuntimeBuilder;
+use crate::time::{sleep, timeout, wall_now};
 
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
@@ -102,22 +103,24 @@ pub async fn mpsc_stress_test(
         let (sender, receiver) = mpsc::channel::<u64>(round_config.capacity);
         let expected_messages = round_config.num_producers * round_config.messages_per_producer;
 
-        let round_result = lab_with_config(|rt| async move {
-            let cx = &rt.cx();
+        let runtime = RuntimeBuilder::current_thread().build()?;
+        let handle = runtime.handle();
 
-            // Use timeout to prevent hanging
-            timeout(config.round_duration, async {
+        let oracle_for_round = Arc::clone(&oracle);
+        let round_result = runtime.block_on(async move {
+            timeout(wall_now(), config.round_duration, async move {
                 // Start consumer
-                let consumer_oracle = Arc::clone(&oracle);
-                let consumer = task::spawn(async move {
-                    consumer_task(receiver, consumer_oracle, expected_messages, cx).await
+                let consumer_oracle = Arc::clone(&oracle_for_round);
+                let consumer = handle.spawn(async move {
+                    let cx = Cx::for_testing();
+                    consumer_task(receiver, consumer_oracle, expected_messages, &cx).await
                 });
 
                 // Start producers with staggered startup to increase interleaving
                 let mut producers = Vec::new();
                 for i in 0..round_config.num_producers {
                     let sender = sender.clone();
-                    let producer_oracle = Arc::clone(&oracle);
+                    let producer_oracle = Arc::clone(&oracle_for_round);
                     let producer_injector = Arc::clone(&injector);
 
                     let messages: Vec<u64> = (0..round_config.messages_per_producer)
@@ -129,11 +132,12 @@ pub async fn mpsc_stress_test(
 
                     // Stagger producer starts
                     if i > 0 {
-                        sleep(Duration::from_micros(100)).await;
+                        sleep(wall_now(), Duration::from_micros(100)).await;
                     }
 
-                    let producer = task::spawn(async move {
-                        producer_task(sender, producer_oracle, producer_injector, messages, cx)
+                    let producer = handle.spawn(async move {
+                        let cx = Cx::for_testing();
+                        producer_task(sender, producer_oracle, producer_injector, messages, &cx)
                             .await
                     });
                     producers.push(producer);
@@ -141,8 +145,8 @@ pub async fn mpsc_stress_test(
 
                 // Wait for all producers with timeout
                 for (i, producer) in producers.into_iter().enumerate() {
-                    match timeout(Duration::from_secs(5), producer).await {
-                        Ok(Ok(_)) => {}
+                    match timeout(wall_now(), Duration::from_secs(5), producer).await {
+                        Ok(Ok(())) => {}
                         Ok(Err(e)) => eprintln!("Producer {} failed: {:?}", i, e),
                         Err(_) => eprintln!("Producer {} timed out", i),
                     }
@@ -152,8 +156,8 @@ pub async fn mpsc_stress_test(
                 drop(sender);
 
                 // Wait for consumer with timeout
-                match timeout(Duration::from_secs(5), consumer).await {
-                    Ok(Ok(Ok(received))) => {
+                match timeout(wall_now(), Duration::from_secs(5), consumer).await {
+                    Ok(Ok(received)) => {
                         println!(
                             "Round {} completed: received {} messages",
                             round + 1,
@@ -161,12 +165,8 @@ pub async fn mpsc_stress_test(
                         );
                         Some(received.len())
                     }
-                    Ok(Ok(Err(e))) => {
+                    Ok(Err(e)) => {
                         eprintln!("Consumer error in round {}: {:?}", round + 1, e);
-                        None
-                    }
-                    Ok(Err(_)) => {
-                        eprintln!("Consumer task panicked in round {}", round + 1);
                         None
                     }
                     Err(_) => {
@@ -176,8 +176,7 @@ pub async fn mpsc_stress_test(
                 }
             })
             .await
-        })
-        .await;
+        });
 
         match round_result {
             Ok(Some(received_count)) => {
@@ -225,28 +224,29 @@ pub async fn mpsc_stress_test(
 
 /// Stress test for oneshot channels.
 pub async fn oneshot_stress_test() -> Result<(), Box<dyn std::error::Error>> {
-    let _runtime = lab_with_config(|rt| async move {
-        let cx = &rt.cx();
-
+    let runtime = RuntimeBuilder::current_thread().build()?;
+    let handle = runtime.handle();
+    runtime.block_on(async move {
         // Test many concurrent oneshot operations
         let mut handles = Vec::new();
 
         for i in 0..1000 {
-            let handle = task::spawn(async move {
-                let (sender, receiver) = oneshot::channel::<u32>();
+            let handle = handle.spawn(async move {
+                let cx = Cx::for_testing();
+                let (sender, mut receiver) = oneshot::channel::<u32>();
 
                 // Randomly decide whether to send or cancel
                 if i % 3 == 0 {
                     // Cancel case - drop sender without sending
                     drop(sender);
-                    match receiver.await {
-                        Err(oneshot::RecvError::Cancelled) => true,
+                    match receiver.recv(&cx).await {
+                        Err(oneshot::RecvError::Closed) => true,
                         _ => false,
                     }
                 } else {
                     // Send case
-                    sender.send(i as u32).unwrap();
-                    match receiver.await {
+                    sender.send(&cx, i as u32).unwrap();
+                    match receiver.recv(&cx).await {
                         Ok(val) => val == i as u32,
                         _ => false,
                     }
@@ -257,7 +257,7 @@ pub async fn oneshot_stress_test() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut successes = 0;
         for handle in handles {
-            if handle.await.unwrap() {
+            if handle.await {
                 successes += 1;
             }
         }
@@ -267,17 +267,17 @@ pub async fn oneshot_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             successes
         );
         assert!(successes >= 995, "Too many oneshot failures"); // Allow some variance
-    })
-    .await;
+    });
 
     Ok(())
 }
 
 /// Stress test for broadcast channels with multiple subscribers.
 pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
-    let _runtime = lab_with_config(|rt| async move {
-        let cx = &rt.cx();
-
+    let runtime = RuntimeBuilder::current_thread().build()?;
+    let handle = runtime.handle();
+    runtime.block_on(async move {
+        let cx = Cx::for_testing();
         let (sender, _) = broadcast::channel::<u32>(100);
         let num_subscribers = 10;
         let num_messages = 500;
@@ -286,15 +286,17 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         let mut subscribers = Vec::new();
         for i in 0..num_subscribers {
             let receiver = sender.subscribe();
-            let handle = task::spawn(async move {
+            let resubscribe_sender = sender.clone();
+            let handle = handle.spawn(async move {
+                let cx = Cx::for_testing();
                 let mut count = 0;
                 let mut receiver = receiver;
                 for _ in 0..num_messages {
-                    match receiver.recv(cx).await {
+                    match receiver.recv(&cx).await {
                         Ok(_) => count += 1,
                         Err(broadcast::RecvError::Lagged(_)) => {
                             // Reset receiver on lag
-                            receiver = sender.subscribe();
+                            receiver = resubscribe_sender.subscribe();
                         }
                         Err(_) => break,
                     }
@@ -305,24 +307,25 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Send messages concurrently with subscribers
-        let sender_handle = task::spawn(async move {
+        let sender_handle = handle.spawn(async move {
+            let cx = Cx::for_testing();
             for i in 0..num_messages {
-                if sender.send(i as u32).is_err() {
+                if sender.send(&cx, i as u32).is_err() {
                     break; // No more subscribers
                 }
                 if i % 50 == 0 {
-                    sleep(Duration::from_micros(1)).await;
+                    sleep(wall_now(), Duration::from_micros(1)).await;
                 }
             }
             num_messages
         });
 
-        let sent = sender_handle.await.unwrap();
+        let sent = sender_handle.await;
 
         // Collect results from subscribers
         let mut total_received = 0;
         for handle in subscribers {
-            let (subscriber_id, count) = handle.await.unwrap();
+            let (subscriber_id, count) = handle.await;
             println!("Subscriber {}: received {} messages", subscriber_id, count);
             total_received += count;
         }
@@ -335,17 +338,16 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             total_received >= sent * num_subscribers / 2,
             "Too few messages received"
         );
-    })
-    .await;
+    });
 
     Ok(())
 }
 
 /// Stress test for watch channels with rapid updates.
 pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
-    let _runtime = lab_with_config(|rt| async move {
-        let cx = &rt.cx();
-
+    let runtime = RuntimeBuilder::current_thread().build()?;
+    let handle = runtime.handle();
+    runtime.block_on(async move {
         let (sender, _) = watch::channel::<u32>(0);
         let num_watchers = 5;
         let num_updates = 1000;
@@ -354,14 +356,15 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         let mut watchers = Vec::new();
         for i in 0..num_watchers {
             let mut receiver = sender.subscribe();
-            let handle = task::spawn(async move {
+            let handle = handle.spawn(async move {
+                let cx = Cx::for_testing();
                 let mut updates_seen = 0;
                 let mut last_value = 0;
 
                 for _ in 0..num_updates * 2 {
                     // Allow extra iterations for watchers
-                    let timeout_fut = sleep(Duration::from_micros(1));
-                    let changed_fut = receiver.changed(cx);
+                    let timeout_fut = sleep(wall_now(), Duration::from_micros(1));
+                    let changed_fut = receiver.changed(&cx);
 
                     match Select::new(changed_fut, timeout_fut).await {
                         Ok(Either::Left(result)) => match result {
@@ -387,21 +390,21 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Send updates
-        let sender_handle = task::spawn(async move {
+        let sender_handle = handle.spawn(async move {
             for i in 1..=num_updates {
                 sender.send(i as u32).unwrap();
                 if i % 100 == 0 {
-                    sleep(Duration::from_micros(10)).await;
+                    sleep(wall_now(), Duration::from_micros(10)).await;
                 }
             }
             num_updates
         });
 
-        let sent = sender_handle.await.unwrap();
+        let sent = sender_handle.await;
 
         // Collect results from watchers
         for handle in watchers {
-            let (watcher_id, updates_seen, last_value) = handle.await.unwrap();
+            let (watcher_id, updates_seen, last_value) = handle.await;
             println!(
                 "Watcher {}: saw {} updates, last value {}",
                 watcher_id, updates_seen, last_value
@@ -410,8 +413,7 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         println!("Watch stress test: sent {} updates", sent);
-    })
-    .await;
+    });
 
     Ok(())
 }
@@ -419,10 +421,11 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
 
     #[test]
     fn test_mpsc_light_stress() {
-        lab_with_config(|_rt| async move {
+        block_on(async move {
             let config = StressTestConfig {
                 base: AtomicityTestConfig {
                     capacity: 4,
@@ -457,21 +460,21 @@ mod tests {
 
     #[test]
     fn test_oneshot_stress_basic() {
-        lab_with_config(|_rt| async move {
+        block_on(async move {
             oneshot_stress_test().await.unwrap();
         });
     }
 
     #[test]
     fn test_broadcast_stress_basic() {
-        lab_with_config(|_rt| async move {
+        block_on(async move {
             broadcast_stress_test().await.unwrap();
         });
     }
 
     #[test]
     fn test_watch_stress_basic() {
-        lab_with_config(|_rt| async move {
+        block_on(async move {
             watch_stress_test().await.unwrap();
         });
     }
