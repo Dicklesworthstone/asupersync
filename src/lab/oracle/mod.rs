@@ -1309,7 +1309,7 @@ mod tests {
 
     #[test]
     fn oracle_suite_debug() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let dbg = format!("{suite:?}");
         assert!(dbg.contains("OracleSuite"));
     }
@@ -1324,7 +1324,7 @@ mod tests {
 
     #[test]
     fn oracle_suite_report_all_pass() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         assert!(report.all_passed());
         assert_eq!(report.failed, 0);
@@ -1334,7 +1334,7 @@ mod tests {
 
     #[test]
     fn oracle_report_debug_clone() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let dbg = format!("{report:?}");
         assert!(dbg.contains("OracleReport"));
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn oracle_report_to_json() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let json = report.to_json();
         assert!(json.is_object());
@@ -1354,7 +1354,7 @@ mod tests {
 
     #[test]
     fn oracle_report_to_text() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let text = report.to_text();
         assert!(text.contains("Oracle Report"));
@@ -1365,7 +1365,7 @@ mod tests {
     #[test]
     #[allow(clippy::significant_drop_tightening)]
     fn oracle_report_emits_structured_oracle_check_events() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let events = Arc::new(Mutex::new(Vec::new()));
         let recorder = EventRecorder {
             events: events.clone(),
@@ -1433,7 +1433,7 @@ mod tests {
 
     #[test]
     fn oracle_report_entry_lookup() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let entry = report.entry("task_leak");
         assert!(entry.is_some());
@@ -1508,7 +1508,7 @@ mod tests {
         // only if we can construct one. Use OracleViolation::TaskLeak as proxy.
         // TaskLeakViolation requires specific sub-oracle construction which is complex,
         // so we test the outer enum via the suite report pathway.
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let violations = suite.check_all(Time::ZERO);
         // No violations on a fresh suite; just verify the Vec is empty.
         assert!(violations.is_empty());
