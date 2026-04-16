@@ -104,7 +104,7 @@ pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
 
 /// Run async test code with a lab runtime.
 ///
-/// Creates a default lab runtime and passes it to the provided closure.
+/// Creates a default lab runtime and runs the provided closure using the regular runtime.
 /// This is commonly used for channel stress tests and other lab-based testing.
 pub fn lab_with_config<F, Fut, R>(f: F) -> R
 where
@@ -113,7 +113,10 @@ where
 {
     init_test_logging();
     let lab = test_lab();
-    lab.block_on(f(lab))
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("failed to build test runtime");
+    runtime.block_on(f(lab))
 }
 
 /// Create a [`TestContext`] for a unit test with the default seed.
