@@ -77,7 +77,9 @@ impl Default for CancelDebtConfig {
 pub enum CancelDebtViolation {
     /// Debt exceeded the maximum allowed threshold.
     DebtThresholdExceeded {
+        /// Current amount of accumulated debt.
         current_debt: usize,
+        /// Maximum allowed debt threshold.
         max_debt: usize,
         queue_type: String,
         detected_at: Time,
