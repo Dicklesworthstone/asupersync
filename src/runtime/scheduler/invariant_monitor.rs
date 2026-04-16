@@ -72,48 +72,75 @@ pub enum InvariantCategory {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchedulerInvariant {
     /// A task appears in multiple queues simultaneously
-    TaskInMultipleQueues { task_id: TaskId, queue_count: usize },
+    TaskInMultipleQueues {
+        /// ID of the task found in multiple queues.
+        task_id: TaskId,
+        /// Number of queues the task was found in.
+        queue_count: usize
+    },
     /// Higher priority task scheduled after lower priority
     PriorityOrderViolation {
+        /// ID of the higher priority task that was scheduled late.
         high_priority_task: TaskId,
+        /// Priority level of the high priority task.
         high_priority: u8,
+        /// ID of the lower priority task that was scheduled first.
         low_priority_task: TaskId,
+        /// Priority level of the low priority task.
         low_priority: u8,
     },
     /// Task starved for excessive time
     TaskStarvation {
+        /// ID of the starved task.
         task_id: TaskId,
+        /// How long the task has been waiting (in milliseconds).
         wait_time_ms: u64,
+        /// Position of the task in the queue.
         queue_position: usize,
     },
     /// Worker load severely imbalanced
     LoadImbalance {
+        /// ID of the overloaded worker.
         overloaded_worker: usize,
+        /// ID of the underloaded worker.
         underloaded_worker: usize,
+        /// Ratio of load imbalance between workers.
         load_ratio: f64,
     },
     /// Work-stealing caused double execution
     WorkStealingDoubleExecution {
+        /// ID of the task that was executed twice.
         task_id: TaskId,
+        /// Worker that originally owned the task.
         original_worker: usize,
+        /// Worker that stole and re-executed the task.
         stealing_worker: usize,
     },
     /// Cancelled task not properly drained
     CancelledTaskLeak {
+        /// ID of the leaked cancelled task.
         task_id: TaskId,
+        /// Name of the queue where the task remains.
         queue_name: String,
+        /// Time since cancellation in milliseconds.
         time_since_cancel_ms: u64,
     },
     /// Queue depth metric doesn't match actual content
     QueueDepthMismatch {
+        /// Name of the queue with the mismatch.
         queue_name: String,
+        /// Depth reported by metrics.
         reported_depth: usize,
+        /// Actual depth measured by counting.
         actual_depth: usize,
     },
     /// Task state transition is invalid
     InvalidStateTransition {
+        /// ID of the task with invalid transition.
         task_id: TaskId,
+        /// State the task was transitioning from.
         from_state: String,
+        /// State the task was transitioning to.
         to_state: String,
     },
 }
