@@ -36,8 +36,12 @@
 //! ```
 
 pub mod analyzer_plugin;
+pub mod cancellation_analyzer;
 pub mod cancellation_tracer;
+pub mod cancellation_visualizer;
 pub mod collector;
+pub mod runtime_integration;
+pub mod structured_cancellation_analyzer;
 pub mod context;
 pub mod diagnostics;
 pub mod entry;
@@ -62,6 +66,21 @@ pub use cancellation_tracer::{
     CancellationAnalysis, CancellationTrace, CancellationTraceStep, CancellationTracer,
     CancellationTracerConfig, CancellationTracerStats, CancellationTracerStatsSnapshot,
     EntityType, PropagationAnomaly, TraceId, analyze_cancellation_patterns,
+};
+pub use cancellation_analyzer::{
+    AnalyzerConfig as CancellationAnalyzerConfig, BottleneckAnalysis, CancellationAnalyzer,
+    CleanupEfficiency, CleanupTimingAnalysis, DistributionStats, EntityPerformance,
+    ImplementationComplexity, OptimizationRecommendation, PerformanceAnalysis,
+    PerformanceRegression, RecommendationPriority, ThroughputMetrics, TrendAnalysis,
+    TrendDirection,
+};
+pub use cancellation_visualizer::{
+    AnomalyInfo, AnomalySeverity, BottleneckInfo, CancellationDashboard, CancellationTreeNode,
+    CancellationVisualizer, ThroughputStats, TimingFormat, VisualizerConfig,
+};
+pub use structured_cancellation_analyzer::{
+    AlertSeverity, AlertType, CancellationAlert, LabRuntimeIntegration, RealTimeStats,
+    StructuredCancellationAnalyzer, StructuredCancellationConfig,
 };
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
