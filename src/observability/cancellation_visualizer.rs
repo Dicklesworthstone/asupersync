@@ -40,23 +40,36 @@ impl Default for VisualizerConfig {
 /// Format for displaying timing information.
 #[derive(Debug, Clone, Copy)]
 pub enum TimingFormat {
+    /// Display timing in nanoseconds.
     Nanoseconds,
+    /// Display timing in microseconds.
     Microseconds,
+    /// Display timing in milliseconds.
     Milliseconds,
+    /// Display timing in seconds.
     Seconds,
+    /// Automatically choose the most appropriate unit.
     Auto,
 }
 
 /// A tree node in the cancellation propagation visualization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancellationTreeNode {
+    /// Unique identifier for the entity (task, region, etc.).
     pub entity_id: String,
+    /// Type of the entity represented by this node.
     pub entity_type: EntityType,
+    /// Depth level in the cancellation tree.
     pub depth: u32,
+    /// Total time for cancellation to complete for this entity.
     pub timing: Option<Duration>,
+    /// Delay between parent cancellation and this entity's cancellation start.
     pub propagation_delay: Option<Duration>,
+    /// List of detected anomalies or issues during cancellation.
     pub anomalies: Vec<String>,
+    /// Child nodes in the cancellation tree.
     pub children: Vec<CancellationTreeNode>,
+    /// Whether cancellation has completed for this entity.
     pub completed: bool,
 }
 
@@ -84,10 +97,15 @@ pub struct CancellationDashboard {
 /// Information about a detected bottleneck.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BottleneckInfo {
+    /// ID of the entity causing the bottleneck.
     pub entity_id: String,
+    /// Type of the entity causing the bottleneck.
     pub entity_type: EntityType,
+    /// Average delay caused by this bottleneck.
     pub avg_delay: Duration,
+    /// Current queue depth at this bottleneck.
     pub queue_depth: usize,
+    /// Impact score indicating severity (0.0 to 1.0).
     pub impact_score: f64,
 }
 
