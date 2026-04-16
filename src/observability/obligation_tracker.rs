@@ -32,12 +32,12 @@ use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
+#[cfg(feature = "obligation-leak-detection")]
+use std::backtrace::Backtrace;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "obligation-leak-detection")]
-use std::backtrace::Backtrace;
 
 /// Configuration for the obligation tracker.
 #[derive(Debug, Clone)]
@@ -699,7 +699,12 @@ mod tests {
 
         // Create an obligation in the region
         let obligation_id = state
-            .create_obligation(ObligationKind::SendPermit, task_id, root, Some("test permit".into()))
+            .create_obligation(
+                ObligationKind::SendPermit,
+                task_id,
+                root,
+                Some("test permit".into()),
+            )
             .expect("create obligation");
 
         state.now = Time::from_secs(30);
@@ -727,7 +732,12 @@ mod tests {
 
         // Create obligations with different ages
         let old_obligation = state
-            .create_obligation(ObligationKind::Lease, task_id, root, Some("old lease".into()))
+            .create_obligation(
+                ObligationKind::Lease,
+                task_id,
+                root,
+                Some("old lease".into()),
+            )
             .expect("create obligation");
 
         state.now = Time::from_secs(120); // Make the first obligation very old
@@ -749,12 +759,16 @@ mod tests {
         assert_eq!(report.threshold_used, threshold);
 
         // Check leak severity classification
-        let critical_leak = report.attributed_leaks.iter()
+        let critical_leak = report
+            .attributed_leaks
+            .iter()
             .find(|leak| leak.obligation.id == old_obligation)
             .expect("should find old obligation");
         assert_eq!(critical_leak.leak_severity, LeakSeverity::Critical);
 
-        let warning_leak = report.attributed_leaks.iter()
+        let warning_leak = report
+            .attributed_leaks
+            .iter()
             .find(|leak| leak.obligation.id == new_obligation)
             .expect("should find new obligation");
         assert_eq!(warning_leak.leak_severity, LeakSeverity::Warning);
@@ -777,7 +791,8 @@ mod tests {
 
         let tracker = ObligationTracker::new(Arc::new(state), None);
 
-        let attribution = tracker.get_leak_attribution(obligation_id)
+        let attribution = tracker
+            .get_leak_attribution(obligation_id)
             .expect("should find attribution");
 
         assert_eq!(attribution.obligation_id, obligation_id);

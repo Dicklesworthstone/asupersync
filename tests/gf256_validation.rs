@@ -12,8 +12,7 @@
 #[cfg(test)]
 mod tests {
     use asupersync::raptorq::gf256::{
-        gf256_mul_slice, gf256_addmul_slice, gf256_mul_slices2, gf256_addmul_slices2,
-        Gf256,
+        Gf256, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
     };
     use std::time::Instant;
 
@@ -83,7 +82,8 @@ mod tests {
 
             assert_eq!(
                 dst_reference, dst_test,
-                "Addmul bit-exactness violation for c={}", c_val
+                "Addmul bit-exactness violation for c={}",
+                c_val
             );
         }
     }
@@ -91,7 +91,7 @@ mod tests {
     /// Test dual-slice operations for bit-exactness
     #[test]
     fn test_dual_slice_bit_exactness() {
-        const SIZE_A: usize = 567;  // Asymmetric sizes to test edge cases
+        const SIZE_A: usize = 567; // Asymmetric sizes to test edge cases
         const SIZE_B: usize = 890;
 
         let mut dst_a_test = vec![0u8; SIZE_A];
@@ -119,8 +119,14 @@ mod tests {
         // Optimized: fused dual-slice kernel
         gf256_mul_slices2(&mut dst_a_test, &mut dst_b_test, c);
 
-        assert_eq!(dst_a_ref, dst_a_test, "Dual-slice A bit-exactness violation");
-        assert_eq!(dst_b_ref, dst_b_test, "Dual-slice B bit-exactness violation");
+        assert_eq!(
+            dst_a_ref, dst_a_test,
+            "Dual-slice A bit-exactness violation"
+        );
+        assert_eq!(
+            dst_b_ref, dst_b_test,
+            "Dual-slice B bit-exactness violation"
+        );
     }
 
     /// Performance regression protection test
@@ -144,11 +150,16 @@ mod tests {
         let optimized_duration = start.elapsed();
 
         // Verify we have measurable performance (not a no-op)
-        assert!(optimized_duration.as_nanos() > 0, "Performance test shows no work done");
+        assert!(
+            optimized_duration.as_nanos() > 0,
+            "Performance test shows no work done"
+        );
 
         // Log performance for CI monitoring
-        println!("GF256 mul_slice performance: {:?} for {} iterations on {}B",
-                optimized_duration, ITERATIONS, BENCH_SIZE);
+        println!(
+            "GF256 mul_slice performance: {:?} for {} iterations on {}B",
+            optimized_duration, ITERATIONS, BENCH_SIZE
+        );
 
         // Throughput calculation (bytes/second)
         let total_bytes = BENCH_SIZE * ITERATIONS;
@@ -157,7 +168,11 @@ mod tests {
         println!("GF256 mul_slice throughput: {:.2} GB/s", throughput_gbps);
 
         // Basic regression protection: should be faster than 100 MB/s (very conservative)
-        assert!(throughput_gbps > 0.1, "Performance regression detected: {:.2} GB/s", throughput_gbps);
+        assert!(
+            throughput_gbps > 0.1,
+            "Performance regression detected: {:.2} GB/s",
+            throughput_gbps
+        );
     }
 
     /// Test that validates kernel selection logic with structured logging
@@ -175,7 +190,11 @@ mod tests {
             let mut data2 = original_data.clone();
             gf256_mul_slice(&mut data2, Gf256(157));
 
-            assert_eq!(data, data2, "Non-deterministic kernel behavior for size {}", size);
+            assert_eq!(
+                data, data2,
+                "Non-deterministic kernel behavior for size {}",
+                size
+            );
 
             // Log kernel selection for debugging
             println!("Size {} bytes: kernel selection deterministic ✓", size);

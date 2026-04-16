@@ -4,7 +4,7 @@
 //! reserve/commit operations across all channel types under concurrent stress
 //! and cancellation injection.
 
-use crate::channel::mpsc::{self, SendError, RecvError};
+use crate::channel::mpsc::{self, RecvError, SendError};
 use crate::cx::Cx;
 use crate::test_utils::lab_with_config;
 use crate::time::sleep;
@@ -134,7 +134,9 @@ impl AtomicityOracle {
 
     /// Records a reservation abortion.
     pub fn record_abortion(&self) {
-        self.stats.reservations_aborted.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .reservations_aborted
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records a successful message send.
@@ -149,17 +151,23 @@ impl AtomicityOracle {
 
     /// Records a cancellation during reserve phase.
     pub fn record_reserve_cancellation(&self) {
-        self.stats.reserve_cancellations.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .reserve_cancellations
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records a cancellation during commit phase.
     pub fn record_commit_cancellation(&self) {
-        self.stats.commit_cancellations.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .commit_cancellations
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records an invariant violation.
     pub fn record_violation(&self) {
-        self.stats.invariant_violations.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .invariant_violations
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Takes a snapshot of channel state for invariant checking.
@@ -168,19 +176,27 @@ impl AtomicityOracle {
         if self.config.check_invariants {
             if !snapshot.verify_capacity_invariant() {
                 self.record_violation();
-                eprintln!("VIOLATION: Capacity invariant failed: used_slots={} > capacity={}",
-                         snapshot.used_slots, snapshot.capacity);
+                eprintln!(
+                    "VIOLATION: Capacity invariant failed: used_slots={} > capacity={}",
+                    snapshot.used_slots, snapshot.capacity
+                );
             }
             if !snapshot.verify_accounting_invariant() {
                 self.record_violation();
-                eprintln!("VIOLATION: Accounting invariant failed: used_slots={} != queue_length={} + reserved_count={}",
-                         snapshot.used_slots, snapshot.queue_length, snapshot.reserved_count);
+                eprintln!(
+                    "VIOLATION: Accounting invariant failed: used_slots={} != queue_length={} + reserved_count={}",
+                    snapshot.used_slots, snapshot.queue_length, snapshot.reserved_count
+                );
             }
         }
 
         // Update max observed values
-        self.stats.max_queue_length.fetch_max(snapshot.queue_length, Ordering::Relaxed);
-        self.stats.max_reserved_count.fetch_max(snapshot.reserved_count, Ordering::Relaxed);
+        self.stats
+            .max_queue_length
+            .fetch_max(snapshot.queue_length, Ordering::Relaxed);
+        self.stats
+            .max_reserved_count
+            .fetch_max(snapshot.reserved_count, Ordering::Relaxed);
 
         // Store snapshot for later analysis
         if let Ok(mut snapshots) = self.snapshots.lock() {
@@ -272,9 +288,9 @@ impl<T> TestableChannel<T> {
         // This is a placeholder - in a real implementation we'd need
         // privileged access to channel internals for true state inspection
         let snapshot = ChannelSnapshot {
-            queue_length: 0, // Would need internal access
+            queue_length: 0,   // Would need internal access
             reserved_count: 0, // Would need internal access
-            used_slots: 0, // Would need internal access
+            used_slots: 0,     // Would need internal access
             capacity: self.sender.capacity(),
             timestamp: now,
         };
@@ -479,15 +495,28 @@ mod tests {
 
             // Verify consistency
             let stats = oracle.stats();
-            assert!(stats.is_consistent(), "Message count mismatch: sent={}, received={}",
-                   stats.messages_sent.load(Ordering::Acquire),
-                   stats.messages_received.load(Ordering::Acquire));
+            assert!(
+                stats.is_consistent(),
+                "Message count mismatch: sent={}, received={}",
+                stats.messages_sent.load(Ordering::Acquire),
+                stats.messages_received.load(Ordering::Acquire)
+            );
             assert!(stats.is_invariant_safe(), "Invariant violations detected");
 
             println!("Basic atomicity test passed:");
-            println!("  Messages sent: {}", stats.messages_sent.load(Ordering::Acquire));
-            println!("  Messages received: {}", stats.messages_received.load(Ordering::Acquire));
-            println!("  Reservations made: {}", stats.reservations_made.load(Ordering::Acquire));
-        }).await;
+            println!(
+                "  Messages sent: {}",
+                stats.messages_sent.load(Ordering::Acquire)
+            );
+            println!(
+                "  Messages received: {}",
+                stats.messages_received.load(Ordering::Acquire)
+            );
+            println!(
+                "  Reservations made: {}",
+                stats.reservations_made.load(Ordering::Acquire)
+            );
+        })
+        .await;
     }
 }

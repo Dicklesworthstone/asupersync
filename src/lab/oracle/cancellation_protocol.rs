@@ -61,8 +61,8 @@ use crate::runtime::RuntimeState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Macro for zero-cost oracle operations when the feature is disabled.
 #[cfg(not(feature = "cancel-correctness-oracle"))]
@@ -148,10 +148,12 @@ impl ViolationRecord {
             violation,
             trace_id,
             stack_trace,
-            detected_at: Time::from_nanos(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64),
+            detected_at: Time::from_nanos(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+            ),
             replay_command,
         }
     }
@@ -549,7 +551,7 @@ impl CancellationProtocolOracle {
     pub fn for_runtime() -> Self {
         Self::with_config(CancelCorrectnessConfig {
             enforcement: EnforcementMode::Warn,
-            capture_stacks: false, // Disabled for performance
+            capture_stacks: false,      // Disabled for performance
             max_violations_tracked: 50, // Reduced for memory usage
             structured_logging: true,
         })
@@ -580,7 +582,11 @@ impl CancellationProtocolOracle {
             }
             EnforcementMode::Warn => {
                 eprintln!("⚠️  Cancel protocol violation: {}", violation);
-                if let Some(ref stack) = self.violation_records.last().and_then(|r| r.stack_trace.as_ref()) {
+                if let Some(ref stack) = self
+                    .violation_records
+                    .last()
+                    .and_then(|r| r.stack_trace.as_ref())
+                {
                     eprintln!("   Stack trace: {}", stack);
                 }
             }

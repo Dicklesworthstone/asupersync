@@ -66,15 +66,15 @@ use core::arch::aarch64::{
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86"))]
 use core::arch::x86::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256, _mm_prefetch, _MM_HINT_T0,
+    __m128i, __m256i, _MM_HINT_T0, _mm_loadu_si128, _mm_prefetch, _mm256_and_si256,
+    _mm256_broadcastsi128_si256, _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8,
+    _mm256_srli_epi16, _mm256_storeu_si256, _mm256_xor_si256,
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256, _mm_prefetch, _MM_HINT_T0,
+    __m128i, __m256i, _MM_HINT_T0, _mm_loadu_si128, _mm_prefetch, _mm256_and_si256,
+    _mm256_broadcastsi128_si256, _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8,
+    _mm256_srli_epi16, _mm256_storeu_si256, _mm256_xor_si256,
 };
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.
@@ -1997,7 +1997,10 @@ fn gf256_add_slice_aarch64_neon(dst: &mut [u8], src: &[u8]) {
 }
 
 /// Architecture-specific thresholds for SIMD nibble-table setup in mul paths.
-#[cfg(all(feature = "simd-intrinsics", any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
 const MUL_TABLE_THRESHOLD: usize = 32; // x86-avx2-t32 tuning evidence
 #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 const MUL_TABLE_THRESHOLD: usize = 32; // aarch64-neon-t32 tuning evidence
@@ -2005,7 +2008,10 @@ const MUL_TABLE_THRESHOLD: usize = 32; // aarch64-neon-t32 tuning evidence
 const MUL_TABLE_THRESHOLD: usize = 16; // scalar-t16 baseline
 
 /// Architecture-specific thresholds for SIMD nibble-table setup in addmul paths.
-#[cfg(all(feature = "simd-intrinsics", any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
 const ADDMUL_TABLE_THRESHOLD: usize = 32; // x86-avx2-t32 tuning evidence
 #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 const ADDMUL_TABLE_THRESHOLD: usize = 32; // aarch64-neon-t32 tuning evidence

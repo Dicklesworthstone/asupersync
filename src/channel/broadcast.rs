@@ -1841,8 +1841,16 @@ mod tests {
     #[test]
     fn try_recv_error_traits() {
         init_test("broadcast_try_recv_error_traits");
-        let errors = [TryRecvError::Empty, TryRecvError::Lagged(5), TryRecvError::Closed];
-        let expected = ["broadcast channel empty", "receiver lagged by 5 messages", "broadcast channel closed"];
+        let errors = [
+            TryRecvError::Empty,
+            TryRecvError::Lagged(5),
+            TryRecvError::Closed,
+        ];
+        let expected = [
+            "broadcast channel empty",
+            "receiver lagged by 5 messages",
+            "broadcast channel closed",
+        ];
         for (e, exp) in errors.iter().zip(expected.iter()) {
             let copied = *e;
             let cloned = *e;

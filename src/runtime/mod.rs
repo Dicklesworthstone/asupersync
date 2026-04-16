@@ -137,6 +137,7 @@ pub mod sharded_state;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
 pub mod state;
+pub mod state_verifier;
 pub mod stored_task;
 pub mod task_handle;
 pub mod task_table;
@@ -185,6 +186,10 @@ pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
+pub use state_verifier::{
+    StateTransitionVerifier, StateVerifierConfig, StateViolation, StateVerifierStatsSnapshot,
+    StateEntityType, RegionStateTransitions, ObligationStateTransitions,
+};
 pub use stored_task::StoredTask;
 pub use task_handle::{JoinError, TaskHandle};
 pub use task_table::TaskTable;

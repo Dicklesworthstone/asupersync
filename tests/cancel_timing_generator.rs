@@ -39,8 +39,8 @@
 #![allow(missing_docs)]
 
 use proptest::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 /// A comprehensive cancellation timing scenario
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,9 +182,18 @@ pub struct BudgetConfig {
 pub enum BudgetType {
     Infinite,
     Fixed(u64),
-    Renewable { initial: u64, renewal_amount: u64 },
-    Shared { total: u64, consumers: usize },
-    Hierarchical { parent_budget: u64, child_ratios: Vec<f64> },
+    Renewable {
+        initial: u64,
+        renewal_amount: u64,
+    },
+    Shared {
+        total: u64,
+        consumers: usize,
+    },
+    Hierarchical {
+        parent_budget: u64,
+        child_ratios: Vec<f64>,
+    },
 }
 
 /// Budget renewal event
@@ -244,271 +253,284 @@ pub mod generators {
     /// Generate basic cancel point scenarios
     pub fn basic_cancel_points() -> impl Strategy<Value = CancelTimingPattern> {
         (
-            any::<u64>(),                           // seed for pattern_id
-            0u64..1000,                            // cancel time
-            cancel_source(),                        // cancel source
-            region_hierarchy_simple(),              // simple hierarchy
-        ).prop_map(|(seed, cancel_time, source, hierarchy)| {
-            CancelTimingPattern {
-                pattern_id: format!("basic-cancel-{:08x}", seed),
-                category: PatternCategory::BasicCancelPoints,
-                description: format!("Cancel at {}ms from {source:?}", cancel_time),
-                timing_events: vec![
-                    TimingEvent {
+            any::<u64>(),              // seed for pattern_id
+            0u64..1000,                // cancel time
+            cancel_source(),           // cancel source
+            region_hierarchy_simple(), // simple hierarchy
+        )
+            .prop_map(
+                |(seed, cancel_time, source, hierarchy)| CancelTimingPattern {
+                    pattern_id: format!("basic-cancel-{:08x}", seed),
+                    category: PatternCategory::BasicCancelPoints,
+                    description: format!("Cancel at {}ms from {source:?}", cancel_time),
+                    timing_events: vec![TimingEvent {
                         event_type: EventType::CancelRequest,
                         virtual_time_ms: cancel_time,
                         target_region: hierarchy.root_region,
                         source,
                         trigger_condition: None,
                         expected_propagation: vec![hierarchy.root_region],
-                    }
-                ],
-                region_hierarchy: hierarchy,
-                budget_config: BudgetConfig::infinite(),
-                expected_invariants: vec![
-                    ExpectedInvariant::losers_drained(),
-                    ExpectedInvariant::no_leaks(),
-                ],
-            }
-        })
+                    }],
+                    region_hierarchy: hierarchy,
+                    budget_config: BudgetConfig::infinite(),
+                    expected_invariants: vec![
+                        ExpectedInvariant::losers_drained(),
+                        ExpectedInvariant::no_leaks(),
+                    ],
+                },
+            )
     }
 
     /// Generate nested cancellation scenarios
     pub fn nested_cancellation() -> impl Strategy<Value = CancelTimingPattern> {
         (
             any::<u64>(),
-            2usize..=5,                            // number of nesting levels
-            cancel_cascade_mode(),                  // how cancellation propagates
-        ).prop_map(|(seed, levels, cascade_mode)| {
-            let hierarchy = RegionHierarchy::nested(levels);
-            let timing_events = create_cascading_cancel_events(&hierarchy, cascade_mode);
+            2usize..=5,            // number of nesting levels
+            cancel_cascade_mode(), // how cancellation propagates
+        )
+            .prop_map(|(seed, levels, cascade_mode)| {
+                let hierarchy = RegionHierarchy::nested(levels);
+                let timing_events = create_cascading_cancel_events(&hierarchy, cascade_mode);
 
-            CancelTimingPattern {
-                pattern_id: format!("nested-cancel-{:08x}", seed),
-                category: PatternCategory::NestedCancellation,
-                description: format!("{} level nested cancellation with {cascade_mode:?}", levels),
-                timing_events,
-                region_hierarchy: hierarchy,
-                budget_config: BudgetConfig::hierarchical(levels),
-                expected_invariants: vec![
-                    ExpectedInvariant::structured_concurrency(),
-                    ExpectedInvariant::cancel_protocol_followed(),
-                    ExpectedInvariant::no_task_orphans(),
-                ],
-            }
-        })
+                CancelTimingPattern {
+                    pattern_id: format!("nested-cancel-{:08x}", seed),
+                    category: PatternCategory::NestedCancellation,
+                    description: format!(
+                        "{} level nested cancellation with {cascade_mode:?}",
+                        levels
+                    ),
+                    timing_events,
+                    region_hierarchy: hierarchy,
+                    budget_config: BudgetConfig::hierarchical(levels),
+                    expected_invariants: vec![
+                        ExpectedInvariant::structured_concurrency(),
+                        ExpectedInvariant::cancel_protocol_followed(),
+                        ExpectedInvariant::no_task_orphans(),
+                    ],
+                }
+            })
     }
 
     /// Generate concurrent cancellation scenarios
     pub fn concurrent_cancellation() -> impl Strategy<Value = CancelTimingPattern> {
         (
             any::<u64>(),
-            2usize..=4,                            // number of concurrent cancellers
-            0u64..100,                            // time window for cancellation racing
-        ).prop_map(|(seed, num_cancellers, time_window)| {
-            let hierarchy = RegionHierarchy::concurrent_siblings(num_cancellers);
-            let mut timing_events = Vec::new();
+            2usize..=4, // number of concurrent cancellers
+            0u64..100,  // time window for cancellation racing
+        )
+            .prop_map(|(seed, num_cancellers, time_window)| {
+                let hierarchy = RegionHierarchy::concurrent_siblings(num_cancellers);
+                let mut timing_events = Vec::new();
 
-            // Create racing cancel requests
-            for i in 0..num_cancellers {
-                let cancel_time = (i as u64 * time_window) / (num_cancellers as u64);
-                timing_events.push(TimingEvent {
-                    event_type: EventType::CancelRequest,
-                    virtual_time_ms: cancel_time,
-                    target_region: i as RegionId + 1, // Skip root region (0)
-                    source: CancelSource::SiblingTask,
-                    trigger_condition: Some(TriggerCondition::Probability(0.7)),
-                    expected_propagation: vec![i as RegionId + 1],
-                });
-            }
+                // Create racing cancel requests
+                for i in 0..num_cancellers {
+                    let cancel_time = (i as u64 * time_window) / (num_cancellers as u64);
+                    timing_events.push(TimingEvent {
+                        event_type: EventType::CancelRequest,
+                        virtual_time_ms: cancel_time,
+                        target_region: i as RegionId + 1, // Skip root region (0)
+                        source: CancelSource::SiblingTask,
+                        trigger_condition: Some(TriggerCondition::Probability(0.7)),
+                        expected_propagation: vec![i as RegionId + 1],
+                    });
+                }
 
-            CancelTimingPattern {
-                pattern_id: format!("concurrent-cancel-{:08x}", seed),
-                category: PatternCategory::ConcurrentCancellation,
-                description: format!("{} concurrent cancellers within {}ms window",
-                              num_cancellers, time_window),
-                timing_events,
-                region_hierarchy: hierarchy,
-                budget_config: BudgetConfig::shared(num_cancellers),
-                expected_invariants: vec![
-                    ExpectedInvariant::losers_drained(),
-                    ExpectedInvariant::cancel_protocol_followed(),
-                ],
-            }
-        })
+                CancelTimingPattern {
+                    pattern_id: format!("concurrent-cancel-{:08x}", seed),
+                    category: PatternCategory::ConcurrentCancellation,
+                    description: format!(
+                        "{} concurrent cancellers within {}ms window",
+                        num_cancellers, time_window
+                    ),
+                    timing_events,
+                    region_hierarchy: hierarchy,
+                    budget_config: BudgetConfig::shared(num_cancellers),
+                    expected_invariants: vec![
+                        ExpectedInvariant::losers_drained(),
+                        ExpectedInvariant::cancel_protocol_followed(),
+                    ],
+                }
+            })
     }
 
     /// Generate two-phase protocol stress scenarios
     pub fn two_phase_stress() -> impl Strategy<Value = CancelTimingPattern> {
         (
             any::<u64>(),
-            two_phase_cancel_point(),               // when to cancel during two-phase
-            1usize..=3,                            // number of two-phase operations
-        ).prop_map(|(seed, cancel_point, num_ops)| {
-            let hierarchy = RegionHierarchy::simple();
-            let mut timing_events = Vec::new();
+            two_phase_cancel_point(), // when to cancel during two-phase
+            1usize..=3,               // number of two-phase operations
+        )
+            .prop_map(|(seed, cancel_point, num_ops)| {
+                let hierarchy = RegionHierarchy::simple();
+                let mut timing_events = Vec::new();
 
-            for op_idx in 0..num_ops {
-                let base_time = op_idx as u64 * 100;
+                for op_idx in 0..num_ops {
+                    let base_time = op_idx as u64 * 100;
 
-                // Reserve phase
-                timing_events.push(TimingEvent {
-                    event_type: EventType::ReserveOperation,
-                    virtual_time_ms: base_time,
-                    target_region: hierarchy.root_region,
-                    source: CancelSource::UserRequest,
-                    trigger_condition: None,
-                    expected_propagation: vec![],
-                });
-
-                // Potential cancel point
-                if let Some(cancel_offset) = cancel_point.time_offset(base_time) {
+                    // Reserve phase
                     timing_events.push(TimingEvent {
-                        event_type: EventType::CancelRequest,
-                        virtual_time_ms: cancel_offset,
+                        event_type: EventType::ReserveOperation,
+                        virtual_time_ms: base_time,
                         target_region: hierarchy.root_region,
-                        source: CancelSource::ExternalSignal,
+                        source: CancelSource::UserRequest,
                         trigger_condition: None,
-                        expected_propagation: vec![hierarchy.root_region],
+                        expected_propagation: vec![],
+                    });
+
+                    // Potential cancel point
+                    if let Some(cancel_offset) = cancel_point.time_offset(base_time) {
+                        timing_events.push(TimingEvent {
+                            event_type: EventType::CancelRequest,
+                            virtual_time_ms: cancel_offset,
+                            target_region: hierarchy.root_region,
+                            source: CancelSource::ExternalSignal,
+                            trigger_condition: None,
+                            expected_propagation: vec![hierarchy.root_region],
+                        });
+                    }
+
+                    // Commit phase
+                    timing_events.push(TimingEvent {
+                        event_type: EventType::CommitOperation,
+                        virtual_time_ms: base_time + 50,
+                        target_region: hierarchy.root_region,
+                        source: CancelSource::UserRequest,
+                        trigger_condition: None,
+                        expected_propagation: vec![],
                     });
                 }
 
-                // Commit phase
-                timing_events.push(TimingEvent {
-                    event_type: EventType::CommitOperation,
-                    virtual_time_ms: base_time + 50,
-                    target_region: hierarchy.root_region,
-                    source: CancelSource::UserRequest,
-                    trigger_condition: None,
-                    expected_propagation: vec![],
-                });
-            }
-
-            CancelTimingPattern {
-                pattern_id: format!("two-phase-stress-{:08x}", seed),
-                category: PatternCategory::TwoPhasePressure,
-                description: format!("{} two-phase ops with cancel at {cancel_point:?}", num_ops),
-                timing_events,
-                region_hierarchy: hierarchy,
-                budget_config: BudgetConfig::renewable(50, 25),
-                expected_invariants: vec![
-                    ExpectedInvariant::two_phase_correctness(),
-                    ExpectedInvariant::resources_freed(),
-                ],
-            }
-        })
+                CancelTimingPattern {
+                    pattern_id: format!("two-phase-stress-{:08x}", seed),
+                    category: PatternCategory::TwoPhasePressure,
+                    description: format!(
+                        "{} two-phase ops with cancel at {cancel_point:?}",
+                        num_ops
+                    ),
+                    timing_events,
+                    region_hierarchy: hierarchy,
+                    budget_config: BudgetConfig::renewable(50, 25),
+                    expected_invariants: vec![
+                        ExpectedInvariant::two_phase_correctness(),
+                        ExpectedInvariant::resources_freed(),
+                    ],
+                }
+            })
     }
 
     /// Generate budget interaction scenarios
     pub fn budget_interactions() -> impl Strategy<Value = CancelTimingPattern> {
         (
             any::<u64>(),
-            budget_exhaustion_scenario(),           // how budget exhaustion interacts with cancel
-            10u64..=200,                           // budget amount
-        ).prop_map(|(seed, exhaustion_scenario, budget_amount)| {
-            let hierarchy = RegionHierarchy::simple();
-            let mut timing_events = vec![];
+            budget_exhaustion_scenario(), // how budget exhaustion interacts with cancel
+            10u64..=200,                  // budget amount
+        )
+            .prop_map(|(seed, exhaustion_scenario, budget_amount)| {
+                let hierarchy = RegionHierarchy::simple();
+                let mut timing_events = vec![];
 
-            match exhaustion_scenario {
-                BudgetExhaustionScenario::ExhaustThenCancel => {
-                    timing_events.push(TimingEvent {
-                        event_type: EventType::BudgetExhaustion,
-                        virtual_time_ms: 80,  // Exhaust budget first
-                        target_region: hierarchy.root_region,
-                        source: CancelSource::BudgetExhaustion,
-                        trigger_condition: None,
-                        expected_propagation: vec![hierarchy.root_region],
-                    });
-                    timing_events.push(TimingEvent {
-                        event_type: EventType::CancelRequest,
-                        virtual_time_ms: 100,
-                        target_region: hierarchy.root_region,
-                        source: CancelSource::ExternalSignal,
-                        trigger_condition: None,
-                        expected_propagation: vec![hierarchy.root_region],
-                    });
+                match exhaustion_scenario {
+                    BudgetExhaustionScenario::ExhaustThenCancel => {
+                        timing_events.push(TimingEvent {
+                            event_type: EventType::BudgetExhaustion,
+                            virtual_time_ms: 80, // Exhaust budget first
+                            target_region: hierarchy.root_region,
+                            source: CancelSource::BudgetExhaustion,
+                            trigger_condition: None,
+                            expected_propagation: vec![hierarchy.root_region],
+                        });
+                        timing_events.push(TimingEvent {
+                            event_type: EventType::CancelRequest,
+                            virtual_time_ms: 100,
+                            target_region: hierarchy.root_region,
+                            source: CancelSource::ExternalSignal,
+                            trigger_condition: None,
+                            expected_propagation: vec![hierarchy.root_region],
+                        });
+                    }
+                    BudgetExhaustionScenario::CancelThenExhaust => {
+                        timing_events.push(TimingEvent {
+                            event_type: EventType::CancelRequest,
+                            virtual_time_ms: 50,
+                            target_region: hierarchy.root_region,
+                            source: CancelSource::ExternalSignal,
+                            trigger_condition: None,
+                            expected_propagation: vec![hierarchy.root_region],
+                        });
+                        timing_events.push(TimingEvent {
+                            event_type: EventType::BudgetExhaustion,
+                            virtual_time_ms: 70, // Exhaust during cancel
+                            target_region: hierarchy.root_region,
+                            source: CancelSource::BudgetExhaustion,
+                            trigger_condition: None,
+                            expected_propagation: vec![],
+                        });
+                    }
+                    BudgetExhaustionScenario::SimultaneousRacing => {
+                        timing_events.push(TimingEvent {
+                            event_type: EventType::CancelRequest,
+                            virtual_time_ms: 75,
+                            target_region: hierarchy.root_region,
+                            source: CancelSource::ExternalSignal,
+                            trigger_condition: Some(TriggerCondition::Probability(0.5)),
+                            expected_propagation: vec![hierarchy.root_region],
+                        });
+                        timing_events.push(TimingEvent {
+                            event_type: EventType::BudgetExhaustion,
+                            virtual_time_ms: 75, // Same time - race condition
+                            target_region: hierarchy.root_region,
+                            source: CancelSource::BudgetExhaustion,
+                            trigger_condition: Some(TriggerCondition::Probability(0.5)),
+                            expected_propagation: vec![hierarchy.root_region],
+                        });
+                    }
                 }
-                BudgetExhaustionScenario::CancelThenExhaust => {
-                    timing_events.push(TimingEvent {
-                        event_type: EventType::CancelRequest,
-                        virtual_time_ms: 50,
-                        target_region: hierarchy.root_region,
-                        source: CancelSource::ExternalSignal,
-                        trigger_condition: None,
-                        expected_propagation: vec![hierarchy.root_region],
-                    });
-                    timing_events.push(TimingEvent {
-                        event_type: EventType::BudgetExhaustion,
-                        virtual_time_ms: 70,  // Exhaust during cancel
-                        target_region: hierarchy.root_region,
-                        source: CancelSource::BudgetExhaustion,
-                        trigger_condition: None,
-                        expected_propagation: vec![],
-                    });
-                }
-                BudgetExhaustionScenario::SimultaneousRacing => {
-                    timing_events.push(TimingEvent {
-                        event_type: EventType::CancelRequest,
-                        virtual_time_ms: 75,
-                        target_region: hierarchy.root_region,
-                        source: CancelSource::ExternalSignal,
-                        trigger_condition: Some(TriggerCondition::Probability(0.5)),
-                        expected_propagation: vec![hierarchy.root_region],
-                    });
-                    timing_events.push(TimingEvent {
-                        event_type: EventType::BudgetExhaustion,
-                        virtual_time_ms: 75,  // Same time - race condition
-                        target_region: hierarchy.root_region,
-                        source: CancelSource::BudgetExhaustion,
-                        trigger_condition: Some(TriggerCondition::Probability(0.5)),
-                        expected_propagation: vec![hierarchy.root_region],
-                    });
-                }
-            }
 
-            CancelTimingPattern {
-                pattern_id: format!("budget-interaction-{:08x}", seed),
-                category: PatternCategory::BudgetInteractions,
-                description: format!("Budget {} with {exhaustion_scenario:?}", budget_amount),
-                timing_events,
-                region_hierarchy: hierarchy,
-                budget_config: BudgetConfig::fixed(budget_amount),
-                expected_invariants: vec![
-                    ExpectedInvariant::budget_respected(),
-                    ExpectedInvariant::cancel_protocol_followed(),
-                ],
-            }
-        })
+                CancelTimingPattern {
+                    pattern_id: format!("budget-interaction-{:08x}", seed),
+                    category: PatternCategory::BudgetInteractions,
+                    description: format!("Budget {} with {exhaustion_scenario:?}", budget_amount),
+                    timing_events,
+                    region_hierarchy: hierarchy,
+                    budget_config: BudgetConfig::fixed(budget_amount),
+                    expected_invariants: vec![
+                        ExpectedInvariant::budget_respected(),
+                        ExpectedInvariant::cancel_protocol_followed(),
+                    ],
+                }
+            })
     }
 
     /// Generate chaos testing scenarios
     pub fn chaos_testing() -> impl Strategy<Value = CancelTimingPattern> {
         (
             any::<u64>(),
-            1usize..=5,                            // number of chaos events
+            1usize..=5,                                   // number of chaos events
             prop::collection::vec(chaos_event(), 1..=10), // random chaos events
-        ).prop_map(|(seed, region_count, chaos_events)| {
-            let hierarchy = RegionHierarchy::random_tree(region_count);
+        )
+            .prop_map(|(seed, region_count, chaos_events)| {
+                let hierarchy = RegionHierarchy::random_tree(region_count);
 
-            let timing_events = chaos_events.into_iter()
-                .enumerate()
-                .map(|(i, event)| event.to_timing_event(i as u64 * 50, hierarchy.root_region))
-                .collect();
+                let timing_events = chaos_events
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, event)| event.to_timing_event(i as u64 * 50, hierarchy.root_region))
+                    .collect();
 
-            CancelTimingPattern {
-                pattern_id: format!("chaos-{:08x}", seed),
-                category: PatternCategory::ChaosTesting,
-                description: "Random chaos events testing robustness".to_string(),
-                timing_events,
-                region_hierarchy: hierarchy,
-                budget_config: BudgetConfig::random(),
-                expected_invariants: vec![
-                    ExpectedInvariant::losers_drained(),
-                    ExpectedInvariant::no_leaks(),
-                    ExpectedInvariant::structured_concurrency(),
-                ],
-            }
-        })
+                CancelTimingPattern {
+                    pattern_id: format!("chaos-{:08x}", seed),
+                    category: PatternCategory::ChaosTesting,
+                    description: "Random chaos events testing robustness".to_string(),
+                    timing_events,
+                    region_hierarchy: hierarchy,
+                    budget_config: BudgetConfig::random(),
+                    expected_invariants: vec![
+                        ExpectedInvariant::losers_drained(),
+                        ExpectedInvariant::no_leaks(),
+                        ExpectedInvariant::structured_concurrency(),
+                    ],
+                }
+            })
     }
 
     /// Generate a comprehensive mixed scenario combining multiple stress factors
@@ -516,27 +538,28 @@ pub mod generators {
         (
             any::<u64>(),
             prop::collection::vec(scenario_component(), 2..=6),
-        ).prop_map(|(seed, components)| {
-            let hierarchy = RegionHierarchy::complex_mixed(4);
-            let mut timing_events = Vec::new();
-            let mut invariants = Vec::new();
+        )
+            .prop_map(|(seed, components)| {
+                let hierarchy = RegionHierarchy::complex_mixed(4);
+                let mut timing_events = Vec::new();
+                let mut invariants = Vec::new();
 
-            for (i, component) in components.iter().enumerate() {
-                let base_time = i as u64 * 100;
-                timing_events.extend(component.generate_events(base_time, &hierarchy));
-                invariants.extend(component.required_invariants());
-            }
+                for (i, component) in components.iter().enumerate() {
+                    let base_time = i as u64 * 100;
+                    timing_events.extend(component.generate_events(base_time, &hierarchy));
+                    invariants.extend(component.required_invariants());
+                }
 
-            CancelTimingPattern {
-                pattern_id: format!("comprehensive-{:08x}", seed),
-                category: PatternCategory::ChaosTesting,
-                description: format!("Mixed scenario with {} components", components.len()),
-                timing_events,
-                region_hierarchy: hierarchy,
-                budget_config: BudgetConfig::hierarchical(4),
-                expected_invariants: invariants,
-            }
-        })
+                CancelTimingPattern {
+                    pattern_id: format!("comprehensive-{:08x}", seed),
+                    category: PatternCategory::ChaosTesting,
+                    description: format!("Mixed scenario with {} components", components.len()),
+                    timing_events,
+                    region_hierarchy: hierarchy,
+                    budget_config: BudgetConfig::hierarchical(4),
+                    expected_invariants: invariants,
+                }
+            })
     }
 
     // Helper generators
@@ -606,10 +629,10 @@ pub mod generators {
 
 #[derive(Debug, Clone, Copy)]
 pub enum CascadeMode {
-    TopDown,    // Parent cancels children
-    BottomUp,   // Children cancel parent
-    MiddleOut,  // Middle region cancels both directions
-    Random,     // Random propagation order
+    TopDown,   // Parent cancels children
+    BottomUp,  // Children cancel parent
+    MiddleOut, // Middle region cancels both directions
+    Random,    // Random propagation order
 }
 
 #[derive(Debug, Clone)]
@@ -675,7 +698,7 @@ impl ChaosEvent {
                 source: CancelSource::SystemShutdown,
                 trigger_condition: None,
                 expected_propagation: vec![target],
-            }
+            },
         }
     }
 }
@@ -691,16 +714,14 @@ pub enum ScenarioComponent {
 impl ScenarioComponent {
     fn generate_events(&self, base_time: u64, hierarchy: &RegionHierarchy) -> Vec<TimingEvent> {
         match self {
-            ScenarioComponent::NestedCancel => vec![
-                TimingEvent {
-                    event_type: EventType::CancelRequest,
-                    virtual_time_ms: base_time,
-                    target_region: hierarchy.root_region,
-                    source: CancelSource::ParentRegion,
-                    trigger_condition: None,
-                    expected_propagation: hierarchy.all_child_regions(),
-                }
-            ],
+            ScenarioComponent::NestedCancel => vec![TimingEvent {
+                event_type: EventType::CancelRequest,
+                virtual_time_ms: base_time,
+                target_region: hierarchy.root_region,
+                source: CancelSource::ParentRegion,
+                trigger_condition: None,
+                expected_propagation: hierarchy.all_child_regions(),
+            }],
             _ => vec![], // Simplified for other components
         }
     }
@@ -743,15 +764,16 @@ impl BudgetConfig {
 
     pub fn renewable(initial: u64, renewal: u64) -> Self {
         Self {
-            budget_type: BudgetType::Renewable { initial, renewal_amount: renewal },
+            budget_type: BudgetType::Renewable {
+                initial,
+                renewal_amount: renewal,
+            },
             initial_budget: initial,
-            renewal_events: vec![
-                BudgetRenewal {
-                    at_time_ms: 100,
-                    amount: renewal,
-                    condition: None,
-                }
-            ],
+            renewal_events: vec![BudgetRenewal {
+                at_time_ms: 100,
+                amount: renewal,
+                condition: None,
+            }],
             exhaustion_behavior: ExhaustionBehavior::RequestMoreTime,
         }
     }
@@ -792,12 +814,15 @@ impl BudgetConfig {
 impl RegionHierarchy {
     pub fn simple() -> Self {
         let mut regions = HashMap::new();
-        regions.insert(0, RegionInfo {
-            id: 0,
-            name: "root".to_string(),
-            expected_task_count: 1,
-            cleanup_complexity: CleanupComplexity::Simple,
-        });
+        regions.insert(
+            0,
+            RegionInfo {
+                id: 0,
+                name: "root".to_string(),
+                expected_task_count: 1,
+                cleanup_complexity: CleanupComplexity::Simple,
+            },
+        );
 
         Self {
             regions,
@@ -811,13 +836,19 @@ impl RegionHierarchy {
         let mut edges = Vec::new();
 
         for level in 0..levels {
-            regions.insert(level as RegionId, RegionInfo {
-                id: level as RegionId,
-                name: format!("level-{}", level),
-                expected_task_count: 1,
-                cleanup_complexity: if level == 0 { CleanupComplexity::Trivial }
-                                  else { CleanupComplexity::Simple },
-            });
+            regions.insert(
+                level as RegionId,
+                RegionInfo {
+                    id: level as RegionId,
+                    name: format!("level-{}", level),
+                    expected_task_count: 1,
+                    cleanup_complexity: if level == 0 {
+                        CleanupComplexity::Trivial
+                    } else {
+                        CleanupComplexity::Simple
+                    },
+                },
+            );
 
             if level > 0 {
                 edges.push(((level - 1) as RegionId, level as RegionId));
@@ -836,21 +867,27 @@ impl RegionHierarchy {
         let mut edges = Vec::new();
 
         // Root region
-        regions.insert(0, RegionInfo {
-            id: 0,
-            name: "root".to_string(),
-            expected_task_count: 0,
-            cleanup_complexity: CleanupComplexity::Simple,
-        });
+        regions.insert(
+            0,
+            RegionInfo {
+                id: 0,
+                name: "root".to_string(),
+                expected_task_count: 0,
+                cleanup_complexity: CleanupComplexity::Simple,
+            },
+        );
 
         // Sibling regions
         for i in 1..=count {
-            regions.insert(i as RegionId, RegionInfo {
-                id: i as RegionId,
-                name: format!("sibling-{}", i),
-                expected_task_count: 1,
-                cleanup_complexity: CleanupComplexity::Simple,
-            });
+            regions.insert(
+                i as RegionId,
+                RegionInfo {
+                    id: i as RegionId,
+                    name: format!("sibling-{}", i),
+                    expected_task_count: 1,
+                    cleanup_complexity: CleanupComplexity::Simple,
+                },
+            );
             edges.push((0, i as RegionId));
         }
 
@@ -872,7 +909,8 @@ impl RegionHierarchy {
     }
 
     pub fn all_child_regions(&self) -> Vec<RegionId> {
-        self.parent_child_edges.iter()
+        self.parent_child_edges
+            .iter()
             .map(|(_, child)| *child)
             .collect()
     }
@@ -944,32 +982,31 @@ impl ExpectedInvariant {
     }
 }
 
-fn create_cascading_cancel_events(hierarchy: &RegionHierarchy, mode: CascadeMode) -> Vec<TimingEvent> {
+fn create_cascading_cancel_events(
+    hierarchy: &RegionHierarchy,
+    mode: CascadeMode,
+) -> Vec<TimingEvent> {
     match mode {
         CascadeMode::TopDown => {
-            vec![
-                TimingEvent {
-                    event_type: EventType::CancelRequest,
-                    virtual_time_ms: 50,
-                    target_region: hierarchy.root_region,
-                    source: CancelSource::ParentRegion,
-                    trigger_condition: None,
-                    expected_propagation: hierarchy.all_child_regions(),
-                }
-            ]
+            vec![TimingEvent {
+                event_type: EventType::CancelRequest,
+                virtual_time_ms: 50,
+                target_region: hierarchy.root_region,
+                source: CancelSource::ParentRegion,
+                trigger_condition: None,
+                expected_propagation: hierarchy.all_child_regions(),
+            }]
         }
         _ => {
             // Simplified implementation for other modes
-            vec![
-                TimingEvent {
-                    event_type: EventType::CancelRequest,
-                    virtual_time_ms: 100,
-                    target_region: hierarchy.root_region,
-                    source: CancelSource::SelfInitiated,
-                    trigger_condition: None,
-                    expected_propagation: vec![hierarchy.root_region],
-                }
-            ]
+            vec![TimingEvent {
+                event_type: EventType::CancelRequest,
+                virtual_time_ms: 100,
+                target_region: hierarchy.root_region,
+                source: CancelSource::SelfInitiated,
+                trigger_condition: None,
+                expected_propagation: vec![hierarchy.root_region],
+            }]
         }
     }
 }
@@ -1001,8 +1038,8 @@ pub fn any_cancel_timing_pattern() -> impl Strategy<Value = CancelTimingPattern>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::generators::*;
+    use super::*;
     use proptest::strategy::ValueTree;
 
     #[test]

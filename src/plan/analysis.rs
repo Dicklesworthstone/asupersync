@@ -2080,10 +2080,12 @@ mod tests {
         let analysis = PlanAnalyzer::analyze(&dag);
         let join_node = analysis.get(join).expect("join analyzed");
         // The join should track the obligation from the obl: leaf.
-        assert!(join_node
-            .obligation_flow
-            .reserves
-            .contains(&"obl:permit".to_string()));
+        assert!(
+            join_node
+                .obligation_flow
+                .reserves
+                .contains(&"obl:permit".to_string())
+        );
     }
 
     #[test]
@@ -2113,10 +2115,12 @@ mod tests {
 
         let analysis = PlanAnalyzer::analyze(&dag);
         let timeout_node = analysis.get(timeout).expect("timeout analyzed");
-        assert!(timeout_node
-            .obligation_flow
-            .leak_on_cancel
-            .contains(&"obl:lease".to_string()));
+        assert!(
+            timeout_node
+                .obligation_flow
+                .leak_on_cancel
+                .contains(&"obl:lease".to_string())
+        );
         assert_eq!(timeout_node.obligation, ObligationSafety::MayLeak);
         assert_eq!(timeout_node.cancel, CancelSafety::MayOrphan);
         assert!(!timeout_node.is_safe());
@@ -2290,7 +2294,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100)); // original
         let t2 = dag.timeout(b, Duration::from_millis(50)); // tighter (different leaf)
-                                                            // Make both reachable via join at root
+        // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -2305,7 +2309,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(50)); // original: tight
         let t2 = dag.timeout(b, Duration::from_millis(100)); // looser (different leaf)
-                                                             // Make both reachable via join at root
+        // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -2332,7 +2336,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100));
         let t2 = dag.timeout(b, Duration::from_millis(110)); // 10ms looser (different leaf)
-                                                             // Make both reachable via join at root
+        // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 

@@ -976,6 +976,9 @@ impl ThreeLaneScheduler {
                     None
                 },
                 decision_sequence: 0,
+                fairness_monitor: FairnessMonitor::with_defaults(),
+                invariant_monitor:
+                    super::invariant_monitor::SchedulerInvariantMonitor::with_defaults(),
             });
         }
 
@@ -1507,6 +1510,10 @@ pub struct ThreeLaneWorker {
     drain_certificate: Option<ProgressCertificate>,
     /// Monotone sequence for deterministic decision IDs and timestamps.
     decision_sequence: u64,
+    /// Enhanced fairness monitoring for starvation and priority inversion detection.
+    fairness_monitor: FairnessMonitor,
+    /// Scheduler invariant monitor for comprehensive correctness verification.
+    invariant_monitor: super::invariant_monitor::SchedulerInvariantMonitor,
 }
 
 /// Per-worker metrics tracking cancel-lane preemption and fairness.
@@ -1634,6 +1641,390 @@ impl PreemptionMetrics {
     }
 }
 
+/// Configuration for fairness monitoring and starvation detection.
+#[derive(Debug, Clone)]
+pub struct FairnessConfig {
+    /// Maximum time a task can wait before being considered starved (nanoseconds).
+    pub starvation_threshold_ns: u64,
+    /// Size of the moving window for temporal pattern analysis.
+    pub analysis_window_size: usize,
+    /// Threshold for detecting priority inversion patterns.
+    pub priority_inversion_threshold: u8,
+    /// Maximum number of tasks to track for starvation monitoring.
+    pub max_tracked_tasks: usize,
+    /// Enable detailed per-task tracking (impacts performance).
+    pub enable_per_task_tracking: bool,
+}
+
+impl Default for FairnessConfig {
+    fn default() -> Self {
+        Self {
+            starvation_threshold_ns: 100_000_000, // 100ms
+            analysis_window_size: 1000,
+            priority_inversion_threshold: 5,
+            max_tracked_tasks: 10_000,
+            enable_per_task_tracking: true,
+        }
+    }
+}
+
+/// Per-task tracking information for starvation detection.
+#[derive(Debug, Clone)]
+struct TaskStarvationInfo {
+    /// Task ID being tracked.
+    task_id: TaskId,
+    /// Priority of the task.
+    priority: u8,
+    /// Timestamp when task was first enqueued (nanoseconds).
+    enqueue_time_ns: u64,
+    /// Number of times this task was skipped for higher-priority work.
+    skip_count: u32,
+    /// Last time this task was skipped (nanoseconds).
+    last_skip_time_ns: u64,
+    /// Current queue lane (Cancel=0, Timed=1, Ready=2).
+    current_lane: u8,
+    /// Total time spent waiting across all queue entries.
+    total_wait_time_ns: u64,
+}
+
+impl TaskStarvationInfo {
+    fn new(task_id: TaskId, priority: u8, current_time_ns: u64, lane: u8) -> Self {
+        Self {
+            task_id,
+            priority,
+            enqueue_time_ns: current_time_ns,
+            skip_count: 0,
+            last_skip_time_ns: 0,
+            current_lane: lane,
+            total_wait_time_ns: 0,
+        }
+    }
+
+    fn record_skip(&mut self, current_time_ns: u64) {
+        self.skip_count = self.skip_count.saturating_add(1);
+        self.last_skip_time_ns = current_time_ns;
+    }
+
+    fn current_wait_time_ns(&self, current_time_ns: u64) -> u64 {
+        current_time_ns.saturating_sub(self.enqueue_time_ns)
+    }
+
+    fn is_starved(&self, threshold_ns: u64, current_time_ns: u64) -> bool {
+        self.current_wait_time_ns(current_time_ns) >= threshold_ns
+    }
+}
+
+/// Priority inversion detection entry.
+#[derive(Debug, Clone)]
+struct PriorityInversionEvent {
+    /// High-priority task that was blocked.
+    blocked_task_id: TaskId,
+    /// Priority of the blocked task.
+    blocked_priority: u8,
+    /// Low-priority task that was executed instead.
+    executing_task_id: TaskId,
+    /// Priority of the executing task.
+    executing_priority: u8,
+    /// Timestamp when the inversion occurred.
+    timestamp_ns: u64,
+    /// Duration of the inversion (nanoseconds).
+    duration_ns: u64,
+}
+
+/// Moving window for temporal pattern analysis.
+#[derive(Debug, Clone)]
+struct StarvationAnalysisWindow {
+    /// Circular buffer of starvation events.
+    events: Vec<u64>,
+    /// Current write position in the circular buffer.
+    write_pos: usize,
+    /// Total number of events recorded.
+    total_events: u64,
+    /// Window size.
+    size: usize,
+}
+
+impl StarvationAnalysisWindow {
+    fn new(size: usize) -> Self {
+        Self {
+            events: vec![0; size.max(1)],
+            write_pos: 0,
+            size: size.max(1),
+            total_events: 0,
+        }
+    }
+
+    fn record_event(&mut self, timestamp_ns: u64) {
+        self.events[self.write_pos] = timestamp_ns;
+        self.write_pos = (self.write_pos + 1) % self.size;
+        self.total_events = self.total_events.saturating_add(1);
+    }
+
+    fn events_in_window(&self, window_duration_ns: u64, current_time_ns: u64) -> u32 {
+        let threshold_time = current_time_ns.saturating_sub(window_duration_ns);
+        let mut count = 0;
+
+        for &event_time in &self.events {
+            if event_time >= threshold_time && event_time <= current_time_ns {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn is_pattern_detected(
+        &self,
+        min_events: u32,
+        window_duration_ns: u64,
+        current_time_ns: u64,
+    ) -> bool {
+        self.events_in_window(window_duration_ns, current_time_ns) >= min_events
+    }
+}
+
+/// Enhanced fairness monitoring framework for starvation and priority inversion detection.
+#[derive(Debug)]
+pub struct FairnessMonitor {
+    /// Configuration for fairness monitoring.
+    config: FairnessConfig,
+    /// Per-task starvation tracking information.
+    tracked_tasks: std::collections::HashMap<TaskId, TaskStarvationInfo>,
+    /// Recent priority inversion events.
+    priority_inversions: Vec<PriorityInversionEvent>,
+    /// Moving window for starvation pattern analysis.
+    starvation_window: StarvationAnalysisWindow,
+    /// Total starvation events detected.
+    total_starvation_events: u64,
+    /// Total priority inversion events detected.
+    total_priority_inversions: u64,
+    /// Maximum observed task wait time.
+    max_task_wait_time_ns: u64,
+    /// Last cleanup timestamp to prevent unbounded growth.
+    last_cleanup_time_ns: u64,
+}
+
+impl FairnessMonitor {
+    /// Creates a new fairness monitor with the given configuration.
+    pub fn new(config: FairnessConfig) -> Self {
+        let window_size = config.analysis_window_size;
+        Self {
+            config,
+            tracked_tasks: std::collections::HashMap::new(),
+            priority_inversions: Vec::new(),
+            starvation_window: StarvationAnalysisWindow::new(window_size),
+            total_starvation_events: 0,
+            total_priority_inversions: 0,
+            max_task_wait_time_ns: 0,
+            last_cleanup_time_ns: 0,
+        }
+    }
+
+    /// Creates a new fairness monitor with default configuration.
+    pub fn with_defaults() -> Self {
+        Self::new(FairnessConfig::default())
+    }
+
+    /// Records a task entering a queue for starvation tracking.
+    pub fn record_task_enqueue(
+        &mut self,
+        task_id: TaskId,
+        priority: u8,
+        current_time_ns: u64,
+        lane: u8,
+    ) {
+        if !self.config.enable_per_task_tracking {
+            return;
+        }
+
+        // Cleanup old entries if needed
+        self.cleanup_if_needed(current_time_ns);
+
+        // Only track up to max_tracked_tasks to prevent unbounded growth
+        if self.tracked_tasks.len() >= self.config.max_tracked_tasks {
+            // Remove oldest entry
+            if let Some((oldest_task_id, _)) = self
+                .tracked_tasks
+                .iter()
+                .min_by_key(|(_, info)| info.enqueue_time_ns)
+                .map(|(id, info)| (*id, info.clone()))
+            {
+                self.tracked_tasks.remove(&oldest_task_id);
+            }
+        }
+
+        let info = TaskStarvationInfo::new(task_id, priority, current_time_ns, lane);
+        self.tracked_tasks.insert(task_id, info);
+    }
+
+    /// Records a task being dispatched (removes from tracking).
+    pub fn record_task_dispatch(&mut self, task_id: TaskId, current_time_ns: u64) -> Option<u64> {
+        if let Some(info) = self.tracked_tasks.remove(&task_id) {
+            let wait_time = info.current_wait_time_ns(current_time_ns);
+            if wait_time > self.max_task_wait_time_ns {
+                self.max_task_wait_time_ns = wait_time;
+            }
+            Some(wait_time)
+        } else {
+            None
+        }
+    }
+
+    /// Records a task being skipped in favor of higher-priority work.
+    pub fn record_task_skip(
+        &mut self,
+        skipped_task_id: TaskId,
+        executing_task_id: TaskId,
+        executing_priority: u8,
+        current_time_ns: u64,
+    ) {
+        let (should_record_starvation, should_record_inversion, blocked_priority) = {
+            if let Some(info) = self.tracked_tasks.get_mut(&skipped_task_id) {
+                info.record_skip(current_time_ns);
+
+                let is_starved =
+                    info.is_starved(self.config.starvation_threshold_ns, current_time_ns);
+                let is_inversion = executing_priority > info.priority;
+                let priority = info.priority;
+
+                (is_starved, is_inversion, priority)
+            } else {
+                (false, false, 0)
+            }
+        };
+
+        // Record events after releasing the borrow
+        if should_record_starvation {
+            self.record_starvation_event(current_time_ns);
+        }
+
+        if should_record_inversion {
+            self.record_priority_inversion(
+                skipped_task_id,
+                blocked_priority,
+                executing_task_id,
+                executing_priority,
+                current_time_ns,
+            );
+        }
+    }
+
+    /// Records a starvation event for pattern analysis.
+    fn record_starvation_event(&mut self, timestamp_ns: u64) {
+        self.total_starvation_events = self.total_starvation_events.saturating_add(1);
+        self.starvation_window.record_event(timestamp_ns);
+    }
+
+    /// Records a priority inversion event.
+    fn record_priority_inversion(
+        &mut self,
+        blocked_task: TaskId,
+        blocked_priority: u8,
+        executing_task: TaskId,
+        executing_priority: u8,
+        timestamp_ns: u64,
+    ) {
+        self.total_priority_inversions = self.total_priority_inversions.saturating_add(1);
+
+        let inversion = PriorityInversionEvent {
+            blocked_task_id: blocked_task,
+            blocked_priority,
+            executing_task_id: executing_task,
+            executing_priority,
+            timestamp_ns,
+            duration_ns: 0, // Will be updated when inversion ends
+        };
+
+        self.priority_inversions.push(inversion);
+
+        // Keep only recent inversions to prevent unbounded growth
+        const MAX_TRACKED_INVERSIONS: usize = 1000;
+        if self.priority_inversions.len() > MAX_TRACKED_INVERSIONS {
+            self.priority_inversions
+                .drain(0..self.priority_inversions.len() - MAX_TRACKED_INVERSIONS);
+        }
+    }
+
+    /// Detects if there's a starvation pattern in the current window.
+    pub fn detect_starvation_pattern(&self, current_time_ns: u64) -> bool {
+        const PATTERN_WINDOW_NS: u64 = 1_000_000_000; // 1 second
+        const MIN_EVENTS_FOR_PATTERN: u32 = 10;
+
+        self.starvation_window.is_pattern_detected(
+            MIN_EVENTS_FOR_PATTERN,
+            PATTERN_WINDOW_NS,
+            current_time_ns,
+        )
+    }
+
+    /// Returns the number of currently starved tasks.
+    pub fn count_starved_tasks(&self, current_time_ns: u64) -> u32 {
+        self.tracked_tasks
+            .values()
+            .filter(|info| info.is_starved(self.config.starvation_threshold_ns, current_time_ns))
+            .count() as u32
+    }
+
+    /// Returns starvation statistics for monitoring.
+    pub fn starvation_stats(&self, current_time_ns: u64) -> StarvationStats {
+        let currently_starved = self.count_starved_tasks(current_time_ns);
+        let avg_wait_time_ns = if !self.tracked_tasks.is_empty() {
+            self.tracked_tasks
+                .values()
+                .map(|info| info.current_wait_time_ns(current_time_ns))
+                .sum::<u64>()
+                / self.tracked_tasks.len() as u64
+        } else {
+            0
+        };
+
+        StarvationStats {
+            total_starvation_events: self.total_starvation_events,
+            currently_starved_tasks: currently_starved,
+            max_task_wait_time_ns: self.max_task_wait_time_ns,
+            avg_task_wait_time_ns: avg_wait_time_ns,
+            total_priority_inversions: self.total_priority_inversions,
+            tracked_tasks_count: self.tracked_tasks.len() as u32,
+            pattern_detected: self.detect_starvation_pattern(current_time_ns),
+        }
+    }
+
+    /// Cleans up old tracking entries to prevent unbounded growth.
+    fn cleanup_if_needed(&mut self, current_time_ns: u64) {
+        const CLEANUP_INTERVAL_NS: u64 = 60_000_000_000; // 60 seconds
+        const MAX_TASK_AGE_NS: u64 = 300_000_000_000; // 5 minutes
+
+        if current_time_ns.saturating_sub(self.last_cleanup_time_ns) < CLEANUP_INTERVAL_NS {
+            return;
+        }
+
+        self.last_cleanup_time_ns = current_time_ns;
+
+        // Remove tasks that are too old
+        let cutoff_time = current_time_ns.saturating_sub(MAX_TASK_AGE_NS);
+        self.tracked_tasks
+            .retain(|_, info| info.enqueue_time_ns >= cutoff_time);
+    }
+}
+
+/// Starvation monitoring statistics.
+#[derive(Debug, Clone, Default)]
+pub struct StarvationStats {
+    /// Total starvation events detected.
+    pub total_starvation_events: u64,
+    /// Number of tasks currently experiencing starvation.
+    pub currently_starved_tasks: u32,
+    /// Maximum observed task wait time (nanoseconds).
+    pub max_task_wait_time_ns: u64,
+    /// Average task wait time across all tracked tasks (nanoseconds).
+    pub avg_task_wait_time_ns: u64,
+    /// Total priority inversion events detected.
+    pub total_priority_inversions: u64,
+    /// Number of tasks currently being tracked.
+    pub tracked_tasks_count: u32,
+    /// Whether a starvation pattern has been detected.
+    pub pattern_detected: bool,
+}
+
 /// Deterministic witness for cancel-lane fairness guarantees.
 ///
 /// This compiles the runtime fairness argument into an auditable artifact:
@@ -1721,6 +2112,47 @@ impl PreemptionFairnessCertificate {
 }
 
 impl ThreeLaneWorker {
+    /// Returns the current time in nanoseconds for fairness monitoring.
+    #[inline]
+    fn current_time_ns(&self) -> u64 {
+        self.timer_driver
+            .as_ref()
+            .map_or(0, |timer| timer.now().as_nanos())
+    }
+
+    /// Returns a reference to the fairness monitor for this worker.
+    #[must_use]
+    pub fn fairness_monitor(&self) -> &FairnessMonitor {
+        &self.fairness_monitor
+    }
+
+    /// Returns starvation statistics from the fairness monitor.
+    #[must_use]
+    pub fn starvation_stats(&self) -> StarvationStats {
+        let current_time = self.current_time_ns();
+        self.fairness_monitor.starvation_stats(current_time)
+    }
+
+    /// Returns a reference to the invariant monitor for this worker.
+    #[must_use]
+    pub fn invariant_monitor(&self) -> &super::invariant_monitor::SchedulerInvariantMonitor {
+        &self.invariant_monitor
+    }
+
+    /// Returns invariant statistics from the monitor.
+    #[must_use]
+    pub fn invariant_stats(&self) -> super::invariant_monitor::InvariantStats {
+        self.invariant_monitor.stats()
+    }
+
+    /// Returns all recorded invariant violations.
+    #[must_use]
+    pub fn invariant_violations(
+        &self,
+    ) -> &std::collections::VecDeque<super::invariant_monitor::InvariantViolation> {
+        self.invariant_monitor.violations()
+    }
+
     /// Runs a closure against the task table, using the sharded task table
     /// when available, otherwise falling back to RuntimeState's embedded table.
     ///

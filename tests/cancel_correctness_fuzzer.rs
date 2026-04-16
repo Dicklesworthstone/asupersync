@@ -23,15 +23,14 @@
 #![allow(missing_docs)]
 
 use proptest::prelude::*;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}};
-use serde::{Serialize, Deserialize};
-
-use asupersync::lab::{
-    runtime::LabRuntime,
-    config::LabConfig,
-    oracle::OracleSuite,
+use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
-use asupersync::types::{Budget, TaskId, RegionId};
+
+use asupersync::lab::{config::LabConfig, oracle::OracleSuite, runtime::LabRuntime};
+use asupersync::types::{Budget, RegionId, TaskId};
 
 /// Test scenario metadata for structured logging and reproduction
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,22 +225,23 @@ pub mod generators {
     /// Generate random cancel scenarios
     pub fn cancel_scenario() -> impl Strategy<Value = CancelScenario> {
         (
-            any::<u64>(),                           // seed
-            combinator_type(),                      // combinator type
-            cancel_timing(),                        // timing pattern
-            2usize..=8,                            // participant count
-            chaos_config(),                         // chaos settings
-        ).prop_map(|(seed, comb_type, timing, count, chaos)| {
-            CancelScenario {
-                scenario_id: format!("fuzz-{}-{:08x}", comb_type.name(), seed),
-                seed,
-                combinator_type: comb_type,
-                cancel_timing: timing,
-                participant_count: count,
-                expected_winner: None, // determined during execution
-                chaos_config: chaos,
-            }
-        })
+            any::<u64>(),      // seed
+            combinator_type(), // combinator type
+            cancel_timing(),   // timing pattern
+            2usize..=8,        // participant count
+            chaos_config(),    // chaos settings
+        )
+            .prop_map(|(seed, comb_type, timing, count, chaos)| {
+                CancelScenario {
+                    scenario_id: format!("fuzz-{}-{:08x}", comb_type.name(), seed),
+                    seed,
+                    combinator_type: comb_type,
+                    cancel_timing: timing,
+                    participant_count: count,
+                    expected_winner: None, // determined during execution
+                    chaos_config: chaos,
+                }
+            })
     }
 
     pub fn combinator_type() -> impl Strategy<Value = CombinatorType> {
@@ -268,20 +268,21 @@ pub mod generators {
 
     pub fn chaos_config() -> impl Strategy<Value = ChaosConfig> {
         (
-            any::<bool>(),      // inject_delays
-            any::<bool>(),      // inject_panics
-            any::<bool>(),      // inject_spurious_wakes
-            1u32..=50,         // max_delay_ms
-            0.0f32..=0.05,     // panic_probability (low for stability)
-        ).prop_map(|(delays, panics, wakes, max_delay, panic_prob)| {
-            ChaosConfig {
-                inject_delays: delays,
-                inject_panics: panics,
-                inject_spurious_wakes: wakes,
-                max_delay_ms: max_delay,
-                panic_probability: panic_prob,
-            }
-        })
+            any::<bool>(), // inject_delays
+            any::<bool>(), // inject_panics
+            any::<bool>(), // inject_spurious_wakes
+            1u32..=50,     // max_delay_ms
+            0.0f32..=0.05, // panic_probability (low for stability)
+        )
+            .prop_map(
+                |(delays, panics, wakes, max_delay, panic_prob)| ChaosConfig {
+                    inject_delays: delays,
+                    inject_panics: panics,
+                    inject_spurious_wakes: wakes,
+                    max_delay_ms: max_delay,
+                    panic_probability: panic_prob,
+                },
+            )
     }
 }
 
@@ -339,15 +340,15 @@ impl CancelCorrectnessFuzzer {
             Ok(oracle_results) => {
                 if oracle_results.has_violations() {
                     FuzzOutcome::Fail {
-                        violation: InvariantViolation::from_oracle_results(&oracle_results)
+                        violation: InvariantViolation::from_oracle_results(&oracle_results),
                     }
                 } else {
                     FuzzOutcome::Pass
                 }
             }
             Err(error) => FuzzOutcome::Error {
-                error: error.to_string()
-            }
+                error: error.to_string(),
+            },
         };
 
         trace.total_duration_ms = start_time.elapsed().as_millis() as u64;
@@ -357,10 +358,7 @@ impl CancelCorrectnessFuzzer {
             outcome,
             oracle_results: self.collect_oracle_results(),
             execution_trace: trace,
-            reproduction_command: format!(
-                "cargo test cancel_fuzz_repro_{}",
-                scenario.scenario_id
-            ),
+            reproduction_command: format!("cargo test cancel_fuzz_repro_{}", scenario.scenario_id),
         };
 
         self.results.push(result.clone());
@@ -370,7 +368,7 @@ impl CancelCorrectnessFuzzer {
     fn execute_scenario(
         &mut self,
         scenario: &CancelScenario,
-        trace: &mut ExecutionTrace
+        trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         // Reset oracles
         self.oracle_suite.reset();
@@ -394,12 +392,12 @@ impl CancelCorrectnessFuzzer {
         &mut self,
         scenario: &CancelScenario,
         region: RegionId,
-        trace: &mut ExecutionTrace
+        trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         use asupersync::cx::Cx;
         use asupersync::types::{Budget, Outcome};
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
         trace.task_count = 2;
@@ -475,17 +473,17 @@ impl CancelCorrectnessFuzzer {
             1 => {
                 // fut1 won, fut2 should be drained
                 if !fut2_was_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race2 loser (future 2) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race2 loser (future 2) was not properly drained".to_string());
                 }
             }
             2 => {
                 // fut2 won, fut1 should be drained
                 if !fut1_was_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race2 loser (future 1) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race2 loser (future 1) was not properly drained".to_string());
                 }
             }
             _ => unreachable!(),
@@ -511,12 +509,12 @@ impl CancelCorrectnessFuzzer {
         &mut self,
         scenario: &CancelScenario,
         region: RegionId,
-        trace: &mut ExecutionTrace
+        trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         use asupersync::cx::Cx;
-        use asupersync::types::{Budget};
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use asupersync::types::Budget;
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         trace.task_count = 3;
 
@@ -544,9 +542,15 @@ impl CancelCorrectnessFuzzer {
             }
             CancelTiming::Partial(pattern) => {
                 if pattern.len() >= 3 {
-                    if pattern[0] { fut1.make_ready(); }
-                    if pattern[1] { fut2.make_ready(); }
-                    if pattern[2] { fut3.make_ready(); }
+                    if pattern[0] {
+                        fut1.make_ready();
+                    }
+                    if pattern[1] {
+                        fut2.make_ready();
+                    }
+                    if pattern[2] {
+                        fut3.make_ready();
+                    }
                 }
             }
             _ => {
@@ -581,38 +585,38 @@ impl CancelCorrectnessFuzzer {
         match winner {
             1 => {
                 if !fut2_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race3 loser (future 2) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race3 loser (future 2) was not properly drained".to_string());
                 }
                 if !fut3_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race3 loser (future 3) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race3 loser (future 3) was not properly drained".to_string());
                 }
             }
             2 => {
                 if !fut1_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race3 loser (future 1) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race3 loser (future 1) was not properly drained".to_string());
                 }
                 if !fut3_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race3 loser (future 3) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race3 loser (future 3) was not properly drained".to_string());
                 }
             }
             3 => {
                 if !fut1_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race3 loser (future 1) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race3 loser (future 1) was not properly drained".to_string());
                 }
                 if !fut2_drained {
-                    oracle_results.loser_drain_violations.push(
-                        "race3 loser (future 2) was not properly drained".to_string()
-                    );
+                    oracle_results
+                        .loser_drain_violations
+                        .push("race3 loser (future 2) was not properly drained".to_string());
                 }
             }
             _ => unreachable!(),
@@ -642,7 +646,7 @@ impl CancelCorrectnessFuzzer {
         &mut self,
         scenario: &CancelScenario,
         _region: RegionId,
-        trace: &mut ExecutionTrace
+        trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         // TODO: Implement N-way race testing
         trace.task_count = scenario.participant_count;
@@ -651,20 +655,128 @@ impl CancelCorrectnessFuzzer {
 
     fn test_join2(
         &mut self,
-        _scenario: &CancelScenario,
-        _region: RegionId,
-        trace: &mut ExecutionTrace
+        scenario: &CancelScenario,
+        region: RegionId,
+        trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
-        // TODO: Implement join2 testing
+        use asupersync::cx::Cx;
+        use asupersync::types::Budget;
+        use std::sync::atomic::Ordering;
+
         trace.task_count = 2;
-        Ok(self.collect_oracle_results())
+
+        let budget = Budget::INFINITE;
+        let cx = Cx::new(region, budget);
+
+        // Create two controllable futures for join test
+        let fut1 = ControllableFuture::new(1);
+        let fut2 = ControllableFuture::new(2);
+
+        let fut1_ready = std::sync::Arc::clone(&fut1.ready);
+        let fut2_ready = std::sync::Arc::clone(&fut2.ready);
+
+        // Apply scenario timing - for joins, we test different completion patterns
+        match &scenario.cancel_timing {
+            CancelTiming::NaturalCompletion => {
+                // Both futures complete naturally
+                fut1.make_ready();
+                fut2.make_ready();
+            }
+            CancelTiming::Early => {
+                // Cancel before either completes (external cancellation)
+                // Neither future should complete
+            }
+            CancelTiming::Partial(pattern) => {
+                if pattern.len() >= 2 {
+                    if pattern[0] {
+                        fut1.make_ready();
+                    }
+                    if pattern[1] {
+                        fut2.make_ready();
+                    }
+                }
+            }
+            _ => {
+                // Default to both completing
+                fut1.make_ready();
+                fut2.make_ready();
+            }
+        }
+
+        let fut1_completed = fut1_ready.load(Ordering::Acquire);
+        let fut2_completed = fut2_ready.load(Ordering::Acquire);
+        let fut1_drained = fut1.was_drained();
+        let fut2_drained = fut2.was_drained();
+
+        let mut oracle_results = OracleResults {
+            loser_drain_violations: Vec::new(),
+            cancellation_violations: Vec::new(),
+            resource_violations: Vec::new(),
+        };
+
+        // Join semantics: if cancelled externally, both should be drained
+        // If one panics/fails, the other should be cancelled and drained
+        match &scenario.cancel_timing {
+            CancelTiming::Early => {
+                // External cancellation - both should be drained
+                if fut1_completed && !fut1_drained {
+                    oracle_results.loser_drain_violations.push(
+                        "join2 fut1 completed but not drained on external cancel".to_string(),
+                    );
+                }
+                if fut2_completed && !fut2_drained {
+                    oracle_results.loser_drain_violations.push(
+                        "join2 fut2 completed but not drained on external cancel".to_string(),
+                    );
+                }
+            }
+            CancelTiming::NaturalCompletion => {
+                // Both should complete successfully - no draining needed
+                if fut1_completed && fut2_completed {
+                    trace.completion_order.push(TaskId::default()); // fut1
+                    trace.completion_order.push(TaskId::default()); // fut2
+                } else {
+                    oracle_results.cancellation_violations.push(
+                        "join2 did not complete both futures in natural completion scenario"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {
+                // Partial completion cases - depends on join semantics
+                if fut1_completed && !fut2_completed {
+                    // fut1 completed, fut2 should wait for completion or cancellation
+                    trace.completion_order.push(TaskId::default());
+                }
+                if fut2_completed && !fut1_completed {
+                    // fut2 completed, fut1 should wait for completion or cancellation
+                    trace.completion_order.push(TaskId::default());
+                }
+            }
+        }
+
+        // Record execution trace
+        trace.cancellation_events.push(CancellationEvent {
+            task_id: TaskId::default(),
+            timestamp_ms: 0,
+            event_type: "join2_completed".to_string(),
+            details: serde_json::json!({
+                "fut1_completed": fut1_completed,
+                "fut2_completed": fut2_completed,
+                "fut1_drained": fut1_drained,
+                "fut2_drained": fut2_drained,
+                "cancel_timing": scenario.cancel_timing
+            }),
+        });
+
+        Ok(oracle_results)
     }
 
     fn test_join_all(
         &mut self,
         scenario: &CancelScenario,
         _region: RegionId,
-        trace: &mut ExecutionTrace
+        trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         // TODO: Implement N-way join testing
         trace.task_count = scenario.participant_count;
@@ -675,12 +787,12 @@ impl CancelCorrectnessFuzzer {
         &mut self,
         scenario: &CancelScenario,
         region: RegionId,
-        trace: &mut ExecutionTrace
+        trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         use asupersync::cx::Cx;
         use asupersync::types::{Budget, Outcome};
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
         trace.task_count = 1;
@@ -732,9 +844,9 @@ impl CancelCorrectnessFuzzer {
         if timed_out {
             // Future should be cancelled due to timeout
             if !fut_drained {
-                oracle_results.loser_drain_violations.push(
-                    "timeout victim future was not properly drained".to_string()
-                );
+                oracle_results
+                    .loser_drain_violations
+                    .push("timeout victim future was not properly drained".to_string());
             }
 
             trace.cancellation_events.push(CancellationEvent {
@@ -772,7 +884,7 @@ impl CancelCorrectnessFuzzer {
         &mut self,
         scenario: &CancelScenario,
         task_ids: &[TaskId],
-        trace: &mut ExecutionTrace
+        trace: &mut ExecutionTrace,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match &scenario.cancel_timing {
             CancelTiming::Early => {
@@ -831,7 +943,9 @@ impl CancelCorrectnessFuzzer {
     /// Generate structured test report
     pub fn generate_report(&self) -> String {
         let total_tests = self.results.len();
-        let passed = self.results.iter()
+        let passed = self
+            .results
+            .iter()
             .filter(|r| matches!(r.outcome, FuzzOutcome::Pass))
             .count();
         let failed = total_tests - passed;
@@ -845,7 +959,11 @@ impl CancelCorrectnessFuzzer {
             total_tests,
             passed,
             failed,
-            if total_tests > 0 { (passed as f64 / total_tests as f64) * 100.0 } else { 0.0 }
+            if total_tests > 0 {
+                (passed as f64 / total_tests as f64) * 100.0
+            } else {
+                0.0
+            }
         )
     }
 }
@@ -887,8 +1005,8 @@ impl InvariantViolation {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::generators::*;
+    use super::*;
 
     #[test]
     fn test_fuzzer_creation() {
@@ -922,10 +1040,14 @@ mod tests {
         // Should pass with no violations
         match result.outcome {
             FuzzOutcome::Pass => {
-                assert!(result.oracle_results.loser_drain_violations.is_empty(),
-                    "Should have no loser drain violations");
-                assert_eq!(result.execution_trace.task_count, 2,
-                    "Should track 2 tasks in race");
+                assert!(
+                    result.oracle_results.loser_drain_violations.is_empty(),
+                    "Should have no loser drain violations"
+                );
+                assert_eq!(
+                    result.execution_trace.task_count, 2,
+                    "Should track 2 tasks in race"
+                );
             }
             FuzzOutcome::Fail { violation } => {
                 panic!("Unexpected failure: {:?}", violation);

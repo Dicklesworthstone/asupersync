@@ -428,7 +428,7 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
         }
 
         this.staged_symbols.push_back(symbol);
-        
+
         // We accepted the symbol into our backlog. Return Ok so callers do
         // not retry and cause duplicate delivery.
         Poll::Ready(Ok(()))

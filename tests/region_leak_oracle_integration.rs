@@ -3,8 +3,8 @@
 //! These tests verify that the oracle correctly detects various forms of
 //! region lifecycle violations and structured concurrency issues.
 
-use asupersync::lab::oracle::region_leak::{RegionLeakOracle, RegionLeakConfig};
-use asupersync::types::{RegionId, TaskId, Budget, Outcome};
+use asupersync::lab::oracle::region_leak::{RegionLeakConfig, RegionLeakOracle};
+use asupersync::types::{Budget, Outcome, RegionId, TaskId};
 use std::time::Duration;
 
 #[test]

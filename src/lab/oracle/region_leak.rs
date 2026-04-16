@@ -47,11 +47,11 @@
 //! }
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
-use serde::{Serialize, Deserialize};
 
-use crate::types::{RegionId, TaskId, Budget, Outcome};
+use crate::types::{Budget, Outcome, RegionId, TaskId};
 
 /// Configuration for region leak detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,9 +426,10 @@ impl RegionLeakOracle {
             region.last_activity = Instant::now();
 
             // Transition to finalizing if all children done but finalizers remain
-            if region.child_regions.is_empty() &&
-               region.active_tasks.is_empty() &&
-               region.completed_finalizers < region.expected_finalizers {
+            if region.child_regions.is_empty()
+                && region.active_tasks.is_empty()
+                && region.completed_finalizers < region.expected_finalizers
+            {
                 region.state = RegionLifecycleState::Finalizing;
             }
         }
@@ -550,7 +551,11 @@ impl RegionLeakOracle {
         }
     }
 
-    fn check_region_violations(&self, region: &RegionState, now: Instant) -> Option<RegionViolation> {
+    fn check_region_violations(
+        &self,
+        region: &RegionState,
+        now: Instant,
+    ) -> Option<RegionViolation> {
         let duration = now.duration_since(region.creation_time);
 
         match region.state {
@@ -628,9 +633,10 @@ impl RegionLeakOracle {
     }
 
     fn check_task_violations(&self, task: &TaskState, now: Instant) -> Option<RegionViolation> {
-        if task.state == TaskLifecycleState::Completed ||
-           task.state == TaskLifecycleState::Cancelled ||
-           task.state == TaskLifecycleState::Panicked {
+        if task.state == TaskLifecycleState::Completed
+            || task.state == TaskLifecycleState::Cancelled
+            || task.state == TaskLifecycleState::Panicked
+        {
             return None;
         }
 
@@ -678,8 +684,9 @@ impl RegionLeakOracle {
         for region in self.regions.values() {
             if let Some(parent_id) = region.parent_id {
                 if let Some(parent) = self.regions.get(&parent_id) {
-                    if parent.state == RegionLifecycleState::Closed &&
-                       region.state != RegionLifecycleState::Closed {
+                    if parent.state == RegionLifecycleState::Closed
+                        && region.state != RegionLifecycleState::Closed
+                    {
                         violations.push(RegionViolation {
                             violation_type: ViolationType::OrphanedChildren,
                             region_id: region.region_id,
@@ -690,7 +697,8 @@ impl RegionLeakOracle {
                                 region.region_id, parent_id
                             ),
                             context: self.build_violation_context(region),
-                            suggested_fix: "Ensure parent waits for all children to close".to_string(),
+                            suggested_fix: "Ensure parent waits for all children to close"
+                                .to_string(),
                         });
                     }
                 }
@@ -705,7 +713,8 @@ impl RegionLeakOracle {
                     duration: Duration::from_secs(0),
                     description: format!(
                         "Region {} closed with {} active tasks",
-                        region.region_id, region.active_tasks.len()
+                        region.region_id,
+                        region.active_tasks.len()
                     ),
                     context: self.build_violation_context(region),
                     suggested_fix: "Ensure all tasks complete before region closes".to_string(),
@@ -713,8 +722,9 @@ impl RegionLeakOracle {
             }
 
             // Check for incomplete finalizers
-            if region.state == RegionLifecycleState::Closed &&
-               region.completed_finalizers < region.expected_finalizers {
+            if region.state == RegionLifecycleState::Closed
+                && region.completed_finalizers < region.expected_finalizers
+            {
                 violations.push(RegionViolation {
                     violation_type: ViolationType::FinalizersIncomplete,
                     region_id: region.region_id,
@@ -829,7 +839,10 @@ mod tests {
         // Should detect stuck creation
         let violations = oracle.check_for_violations().unwrap();
         assert!(!violations.is_empty());
-        assert!(matches!(violations[0].violation_type, ViolationType::StuckCreation));
+        assert!(matches!(
+            violations[0].violation_type,
+            ViolationType::StuckCreation
+        ));
     }
 
     #[test]
@@ -871,7 +884,10 @@ mod tests {
         // Should detect orphaned tasks
         let violations = oracle.check_for_violations().unwrap();
         assert!(!violations.is_empty());
-        assert!(matches!(violations[0].violation_type, ViolationType::OrphanedTasks));
+        assert!(matches!(
+            violations[0].violation_type,
+            ViolationType::OrphanedTasks
+        ));
     }
 }
 

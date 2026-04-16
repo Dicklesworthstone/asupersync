@@ -439,10 +439,8 @@ where
                         Ok(Some(msg)) => return Ok(Some(msg)),
                         Ok(None) => {}
                         Err(err) => {
-                            self.close_handshake.force_close(CloseReason::new(
-                                err.as_close_code(),
-                                None,
-                            ));
+                            self.close_handshake
+                                .force_close(CloseReason::new(err.as_close_code(), None));
                             return Err(err);
                         }
                     },

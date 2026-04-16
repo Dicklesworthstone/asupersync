@@ -6,10 +6,10 @@
 #![cfg(test)]
 
 use crate::raptorq::gf256::{
-    Gf256, gf256_mul_slice, gf256_addmul_slice, gf256_mul_slices2, gf256_addmul_slices2,
-    active_kernel, Gf256Kernel, dual_addmul_kernel_decision_detail, dual_policy_snapshot,
+    Gf256, Gf256Kernel, active_kernel, dual_addmul_kernel_decision_detail, dual_policy_snapshot,
+    gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
-use crate::test_logging::{UnitLogEntry, test_log_sink, TestOutcome};
+use crate::test_logging::{TestOutcome, UnitLogEntry, test_log_sink};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -48,10 +48,16 @@ impl ValidationConfig {
         UnitLogEntry::new(
             sequence,
             format!("gf256_validation_{}", self.scenario),
-            format!("size={} scalar={} seed={}", self.size, self.scalar, self.seed),
+            format!(
+                "size={} scalar={} seed={}",
+                self.size, self.scalar, self.seed
+            ),
             outcome,
             details.to_string(),
-            format!("cargo test gf256_validation_tests::test_{} -- --nocapture", self.scenario),
+            format!(
+                "cargo test gf256_validation_tests::test_{} -- --nocapture",
+                self.scenario
+            ),
         )
     }
 }
@@ -59,25 +65,87 @@ impl ValidationConfig {
 /// Validation test scenarios covering different sizes and edge cases.
 const VALIDATION_SCENARIOS: &[ValidationConfig] = &[
     // Small sizes for exhaustive coverage
-    ValidationConfig { size: 1, scalar: 1, seed: 0, scenario: "single_byte" },
-    ValidationConfig { size: 15, scalar: 17, seed: 42, scenario: "sub_simd_odd" },
-    ValidationConfig { size: 16, scalar: 255, seed: 123, scenario: "exactly_simd" },
-    ValidationConfig { size: 17, scalar: 2, seed: 456, scenario: "just_over_simd" },
-
+    ValidationConfig {
+        size: 1,
+        scalar: 1,
+        seed: 0,
+        scenario: "single_byte",
+    },
+    ValidationConfig {
+        size: 15,
+        scalar: 17,
+        seed: 42,
+        scenario: "sub_simd_odd",
+    },
+    ValidationConfig {
+        size: 16,
+        scalar: 255,
+        seed: 123,
+        scenario: "exactly_simd",
+    },
+    ValidationConfig {
+        size: 17,
+        scalar: 2,
+        seed: 456,
+        scenario: "just_over_simd",
+    },
     // Medium sizes for typical usage
-    ValidationConfig { size: 64, scalar: 85, seed: 789, scenario: "cache_line" },
-    ValidationConfig { size: 256, scalar: 42, seed: 1011, scenario: "page_fraction" },
-    ValidationConfig { size: 1024, scalar: 199, seed: 1213, scenario: "small_page" },
-
+    ValidationConfig {
+        size: 64,
+        scalar: 85,
+        seed: 789,
+        scenario: "cache_line",
+    },
+    ValidationConfig {
+        size: 256,
+        scalar: 42,
+        seed: 1011,
+        scenario: "page_fraction",
+    },
+    ValidationConfig {
+        size: 1024,
+        scalar: 199,
+        seed: 1213,
+        scenario: "small_page",
+    },
     // Large sizes for performance validation
-    ValidationConfig { size: 4096, scalar: 123, seed: 1415, scenario: "page_size" },
-    ValidationConfig { size: 16384, scalar: 77, seed: 1617, scenario: "large_block" },
-    ValidationConfig { size: 65536, scalar: 234, seed: 1819, scenario: "very_large" },
-
+    ValidationConfig {
+        size: 4096,
+        scalar: 123,
+        seed: 1415,
+        scenario: "page_size",
+    },
+    ValidationConfig {
+        size: 16384,
+        scalar: 77,
+        seed: 1617,
+        scenario: "large_block",
+    },
+    ValidationConfig {
+        size: 65536,
+        scalar: 234,
+        seed: 1819,
+        scenario: "very_large",
+    },
     // Edge cases for corner validation
-    ValidationConfig { size: 4095, scalar: 1, seed: 2021, scenario: "odd_large" },
-    ValidationConfig { size: 32768, scalar: 0, seed: 2223, scenario: "zero_scalar" },
-    ValidationConfig { size: 8192, scalar: 255, seed: 2425, scenario: "max_scalar" },
+    ValidationConfig {
+        size: 4095,
+        scalar: 1,
+        seed: 2021,
+        scenario: "odd_large",
+    },
+    ValidationConfig {
+        size: 32768,
+        scalar: 0,
+        seed: 2223,
+        scenario: "zero_scalar",
+    },
+    ValidationConfig {
+        size: 8192,
+        scalar: 255,
+        seed: 2425,
+        scenario: "max_scalar",
+    },
 ];
 
 /// Validate mul_slice operation produces bit-exact results.
@@ -104,11 +172,19 @@ fn test_mul_slice_bit_exact() {
             kernel, config.size, config.scalar, bit_exact
         );
 
-        let outcome = if bit_exact { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if bit_exact {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
-        assert!(bit_exact, "mul_slice not bit-exact for scenario: {}", config.scenario);
+        assert!(
+            bit_exact,
+            "mul_slice not bit-exact for scenario: {}",
+            config.scenario
+        );
     }
 }
 
@@ -143,11 +219,19 @@ fn test_addmul_slice_bit_exact() {
             kernel, config.size, config.scalar, bit_exact
         );
 
-        let outcome = if bit_exact { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if bit_exact {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
-        assert!(bit_exact, "addmul_slice not bit-exact for scenario: {}", config.scenario);
+        assert!(
+            bit_exact,
+            "addmul_slice not bit-exact for scenario: {}",
+            config.scenario
+        );
     }
 }
 
@@ -186,11 +270,19 @@ fn test_dual_slice_equivalence() {
             kernel, config.size, config.scalar, mul_equivalent
         );
 
-        let outcome = if mul_equivalent { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if mul_equivalent {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
-        assert!(mul_equivalent, "dual mul_slices2 not equivalent for scenario: {}", config.scenario);
+        assert!(
+            mul_equivalent,
+            "dual mul_slices2 not equivalent for scenario: {}",
+            config.scenario
+        );
     }
 }
 
@@ -241,11 +333,19 @@ fn test_dual_addmul_equivalence() {
             kernel, config.size, config.scalar, addmul_equivalent, decision.decision
         );
 
-        let outcome = if addmul_equivalent { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if addmul_equivalent {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
-        assert!(addmul_equivalent, "dual addmul_slices2 not equivalent for scenario: {}", config.scenario);
+        assert!(
+            addmul_equivalent,
+            "dual addmul_slices2 not equivalent for scenario: {}",
+            config.scenario
+        );
     }
 }
 
@@ -282,11 +382,19 @@ fn test_fast_path_correctness() {
             kernel, size, unchanged
         );
 
-        let outcome = if unchanged { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if unchanged {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
-        assert!(unchanged, "Zero scalar should not change dst for size: {}", size);
+        assert!(
+            unchanged,
+            "Zero scalar should not change dst for size: {}",
+            size
+        );
     }
 
     // Test c == 1 (identity scalar) fast path
@@ -320,7 +428,11 @@ fn test_fast_path_correctness() {
             kernel, size, correct_xor
         );
 
-        let outcome = if correct_xor { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if correct_xor {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
@@ -377,11 +489,19 @@ fn test_alignment_robustness() {
             kernel, offset, base_size, alignment_robust
         );
 
-        let outcome = if alignment_robust { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if alignment_robust {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
-        assert!(alignment_robust, "Alignment sensitive at offset: {}", offset);
+        assert!(
+            alignment_robust,
+            "Alignment sensitive at offset: {}",
+            offset
+        );
     }
 }
 
@@ -419,7 +539,8 @@ fn test_exhaustive_scalar_coverage() {
         let expected_behavior = if scalar_value == 0 {
             dst == original_dst
         } else if scalar_value == 1 {
-            dst == original_dst.iter()
+            dst == original_dst
+                .iter()
                 .zip(src.iter())
                 .map(|(&d, &s)| d ^ s)
                 .collect::<Vec<_>>()
@@ -432,11 +553,19 @@ fn test_exhaustive_scalar_coverage() {
             kernel, scalar_value, test_size, expected_behavior
         );
 
-        let outcome = if expected_behavior { TestOutcome::Pass } else { TestOutcome::Fail };
+        let outcome = if expected_behavior {
+            TestOutcome::Pass
+        } else {
+            TestOutcome::Fail
+        };
         let log_entry = config.log_entry(sequence, outcome, &details);
         test_log_sink().write_log_entry(log_entry);
 
-        assert!(expected_behavior, "Incorrect behavior for scalar: {}", scalar_value);
+        assert!(
+            expected_behavior,
+            "Incorrect behavior for scalar: {}",
+            scalar_value
+        );
     }
 }
 
@@ -455,16 +584,22 @@ fn test_policy_determinism() {
     let decision1 = dual_addmul_kernel_decision_detail(4096, 4096);
     let decision2 = dual_addmul_kernel_decision_detail(4096, 4096);
 
-    let decisions_deterministic = decision1.decision == decision2.decision
-        && decision1.reason == decision2.reason;
+    let decisions_deterministic =
+        decision1.decision == decision2.decision && decision1.reason == decision2.reason;
 
     let details = format!(
         "policy_deterministic={} decisions_deterministic={} active_kernel={:?}",
-        deterministic, decisions_deterministic, active_kernel()
+        deterministic,
+        decisions_deterministic,
+        active_kernel()
     );
 
     let overall_deterministic = deterministic && decisions_deterministic;
-    let outcome = if overall_deterministic { TestOutcome::Pass } else { TestOutcome::Fail };
+    let outcome = if overall_deterministic {
+        TestOutcome::Pass
+    } else {
+        TestOutcome::Fail
+    };
 
     let log_entry = UnitLogEntry::new(
         sequence,
@@ -522,17 +657,28 @@ fn test_performance_regression() {
 
     let details = format!(
         "kernel={:?} size={} iterations={} duration_ms={} throughput_gbps={}",
-        kernel, size, iterations, duration.as_millis(), throughput_gbps
+        kernel,
+        size,
+        iterations,
+        duration.as_millis(),
+        throughput_gbps
     );
 
     // Expect at least 1 GB/s for reasonable SIMD performance
     let adequate_performance = throughput_gbps >= 1.0;
-    let outcome = if adequate_performance { TestOutcome::Pass } else { TestOutcome::Fail };
+    let outcome = if adequate_performance {
+        TestOutcome::Pass
+    } else {
+        TestOutcome::Fail
+    };
 
     let log_entry = config.log_entry(sequence, outcome, &details);
     test_log_sink().write_log_entry(log_entry);
 
-    println!("Performance: {} GB/s with kernel {:?}", throughput_gbps, kernel);
+    println!(
+        "Performance: {} GB/s with kernel {:?}",
+        throughput_gbps, kernel
+    );
 
     // Don't assert for now - just collect performance data
     // assert!(adequate_performance, "Performance regression: {} GB/s", throughput_gbps);

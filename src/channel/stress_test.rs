@@ -5,16 +5,18 @@
 //! guarantees hold under all conditions.
 
 use super::atomicity_test::{
-    AtomicityTestConfig, AtomicityOracle, CancellationInjector,
-    producer_task, consumer_task
+    AtomicityOracle, AtomicityTestConfig, CancellationInjector, consumer_task, producer_task,
 };
-use crate::channel::{mpsc, oneshot, broadcast, watch};
+use crate::channel::{broadcast, mpsc, oneshot, watch};
 use crate::cx::Cx;
 use crate::test_utils::lab_with_config;
 use crate::time::{sleep, timeout};
 use crate::types::Budget;
 
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::Duration;
 // Removed tokio dependency - this project IS the async runtime
 
@@ -69,7 +71,9 @@ pub struct StressTestResult {
 }
 
 /// Comprehensive MPSC stress test with escalating concurrency and cancellation.
-pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResult, Box<dyn std::error::Error>> {
+pub async fn mpsc_stress_test(
+    config: StressTestConfig,
+) -> Result<StressTestResult, Box<dyn std::error::Error>> {
     let test_start = std::time::Instant::now();
     let mut total_messages = 0u64;
     let mut total_violations = 0u64;
@@ -81,14 +85,20 @@ pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResu
             config.base.cancel_probability * (1.0 + round as f64 * 0.2)
         } else {
             config.base.cancel_probability
-        }.min(0.8); // Cap at 80%
+        }
+        .min(0.8); // Cap at 80%
 
         let round_config = AtomicityTestConfig {
             cancel_probability: cancel_prob,
             ..config.base.clone()
         };
 
-        println!("Round {}/{}: cancel_prob={:.2}", round + 1, config.stress_rounds, cancel_prob);
+        println!(
+            "Round {}/{}: cancel_prob={:.2}",
+            round + 1,
+            config.stress_rounds,
+            cancel_prob
+        );
 
         let oracle = Arc::new(AtomicityOracle::new(round_config.clone()));
         let injector = Arc::new(CancellationInjector::new(cancel_prob));
@@ -115,8 +125,10 @@ pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResu
                     let producer_injector = Arc::clone(&injector);
 
                     let messages: Vec<u64> = (0..round_config.messages_per_producer)
-                        .map(|j| ((i * round_config.messages_per_producer + j) as u64)
-                                 | ((round as u64) << 32)) // Embed round in high bits
+                        .map(|j| {
+                            ((i * round_config.messages_per_producer + j) as u64)
+                                | ((round as u64) << 32)
+                        }) // Embed round in high bits
                         .collect();
 
                     // Stagger producer starts
@@ -125,7 +137,8 @@ pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResu
                     }
 
                     let producer = task::spawn(async move {
-                        producer_task(sender, producer_oracle, producer_injector, messages, cx).await
+                        producer_task(sender, producer_oracle, producer_injector, messages, cx)
+                            .await
                     });
                     producers.push(producer);
                 }
@@ -133,7 +146,7 @@ pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResu
                 // Wait for all producers with timeout
                 for (i, producer) in producers.into_iter().enumerate() {
                     match timeout(Duration::from_secs(5), producer).await {
-                        Ok(Ok(_)) => {},
+                        Ok(Ok(_)) => {}
                         Ok(Err(e)) => eprintln!("Producer {} failed: {:?}", i, e),
                         Err(_) => eprintln!("Producer {} timed out", i),
                     }
@@ -145,26 +158,32 @@ pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResu
                 // Wait for consumer with timeout
                 match timeout(Duration::from_secs(5), consumer).await {
                     Ok(Ok(Ok(received))) => {
-                        println!("Round {} completed: received {} messages", round + 1, received.len());
+                        println!(
+                            "Round {} completed: received {} messages",
+                            round + 1,
+                            received.len()
+                        );
                         Some(received.len())
-                    },
+                    }
                     Ok(Ok(Err(e))) => {
                         eprintln!("Consumer error in round {}: {:?}", round + 1, e);
                         None
-                    },
+                    }
                     Ok(Err(_)) => {
                         eprintln!("Consumer task panicked in round {}", round + 1);
                         None
-                    },
+                    }
                     Err(_) => {
                         eprintln!("Consumer timed out in round {}", round + 1);
                         None
                     }
                 }
-            }).await;
+            })
+            .await;
 
             round_result
-        }).await;
+        })
+        .await;
 
         match round_result {
             Ok(Some(received_count)) => {
@@ -173,7 +192,10 @@ pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResu
                 let received = stats.messages_received.load(Ordering::Acquire);
                 let violations = stats.invariant_violations.load(Ordering::Acquire);
 
-                println!("  Sent: {}, Received: {}, Violations: {}", sent, received, violations);
+                println!(
+                    "  Sent: {}, Received: {}, Violations: {}",
+                    sent, received, violations
+                );
 
                 total_messages += sent;
                 total_violations += violations;
@@ -183,10 +205,10 @@ pub async fn mpsc_stress_test(config: StressTestConfig) -> Result<StressTestResu
                 if !oracle.verify_final_consistency() {
                     eprintln!("CONSISTENCY FAILURE in round {}", round + 1);
                 }
-            },
+            }
             Ok(None) => {
                 eprintln!("Round {} failed to complete properly", round + 1);
-            },
+            }
             Err(_) => {
                 eprintln!("Round {} timed out", round + 1);
             }
@@ -246,9 +268,13 @@ pub async fn oneshot_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        println!("Oneshot stress test: {}/1000 operations successful", successes);
+        println!(
+            "Oneshot stress test: {}/1000 operations successful",
+            successes
+        );
         assert!(successes >= 995, "Too many oneshot failures"); // Allow some variance
-    }).await;
+    })
+    .await;
 
     Ok(())
 }
@@ -307,9 +333,16 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             total_received += count;
         }
 
-        println!("Broadcast stress test: sent {}, total received {}", sent, total_received);
-        assert!(total_received >= sent * num_subscribers / 2, "Too few messages received");
-    }).await;
+        println!(
+            "Broadcast stress test: sent {}, total received {}",
+            sent, total_received
+        );
+        assert!(
+            total_received >= sent * num_subscribers / 2,
+            "Too few messages received"
+        );
+    })
+    .await;
 
     Ok(())
 }
@@ -331,7 +364,8 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                 let mut updates_seen = 0;
                 let mut last_value = 0;
 
-                for _ in 0..num_updates * 2 { // Allow extra iterations for watchers
+                for _ in 0..num_updates * 2 {
+                    // Allow extra iterations for watchers
                     select! {
                         result = receiver.changed(cx) => {
                             match result {
@@ -372,13 +406,16 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         // Collect results from watchers
         for handle in watchers {
             let (watcher_id, updates_seen, last_value) = handle.await.unwrap();
-            println!("Watcher {}: saw {} updates, last value {}",
-                     watcher_id, updates_seen, last_value);
+            println!(
+                "Watcher {}: saw {} updates, last value {}",
+                watcher_id, updates_seen, last_value
+            );
             assert!(last_value > 0, "Watcher should see some updates");
         }
 
         println!("Watch stress test: sent {} updates", sent);
-    }).await;
+    })
+    .await;
 
     Ok(())
 }
@@ -412,7 +449,10 @@ mod tests {
         println!("  Throughput: {:.2} msg/s", result.avg_throughput);
         println!("  Atomicity: {}", result.atomicity_maintained);
 
-        assert!(result.rounds_completed >= 1, "Should complete at least one round");
+        assert!(
+            result.rounds_completed >= 1,
+            "Should complete at least one round"
+        );
         assert!(result.atomicity_maintained, "Atomicity violations detected");
         assert_eq!(result.total_violations, 0, "Should have no violations");
     }

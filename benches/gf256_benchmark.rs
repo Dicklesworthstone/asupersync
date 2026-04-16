@@ -3,11 +3,11 @@
 //! Benchmarks all kernel variants (Scalar, AVX2, NEON) and dual-lane operations
 //! to validate substantial performance wins over baseline scalar implementation.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use asupersync::raptorq::gf256::{
-    Gf256, gf256_mul_slice, gf256_addmul_slice, gf256_mul_slices2, gf256_addmul_slices2,
-    active_kernel, Gf256Kernel, dual_addmul_kernel_decision_detail, dual_policy_snapshot
+    Gf256, Gf256Kernel, active_kernel, dual_addmul_kernel_decision_detail, dual_policy_snapshot,
+    gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::hint::black_box as hint_black_box;
 
 /// Benchmark configurations for different operation sizes.
@@ -31,16 +31,12 @@ fn bench_mul_slice(c: &mut Criterion) {
         let mut data = generate_test_data(size);
         let scalar = Gf256::new(17);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    gf256_mul_slice(black_box(&mut data), black_box(scalar));
-                    hint_black_box(&data);
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
+            b.iter(|| {
+                gf256_mul_slice(black_box(&mut data), black_box(scalar));
+                hint_black_box(&data);
+            });
+        });
     }
     group.finish();
 }
@@ -56,20 +52,12 @@ fn bench_addmul_slice(c: &mut Criterion) {
         let src = generate_test_data(size);
         let scalar = Gf256::new(42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    gf256_addmul_slice(
-                        black_box(&mut dst),
-                        black_box(&src),
-                        black_box(scalar)
-                    );
-                    hint_black_box(&dst);
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
+            b.iter(|| {
+                gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(scalar));
+                hint_black_box(&dst);
+            });
+        });
     }
     group.finish();
 }
@@ -85,21 +73,17 @@ fn bench_mul_slices2(c: &mut Criterion) {
         let mut data_b = generate_test_data(size);
         let scalar = Gf256::new(85);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    gf256_mul_slices2(
-                        black_box(&mut data_a),
-                        black_box(&mut data_b),
-                        black_box(scalar)
-                    );
-                    hint_black_box(&data_a);
-                    hint_black_box(&data_b);
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
+            b.iter(|| {
+                gf256_mul_slices2(
+                    black_box(&mut data_a),
+                    black_box(&mut data_b),
+                    black_box(scalar),
+                );
+                hint_black_box(&data_a);
+                hint_black_box(&data_b);
+            });
+        });
     }
     group.finish();
 }
@@ -118,23 +102,19 @@ fn bench_addmul_slices2(c: &mut Criterion) {
         let src_b = generate_test_data(size);
         let scalar = Gf256::new(123);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    gf256_addmul_slices2(
-                        black_box(&mut dst_a),
-                        black_box(&src_a),
-                        black_box(&mut dst_b),
-                        black_box(&src_b),
-                        black_box(scalar)
-                    );
-                    hint_black_box(&dst_a);
-                    hint_black_box(&dst_b);
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
+            b.iter(|| {
+                gf256_addmul_slices2(
+                    black_box(&mut dst_a),
+                    black_box(&src_a),
+                    black_box(&mut dst_b),
+                    black_box(&src_b),
+                    black_box(scalar),
+                );
+                hint_black_box(&dst_a);
+                hint_black_box(&dst_b);
+            });
+        });
     }
     group.finish();
 }
@@ -152,11 +132,7 @@ fn bench_fast_paths(c: &mut Criterion) {
     // Test c == 1 (should use XOR fast path)
     group.bench_function("addmul_c_eq_1", |b| {
         b.iter(|| {
-            gf256_addmul_slice(
-                black_box(&mut dst),
-                black_box(&src),
-                black_box(Gf256::ONE)
-            );
+            gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(Gf256::ONE));
             hint_black_box(&dst);
         });
     });
@@ -164,11 +140,7 @@ fn bench_fast_paths(c: &mut Criterion) {
     // Test c == 0 (should use zero fill)
     group.bench_function("addmul_c_eq_0", |b| {
         b.iter(|| {
-            gf256_addmul_slice(
-                black_box(&mut dst),
-                black_box(&src),
-                black_box(Gf256::ZERO)
-            );
+            gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(Gf256::ZERO));
             hint_black_box(&dst);
         });
     });
@@ -183,10 +155,7 @@ fn bench_dispatch_overhead(c: &mut Criterion) {
     // Test dual-lane decision making
     group.bench_function("dual_addmul_decision", |b| {
         b.iter(|| {
-            let decision = dual_addmul_kernel_decision_detail(
-                black_box(4096),
-                black_box(4096)
-            );
+            let decision = dual_addmul_kernel_decision_detail(black_box(4096), black_box(4096));
             hint_black_box(&decision);
         });
     });
@@ -214,11 +183,7 @@ fn bench_kernel_comparison(c: &mut Criterion) {
     // Benchmark current active kernel
     group.bench_function("active_kernel_addmul", |b| {
         b.iter(|| {
-            gf256_addmul_slice(
-                black_box(&mut data),
-                black_box(&src),
-                black_box(scalar)
-            );
+            gf256_addmul_slice(black_box(&mut data), black_box(&src), black_box(scalar));
             hint_black_box(&data);
         });
     });
@@ -246,20 +211,16 @@ fn bench_alignment_sensitivity(c: &mut Criterion) {
         let dst_slice = &mut data[*offset..];
         let src_slice = &src[*offset..];
 
-        group.bench_with_input(
-            BenchmarkId::new("addmul_offset", offset),
-            offset,
-            |b, _| {
-                b.iter(|| {
-                    gf256_addmul_slice(
-                        black_box(dst_slice),
-                        black_box(src_slice),
-                        black_box(scalar)
-                    );
-                    hint_black_box(&dst_slice);
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::new("addmul_offset", offset), offset, |b, _| {
+            b.iter(|| {
+                gf256_addmul_slice(
+                    black_box(dst_slice),
+                    black_box(src_slice),
+                    black_box(scalar),
+                );
+                hint_black_box(&dst_slice);
+            });
+        });
     }
 
     group.finish();
@@ -283,14 +244,10 @@ fn bench_scalar_sensitivity(c: &mut Criterion) {
             &scalar_value,
             |b, _| {
                 b.iter(|| {
-                    gf256_addmul_slice(
-                        black_box(&mut dst),
-                        black_box(&src),
-                        black_box(scalar)
-                    );
+                    gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(scalar));
                     hint_black_box(&dst);
                 });
-            }
+            },
         );
     }
 
@@ -310,8 +267,10 @@ fn print_bench_info() {
     // Test decision making for a few representative sizes
     for &size in &[1024, 4096, 16384] {
         let decision = dual_addmul_kernel_decision_detail(size, size);
-        println!("Size {} dual decision: {:?} (reason: {:?})",
-                 size, decision.decision, decision.reason);
+        println!(
+            "Size {} dual decision: {:?} (reason: {:?})",
+            size, decision.decision, decision.reason
+        );
     }
 
     println!("============================================");

@@ -26,7 +26,7 @@
 
 #![allow(missing_docs)]
 
-use asupersync::raptorq::rfc6330::{rand, deg, next_prime_ge, tuple, repair_indices_for_esi};
+use asupersync::raptorq::rfc6330::{deg, next_prime_ge, rand, repair_indices_for_esi, tuple};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -54,7 +54,7 @@ pub enum TestVerdict {
     Pass,
     Fail,
     Skip,
-    ExpectedFail,  // Known divergence
+    ExpectedFail, // Known divergence
 }
 
 /// RFC 6330 golden test vector.
@@ -240,10 +240,15 @@ fn test_rand_function_determinism(vector: &GoldenVector<(u32, u8, u32), u32>) ->
         rfc_section: vector.rfc_section.to_string(),
         requirement_level: RequirementLevel::Must,
         verdict: verdict.clone(),
-        description: format!("{}: rand({}, {}, {}) determinism",
-                           vector.description, y, i, m),
+        description: format!(
+            "{}: rand({}, {}, {}) determinism",
+            vector.description, y, i, m
+        ),
         error_details: if verdict == TestVerdict::Fail {
-            Some(format!("Non-deterministic: {} != {} != {}", result1, result2, result3))
+            Some(format!(
+                "Non-deterministic: {} != {} != {}",
+                result1, result2, result3
+            ))
         } else {
             None
         },
@@ -264,8 +269,10 @@ fn test_deg_function(vector: &GoldenVector<u32, usize>) -> ConformanceResult {
         rfc_section: vector.rfc_section.to_string(),
         requirement_level: RequirementLevel::Must,
         verdict: verdict.clone(),
-        description: format!("{}: deg({}) -> {}",
-                           vector.description, vector.input, vector.expected),
+        description: format!(
+            "{}: deg({}) -> {}",
+            vector.description, vector.input, vector.expected
+        ),
         error_details: if verdict == TestVerdict::Fail {
             Some(format!("Expected {}, got {}", vector.expected, actual))
         } else {
@@ -274,7 +281,9 @@ fn test_deg_function(vector: &GoldenVector<u32, usize>) -> ConformanceResult {
     }
 }
 
-fn test_tuple_function_determinism(vector: &GoldenVector<(usize, u32), (usize, usize, usize)>) -> ConformanceResult {
+fn test_tuple_function_determinism(
+    vector: &GoldenVector<(usize, u32), (usize, usize, usize)>,
+) -> ConformanceResult {
     let (k, x) = vector.input;
     let w = next_prime_ge(k);
     let p = k.max(4); // Reasonable pi_count, must be > 0
@@ -284,9 +293,7 @@ fn test_tuple_function_determinism(vector: &GoldenVector<(usize, u32), (usize, u
     let result1 = tuple(k, w, p, p1, x);
     let result2 = tuple(k, w, p, p1, x);
 
-    let verdict = if result1.d == result2.d &&
-                     result1.a == result2.a &&
-                     result1.b == result2.b {
+    let verdict = if result1.d == result2.d && result1.a == result2.a && result1.b == result2.b {
         TestVerdict::Pass
     } else {
         TestVerdict::Fail
@@ -297,8 +304,7 @@ fn test_tuple_function_determinism(vector: &GoldenVector<(usize, u32), (usize, u
         rfc_section: vector.rfc_section.to_string(),
         requirement_level: RequirementLevel::Must,
         verdict: verdict.clone(),
-        description: format!("{}: tuple({}, {}) determinism",
-                           vector.description, k, x),
+        description: format!("{}: tuple({}, {}) determinism", vector.description, k, x),
         error_details: if verdict == TestVerdict::Fail {
             Some(format!("Non-deterministic tuple results"))
         } else {
@@ -306,7 +312,6 @@ fn test_tuple_function_determinism(vector: &GoldenVector<(usize, u32), (usize, u
         },
     }
 }
-
 
 // ============================================================================
 // Intermediate Symbol Generation Tests (RFC 6330 Section 5.4.2.1)
@@ -377,7 +382,11 @@ fn test_intermediate_symbol_generation() -> Vec<ConformanceResult> {
             test_id: format!("RFC6330-5.4.2.1-SIZE-{:03}", i),
             rfc_section: "5.4.2.1".to_string(),
             requirement_level: RequirementLevel::Must,
-            verdict: if valid_size { TestVerdict::Pass } else { TestVerdict::Fail },
+            verdict: if valid_size {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            },
             description: format!("Intermediate symbol {} size validation", i),
             error_details: if !valid_size {
                 Some(format!("Expected size {}, got {}", symbol_size, sym.len()))
@@ -424,7 +433,11 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
         let uniqueness_valid = sorted_indices.len() == indices.len();
 
         let valid = bounds_valid && uniqueness_valid;
-        let verdict = if valid { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if valid {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
 
         results.push(ConformanceResult {
             test_id: format!("RFC6330-5.4.2.2-EDGE-{:03}", test_idx),
@@ -440,8 +453,11 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
                 if !uniqueness_valid {
                     errors.push("repair indices not unique".to_string());
                 }
-                Some(format!("Invalid repair indices: {:?}. Errors: {}",
-                           indices, errors.join(", ")))
+                Some(format!(
+                    "Invalid repair indices: {:?}. Errors: {}",
+                    indices,
+                    errors.join(", ")
+                ))
             } else {
                 None
             },
@@ -457,7 +473,11 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
             test_id: format!("RFC6330-5.4.2.2-DET-{:03}", test_idx),
             rfc_section: "5.4.2.2".to_string(),
             requirement_level: RequirementLevel::Must,
-            verdict: if deterministic { TestVerdict::Pass } else { TestVerdict::Fail },
+            verdict: if deterministic {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            },
             description: format!("Repair equation ESI={} determinism", esi),
             error_details: if !deterministic {
                 Some("Repair equation generation not deterministic".to_string())
@@ -479,11 +499,17 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
     let mut report = String::new();
 
     report.push_str("# RFC 6330 RaptorQ Conformance Report\n\n");
-    report.push_str(&format!("Generated: {}\n\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+    report.push_str(&format!(
+        "Generated: {}\n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ));
 
     let mut by_section: HashMap<String, Vec<&ConformanceResult>> = HashMap::new();
     for result in results {
-        by_section.entry(result.rfc_section.clone()).or_default().push(result);
+        by_section
+            .entry(result.rfc_section.clone())
+            .or_default()
+            .push(result);
     }
 
     // Summary table
@@ -501,13 +527,16 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
 
     for (section, desc) in &sections {
         if let Some(section_results) = by_section.get(*section) {
-            let must_tests: Vec<_> = section_results.iter()
+            let must_tests: Vec<_> = section_results
+                .iter()
                 .filter(|r| matches!(r.requirement_level, RequirementLevel::Must))
                 .collect();
-            let pass_count = must_tests.iter()
+            let pass_count = must_tests
+                .iter()
                 .filter(|r| r.verdict == TestVerdict::Pass)
                 .count();
-            let fail_count = must_tests.iter()
+            let fail_count = must_tests
+                .iter()
                 .filter(|r| r.verdict == TestVerdict::Fail)
                 .count();
             let coverage = if !must_tests.is_empty() {
@@ -516,16 +545,25 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
                 0
             };
 
-            report.push_str(&format!("| {} | {} | {} | {} | {} | {}% |\n",
-                section, desc, must_tests.len(), pass_count, fail_count, coverage));
+            report.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {}% |\n",
+                section,
+                desc,
+                must_tests.len(),
+                pass_count,
+                fail_count,
+                coverage
+            ));
         }
     }
 
     // Overall conformance score
-    let all_must_tests: Vec<_> = results.iter()
+    let all_must_tests: Vec<_> = results
+        .iter()
         .filter(|r| matches!(r.requirement_level, RequirementLevel::Must))
         .collect();
-    let total_pass = all_must_tests.iter()
+    let total_pass = all_must_tests
+        .iter()
         .filter(|r| r.verdict == TestVerdict::Pass)
         .count();
     let overall_coverage = if !all_must_tests.is_empty() {
@@ -534,8 +572,12 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
         0.0
     };
 
-    report.push_str(&format!("\n**Overall RFC 6330 Conformance: {:.1}%** ({}/{} MUST requirements pass)\n\n",
-        overall_coverage, total_pass, all_must_tests.len()));
+    report.push_str(&format!(
+        "\n**Overall RFC 6330 Conformance: {:.1}%** ({}/{} MUST requirements pass)\n\n",
+        overall_coverage,
+        total_pass,
+        all_must_tests.len()
+    ));
 
     // Conformance status
     if overall_coverage >= 95.0 {
@@ -556,8 +598,10 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
                     TestVerdict::Skip => "⏭️",
                     TestVerdict::ExpectedFail => "⚠️",
                 };
-                report.push_str(&format!("- {} **{}**: {}\n",
-                    status_icon, result.test_id, result.description));
+                report.push_str(&format!(
+                    "- {} **{}**: {}\n",
+                    status_icon, result.test_id, result.description
+                ));
                 if let Some(error) = &result.error_details {
                     report.push_str(&format!("  - **Error**: {}\n", error));
                 }
@@ -573,8 +617,10 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
 pub fn output_structured_logs(results: &[ConformanceResult]) {
     eprintln!("📊 RFC 6330 Conformance Results (GAP-D7 Schema Foundation):");
     for result in results {
-        eprintln!("{{\"test_id\":\"{}\",\"rfc_section\":\"{}\",\"verdict\":\"{:?}\",\"requirement_level\":\"{:?}\"}}",
-            result.test_id, result.rfc_section, result.verdict, result.requirement_level);
+        eprintln!(
+            "{{\"test_id\":\"{}\",\"rfc_section\":\"{}\",\"verdict\":\"{:?}\",\"requirement_level\":\"{:?}\"}}",
+            result.test_id, result.rfc_section, result.verdict, result.requirement_level
+        );
     }
 }
 
@@ -596,7 +642,8 @@ mod tests {
         output_structured_logs(&results);
 
         // Check for any failures
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Fail)
             .collect();
 
@@ -612,18 +659,27 @@ mod tests {
         }
 
         // Verify minimum coverage requirements
-        let must_tests: Vec<_> = results.iter()
+        let must_tests: Vec<_> = results
+            .iter()
             .filter(|r| matches!(r.requirement_level, RequirementLevel::Must))
             .collect();
-        let pass_count = must_tests.iter()
+        let pass_count = must_tests
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Pass)
             .count();
 
         let coverage = pass_count as f64 / must_tests.len() as f64;
-        assert!(coverage >= 0.95,
-            "RFC 6330 MUST coverage {:.1}% below required 95%", coverage * 100.0);
+        assert!(
+            coverage >= 0.95,
+            "RFC 6330 MUST coverage {:.1}% below required 95%",
+            coverage * 100.0
+        );
 
-        println!("✅ RFC 6330 conformance PASS: {}/{} MUST tests ({:.1}% coverage)",
-            pass_count, must_tests.len(), coverage * 100.0);
+        println!(
+            "✅ RFC 6330 conformance PASS: {}/{} MUST tests ({:.1}% coverage)",
+            pass_count,
+            must_tests.len(),
+            coverage * 100.0
+        );
     }
 }

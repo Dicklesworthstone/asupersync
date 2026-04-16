@@ -29,7 +29,9 @@ pub struct CollectorSink {
 
 impl CollectorSink {
     fn new() -> Self {
-        Self { symbols: Vec::new() }
+        Self {
+            symbols: Vec::new(),
+        }
     }
 
     pub fn symbols(&self) -> &[AuthenticatedSymbol] {
@@ -47,15 +49,24 @@ impl SymbolSink for CollectorSink {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), crate::transport::error::SinkError>> {
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), crate::transport::error::SinkError>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), crate::transport::error::SinkError>> {
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), crate::transport::error::SinkError>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), crate::transport::error::SinkError>> {
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), crate::transport::error::SinkError>> {
         Poll::Ready(Ok(()))
     }
 }
@@ -76,7 +87,8 @@ fn create_test_decoder(k: usize, symbol_size: usize) -> InactivationDecoder {
 
 /// Convert authenticated symbols to received symbols for decoder.
 fn symbols_to_received(symbols: &[AuthenticatedSymbol], k: usize) -> Vec<ReceivedSymbol> {
-    symbols.iter()
+    symbols
+        .iter()
         .enumerate()
         .map(|(i, auth_symbol)| ReceivedSymbol {
             esi: i as u32,
@@ -90,7 +102,8 @@ fn symbols_to_received(symbols: &[AuthenticatedSymbol], k: usize) -> Vec<Receive
 
 /// Flatten source symbols into original data format.
 fn flatten_source_symbols(source_symbols: &[Vec<u8>], original_len: usize) -> Vec<u8> {
-    source_symbols.iter()
+    source_symbols
+        .iter()
         .flatten()
         .copied()
         .take(original_len)

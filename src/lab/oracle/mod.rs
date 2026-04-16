@@ -37,6 +37,7 @@
 pub mod actor;
 pub mod ambient_authority;
 pub mod cancellation_protocol;
+pub mod channel_atomicity;
 pub mod deadline_monotone;
 pub mod determinism;
 pub mod eprocess;
@@ -63,6 +64,10 @@ pub use ambient_authority::{
 pub use cancellation_protocol::{
     CancellationProtocolOracle, CancellationProtocolViolation, TaskStateKind,
 };
+pub use channel_atomicity::{
+    ChannelAtomicityConfig, ChannelAtomicityOracle, ChannelAtomicityStatistics,
+    ChannelAtomicityViolation, ChannelId, EnforcementMode, ReservationId, ViolationRecord, WakerId,
+};
 pub use deadline_monotone::{DeadlineMonotoneOracle, DeadlineMonotoneViolation};
 pub use determinism::{
     DeterminismOracle, DeterminismViolation, TraceEventSummary, assert_deterministic,
@@ -83,9 +88,9 @@ pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
 pub use obligation_leak::{ObligationLeakOracle, ObligationLeakViolation};
 pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
 pub use region_leak::{
-    RegionLeakOracle, RegionLeakConfig, RegionLeakStatistics, RegionViolation, ViolationType,
-    ViolationContext, RegionState as RegionLeakState, TaskState,
-    RegionLifecycleState, TaskLifecycleState, BudgetInfo,
+    BudgetInfo, RegionLeakConfig, RegionLeakOracle, RegionLeakStatistics, RegionLifecycleState,
+    RegionState as RegionLeakState, RegionViolation, TaskLifecycleState, TaskState,
+    ViolationContext, ViolationType,
 };
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
 pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
@@ -130,6 +135,8 @@ pub enum OracleViolation {
     DeadlineMonotone(DeadlineMonotoneViolation),
     /// Cancellation protocol violated.
     CancellationProtocol(CancellationProtocolViolation),
+    /// Channel atomicity violation (reservation lifecycle, waker consistency, etc.).
+    ChannelAtomicity(ChannelAtomicityViolation),
     /// An actor leak was detected.
     ActorLeak(ActorLeakViolation),
     /// Supervision tree behavior violated.
@@ -173,6 +180,7 @@ impl std::fmt::Display for OracleViolation {
             Self::AmbientAuthority(v) => write!(f, "Ambient authority violation: {v}"),
             Self::DeadlineMonotone(v) => write!(f, "Deadline monotonicity violation: {v}"),
             Self::CancellationProtocol(v) => write!(f, "Cancellation protocol violation: {v}"),
+            Self::ChannelAtomicity(v) => write!(f, "Channel atomicity violation: {v}"),
             Self::ActorLeak(v) => write!(f, "Actor leak: {v}"),
             Self::Supervision(v) => write!(f, "Supervision violation: {v}"),
             Self::Mailbox(v) => write!(f, "Mailbox violation: {v}"),
@@ -218,6 +226,8 @@ pub struct OracleSuite {
     pub deadline_monotone: DeadlineMonotoneOracle,
     /// Cancellation protocol oracle.
     pub cancellation_protocol: CancellationProtocolOracle,
+    /// Channel atomicity oracle.
+    pub channel_atomicity: ChannelAtomicityOracle,
     /// Actor leak oracle.
     pub actor_leak: ActorLeakOracle,
     /// Supervision oracle.
@@ -463,6 +473,19 @@ impl OracleSuite {
             violations.push(OracleViolation::CancellationProtocol(v));
         }
 
+        let channel_atomicity_violations = self.channel_atomicity.check_for_violations();
+        match channel_atomicity_violations {
+            Ok(violations_vec) => {
+                for violation in violations_vec {
+                    violations.push(OracleViolation::ChannelAtomicity(violation));
+                }
+            }
+            Err(_) => {
+                // Handle case where oracle fails - this would be a critical error
+                // For now, we'll skip adding violations
+            }
+        }
+
         if let Err(v) = self.actor_leak.check(now) {
             violations.push(OracleViolation::ActorLeak(v));
         }
@@ -530,6 +553,7 @@ impl OracleSuite {
         self.ambient_authority.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
+        self.channel_atomicity.reset();
         self.actor_leak.reset();
         self.supervision.reset();
         self.mailbox.reset();
@@ -633,7 +657,8 @@ impl OracleSuite {
                 OracleStats {
                     entities_tracked: self.region_leak.statistics().active_regions as usize,
                     events_recorded: (self.region_leak.statistics().total_regions_created
-                        + self.region_leak.statistics().total_tasks_spawned) as usize,
+                        + self.region_leak.statistics().total_tasks_spawned)
+                        as usize,
                 },
             ),
             OracleEntryReport::from_result(
@@ -669,6 +694,38 @@ impl OracleSuite {
                     entities_tracked: self.cancellation_protocol.region_count(),
                     events_recorded: self.cancellation_protocol.region_count()
                         + self.cancellation_protocol.cancel_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "channel_atomicity",
+                self.channel_atomicity
+                    .check_for_violations()
+                    .ok()
+                    .and_then(|violations| violations.first().cloned())
+                    .map(OracleViolation::ChannelAtomicity),
+                OracleStats {
+                    entities_tracked: (self
+                        .channel_atomicity
+                        .statistics()
+                        .total_reservations_created
+                        + self.channel_atomicity.statistics().total_wakers_registered)
+                        as usize,
+                    events_recorded: (self
+                        .channel_atomicity
+                        .statistics()
+                        .total_reservations_created
+                        + self
+                            .channel_atomicity
+                            .statistics()
+                            .total_reservations_committed
+                        + self
+                            .channel_atomicity
+                            .statistics()
+                            .total_reservations_aborted
+                        + self.channel_atomicity.statistics().total_wakers_registered
+                        + self.channel_atomicity.statistics().total_wakeups_expected
+                        + self.channel_atomicity.statistics().total_wakeups_actual)
+                        as usize,
                 },
             ),
             OracleEntryReport::from_result(

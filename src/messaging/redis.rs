@@ -363,9 +363,8 @@ impl RespValue {
                     if n < -1 {
                         return Err(RedisError::Protocol(format!("invalid array length: {n}")));
                     }
-                    let n = usize::try_from(n).map_err(|_| {
-                        RedisError::Protocol(format!("invalid array length: {n}"))
-                    })?;
+                    let n = usize::try_from(n)
+                        .map_err(|_| RedisError::Protocol(format!("invalid array length: {n}")))?;
                     if n > limits.max_array_len {
                         return Err(RedisError::Protocol(format!(
                             "array length {n} exceeds maximum {}",
