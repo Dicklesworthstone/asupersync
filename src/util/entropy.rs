@@ -37,12 +37,14 @@ impl EntropySource for OsEntropy {
         getrandom::fill(dest).expect("OS entropy failed");
     }
 
+    #[inline]
     fn next_u64(&self) -> u64 {
         let mut buf = [0u8; 8];
         self.fill_bytes(&mut buf);
         u64::from_le_bytes(buf)
     }
 
+    #[inline]
     fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
         Arc::new(Self)
     }
@@ -90,11 +92,13 @@ impl DetEntropy {
         }
     }
 
+    #[inline]
     fn task_seed(task_id: TaskId) -> u64 {
         let idx = task_id.arena_index();
         ((u64::from(idx.generation())) << 32) | u64::from(idx.index())
     }
 
+    #[inline]
     pub(crate) fn mix_seed(mut seed: u64) -> u64 {
         seed ^= seed >> 30;
         seed = seed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -146,17 +150,20 @@ impl EntropySource for DetEntropy {
 pub struct BrowserEntropy;
 
 impl EntropySource for BrowserEntropy {
+    #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         check_ambient_entropy("browser");
         getrandom::fill(dest).expect("browser entropy failed");
     }
 
+    #[inline]
     fn next_u64(&self) -> u64 {
         let mut buf = [0u8; 8];
         self.fill_bytes(&mut buf);
         u64::from_le_bytes(buf)
     }
 
+    #[inline]
     fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
         Arc::new(Self)
     }
@@ -183,6 +190,7 @@ impl ThreadLocalEntropy {
 
     /// Deterministically derive an entropy source for a worker index.
     #[must_use]
+    #[inline]
     pub fn for_thread(&self, thread_index: usize) -> DetEntropy {
         let combined = self
             .global_seed
@@ -199,11 +207,13 @@ impl ThreadLocalEntropy {
 static STRICT_ENTROPY: AtomicBool = AtomicBool::new(false);
 
 /// Enable strict entropy isolation globally.
+#[inline]
 pub fn enable_strict_entropy() {
     STRICT_ENTROPY.store(true, Ordering::SeqCst);
 }
 
 /// Disable strict entropy isolation globally.
+#[inline]
 pub fn disable_strict_entropy() {
     STRICT_ENTROPY.store(false, Ordering::SeqCst);
 }
@@ -216,6 +226,7 @@ pub fn strict_entropy_enabled() -> bool {
 }
 
 /// Panic if strict entropy isolation is enabled.
+#[inline]
 pub fn check_ambient_entropy(source: &str) {
     assert!(
         !strict_entropy_enabled(),
@@ -232,6 +243,7 @@ pub struct StrictEntropyGuard {
 impl StrictEntropyGuard {
     /// Enables strict entropy isolation until dropped.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         let previous = STRICT_ENTROPY.swap(true, Ordering::SeqCst);
         Self { previous }
