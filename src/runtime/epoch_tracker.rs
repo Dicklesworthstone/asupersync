@@ -598,8 +598,8 @@ impl EpochConsistencyTracker {
                 from_epoch: _,
                 to_epoch: _,
                 started_at: _,
-                detected_at,
-                duration_ns,
+                detected_at: _,
+                duration_ns: _,
             } => {
                 error!(
                     violation_type = "slow_transition",
@@ -617,7 +617,7 @@ impl EpochConsistencyTracker {
                 );
             }
             EpochConsistencyViolation::MissingTransition {
-                module,
+                module: _,
                 expected_epoch,
                 actual_epoch,
                 detected_at,
