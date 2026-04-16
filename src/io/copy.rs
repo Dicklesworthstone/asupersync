@@ -362,6 +362,7 @@ where
 ///     println!("Copied {} bytes", total);
 /// }).await?;
 /// ```
+#[inline]
 pub fn copy_with_progress<'a, R, W, F>(
     reader: &'a mut R,
     writer: &'a mut W,
@@ -528,6 +529,7 @@ where
 /// let (a_to_b, b_to_a) = copy_bidirectional(&mut stream_a, &mut stream_b).await?;
 /// println!("A->B: {} bytes, B->A: {} bytes", a_to_b, b_to_a);
 /// ```
+#[inline]
 pub fn copy_bidirectional<'a, A, B>(a: &'a mut A, b: &'a mut B) -> CopyBidirectional<'a, A, B>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
