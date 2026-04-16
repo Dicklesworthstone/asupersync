@@ -7089,7 +7089,5 @@ mod tests {
         }
     }
 
-    // Include comprehensive validation tests with structured logging
-    #[cfg(test)]
-    mod gf256_validation_tests;
+    // Note: Validation tests are included via gf256_tests module
 }
