@@ -71,21 +71,32 @@ pub struct CancellationAlert {
 /// Type of cancellation alert.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum AlertType {
+    /// Cancellation propagation is slower than expected.
     SlowPropagation,
+    /// Cancellation appears to be stuck or blocked.
     StuckCancellation,
+    /// High cancellation latency detected.
     HighLatency,
+    /// Performance bottleneck detected in cancellation path.
     BottleneckDetected,
+    /// Risk of resource leaks during cancellation.
     ResourceLeakRisk,
+    /// Spike in anomalies or unusual patterns.
     AnomalySpike,
+    /// Performance regression in cancellation system.
     PerformanceRegression,
 }
 
 /// Severity level of an alert.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum AlertSeverity {
+    /// Informational alert, no action required.
     Info,
+    /// Warning alert, investigation recommended.
     Warning,
+    /// Error alert, action needed.
     Error,
+    /// Critical alert, immediate action required.
     Critical,
 }
 
