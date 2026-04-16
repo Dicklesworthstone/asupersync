@@ -3097,3 +3097,4 @@
 {"file":"src/sync/barrier.rs","lines":771,"batch":"fresh-eyes-sync","date":"2026-04-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"N-way rendezvous barrier with generation-based protection against races"}
 {"file":"src/sync/once_cell.rs","lines":1346,"batch":"fresh-eyes-sync","date":"2026-04-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lazy initialization cell with hybrid sync/async support"}
 {"file":"src/obligation/calm.rs","lines":356,"batch":"audit-calm","date":"2026-04-16","agent":"QuietKite","verdict":"FIXED","bugs":1,"notes":"Strengthened monotone-operation membership test so it fails on wrong classifications instead of only checking the count"}
+{"file":"src/obligation/crdt.rs","lines":1209,"batch":"audit-crdt","date":"2026-04-16","agent":"QuietKite","verdict":"SOUND","bugs":0,"notes":"CRDT obligation ledger merge, repair tombstones, linearity counters, and compaction semantics audited with no correctness issues found"}
