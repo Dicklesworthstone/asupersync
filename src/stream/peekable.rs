@@ -29,6 +29,7 @@ enum PeekSlot<T> {
 
 impl<S: Stream> Peekable<S> {
     /// Creates a new `Peekable` stream.
+    #[inline]
     pub(crate) fn new(stream: S) -> Self {
         Self {
             stream,
@@ -37,11 +38,13 @@ impl<S: Stream> Peekable<S> {
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
@@ -49,6 +52,7 @@ impl<S: Stream> Peekable<S> {
     /// Consumes the combinator, returning the underlying stream.
     ///
     /// Note: any peeked item is lost.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -58,6 +62,7 @@ impl<S: Stream> Peekable<S> {
     /// Returns `Poll::Ready(Some(&item))` if the next item is available,
     /// `Poll::Ready(None)` if the stream is exhausted, or `Poll::Pending`
     /// if the next item is not yet ready.
+    #[inline]
     pub fn poll_peek(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<&S::Item>> {
         let mut this = self.project();
         if matches!(this.peeked, PeekSlot::Empty) {
@@ -77,6 +82,7 @@ impl<S: Stream> Peekable<S> {
     /// Returns a reference to the peeked item, if one has been peeked.
     ///
     /// Unlike `poll_peek`, this does not poll the underlying stream.
+    #[inline]
     #[must_use]
     pub fn peek_cached(&self) -> Option<&S::Item> {
         match &self.peeked {
