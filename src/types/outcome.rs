@@ -110,6 +110,7 @@ pub struct PanicPayload {
 
 impl PanicPayload {
     /// Creates a new panic payload with the given message.
+    #[inline]
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -576,6 +577,7 @@ impl<T, E> Outcome<T, E> {
     /// reason has strictly higher severity and therefore strengthens the result.
     /// This is intentional: join is associative on severity, but not fully
     /// value-commutative. See `law.join.assoc` (#42).
+    #[inline]
     #[must_use]
     pub fn join(self, other: Self) -> Self {
         match (self, other) {
@@ -676,6 +678,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for OutcomeError<E> {}
 ///
 /// When both outcomes are `Cancelled`, a strictly stronger [`CancelReason`] is
 /// kept. Equal-severity cancellation ties remain left-biased.
+#[inline]
 pub fn join_outcomes<T, E>(a: Outcome<T, E>, b: Outcome<T, E>) -> Outcome<T, E> {
     a.join(b)
 }

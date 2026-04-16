@@ -130,6 +130,7 @@ impl CancelAttributionConfig {
     pub const DEFAULT_MAX_MEMORY: usize = 4096;
 
     /// Creates a new configuration with custom limits.
+    #[inline]
     #[must_use]
     pub const fn new(max_chain_depth: usize, max_chain_memory: usize) -> Self {
         Self {
@@ -139,6 +140,7 @@ impl CancelAttributionConfig {
     }
 
     /// Creates a configuration with no limits (for testing or special cases).
+    #[inline]
     #[must_use]
     pub const fn unlimited() -> Self {
         Self {
@@ -261,6 +263,7 @@ pub struct CancelWitness {
 
 impl CancelWitness {
     /// Creates a new cancellation witness.
+    #[inline]
     #[must_use]
     pub fn new(
         task_id: TaskId,
@@ -445,6 +448,7 @@ impl CancelReason {
     /// Creates a new cancellation reason with the given kind and origin.
     ///
     /// This is the primary constructor that requires full attribution.
+    #[inline]
     #[must_use]
     pub const fn with_origin(kind: CancelKind, origin_region: RegionId, timestamp: Time) -> Self {
         Self {
@@ -463,6 +467,7 @@ impl CancelReason {
     ///
     /// Uses `RegionId::testing_default()` and `Time::ZERO` for attribution.
     /// Prefer `with_origin` in production code.
+    #[inline]
     #[must_use]
     pub const fn new(kind: CancelKind) -> Self {
         Self {
@@ -478,6 +483,7 @@ impl CancelReason {
     }
 
     /// Creates a user cancellation reason with a message.
+    #[inline]
     #[must_use]
     pub const fn user(message: &'static str) -> Self {
         Self {
@@ -493,18 +499,21 @@ impl CancelReason {
     }
 
     /// Creates a timeout cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn timeout() -> Self {
         Self::new(CancelKind::Timeout)
     }
 
     /// Creates a deadline cancellation reason (budget deadline exceeded).
+    #[inline]
     #[must_use]
     pub const fn deadline() -> Self {
         Self::new(CancelKind::Deadline)
     }
 
     /// Creates a poll quota cancellation reason (budget poll quota exceeded).
+    #[inline]
     #[must_use]
     pub const fn poll_quota() -> Self {
         Self::new(CancelKind::PollQuota)
@@ -559,6 +568,7 @@ impl CancelReason {
     }
 
     /// Creates a shutdown cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn shutdown() -> Self {
         Self::new(CancelKind::Shutdown)
@@ -575,6 +585,7 @@ impl CancelReason {
     // ========================================================================
 
     /// Sets the origin task for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_task(mut self, task: TaskId) -> Self {
         self.origin_task = Some(task);
@@ -582,6 +593,7 @@ impl CancelReason {
     }
 
     /// Sets a message for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_message(mut self, message: &'static str) -> Self {
         self.message = Some(message);
@@ -592,6 +604,7 @@ impl CancelReason {
     ///
     /// This does not apply any limits to the chain depth.
     /// For production use with limits, prefer [`with_cause_limited`][Self::with_cause_limited].
+    #[inline]
     #[must_use]
     pub fn with_cause(mut self, cause: Self) -> Self {
         self.cause = Some(Box::new(cause));
@@ -711,6 +724,7 @@ impl CancelReason {
     }
 
     /// Sets the timestamp for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_timestamp(mut self, timestamp: Time) -> Self {
         self.timestamp = timestamp;
@@ -718,6 +732,7 @@ impl CancelReason {
     }
 
     /// Sets the origin region for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_region(mut self, region: RegionId) -> Self {
         self.origin_region = region;
@@ -737,6 +752,7 @@ impl CancelReason {
     ///     println!("Cause: {:?}", reason.kind);
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn chain(&self) -> CancelReasonChain<'_> {
         CancelReasonChain {
@@ -757,6 +773,7 @@ impl CancelReason {
     }
 
     /// Returns the depth of the cause chain (1 = no parent, 2 = one parent, etc.).
+    #[inline]
     #[must_use]
     pub fn chain_depth(&self) -> usize {
         self.chain().count()

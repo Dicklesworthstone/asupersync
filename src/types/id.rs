@@ -48,6 +48,7 @@ impl RegionId {
 
     /// Creates a region ID for testing/benchmarking purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
         Self(ArenaIndex::new(index, generation))
@@ -58,6 +59,7 @@ impl RegionId {
     /// This creates an ID with index 0 and generation 0, suitable for
     /// unit tests that don't care about specific ID values.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn testing_default() -> Self {
         Self(ArenaIndex::new(0, 0))
@@ -68,6 +70,7 @@ impl RegionId {
     ///
     /// This is intended for production request handling that needs unique
     /// identifiers without full runtime region registration.
+    #[inline]
     #[must_use]
     pub fn new_ephemeral() -> Self {
         let index = EPHEMERAL_REGION_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -96,6 +99,7 @@ struct SerdeArenaIndex {
 }
 
 impl SerdeArenaIndex {
+    #[inline]
     const fn to_arena(self) -> ArenaIndex {
         ArenaIndex::new(self.index, self.generation)
     }
@@ -165,6 +169,7 @@ impl TaskId {
 
     /// Creates a task ID for testing/benchmarking purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
         Self(ArenaIndex::new(index, generation))
@@ -175,6 +180,7 @@ impl TaskId {
     /// This creates an ID with index 0 and generation 0, suitable for
     /// unit tests that don't care about specific ID values.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn testing_default() -> Self {
         Self(ArenaIndex::new(0, 0))
@@ -182,6 +188,7 @@ impl TaskId {
 
     /// Creates a new ephemeral task ID for request-scoped contexts created
     /// outside the runtime scheduler.
+    #[inline]
     #[must_use]
     pub fn new_ephemeral() -> Self {
         let index = EPHEMERAL_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -258,6 +265,7 @@ impl ObligationId {
 
     /// Creates an obligation ID for testing/benchmarking purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
         Self(ArenaIndex::new(index, generation))
