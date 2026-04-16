@@ -485,7 +485,12 @@ pub mod integration_examples {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
+    use super::{
+        CancellationDebtConfig, DebtAlertLevel, DebtRuntimeIntegration, DebtSnapshot, WorkType,
+    };
+    use crate::types::{CancelKind, CancelReason, TaskId};
+    use std::collections::HashMap;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn test_integration_creation() {
@@ -500,7 +505,7 @@ mod tests {
         let integration = DebtRuntimeIntegration::default();
 
         let task_id = TaskId::new(42);
-        let cancel_reason = CancelReason::with_user_reason("test".to_string());
+        let cancel_reason = CancelReason::user("test");
 
         let work_id =
             integration.on_task_cleanup_started(task_id, &cancel_reason, CancelKind::User, 100);
@@ -523,8 +528,8 @@ mod tests {
     fn test_priority_calculation() {
         let integration = DebtRuntimeIntegration::default();
 
-        // Emergency cancellation should get highest priority
-        let emergency_priority = integration.calculate_priority(CancelKind::Emergency);
+        // Shutdown cancellation should get highest priority
+        let emergency_priority = integration.calculate_priority(CancelKind::Shutdown);
         let user_priority = integration.calculate_priority(CancelKind::User);
 
         assert!(emergency_priority > user_priority);
@@ -558,7 +563,7 @@ mod tests {
             .map(|i| {
                 integration.on_waker_cleanup_started(
                     format!("waker-{}", i),
-                    &CancelReason::with_user_reason("batch_test".to_string()),
+                    &CancelReason::user("batch_test"),
                     CancelKind::User,
                 )
             })
@@ -584,7 +589,7 @@ mod tests {
         for i in 0..12 {
             integration.on_task_cleanup_started(
                 TaskId::new(i),
-                &CancelReason::with_user_reason("emergency_test".to_string()),
+                &CancelReason::user("emergency_test"),
                 CancelKind::User,
                 50,
             );
