@@ -242,7 +242,6 @@ impl<T> Arena<T> {
     /// Returns `None` if the index is invalid or the slot is vacant.
     #[inline]
     #[must_use]
-    #[inline]
     pub fn get(&self, index: ArenaIndex) -> Option<&T> {
         match self.slots.get(index.index as usize)? {
             Slot::Occupied { value, generation } if *generation == index.generation => Some(value),
@@ -377,7 +376,6 @@ impl<T> Arena<T> {
     }
 
     /// Returns true if the index is valid and points to an occupied slot.
-    #[inline]
     #[inline]
     #[must_use]
     pub fn contains(&self, index: ArenaIndex) -> bool {
