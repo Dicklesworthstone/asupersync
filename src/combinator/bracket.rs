@@ -323,7 +323,7 @@ where
             // Drive it to completion synchronously using a noop waker.
             // This is Phase 0 behavior; full implementation would use the
             // runtime's cancel mask to run release asynchronously.
-            let waker = Waker::from(Arc::new(NoopWaker));
+            let waker = Waker::noop();
             let mut cx = Context::from_waker(&waker);
 
             // Poll until complete (bounded iteration to prevent infinite loops)
@@ -361,12 +361,6 @@ where
     }
 }
 
-/// Noop waker for synchronous polling in Drop.
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
 
 // ============================================================================
 // bracket() Function - Convenience Constructor
@@ -538,14 +532,8 @@ mod tests {
     // Test Utilities
     // =========================================================================
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        Waker::noop()
     }
 
     fn poll_ready<F: Future>(fut: F) -> F::Output {

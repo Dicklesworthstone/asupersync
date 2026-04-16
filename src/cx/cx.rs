@@ -104,14 +104,7 @@ fn wall_clock_now() -> Time {
 }
 
 fn noop_waker() -> Waker {
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop()
 }
 
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone

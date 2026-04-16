@@ -2267,7 +2267,9 @@ mod tests {
         // Drop handle to disconnect
         drop(handle);
 
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_spawn_and_cast");
@@ -2299,8 +2301,12 @@ mod tests {
             .state
             .store_spawned_task(client_task_id, client_stored);
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
-        runtime.scheduler.lock().schedule(client_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         let result =
@@ -2403,11 +2409,15 @@ mod tests {
         let task_id = handle.task_id();
         runtime.state.store_spawned_task(task_id, stored);
 
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_idle();
 
         handle.stop();
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         let server = futures_lite::future::block_on(handle.join(&cx)).expect("join ok");
@@ -2490,7 +2500,9 @@ mod tests {
             .store_spawned_task(client_task_id, client_stored);
 
         // Poll the client once: it should enqueue the call and then block waiting for reply.
-        runtime.scheduler.lock().schedule(client_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
         runtime.run_until_idle();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
@@ -2501,7 +2513,9 @@ mod tests {
             .clone();
         client_cx.cancel_with(CancelKind::User, Some("gen_server call cancelled"));
 
-        runtime.scheduler.lock().schedule(client_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
         runtime.run_until_idle();
 
         let result =
@@ -2517,7 +2531,9 @@ mod tests {
 
         // Cleanup: disconnect the server and let it drain the queued call.
         drop(handle);
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_call_cancellation_is_deterministic");
@@ -2544,7 +2560,9 @@ mod tests {
 
         // Run runtime. The server should start, init, and enter loop.
         // It should NOT exit just because the starter dropped the handle.
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_idle();
 
         let task = runtime.state.task(task_id).expect("task exists");
@@ -2563,7 +2581,9 @@ mod tests {
         for (tid, priority) in tasks_to_schedule {
             runtime.scheduler.lock().schedule(tid, priority);
         }
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         assert!(
@@ -2610,7 +2630,9 @@ mod tests {
             .store_spawned_task(client_task_id, client_stored);
 
         // Poll the client once: it should block waiting for mailbox capacity.
-        runtime.scheduler.lock().schedule(client_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
         runtime.run_until_idle();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
@@ -2621,7 +2643,9 @@ mod tests {
             .clone();
         client_cx.cancel_with(CancelKind::User, Some("gen_server cast cancelled"));
 
-        runtime.scheduler.lock().schedule(client_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
         runtime.run_until_idle();
 
         let result =
@@ -2637,7 +2661,9 @@ mod tests {
 
         // Cleanup: disconnect the server and let it drain the mailbox.
         drop(handle);
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_cast_cancellation_is_deterministic");
@@ -2710,7 +2736,9 @@ mod tests {
 
         handle.stop();
 
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         assert!(handle.is_finished());
@@ -2735,7 +2763,9 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         // Let the server start, then request stop.
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_idle();
         handle.stop();
 
@@ -2753,7 +2783,9 @@ mod tests {
             "cast after stop must return ServerStopped, got {cast_err:?}"
         );
 
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
         assert!(handle.is_finished());
 
@@ -2776,7 +2808,9 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         handle.stop();
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
         assert!(handle.is_finished());
 
@@ -2805,7 +2839,9 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         handle.stop();
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
         assert!(
             handle.is_finished(),
@@ -2876,7 +2912,9 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         // Start server and let it park waiting on mailbox.recv().
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_idle();
 
         // Stop should wake the blocked recv waiter. No manual reschedule here.
@@ -2914,7 +2952,9 @@ mod tests {
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_idle();
         assert_eq!(
             handle.state.load(),
@@ -3014,7 +3054,9 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         // Start the server so casts are accepted.
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_idle();
 
         // Queue a handful of casts, then disconnect. Shutdown must drain the mailbox
@@ -3025,7 +3067,9 @@ mod tests {
 
         handle.stop();
 
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         // Final count should be 0 (5 resets)
@@ -3059,7 +3103,9 @@ mod tests {
             let task_id = handle.task_id();
             runtime.state.store_spawned_task(task_id, stored);
 
+            {
             runtime.scheduler.lock().schedule(task_id, 0);
+        }
             runtime.run_until_idle();
 
             // 5 resets then disconnect
@@ -3068,7 +3114,9 @@ mod tests {
             }
             handle.stop();
 
+            {
             runtime.scheduler.lock().schedule(task_id, 0);
+        }
             runtime.run_until_quiescent();
 
             final_count.load(Ordering::SeqCst)
@@ -3368,7 +3416,9 @@ mod tests {
 
         drop(handle);
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         let seen = seen.lock();
@@ -3439,13 +3489,21 @@ mod tests {
             runtime.state.store_spawned_task(task_id_b, stored_b);
 
             // Let clients enqueue, then let the server drain.
-            runtime.scheduler.lock().schedule(task_id_a, 0);
-            runtime.scheduler.lock().schedule(task_id_b, 0);
+            {
+                runtime.scheduler.lock().schedule(task_id_a, 0);
+            }
+            {
+                runtime.scheduler.lock().schedule(task_id_b, 0);
+            }
+            {
             runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
 
             runtime.run_until_quiescent();
             drop(handle);
+            {
             runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
             runtime.run_until_quiescent();
 
             events.lock().clone()
@@ -3703,7 +3761,9 @@ mod tests {
         assert!(matches!(err, CastError::Full), "expected Full, got {err:?}");
 
         handle.stop();
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         let recv = futures_lite::future::block_on(reply_rx.recv(&cx));
@@ -3741,7 +3801,9 @@ mod tests {
         assert!(matches!(err, CastError::Full), "expected Full, got {err:?}");
 
         handle.stop();
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_drop_oldest_preserves_queued_info_and_returns_full");
@@ -3813,15 +3875,21 @@ mod tests {
             .state
             .store_spawned_task(client_task_id, stored_client);
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
-        runtime.scheduler.lock().schedule(client_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         assert_eq!(started_priority.load(Ordering::SeqCst), 200);
         assert_eq!(loop_priority.load(Ordering::SeqCst), 10);
 
         drop(handle);
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_on_start_budget_priority_applied_and_restored");
@@ -3851,7 +3919,9 @@ mod tests {
         // Request stop: sets cancel_requested. on_stop must run masked.
         handle.stop();
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         assert_eq!(stop_checkpoint_ok.load(Ordering::SeqCst), 1);
@@ -3880,7 +3950,9 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         // Schedule so Cx::current() is set
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_idle();
 
         // First cast fills the mailbox
@@ -4067,7 +4139,9 @@ mod tests {
         // Cancel BEFORE scheduling (pre-cancel)
         handle.stop();
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         // Init should be skipped
@@ -4160,8 +4234,12 @@ mod tests {
             .state
             .store_spawned_task(client_task_id, stored_client);
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
-        runtime.scheduler.lock().schedule(client_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         // After init, the main budget should have the original quota minus
@@ -4177,7 +4255,9 @@ mod tests {
         );
 
         drop(handle);
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("init_budget_consumption_propagates_to_main_budget");
@@ -4240,7 +4320,9 @@ mod tests {
         // Trigger stop
         handle.stop();
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         let stop_quota = stop_poll_quota.load(Ordering::SeqCst);
@@ -4317,13 +4399,17 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         // Schedule the server so init runs, then idle on recv
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_idle();
 
         // Stop the server and reschedule so on_stop runs
         let phases_clone = Arc::clone(&phases);
         handle.stop();
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_idle();
 
         {
@@ -4411,7 +4497,9 @@ mod tests {
 
         handle.stop();
 
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         // priority = max(original=10, stop_budget=240) after meet
@@ -4529,12 +4617,16 @@ mod tests {
         let server_ref = handle.server_ref();
 
         // Start the server so init runs.
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_idle();
 
         // Stop the server and drain.
         handle.stop();
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         // try_cast to a stopped server should fail.
@@ -4611,7 +4703,9 @@ mod tests {
 
         // Phase 4: Graceful stop.
         handle.stop();
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         // If we get here without panics, no obligations were leaked.
@@ -4681,7 +4775,9 @@ mod tests {
 
             // Stop and drain.
             handle.stop();
+            {
             runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
             runtime.run_until_quiescent();
 
             results.lock().clone()
@@ -4734,7 +4830,9 @@ mod tests {
 
         // Drain and cleanup.
         drop(handle);
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_mailbox_overflow_reject_deterministic");
@@ -4767,7 +4865,9 @@ mod tests {
         server_ref.try_cast(TaggedCast::Set(100)).unwrap();
 
         // Process all messages.
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_idle();
 
         // The final value should be 100 (last Set wins).
@@ -4806,7 +4906,9 @@ mod tests {
         );
 
         drop(handle);
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_mailbox_drop_oldest_preserves_newest");
@@ -4888,7 +4990,9 @@ mod tests {
 
         // Clean up.
         handle.stop();
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_budget_driven_call_timeout");
@@ -4990,7 +5094,9 @@ mod tests {
         }
 
         handle.stop();
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_reply_linearity_send_commits");
@@ -5085,7 +5191,9 @@ mod tests {
         }
 
         handle.stop();
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_reply_linearity_abort_is_clean");
@@ -5248,12 +5356,16 @@ mod tests {
         server_ref.try_cast(AccumCast::Add(30)).unwrap();
 
         // Start the server (init runs, then it will process casts).
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_idle();
 
         // Stop and let it drain remaining messages.
         handle.stop();
-        runtime.scheduler.lock().schedule(server_task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
         runtime.run_until_quiescent();
 
         // The server should have processed all casts before stopping.
@@ -5336,7 +5448,9 @@ mod tests {
 
         // Clean up: stop the task, drive it to completion, then release the name.
         named_handle.stop();
-        runtime.scheduler.lock().schedule(task_id, 0);
+        {
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
         runtime.run_until_quiescent();
         let release_now = runtime.state.now;
         named_handle
@@ -5362,7 +5476,9 @@ mod tests {
             .state
             .store_spawned_task(restarted.task_id(), stored);
         restarted.stop();
-        runtime.scheduler.lock().schedule(restarted.task_id(), 0);
+        {
+            runtime.scheduler.lock().schedule(restarted.task_id(), 0);
+        }
         runtime.run_until_quiescent();
         let restart_release_now = runtime.state.now;
         restarted
@@ -5447,7 +5563,9 @@ mod tests {
             Some(handle.task_id()),
             "release_name during shutdown drain must not remove the registered name",
         );
-        runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        {
+            runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        }
         runtime.run_until_quiescent();
         let release_now = runtime.state.now;
         handle
@@ -5941,7 +6059,9 @@ mod tests {
         runtime.state.store_spawned_task(handle.task_id(), stored);
 
         handle.stop();
-        runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        {
+            runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        }
         runtime.run_until_quiescent();
         let release_now = runtime.state.now;
         handle
@@ -6020,7 +6140,9 @@ mod tests {
             .expect("second alias should register for same task");
 
         handle.stop();
-        runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        {
+            runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        }
         runtime.run_until_quiescent();
 
         let release_now = runtime.state.now;
