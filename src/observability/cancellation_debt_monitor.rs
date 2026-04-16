@@ -587,7 +587,7 @@ impl CancellationDebtMonitor {
     /// Generate alert for debt level changes.
     fn generate_debt_level_alert(
         &self,
-        old_level: DebtAlertLevel,
+        _old_level: DebtAlertLevel,
         new_level: DebtAlertLevel,
         snapshot: &DebtSnapshot,
     ) {

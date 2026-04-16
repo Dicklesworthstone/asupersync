@@ -434,7 +434,7 @@ impl CancellationVisualizer {
         parent_map.insert(root.entity_id.clone(), &mut root);
 
         // This is a simplified tree building - in practice would need more complex logic
-        for step in &trace.steps {
+        for _step in &trace.steps {
             // Add as child of parent or root
             // Implementation would be more complex in practice
         }

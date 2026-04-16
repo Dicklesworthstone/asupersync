@@ -372,7 +372,7 @@ impl EpochConsistencyTracker {
         // Calculate transition latency if there was a transition start time
         let transition_latency_ns = record
             .transition_start_time
-            .map(|start| now.saturating_sub(start))
+            .map(|start| now.duration_since(start))
             .unwrap_or(0);
 
         // Update record
