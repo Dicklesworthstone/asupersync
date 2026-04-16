@@ -83,6 +83,7 @@ pub enum RwLockError {
 }
 
 impl std::fmt::Display for RwLockError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Poisoned => write!(f, "rwlock poisoned"),
@@ -104,6 +105,7 @@ pub enum TryReadError {
 }
 
 impl std::fmt::Display for TryReadError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Locked => write!(f, "rwlock is write-locked"),
@@ -124,6 +126,7 @@ pub enum TryWriteError {
 }
 
 impl std::fmt::Display for TryWriteError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Locked => write!(f, "rwlock is locked"),

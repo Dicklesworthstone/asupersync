@@ -97,6 +97,7 @@ impl<T> Timeout<T> {
 }
 
 impl<T> Clone for Timeout<T> {
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -180,6 +181,7 @@ impl<T, E> TimedResult<T, E> {
     }
 
     /// Converts to an Outcome, treating timeout as cancellation.
+    #[inline]
     pub fn into_outcome(self) -> Outcome<T, E> {
         match self {
             Self::Completed(outcome) => outcome,
@@ -188,6 +190,7 @@ impl<T, E> TimedResult<T, E> {
     }
 
     /// Converts to a Result, treating timeout as an error.
+    #[inline]
     pub fn into_result(self) -> Result<T, TimedError<E>> {
         match self {
             Self::Completed(outcome) => match outcome {
@@ -235,6 +238,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for TimedError<E> {}
 /// * `outcome` - The outcome from the operation
 /// * `deadline` - The deadline that was set
 /// * `completed_in_time` - Whether the operation completed before the deadline
+#[inline]
 #[must_use]
 pub fn make_timed_result<T, E>(
     outcome: Outcome<T, E>,

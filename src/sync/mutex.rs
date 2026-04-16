@@ -408,6 +408,7 @@ impl<T> OwnedMutexGuard<T> {
     }
 
     /// Tries to acquire the mutex without waiting.
+    #[inline]
     pub fn try_lock(mutex: Arc<Mutex<T>>) -> Result<Self, TryLockError> {
         {
             let mut state = mutex.state.lock();
