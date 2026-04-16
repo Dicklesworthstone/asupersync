@@ -102,6 +102,7 @@ impl StateVerifierStats {
     }
 
     /// Gets a snapshot of current statistics.
+    #[inline]
     pub fn snapshot(&self) -> StateVerifierStatsSnapshot {
         StateVerifierStatsSnapshot {
             total_transitions: self.total_transitions.load(Ordering::Relaxed),
@@ -282,6 +283,7 @@ impl StateTransitionVerifier {
     }
 
     /// Gets current statistics.
+    #[inline]
     pub fn stats(&self) -> StateVerifierStatsSnapshot {
         self.stats.snapshot()
     }
