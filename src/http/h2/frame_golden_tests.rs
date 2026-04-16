@@ -5,7 +5,6 @@
 //! prevents regressions in frame encoding logic.
 
 use super::frame::*;
-use super::error::ErrorCode;
 use crate::bytes::{Bytes, BytesMut};
 
 /// Golden test framework for HTTP/2 frames.

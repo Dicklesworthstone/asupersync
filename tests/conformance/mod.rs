@@ -5,6 +5,7 @@
 
 pub mod hpack_rfc7541;
 pub mod hpack_metamorphic;
+pub mod codec_framing;
 
 // Re-export main conformance test functionality
 pub use hpack_rfc7541::{
@@ -23,11 +24,14 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
     let hpack_harness = HpackConformanceHarness::new();
     results.extend(hpack_harness.run_all_tests());
 
+    // Codec framing conformance
+    let codec_harness = codec_framing::CodecConformanceHarness::new();
+    results.extend(codec_harness.run_all_tests());
+
     // Additional conformance suites will be added here:
     // - HTTP/2 RFC 7540 conformance
     // - WebSocket RFC 6455 conformance
     // - gRPC conformance
-    // - Codec framing conformance
 
     results
 }
@@ -108,6 +112,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "RFC 7541 Appendix C test vectors"
+                },
+                "codec_framing": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "Length-delimited, line-delimited, and byte-stream codecs"
                 }
             }
         }

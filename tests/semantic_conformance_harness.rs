@@ -168,7 +168,7 @@ struct RuleVerdict {
 }
 
 /// Run a full oracle suite check and map results to per-rule verdicts.
-fn check_rule_verdicts(suite: &OracleSuite, now: Time) -> Vec<RuleVerdict> {
+fn check_rule_verdicts(suite: &mut OracleSuite, now: Time) -> Vec<RuleVerdict> {
     let report = suite.report(now);
     let mapping = oracle_to_rules();
     let mut verdicts = Vec::new();
@@ -413,7 +413,7 @@ fn conformance_obligation_lifecycle() {
     suite.obligation_leak.on_region_close(root, t(100));
 
     // Check all oracles
-    let verdicts = check_rule_verdicts(&suite, t(100));
+    let verdicts = check_rule_verdicts(&mut suite, t(100));
     assert_rules_pass(&verdicts, "obligation_lifecycle");
 
     test_complete!("conformance_obligation_lifecycle");
@@ -635,7 +635,7 @@ fn conformance_full_suite_integrated() {
     suite.task_leak.on_region_close(root, t(100));
 
     // Generate per-rule verdicts
-    let verdicts = check_rule_verdicts(&suite, t(100));
+    let verdicts = check_rule_verdicts(&mut suite, t(100));
 
     // Print diagnostic report
     let mapped_rules: Vec<_> = verdicts.iter().map(|v| v.rule_id).collect();

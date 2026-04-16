@@ -37,6 +37,7 @@ use asupersync::lab::LabRuntime;
 use asupersync::types::{Budget, Time};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use proptest::prelude::*;
 
 // ============================================================================
 // Test Infrastructure
@@ -412,19 +413,20 @@ async fn mr6_reserve_pool_commutativity() {
 // ============================================================================
 
 /// Property-based test for channel metamorphic relations.
-#[proptest]
-fn property_channel_metamorphic_relations(
-    capacity in 1usize..=10,
-    message_count in 1usize..=5,
-    seed in any::<u64>(),
-) {
-    // Note: This is a simplified version - full property-based testing
-    // would require more sophisticated generators and async test harness
+#[test]
+fn property_channel_metamorphic_relations() {
+    proptest!(|(
+        capacity in 1usize..=10,
+        message_count in 1usize..=5,
+        seed in any::<u64>(),
+    )| {
+        // Note: This is a simplified version - full property-based testing
+        // would require more sophisticated generators and async test harness
 
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async {
-        let (tx, mut rx) = test_channel(capacity);
-        let cx = test_cx();
+        let mut runtime = LabRuntime::new(seed);
+        runtime.block_on(async {
+            let (tx, mut rx) = test_channel(capacity);
+            let cx = test_cx();
 
         // Generate deterministic test messages
         let mut messages = Vec::new();
@@ -443,8 +445,9 @@ fn property_channel_metamorphic_relations(
             received.push(rx.recv(&cx).await.unwrap());
         }
 
-        // Property: Send sequence equals receive sequence
-        prop_assert_eq!(messages, received, "Property violated: send/recv sequence mismatch");
+            // Property: Send sequence equals receive sequence
+            prop_assert_eq!(messages, received, "Property violated: send/recv sequence mismatch");
+        });
     });
 }
 
@@ -453,8 +456,10 @@ fn property_channel_metamorphic_relations(
 // ============================================================================
 
 /// Integration test using lab runtime for deterministic scheduling.
-#[tokio::test]
-async fn integration_deterministic_channel_operations() {
+#[test]
+fn integration_deterministic_channel_operations() {
+    let mut runtime = LabRuntime::new(0xCAFE_BABE);
+    runtime.block_on(async {
     let runtime = LabRuntime::new();
     let _guard = runtime.enter();
 
@@ -479,7 +484,8 @@ async fn integration_deterministic_channel_operations() {
         // Receive second message
         let msg2 = rx.recv(&cx).await.unwrap();
         assert_eq!(msg2.id, 84, "Deterministic scheduling failed");
-    }).await;
+    });
+}
 }
 
 // ============================================================================
@@ -487,10 +493,10 @@ async fn integration_deterministic_channel_operations() {
 // ============================================================================
 
 /// Stress test with many concurrent operations.
-#[tokio::test]
-async fn stress_test_metamorphic_relations() {
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
+#[test]
+fn stress_test_metamorphic_relations() {
+    let mut runtime = LabRuntime::new(0xDEAD_BEEF);
+    runtime.block_on(async {
 
     runtime.block_on(async {
         let (tx, mut rx) = test_channel(100);
@@ -513,5 +519,6 @@ async fn stress_test_metamorphic_relations() {
         // Verify FIFO order maintained under stress
         assert_eq!(sent_messages, received_messages,
             "Stress test failed: FIFO order violated with {} messages", sent_messages.len());
-    }).await;
+    });
+}
 }
