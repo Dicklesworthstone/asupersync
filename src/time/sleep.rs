@@ -38,6 +38,7 @@ fn request_stop_fallback(fallback: &FallbackThread) {
     fallback.thread.unpark();
 }
 
+#[inline]
 fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandle<()>> {
     let mut finished = Vec::new();
 

@@ -45,6 +45,7 @@ impl<'a> ReadBuf<'a> {
     }
 
     /// Copies a slice into the unfilled portion.
+    #[inline]
     pub fn put_slice(&mut self, src: &[u8]) {
         assert!(src.len() <= self.remaining(), "ReadBuf overflow");
         let dst = &mut self.unfilled()[..src.len()];
@@ -53,6 +54,7 @@ impl<'a> ReadBuf<'a> {
     }
 
     /// Advances the filled cursor by `n` bytes.
+    #[inline]
     pub fn advance(&mut self, n: usize) {
         assert!(n <= self.remaining(), "ReadBuf overflow");
         self.filled += n;
