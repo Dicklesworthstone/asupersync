@@ -66,49 +66,77 @@ impl Default for CancelCorrectnessConfig {
 pub enum CancelCorrectnessViolation {
     /// Task completed without going through proper cancellation phases.
     PrematureCompletion {
+        /// The task that completed prematurely.
         task_id: TaskId,
+        /// The region containing the task.
         region_id: RegionId,
+        /// The last cancellation phase reached before completion.
         last_phase: CancelPhase,
+        /// When the premature completion was detected.
         completion_time: Time,
+        /// Optional stack trace for debugging.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Task stuck in a cancellation phase for too long.
     StuckCancellation {
+        /// The task that is stuck in cancellation.
         task_id: TaskId,
+        /// The region containing the stuck task.
         region_id: RegionId,
+        /// The cancellation phase where the task is stuck.
         phase: CancelPhase,
+        /// When the task first entered this phase.
         stuck_since: Time,
+        /// When the stuck condition was detected.
         detected_at: Time,
+        /// Optional stack trace for debugging.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Invalid state transition detected.
     InvalidTransition {
+        /// The task with invalid transition.
         task_id: TaskId,
+        /// The region containing the task.
         region_id: RegionId,
+        /// The phase the task was transitioning from.
         from_phase: CancelPhase,
+        /// The invalid phase the task tried to transition to.
         to_phase: CancelPhase,
+        /// When the invalid transition was attempted.
         transition_time: Time,
+        /// Optional stack trace for debugging.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Task skipped finalization phase.
     MissedFinalization {
+        /// The task that skipped finalization.
         task_id: TaskId,
+        /// The region containing the task.
         region_id: RegionId,
+        /// The phase the task was in before skipping finalization.
         from_phase: CancelPhase,
+        /// When the task completed without finalization.
         completion_time: Time,
+        /// Optional stack trace for debugging.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Cancellation propagation failed in structured concurrency tree.
     PropagationFailure {
+        /// The parent task that should have propagated cancellation.
         parent_task: TaskId,
+        /// The child task that did not receive cancellation.
         child_task: TaskId,
+        /// The region containing the parent task.
         parent_region: RegionId,
+        /// The region containing the child task.
         child_region: RegionId,
+        /// When the propagation failure was detected.
         detected_at: Time,
+        /// Optional stack trace for debugging.
         stack_trace: Option<Arc<Backtrace>>,
     },
 }
