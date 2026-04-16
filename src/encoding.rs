@@ -17,6 +17,7 @@ pub(crate) const MAX_SOURCE_BLOCKS: usize = u8::MAX as usize + 1;
 
 /// Returns the maximum object size supported by the byte-based block contract.
 #[must_use]
+#[inline]
 pub(crate) fn max_object_size(max_block_size: usize) -> usize {
     max_block_size.saturating_mul(MAX_SOURCE_BLOCKS)
 }
@@ -50,6 +51,7 @@ pub enum EncodingError {
 }
 
 impl From<PoolExhausted> for EncodingError {
+    #[inline]
     fn from(_: PoolExhausted) -> Self {
         Self::PoolExhausted
     }
@@ -79,30 +81,35 @@ pub struct EncodedSymbol {
 impl EncodedSymbol {
     /// Creates a new encoded symbol wrapper.
     #[must_use]
+    #[inline]
     pub const fn new(symbol: Symbol) -> Self {
         Self { symbol }
     }
 
     /// Returns the underlying symbol.
     #[must_use]
+    #[inline]
     pub const fn symbol(&self) -> &Symbol {
         &self.symbol
     }
 
     /// Consumes the wrapper and returns the symbol.
     #[must_use]
+    #[inline]
     pub fn into_symbol(self) -> Symbol {
         self.symbol
     }
 
     /// Returns the symbol ID.
     #[must_use]
+    #[inline]
     pub const fn id(&self) -> SymbolId {
         self.symbol.id()
     }
 
     /// Returns the symbol kind.
     #[must_use]
+    #[inline]
     pub const fn kind(&self) -> SymbolKind {
         self.symbol.kind()
     }
@@ -143,6 +150,7 @@ pub struct EncodingPipeline {
 impl EncodingPipeline {
     /// Creates a new encoding pipeline.
     #[must_use]
+    #[inline]
     pub fn new(config: EncodingConfig, pool: SymbolPool) -> Self {
         Self {
             config,
@@ -153,11 +161,13 @@ impl EncodingPipeline {
 
     /// Returns encoding statistics for the most recent run.
     #[must_use]
+    #[inline]
     pub const fn stats(&self) -> EncodingStats {
         self.stats
     }
 
     /// Resets internal statistics.
+    #[inline]
     pub fn reset(&mut self) {
         self.stats = EncodingStats::default();
     }
