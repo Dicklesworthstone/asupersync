@@ -499,6 +499,7 @@ pub struct RecvFuture<'a, T> {
 impl<T> RecvFuture<'_, T> {
     #[must_use]
     #[allow(dead_code)] // Public API — may be used by future callers
+    #[inline]
     pub(crate) fn receiver_finished(&self) -> bool {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }

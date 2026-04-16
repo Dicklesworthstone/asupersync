@@ -300,7 +300,7 @@ impl<T> TestableChannel<T> {
 }
 
 /// Producer task that sends messages with optional cancellation injection.
-pub async fn producer_task<T: Send + Clone + 'static>(
+pub async fn producer_task<T>(
     sender: mpsc::Sender<T>,
     oracle: Arc<AtomicityOracle>,
     injector: Arc<CancellationInjector>,
@@ -308,7 +308,7 @@ pub async fn producer_task<T: Send + Clone + 'static>(
     cx: &Cx,
 ) -> Result<(), SendError<T>>
 where
-    T: Clone + std::fmt::Debug,
+    T: Send + Clone + std::fmt::Debug + 'static,
 {
     for (i, message) in messages.into_iter().enumerate() {
         // Random delay to increase interleaving
@@ -359,20 +359,20 @@ pub async fn consumer_task<T>(
     expected_count: usize,
     cx: &Cx,
 ) -> Result<Vec<T>, RecvError> {
-    let mut received = Vec::new();
+    let mut messages = Vec::new();
 
     for _ in 0..expected_count {
         match receiver.recv(cx).await {
             Ok(message) => {
                 oracle.record_receive();
-                received.push(message);
+                messages.push(message);
             }
             Err(RecvError::Disconnected) => break,
             Err(e) => return Err(e),
         }
     }
 
-    Ok(received)
+    Ok(messages)
 }
 
 #[cfg(test)]

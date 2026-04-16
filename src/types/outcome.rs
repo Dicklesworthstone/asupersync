@@ -449,7 +449,6 @@ impl<T, E> Outcome<T, E> {
 
     /// Maps the success value using the provided function.
     #[inline]
-    #[inline]
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Outcome<U, E> {
         match self {
             Self::Ok(v) => Outcome::Ok(f(v)),
