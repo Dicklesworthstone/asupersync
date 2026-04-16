@@ -1138,6 +1138,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// Task types are optional metadata used by adaptive deadline monitoring
     /// and metrics to group similar work.
+    #[inline]
     #[must_use]
     pub fn task_type(&self) -> Option<String> {
         self.inner.read().task_type.clone()
