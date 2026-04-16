@@ -8,6 +8,7 @@ use super::atomicity_test::{
     AtomicityOracle, AtomicityTestConfig, CancellationInjector, consumer_task, producer_task,
 };
 use crate::channel::{broadcast, mpsc, oneshot, watch};
+use crate::combinator::select::{Select, Either};
 use crate::test_utils::lab_with_config;
 use crate::time::{sleep, timeout};
 
@@ -104,11 +105,11 @@ pub async fn mpsc_stress_test(
         let (sender, receiver) = mpsc::channel::<u64>(round_config.capacity);
         let expected_messages = round_config.num_producers * round_config.messages_per_producer;
 
-        let _runtime = lab_with_config(|rt| async move {
+        let round_result = lab_with_config(|rt| async move {
             let cx = &rt.cx();
 
             // Use timeout to prevent hanging
-            let round_result = timeout(config.round_duration, async {
+            timeout(config.round_duration, async {
                 // Start consumer
                 let consumer_oracle = Arc::clone(&oracle);
                 let consumer = task::spawn(async move {
@@ -177,9 +178,7 @@ pub async fn mpsc_stress_test(
                     }
                 }
             })
-            .await;
-
-            round_result
+            .await
         })
         .await;
 
@@ -364,8 +363,11 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
 
                 for _ in 0..num_updates * 2 {
                     // Allow extra iterations for watchers
-                    select! {
-                        result = receiver.changed(cx) => {
+                    let timeout_fut = sleep(Duration::from_micros(1));
+                    let changed_fut = receiver.changed(cx);
+
+                    match Select::new(changed_fut, timeout_fut).await {
+                        Ok(Either::Left(result)) => {
                             match result {
                                 Ok(()) => {
                                     let value = *receiver.borrow();
@@ -377,10 +379,11 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(_) => break,
                             }
                         }
-                        _ = sleep(Duration::from_micros(1)) => {
-                            // Prevent infinite waiting
+                        Ok(Either::Right(_)) => {
+                            // Timeout - prevent infinite waiting
                             break;
                         }
+                        Err(_) => break,
                     }
                 }
                 (i, updates_seen, last_value)

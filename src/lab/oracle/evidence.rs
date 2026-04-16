@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn ledger_from_oracle_suite() {
-        let suite = super::super::OracleSuite::new();
+        let mut suite = super::super::OracleSuite::new();
         let report = suite.report(crate::types::Time::ZERO);
         let ledger = EvidenceLedger::from_report(&report);
 

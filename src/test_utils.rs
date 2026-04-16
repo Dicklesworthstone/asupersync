@@ -113,10 +113,9 @@ where
 {
     init_test_logging();
     let lab = test_lab();
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("failed to build test runtime");
-    runtime.block_on(f(lab))
+    // FIXME: LabRuntime should have a block_on method or similar
+    // For now, use a simple pattern - this needs to be properly implemented
+    todo!("LabRuntime block_on method needs to be implemented")
 }
 
 /// Create a [`TestContext`] for a unit test with the default seed.

@@ -13,6 +13,7 @@ use crate::time::{timeout};
 use std::sync::{
     Arc,
 };
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// Comprehensive test suite configuration.

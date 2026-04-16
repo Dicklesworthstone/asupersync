@@ -1041,7 +1041,7 @@ mod tests {
         // Register again soon after wakeup (simulating race)
         oracle.on_waker_registered(waker_id, channel_id, true, None);
 
-        let violations = oracle.check_for_violations().unwrap();
+        let _violations = oracle.check_for_violations().unwrap();
         // May or may not detect race depending on timing
     }
 

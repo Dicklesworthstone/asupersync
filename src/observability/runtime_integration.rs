@@ -216,7 +216,7 @@ impl CancellationTracerIntegration {
     pub fn on_region_state_transition(
         &self,
         region_id: RegionId,
-        from_state: RegionState,
+        _from_state: RegionState,
         to_state: RegionState,
         cancel_reason: Option<&CancelReason>,
         cancel_kind: Option<CancelKind>,
