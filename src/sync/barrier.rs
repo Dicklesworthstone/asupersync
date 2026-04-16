@@ -85,6 +85,7 @@ impl Barrier {
     /// If cancelled while waiting, returns `BarrierWaitError::Cancelled` and
     /// decrements the arrival count so the barrier remains consistent for
     /// other waiters.
+    #[inline]
     pub fn wait<'a>(&'a self, cx: &'a Cx) -> BarrierWaitFuture<'a> {
         BarrierWaitFuture {
             barrier: self,

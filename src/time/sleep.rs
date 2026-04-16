@@ -32,6 +32,7 @@ struct FallbackThread {
     join: std::thread::JoinHandle<()>,
 }
 
+#[inline]
 fn request_stop_fallback(fallback: &FallbackThread) {
     fallback.stop.store(true, Ordering::Release);
     fallback.thread.unpark();
@@ -435,6 +436,7 @@ impl Sleep {
     }
 
     /// Gets the current time using the configured time getter or default.
+    #[inline]
     fn current_time(&self) -> Time {
         self.time_getter.map_or_else(wall_now, |getter| getter())
     }
