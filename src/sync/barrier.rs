@@ -294,6 +294,7 @@ pub struct BarrierWaitResult {
 
 impl BarrierWaitResult {
     /// Returns true for exactly one party (the leader) each generation.
+    #[inline]
     #[must_use]
     pub fn is_leader(&self) -> bool {
         self.is_leader

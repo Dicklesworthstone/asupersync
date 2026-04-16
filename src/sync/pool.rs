@@ -371,14 +371,17 @@ struct ReturnObligation {
 }
 
 impl ReturnObligation {
+    #[inline]
     fn new() -> Self {
         Self { discharged: false }
     }
 
+    #[inline]
     fn discharge(&mut self) {
         self.discharged = true;
     }
 
+    #[inline]
     fn is_discharged(&self) -> bool {
         self.discharged
     }
@@ -408,11 +411,13 @@ impl<R> PooledResource<R> {
     /// Creates a new pooled resource wrapper for a freshly created resource.
     ///
     /// This uses the wall clock for hold-duration bookkeeping.
+    #[inline]
     pub fn new(resource: R, return_tx: PoolReturnSender<R>) -> Self {
         Self::new_with_time_getter(resource, return_tx, wall_clock_now)
     }
 
     /// Creates a new pooled resource wrapper with a custom time source.
+    #[inline]
     pub fn new_with_time_getter(
         resource: R,
         return_tx: PoolReturnSender<R>,
@@ -485,6 +490,7 @@ impl<R> PooledResource<R> {
     }
 
     /// How long this resource has been held.
+    #[inline]
     #[must_use]
     pub fn held_duration(&self) -> Duration {
         (self.time_getter)().saturating_duration_since(self.acquired_at)
