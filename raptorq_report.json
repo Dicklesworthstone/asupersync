@@ -1,0 +1,22 @@
+{
+  "project": "/data/projects/asupersync/src/raptorq",
+  "timestamp": "2026-04-13 13:55:37",
+  "scanners": [
+    {
+      "project": "/data/projects/asupersync/src/raptorq",
+      "files": 13,
+      "critical": 94,
+      "warning": 1778,
+      "info": 757,
+      "timestamp": "2026-04-13T18:55:37Z",
+      "format": "json",
+      "language": "rust"
+    }
+  ],
+  "totals": {
+    "critical": 94,
+    "warning": 1778,
+    "info": 757,
+    "files": 13
+  }
+}

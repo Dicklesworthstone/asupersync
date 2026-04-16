@@ -263,7 +263,9 @@ impl WsError {
     #[must_use]
     pub fn as_close_code(&self) -> CloseCode {
         match self {
-            Self::PayloadTooLarge { .. } | Self::ControlFrameTooLarge(_) => CloseCode::MessageTooBig,
+            Self::PayloadTooLarge { .. } | Self::ControlFrameTooLarge(_) => {
+                CloseCode::MessageTooBig
+            }
             Self::InvalidUtf8 => CloseCode::InvalidPayload,
             Self::Io(_) => CloseCode::Abnormal,
             _ => CloseCode::ProtocolError,

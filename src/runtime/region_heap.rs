@@ -372,10 +372,13 @@ impl RegionHeap {
             (entry.size_hint, entry.generation.wrapping_add(1))
         };
 
-        let old_slot = std::mem::replace(slot, HeapSlot::Vacant {
-            next_free: self.free_head,
-            generation: new_gen,
-        });
+        let old_slot = std::mem::replace(
+            slot,
+            HeapSlot::Vacant {
+                next_free: self.free_head,
+                generation: new_gen,
+            },
+        );
         self.free_head = Some(index.index);
         self.len -= 1;
 

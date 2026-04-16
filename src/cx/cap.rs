@@ -81,7 +81,7 @@ mod sealed {
 /// - `RANDOM`: entropy and random values
 /// - `IO`: async I/O capability
 /// - `REMOTE`: remote task spawning
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct CapSet<
     const SPAWN: bool,
     const TIME: bool,
@@ -100,6 +100,19 @@ pub type All = CapSet<true, true, true, true, true>;
 
 /// No capabilities.
 pub type None = CapSet<false, false, false, false, false>;
+
+// Manual Default implementations for type aliases to avoid confusion
+impl Default for All {
+    fn default() -> Self {
+        CapSet::<true, true, true, true, true>
+    }
+}
+
+impl Default for None {
+    fn default() -> Self {
+        CapSet::<false, false, false, false, false>
+    }
+}
 
 /// Marker: spawn capability.
 ///
@@ -347,5 +360,28 @@ mod tests {
         let none = None::default();
         let dbg_none = format!("{none:?}");
         assert!(dbg_none.contains("CapSet"), "{dbg_none}");
+    }
+
+    #[test]
+    fn default_implementations_correct() {
+        // All::default() should have all capabilities
+        let all = All::default();
+        assert_has_spawn::<All>();
+        assert_has_time::<All>();
+        assert_has_random::<All>();
+        assert_has_io::<All>();
+        assert_has_remote::<All>();
+
+        // Verify the type is actually All, not None
+        let _: All = all; // This should compile
+
+        // None::default() should have no capabilities
+        let none = None::default();
+        let _: None = none; // This should compile
+
+        // Verify they are different types at compile-time
+        fn verify_all_has_spawn(_: impl HasSpawn) {}
+        verify_all_has_spawn(all); // Should compile
+        // verify_all_has_spawn(none); // Should NOT compile
     }
 }

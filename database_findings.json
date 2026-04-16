@@ -1,0 +1,22 @@
+{
+  "project": "/data/projects/asupersync/src/database",
+  "timestamp": "2026-04-13 13:57:16",
+  "scanners": [
+    {
+      "project": "/data/projects/asupersync/src/database",
+      "files": 6,
+      "critical": 67,
+      "warning": 997,
+      "info": 154,
+      "timestamp": "2026-04-13T18:57:16Z",
+      "format": "json",
+      "language": "rust"
+    }
+  ],
+  "totals": {
+    "critical": 67,
+    "warning": 997,
+    "info": 154,
+    "files": 6
+  }
+}

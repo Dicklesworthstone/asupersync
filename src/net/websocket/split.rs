@@ -489,10 +489,7 @@ where
                                 self.shared
                                     .lock()
                                     .close_handshake
-                                    .force_close(CloseReason::new(
-                                        err.as_close_code(),
-                                        None,
-                                    ));
+                                    .force_close(CloseReason::new(err.as_close_code(), None));
                                 return Err(err);
                             }
                         }

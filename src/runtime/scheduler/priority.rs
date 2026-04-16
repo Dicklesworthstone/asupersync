@@ -30,10 +30,13 @@ impl Ord for SchedulerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Higher priority first (BinaryHeap is max-heap)
         // For equal priorities, earlier generation (lower number) comes first
-        self.priority.cmp(&other.priority).then_with(|| {
-            let diff = other.generation.wrapping_sub(self.generation).cast_signed();
-            diff.cmp(&0)
-        }).then_with(|| other.task.cmp(&self.task))
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
+            })
+            .then_with(|| other.task.cmp(&self.task))
     }
 }
 
@@ -60,10 +63,14 @@ impl Ord for TimedEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Earlier deadline first (reverse comparison for min-heap behavior via max-heap)
         // For equal deadlines, earlier generation comes first
-        other.deadline.cmp(&self.deadline).then_with(|| {
-            let diff = other.generation.wrapping_sub(self.generation).cast_signed();
-            diff.cmp(&0)
-        }).then_with(|| other.task.cmp(&self.task))
+        other
+            .deadline
+            .cmp(&self.deadline)
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
+            })
+            .then_with(|| other.task.cmp(&self.task))
     }
 }
 

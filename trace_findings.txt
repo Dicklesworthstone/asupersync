@@ -1,0 +1,2 @@
+{"type":"scanner","project":"/data/projects/asupersync/src/trace","language":"rust","files":38,"critical":46,"warning":2930,"info":609,"timestamp":"2026-04-13T19:08:41Z"}
+{"type":"totals","project":"/data/projects/asupersync/src/trace","files":38,"critical":46,"warning":2930,"info":609,"timestamp":"2026-04-13 14:08:41"}

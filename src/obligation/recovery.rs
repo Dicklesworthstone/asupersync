@@ -303,10 +303,8 @@ impl RecoveryGovernor {
 
         // 2c: Linearity violations
         if budget > 0 {
-            let violations: Vec<LinearityViolation> = ledger
-                .linearity_violations_iter()
-                .take(budget)
-                .collect();
+            let violations: Vec<LinearityViolation> =
+                ledger.linearity_violations_iter().take(budget).collect();
             for v in violations {
                 if budget == 0 {
                     break;
