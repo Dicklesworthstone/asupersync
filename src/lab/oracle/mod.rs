@@ -71,16 +71,10 @@ pub use cancel_correctness::{
     CancelCorrectnessViolation,
 };
 pub use cancel_debt::{
-    CancelDebtConfig, CancelDebtOracle, CancelDebtStatistics,
-    CancelDebtViolation,
+    CancelDebtConfig, CancelDebtOracle, CancelDebtStatistics, CancelDebtViolation,
 };
 pub use cancel_signal_ordering::{
-    CancelOrderingConfig, CancelOrderingOracle, CancelOrderingStatistics,
-    CancelOrderingViolation,
-};
-pub use runtime_epoch::{
-    ConsistencyLevel, RuntimeEpochConfig, RuntimeEpochOracle, RuntimeEpochStatistics,
-    RuntimeEpochViolation, RuntimeModule,
+    CancelOrderingConfig, CancelOrderingOracle, CancelOrderingStatistics, CancelOrderingViolation,
 };
 pub use cancellation_protocol::{
     CancellationProtocolOracle, CancellationProtocolViolation, TaskStateKind,
@@ -116,6 +110,10 @@ pub use region_leak::{
 };
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
 pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
+pub use runtime_epoch::{
+    ConsistencyLevel, RuntimeEpochConfig, RuntimeEpochOracle, RuntimeEpochStatistics,
+    RuntimeEpochViolation, RuntimeModule,
+};
 pub use spork::{
     DownOrderOracle, DownOrderViolation, RegistryLeaseOracle, RegistryLeaseViolation,
     ReplyLinearityOracle, ReplyLinearityViolation, SupervisorQuiescenceOracle,
@@ -793,7 +791,8 @@ impl OracleSuite {
                     .map(OracleViolation::CancelCorrectness),
                 OracleStats {
                     entities_tracked: self.cancel_correctness.get_statistics().active_tasks,
-                    events_recorded: self.cancel_correctness.get_statistics().witnesses_processed as usize,
+                    events_recorded: self.cancel_correctness.get_statistics().witnesses_processed
+                        as usize,
                 },
             ),
             OracleEntryReport::from_result(
@@ -815,7 +814,10 @@ impl OracleSuite {
                     .map(OracleViolation::CancelOrdering),
                 OracleStats {
                     entities_tracked: self.cancel_signal_ordering.get_statistics().tracked_signals,
-                    events_recorded: self.cancel_signal_ordering.get_statistics().signals_processed as usize,
+                    events_recorded: self
+                        .cancel_signal_ordering
+                        .get_statistics()
+                        .signals_processed as usize,
                 },
             ),
             OracleEntryReport::from_result(
@@ -826,7 +828,8 @@ impl OracleSuite {
                     .map(OracleViolation::RuntimeEpoch),
                 OracleStats {
                     entities_tracked: self.runtime_epoch.get_statistics().tracked_modules,
-                    events_recorded: self.runtime_epoch.get_statistics().transitions_tracked as usize,
+                    events_recorded: self.runtime_epoch.get_statistics().transitions_tracked
+                        as usize,
                 },
             ),
             OracleEntryReport::from_result(

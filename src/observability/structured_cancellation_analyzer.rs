@@ -6,14 +6,14 @@
 
 use crate::observability::{
     cancellation_analyzer::{CancellationAnalyzer, PerformanceAnalysis},
-    cancellation_tracer::{CancellationTracer, CancellationTracerConfig, CancellationTrace},
-    cancellation_visualizer::{CancellationVisualizer, VisualizerConfig, CancellationDashboard},
+    cancellation_tracer::{CancellationTrace, CancellationTracer, CancellationTracerConfig},
+    cancellation_visualizer::{CancellationDashboard, CancellationVisualizer, VisualizerConfig},
 };
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use std::time::Duration;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Configuration for the complete structured cancellation analyzer.
 #[derive(Debug, Clone)]
@@ -156,7 +156,9 @@ impl StructuredCancellationAnalyzer {
         cancel_reason: &CancelReason,
         cancel_kind: CancelKind,
     ) -> crate::observability::TraceId {
-        let trace_id = self.tracer.start_trace(entity_id, entity_type, cancel_reason, cancel_kind);
+        let trace_id = self
+            .tracer
+            .start_trace(entity_id, entity_type, cancel_reason, cancel_kind);
 
         // Update real-time stats
         self.update_active_traces_count();
@@ -277,7 +279,9 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Get tracer statistics.
-    pub fn get_tracer_stats(&self) -> crate::observability::cancellation_tracer::CancellationTracerStatsSnapshot {
+    pub fn get_tracer_stats(
+        &self,
+    ) -> crate::observability::cancellation_tracer::CancellationTracerStatsSnapshot {
         self.tracer.stats()
     }
 
@@ -301,19 +305,17 @@ impl StructuredCancellationAnalyzer {
         // Update current average latency
         let traces = self.tracer.completed_traces();
         if !traces.is_empty() {
-            let recent_traces = traces.iter()
+            let recent_traces = traces
+                .iter()
                 .rev()
                 .take(10) // Last 10 traces
                 .filter_map(|t| t.total_propagation_time)
                 .collect::<Vec<_>>();
 
             if !recent_traces.is_empty() {
-                let total_nanos: u64 = recent_traces.iter()
-                    .map(|d| d.as_nanos() as u64)
-                    .sum();
-                real_time_stats.current_avg_latency = Duration::from_nanos(
-                    total_nanos / recent_traces.len() as u64
-                );
+                let total_nanos: u64 = recent_traces.iter().map(|d| d.as_nanos() as u64).sum();
+                real_time_stats.current_avg_latency =
+                    Duration::from_nanos(total_nanos / recent_traces.len() as u64);
             }
         }
     }
@@ -323,7 +325,8 @@ impl StructuredCancellationAnalyzer {
         let traces = self.tracer.completed_traces();
 
         // Check recent traces for this entity
-        let entity_traces: Vec<&CancellationTrace> = traces.iter()
+        let entity_traces: Vec<&CancellationTrace> = traces
+            .iter()
             .filter(|t| t.root_entity == entity_id)
             .rev()
             .take(5) // Last 5 traces for this entity
@@ -335,7 +338,8 @@ impl StructuredCancellationAnalyzer {
 
         // Check for slow propagation
         let slow_threshold = Duration::from_millis(self.config.performance_alert_threshold);
-        let slow_count = entity_traces.iter()
+        let slow_count = entity_traces
+            .iter()
             .filter_map(|t| t.total_propagation_time)
             .filter(|&duration| duration > slow_threshold)
             .count();
@@ -344,7 +348,10 @@ impl StructuredCancellationAnalyzer {
             self.trigger_alert(CancellationAlert {
                 alert_type: AlertType::SlowPropagation,
                 severity: AlertSeverity::Warning,
-                message: format!("Entity {} showing consistently slow cancellation propagation", entity_id),
+                message: format!(
+                    "Entity {} showing consistently slow cancellation propagation",
+                    entity_id
+                ),
                 entity_id: Some(entity_id.to_string()),
                 metric_value: slow_count as f64 / entity_traces.len() as f64 * 100.0,
                 threshold: 50.0,
@@ -357,9 +364,7 @@ impl StructuredCancellationAnalyzer {
         }
 
         // Check for anomaly spikes
-        let total_anomalies: usize = entity_traces.iter()
-            .map(|t| t.anomalies.len())
-            .sum();
+        let total_anomalies: usize = entity_traces.iter().map(|t| t.anomalies.len()).sum();
 
         if total_anomalies > entity_traces.len() {
             self.trigger_alert(CancellationAlert {
@@ -403,12 +408,22 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Log a structured trace event.
-    fn log_trace_event(&self, event_type: &str, trace_id: &crate::observability::TraceId, entity_id: Option<&str>) {
+    fn log_trace_event(
+        &self,
+        event_type: &str,
+        trace_id: &crate::observability::TraceId,
+        entity_id: Option<&str>,
+    ) {
         // In a real implementation, this would integrate with the structured logging framework
         #[cfg(debug_assertions)]
         {
             let entity_info = entity_id.map_or(String::new(), |id| format!(", entity_id: {}", id));
-            eprintln!("[CANCELLATION_TRACE] {}: trace_id: {}{}", event_type, trace_id.as_u64(), entity_info);
+            eprintln!(
+                "[CANCELLATION_TRACE] {}: trace_id: {}{}",
+                event_type,
+                trace_id.as_u64(),
+                entity_info
+            );
         }
     }
 
@@ -417,8 +432,10 @@ impl StructuredCancellationAnalyzer {
         // In a real implementation, this would integrate with the structured logging framework
         #[cfg(debug_assertions)]
         {
-            eprintln!("[CANCELLATION_ALERT] {:?}: {} (severity: {:?})",
-                alert.alert_type, alert.message, alert.severity);
+            eprintln!(
+                "[CANCELLATION_ALERT] {:?}: {} (severity: {:?})",
+                alert.alert_type, alert.message, alert.severity
+            );
         }
     }
 

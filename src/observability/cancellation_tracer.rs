@@ -11,11 +11,11 @@
 use crate::record::region::RegionState;
 use crate::record::task::TaskPhase;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use serde::{Deserialize, Serialize};
 
 /// Configuration for cancellation trace collection.
 #[derive(Debug, Clone)]
@@ -168,10 +168,7 @@ pub enum PropagationAnomaly {
         affected_entities: Vec<String>,
     },
     /// Propagation depth exceeded normal bounds.
-    ExcessiveDepth {
-        depth: u32,
-        entity_id: String,
-    },
+    ExcessiveDepth { depth: u32, entity_id: String },
 }
 
 /// Statistics about cancellation tracing.
@@ -337,14 +334,21 @@ impl CancellationTracer {
 
         if let Ok(mut in_progress) = self.in_progress.lock() {
             if let Some(in_progress_trace) = in_progress.get_mut(&trace_id) {
-                let elapsed_since_start = now.duration_since(in_progress_trace.trace.start_time)
+                let elapsed_since_start = now
+                    .duration_since(in_progress_trace.trace.start_time)
                     .unwrap_or(Duration::ZERO);
-                let elapsed_since_prev = now.duration_since(in_progress_trace.last_step_time)
+                let elapsed_since_prev = now
+                    .duration_since(in_progress_trace.last_step_time)
                     .unwrap_or(Duration::ZERO);
 
                 // Determine depth
                 let depth = if let Some(parent) = &parent_entity {
-                    in_progress_trace.depth_by_entity.get(parent).copied().unwrap_or(0) + 1
+                    in_progress_trace
+                        .depth_by_entity
+                        .get(parent)
+                        .copied()
+                        .unwrap_or(0)
+                        + 1
                 } else {
                     0
                 };
@@ -371,8 +375,12 @@ impl CancellationTracer {
                 // Update trace state
                 in_progress_trace.trace.steps.push(step);
                 in_progress_trace.last_step_time = now;
-                in_progress_trace.entity_to_step.insert(entity_id.clone(), step_id);
-                in_progress_trace.depth_by_entity.insert(entity_id.clone(), depth);
+                in_progress_trace
+                    .entity_to_step
+                    .insert(entity_id.clone(), step_id);
+                in_progress_trace
+                    .depth_by_entity
+                    .insert(entity_id.clone(), depth);
                 in_progress_trace.trace.max_depth = in_progress_trace.trace.max_depth.max(depth);
                 in_progress_trace.trace.entities_cancelled += 1;
 
@@ -390,7 +398,8 @@ impl CancellationTracer {
         if let Ok(mut in_progress) = self.in_progress.lock() {
             if let Some(mut in_progress_trace) = in_progress.remove(&trace_id) {
                 let completion_time = SystemTime::now();
-                let total_time = completion_time.duration_since(in_progress_trace.trace.start_time)
+                let total_time = completion_time
+                    .duration_since(in_progress_trace.trace.start_time)
                     .unwrap_or(Duration::ZERO);
 
                 in_progress_trace.trace.is_complete = true;
@@ -426,12 +435,22 @@ impl CancellationTracer {
 
     /// Gets all completed traces (for analysis).
     pub fn completed_traces(&self) -> Vec<CancellationTrace> {
-        self.completed_traces.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+        self.completed_traces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Gets traces that are currently in progress.
     pub fn in_progress_traces(&self) -> Vec<TraceId> {
-        self.in_progress.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect()
+        self.in_progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .copied()
+            .collect()
     }
 
     /// Gets traces related to a specific entity.
@@ -484,23 +503,23 @@ impl CancellationTracer {
         }
 
         if !trace.trace.anomalies.is_empty() {
-            self.stats.anomalies_detected.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .anomalies_detected
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// Updates statistics when a trace completes.
     fn update_completion_stats(&self, trace: &CancellationTrace) {
         if let Some(total_time) = trace.total_propagation_time {
-            self.stats.avg_propagation_time_us.store(
-                total_time.as_micros() as u64,
-                Ordering::Relaxed,
-            );
+            self.stats
+                .avg_propagation_time_us
+                .store(total_time.as_micros() as u64, Ordering::Relaxed);
         }
 
-        self.stats.avg_trace_depth.store(
-            trace.max_depth as u64,
-            Ordering::Relaxed,
-        );
+        self.stats
+            .avg_trace_depth
+            .store(trace.max_depth as u64, Ordering::Relaxed);
     }
 
     /// Hash function for sampling decisions.
@@ -564,18 +583,22 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
     }
 
     let total_steps: usize = traces.iter().map(|t| t.steps.len()).sum();
-    let avg_depth: f64 = traces.iter().map(|t| t.max_depth as f64).sum::<f64>() / traces.len() as f64;
+    let avg_depth: f64 =
+        traces.iter().map(|t| t.max_depth as f64).sum::<f64>() / traces.len() as f64;
 
     let avg_propagation_time = traces
         .iter()
         .filter_map(|t| t.total_propagation_time)
         .map(|d| d.as_nanos() as f64)
-        .sum::<f64>() / traces.len() as f64;
+        .sum::<f64>()
+        / traces.len() as f64;
 
     // Analyze common cancellation kinds
     let mut cancel_kind_counts: HashMap<String, usize> = HashMap::new();
     for trace in traces {
-        *cancel_kind_counts.entry(trace.root_cancel_kind.clone()).or_default() += 1;
+        *cancel_kind_counts
+            .entry(trace.root_cancel_kind.clone())
+            .or_default() += 1;
     }
     let mut common_cancel_kinds: Vec<_> = cancel_kind_counts.into_iter().collect();
     common_cancel_kinds.sort_by(|a, b| b.1.cmp(&a.1));
@@ -610,13 +633,20 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
     let mut bottlenecks = Vec::new();
 
     // Bottleneck 1: Entities with disproportionately high cancellation frequency
-    let total_entity_cancellations: usize = high_cancellation_entities.iter().map(|(_, count)| *count).sum();
+    let total_entity_cancellations: usize = high_cancellation_entities
+        .iter()
+        .map(|(_, count)| *count)
+        .sum();
     if total_entity_cancellations > 0 {
         for (entity_id, count) in &high_cancellation_entities {
             let frequency_ratio = *count as f64 / total_entity_cancellations as f64;
-            if frequency_ratio > 0.3 { // Entity accounts for >30% of all cancellations
-                bottlenecks.push(format!("High-frequency cancellation source: {} ({:.1}% of all cancellations)",
-                    entity_id, frequency_ratio * 100.0));
+            if frequency_ratio > 0.3 {
+                // Entity accounts for >30% of all cancellations
+                bottlenecks.push(format!(
+                    "High-frequency cancellation source: {} ({:.1}% of all cancellations)",
+                    entity_id,
+                    frequency_ratio * 100.0
+                ));
             }
         }
     }
@@ -626,14 +656,19 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
     for trace in traces {
         for anomaly in &trace.anomalies {
             if let PropagationAnomaly::SlowPropagation { entity_id, .. } = anomaly {
-                *slow_propagation_entities.entry(entity_id.clone()).or_default() += 1;
+                *slow_propagation_entities
+                    .entry(entity_id.clone())
+                    .or_default() += 1;
             }
         }
     }
     for (entity_id, slow_count) in slow_propagation_entities {
-        if slow_count > traces.len() / 20 { // Appears in >5% of traces with slow propagation
-            bottlenecks.push(format!("Slow propagation bottleneck: {} (involved in {} slow propagations)",
-                entity_id, slow_count));
+        if slow_count > traces.len() / 20 {
+            // Appears in >5% of traces with slow propagation
+            bottlenecks.push(format!(
+                "Slow propagation bottleneck: {} (involved in {} slow propagations)",
+                entity_id, slow_count
+            ));
         }
     }
 
@@ -647,42 +682,62 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
         }
     }
     for (entity_id, stuck_count) in stuck_entities {
-        if stuck_count > 0 { // Any stuck cancellation is a bottleneck
-            bottlenecks.push(format!("Stuck cancellation bottleneck: {} ({} instances)",
-                entity_id, stuck_count));
+        if stuck_count > 0 {
+            // Any stuck cancellation is a bottleneck
+            bottlenecks.push(format!(
+                "Stuck cancellation bottleneck: {} ({} instances)",
+                entity_id, stuck_count
+            ));
         }
     }
 
     // Bottleneck 4: Deep cancellation tree origins
     let mut depth_bottlenecks: HashMap<String, f64> = HashMap::new();
     for trace in traces {
-        if trace.steps.len() as f64 > avg_depth * 1.5 { // Traces significantly deeper than average
+        if trace.steps.len() as f64 > avg_depth * 1.5 {
+            // Traces significantly deeper than average
             if let Some(first_step) = trace.steps.first() {
-                let current_avg = depth_bottlenecks.entry(first_step.entity_id.clone()).or_insert(0.0);
+                let current_avg = depth_bottlenecks
+                    .entry(first_step.entity_id.clone())
+                    .or_insert(0.0);
                 *current_avg = (*current_avg + trace.steps.len() as f64) / 2.0; // Running average
             }
         }
     }
     for (entity_id, avg_depth_caused) in depth_bottlenecks {
         if avg_depth_caused > avg_depth * 1.5 {
-            bottlenecks.push(format!("Deep cancellation tree origin: {} (avg depth: {:.1})",
-                entity_id, avg_depth_caused));
+            bottlenecks.push(format!(
+                "Deep cancellation tree origin: {} (avg depth: {:.1})",
+                entity_id, avg_depth_caused
+            ));
         }
     }
 
     // Generate recommendations
     let mut recommendations = Vec::new();
-    if avg_propagation_time > 10_000_000.0 { // 10ms
-        recommendations.push("Consider optimizing cancellation propagation - average time is high".to_string());
+    if avg_propagation_time > 10_000_000.0 {
+        // 10ms
+        recommendations.push(
+            "Consider optimizing cancellation propagation - average time is high".to_string(),
+        );
     }
     if avg_depth > 10.0 {
-        recommendations.push("Deep cancellation trees detected - consider flatter structured concurrency".to_string());
+        recommendations.push(
+            "Deep cancellation trees detected - consider flatter structured concurrency"
+                .to_string(),
+        );
     }
     if anomaly_summary.get("SlowPropagation").copied().unwrap_or(0) > traces.len() / 10 {
-        recommendations.push("Frequent slow propagations - investigate blocking operations in cancellation handlers".to_string());
+        recommendations.push(
+            "Frequent slow propagations - investigate blocking operations in cancellation handlers"
+                .to_string(),
+        );
     }
     if !bottlenecks.is_empty() {
-        recommendations.push(format!("Address {} identified performance bottlenecks to improve cancellation efficiency", bottlenecks.len()));
+        recommendations.push(format!(
+            "Address {} identified performance bottlenecks to improve cancellation efficiency",
+            bottlenecks.len()
+        ));
     }
 
     CancellationAnalysis {
@@ -783,7 +838,10 @@ mod tests {
 
         // Should detect slow propagation anomaly
         assert!(!completed[0].anomalies.is_empty());
-        assert!(matches!(completed[0].anomalies[0], PropagationAnomaly::SlowPropagation { .. }));
+        assert!(matches!(
+            completed[0].anomalies[0],
+            PropagationAnomaly::SlowPropagation { .. }
+        ));
     }
 
     #[test]
@@ -836,18 +894,16 @@ mod tests {
                 root_entity: "bottleneck-entity".to_string(),
                 root_entity_type: EntityType::Task,
                 start_time: SystemTime::now(),
-                steps: vec![
-                    CancellationStep {
-                        entity_id: "bottleneck-entity".to_string(),
-                        entity_type: EntityType::Task,
-                        cancel_reason: CancelReason::with_user_reason("high frequency".to_string()),
-                        cancel_kind: CancelKind::User,
-                        result: "Cancelled".to_string(),
-                        parent_entity: None,
-                        timestamp: SystemTime::now(),
-                        is_root: true,
-                    },
-                ],
+                steps: vec![CancellationStep {
+                    entity_id: "bottleneck-entity".to_string(),
+                    entity_type: EntityType::Task,
+                    cancel_reason: CancelReason::with_user_reason("high frequency".to_string()),
+                    cancel_kind: CancelKind::User,
+                    result: "Cancelled".to_string(),
+                    parent_entity: None,
+                    timestamp: SystemTime::now(),
+                    is_root: true,
+                }],
                 is_complete: true,
                 total_propagation_time: Some(Duration::from_millis(1)),
                 max_depth: 1,
@@ -872,18 +928,16 @@ mod tests {
                 root_entity: "bottleneck-entity".to_string(),
                 root_entity_type: EntityType::Task,
                 start_time: SystemTime::now(),
-                steps: vec![
-                    CancellationStep {
-                        entity_id: "bottleneck-entity".to_string(),
-                        entity_type: EntityType::Task,
-                        cancel_reason: CancelReason::with_user_reason("high frequency".to_string()),
-                        cancel_kind: CancelKind::User,
-                        result: "Cancelled".to_string(),
-                        parent_entity: None,
-                        timestamp: SystemTime::now(),
-                        is_root: true,
-                    },
-                ],
+                steps: vec![CancellationStep {
+                    entity_id: "bottleneck-entity".to_string(),
+                    entity_type: EntityType::Task,
+                    cancel_reason: CancelReason::with_user_reason("high frequency".to_string()),
+                    cancel_kind: CancelKind::User,
+                    result: "Cancelled".to_string(),
+                    parent_entity: None,
+                    timestamp: SystemTime::now(),
+                    is_root: true,
+                }],
                 is_complete: true,
                 total_propagation_time: Some(Duration::from_millis(1)),
                 max_depth: 1,
@@ -897,18 +951,16 @@ mod tests {
                 root_entity: "other-entity".to_string(),
                 root_entity_type: EntityType::Task,
                 start_time: SystemTime::now(),
-                steps: vec![
-                    CancellationStep {
-                        entity_id: "other-entity".to_string(),
-                        entity_type: EntityType::Task,
-                        cancel_reason: CancelReason::with_user_reason("normal".to_string()),
-                        cancel_kind: CancelKind::User,
-                        result: "Cancelled".to_string(),
-                        parent_entity: None,
-                        timestamp: SystemTime::now(),
-                        is_root: true,
-                    },
-                ],
+                steps: vec![CancellationStep {
+                    entity_id: "other-entity".to_string(),
+                    entity_type: EntityType::Task,
+                    cancel_reason: CancelReason::with_user_reason("normal".to_string()),
+                    cancel_kind: CancelKind::User,
+                    result: "Cancelled".to_string(),
+                    parent_entity: None,
+                    timestamp: SystemTime::now(),
+                    is_root: true,
+                }],
                 is_complete: true,
                 total_propagation_time: Some(Duration::from_millis(1)),
                 max_depth: 1,
@@ -920,26 +972,48 @@ mod tests {
         let analysis = analyze_cancellation_patterns(&traces);
 
         // Should detect bottlenecks
-        assert!(!analysis.bottlenecks.is_empty(), "Should detect bottlenecks");
+        assert!(
+            !analysis.bottlenecks.is_empty(),
+            "Should detect bottlenecks"
+        );
 
         // Check for high-frequency bottleneck (bottleneck-entity appears in 2/3 traces)
-        let has_high_freq_bottleneck = analysis.bottlenecks.iter()
-            .any(|b| b.contains("High-frequency cancellation source") && b.contains("bottleneck-entity"));
-        assert!(has_high_freq_bottleneck, "Should detect high-frequency cancellation source");
+        let has_high_freq_bottleneck = analysis.bottlenecks.iter().any(|b| {
+            b.contains("High-frequency cancellation source") && b.contains("bottleneck-entity")
+        });
+        assert!(
+            has_high_freq_bottleneck,
+            "Should detect high-frequency cancellation source"
+        );
 
         // Check for slow propagation bottleneck
-        let has_slow_bottleneck = analysis.bottlenecks.iter()
+        let has_slow_bottleneck = analysis
+            .bottlenecks
+            .iter()
             .any(|b| b.contains("Slow propagation bottleneck") && b.contains("slow-entity"));
-        assert!(has_slow_bottleneck, "Should detect slow propagation bottleneck");
+        assert!(
+            has_slow_bottleneck,
+            "Should detect slow propagation bottleneck"
+        );
 
         // Check for stuck cancellation bottleneck
-        let has_stuck_bottleneck = analysis.bottlenecks.iter()
+        let has_stuck_bottleneck = analysis
+            .bottlenecks
+            .iter()
             .any(|b| b.contains("Stuck cancellation bottleneck") && b.contains("stuck-entity"));
-        assert!(has_stuck_bottleneck, "Should detect stuck cancellation bottleneck");
+        assert!(
+            has_stuck_bottleneck,
+            "Should detect stuck cancellation bottleneck"
+        );
 
         // Should include recommendation about addressing bottlenecks
-        let has_bottleneck_recommendation = analysis.recommendations.iter()
+        let has_bottleneck_recommendation = analysis
+            .recommendations
+            .iter()
             .any(|r| r.contains("Address") && r.contains("bottlenecks"));
-        assert!(has_bottleneck_recommendation, "Should recommend addressing bottlenecks");
+        assert!(
+            has_bottleneck_recommendation,
+            "Should recommend addressing bottlenecks"
+        );
     }
 }

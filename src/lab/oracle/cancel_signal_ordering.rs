@@ -24,7 +24,7 @@
 //! - Monitors parent-child relationships during cancellation
 //! - Provides diagnostics with causality chains and timing information
 
-use crate::types::{RegionId, TaskId, Time, CancelReason};
+use crate::types::{CancelReason, RegionId, TaskId, Time};
 use parking_lot::RwLock;
 use std::backtrace::Backtrace;
 use std::collections::{HashMap, VecDeque};
@@ -253,7 +253,10 @@ impl OrderingState {
 
     fn add_region_relationship(&mut self, parent_region: RegionId, child_region: RegionId) {
         self.region_parent_map.insert(child_region, parent_region);
-        self.region_children_map.entry(parent_region).or_default().push(child_region);
+        self.region_children_map
+            .entry(parent_region)
+            .or_default()
+            .push(child_region);
     }
 
     fn add_task_region_mapping(&mut self, task_id: TaskId, region_id: RegionId) {
@@ -273,7 +276,9 @@ impl OrderingState {
     }
 
     fn find_cancel_signal(&self, task_id: TaskId) -> Option<&CancelSignal> {
-        self.cancel_signals.iter().find(|signal| signal.task_id == task_id)
+        self.cancel_signals
+            .iter()
+            .find(|signal| signal.task_id == task_id)
     }
 
     fn get_task_region(&self, task_id: TaskId) -> Option<RegionId> {
@@ -325,7 +330,13 @@ impl CancelOrderingOracle {
     /// Register a parent-child task relationship.
     ///
     /// This should be called when a child task is spawned within a parent region/task.
-    pub fn on_task_spawned(&self, parent_task: TaskId, child_task: TaskId, parent_region: RegionId, child_region: RegionId) {
+    pub fn on_task_spawned(
+        &self,
+        parent_task: TaskId,
+        child_task: TaskId,
+        parent_region: RegionId,
+        child_region: RegionId,
+    ) {
         let mut state = self.state.write();
         state.add_parent_child_relationship(parent_task, child_task);
         state.add_task_region_mapping(parent_task, parent_region);
@@ -338,7 +349,13 @@ impl CancelOrderingOracle {
     /// Notify the oracle of a cancellation signal.
     ///
     /// This is called when any task/region receives a cancellation signal.
-    pub fn on_cancel_signal(&self, task_id: TaskId, region_id: RegionId, cancel_time: Time, reason: CancelReason) {
+    pub fn on_cancel_signal(
+        &self,
+        task_id: TaskId,
+        region_id: RegionId,
+        cancel_time: Time,
+        reason: CancelReason,
+    ) {
         self.signals_processed.fetch_add(1, Ordering::Relaxed);
 
         let mut state = self.state.write();
@@ -368,7 +385,8 @@ impl CancelOrderingOracle {
     ///
     /// This should be called periodically to detect violations that depend on timing.
     pub fn check_ordering_violations(&self, now: Time) {
-        self.ordering_checks_performed.fetch_add(1, Ordering::Relaxed);
+        self.ordering_checks_performed
+            .fetch_add(1, Ordering::Relaxed);
 
         let state = self.state.read();
 
@@ -379,7 +397,8 @@ impl CancelOrderingOracle {
                     if state.find_cancel_signal(child_task).is_none() {
                         let time_since_parent = now.as_nanos() - signal.cancel_time.as_nanos();
                         if time_since_parent > self.config.max_ordering_window_ns {
-                            let child_region = state.get_task_region(child_task)
+                            let child_region = state
+                                .get_task_region(child_task)
                                 .unwrap_or(RegionId::testing_default());
                             let violation = CancelOrderingViolation::MissingChildCancellation {
                                 parent_task: signal.task_id,
@@ -455,16 +474,17 @@ impl CancelOrderingOracle {
 
             // Child cancelled but parent not yet cancelled - potential violation
             let violation = CancelOrderingViolation::OrphanedChildCancellation {
-                    child_task: new_signal.task_id,
-                    parent_task: Some(parent_task),
-                    child_region: new_signal.region_id,
-                    parent_region: new_signal.parent_region.unwrap_or_else(RegionId::testing_default),
-                    child_cancel_time: new_signal.cancel_time,
-                    detected_at: new_signal.cancel_time,
-                    stack_trace: self.capture_stack_trace(),
-                };
-                self.record_violation(violation);
-            }
+                child_task: new_signal.task_id,
+                parent_task: Some(parent_task),
+                child_region: new_signal.region_id,
+                parent_region: new_signal
+                    .parent_region
+                    .unwrap_or_else(RegionId::testing_default),
+                child_cancel_time: new_signal.cancel_time,
+                detected_at: new_signal.cancel_time,
+                stack_trace: self.capture_stack_trace(),
+            };
+            self.record_violation(violation);
         }
 
         // Check if any children were cancelled before this parent
@@ -472,7 +492,8 @@ impl CancelOrderingOracle {
             for &child_task in children {
                 if let Some(child_signal) = state.find_cancel_signal(child_task) {
                     if child_signal.cancel_time < new_signal.cancel_time {
-                        let time_gap = new_signal.cancel_time.as_nanos() - child_signal.cancel_time.as_nanos();
+                        let time_gap =
+                            new_signal.cancel_time.as_nanos() - child_signal.cancel_time.as_nanos();
                         let violation = CancelOrderingViolation::ChildBeforeParent {
                             parent_task: new_signal.task_id,
                             child_task,
@@ -623,9 +644,9 @@ mod tests {
         assert_eq!(violations.len(), 2);
 
         // Check that we detected child before parent violation
-        let has_child_before_parent = violations.iter().any(|v| {
-            matches!(v, CancelOrderingViolation::ChildBeforeParent { .. })
-        });
+        let has_child_before_parent = violations
+            .iter()
+            .any(|v| matches!(v, CancelOrderingViolation::ChildBeforeParent { .. }));
         assert!(has_child_before_parent);
     }
 
@@ -773,7 +794,12 @@ mod tests {
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
 
         // Cancel the parent task
-        oracle.on_cancel_signal(parent_task, parent_region, Time::from_nanos(1000), CancelReason::UserCancelled);
+        oracle.on_cancel_signal(
+            parent_task,
+            parent_region,
+            Time::from_nanos(1000),
+            CancelReason::UserCancelled,
+        );
 
         // Wait for the ordering window to expire so missing child cancellation is detected
         oracle.check_ordering_violations(Time::from_nanos(20_000_000));
@@ -783,8 +809,14 @@ mod tests {
         assert_eq!(violations.len(), 1);
 
         match &violations[0] {
-            CancelOrderingViolation::MissingChildCancellation { child_region: detected_child_region, .. } => {
-                assert_eq!(*detected_child_region, child_region, "Should use actual child region, not placeholder");
+            CancelOrderingViolation::MissingChildCancellation {
+                child_region: detected_child_region,
+                ..
+            } => {
+                assert_eq!(
+                    *detected_child_region, child_region,
+                    "Should use actual child region, not placeholder"
+                );
             }
             other => panic!("Expected MissingChildCancellation, got: {:?}", other),
         }

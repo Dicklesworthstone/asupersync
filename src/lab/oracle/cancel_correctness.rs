@@ -861,7 +861,13 @@ mod tests {
 
         // Task gets stuck in Cancelling phase
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Requested, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Requested,
+                reason.clone(),
+            ),
             now,
         );
 
@@ -898,7 +904,13 @@ mod tests {
 
         // 1. Premature completion
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Requested, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Requested,
+                reason.clone(),
+            ),
             now,
         );
         oracle.notify_task_completed(task_id, now);
@@ -916,13 +928,7 @@ mod tests {
             now,
         );
         oracle.notify_cancel_witness(
-            CancelWitness::new(
-                task_id2,
-                region_id,
-                1,
-                CancelPhase::Cancelling,
-                reason,
-            ),
+            CancelWitness::new(task_id2, region_id, 1, CancelPhase::Cancelling, reason),
             now,
         );
 

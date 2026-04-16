@@ -4,14 +4,14 @@
 //! real-time monitoring of cancellation work accumulation and processing rates.
 
 use crate::observability::cancellation_debt_monitor::{
-    CancellationDebtConfig, CancellationDebtMonitor, WorkType, DebtSnapshot, DebtAlert,
-    DebtAlertLevel, PendingWork,
+    CancellationDebtConfig, CancellationDebtMonitor, DebtAlert, DebtAlertLevel, DebtSnapshot,
+    PendingWork, WorkType,
 };
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, Instant};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Integration points for debt monitoring in the runtime.
 pub struct DebtRuntimeIntegration {
@@ -225,7 +225,10 @@ impl DebtRuntimeIntegration {
     /// Check if emergency intervention is needed.
     pub fn check_emergency_intervention(&self) -> bool {
         let snapshot = self.get_debt_status();
-        matches!(snapshot.alert_level, DebtAlertLevel::Emergency | DebtAlertLevel::Critical)
+        matches!(
+            snapshot.alert_level,
+            DebtAlertLevel::Emergency | DebtAlertLevel::Critical
+        )
     }
 
     /// Execute emergency debt relief.
@@ -271,7 +274,11 @@ impl DebtRuntimeIntegration {
             let now = SystemTime::now();
 
             // Check for new alerts periodically
-            if now.duration_since(last_alert_check).unwrap_or(Duration::ZERO) >= Duration::from_secs(5) {
+            if now
+                .duration_since(last_alert_check)
+                .unwrap_or(Duration::ZERO)
+                >= Duration::from_secs(5)
+            {
                 if let Some(ref callback) = alert_callback {
                     let recent_alerts = monitor.get_recent_alerts(1);
                     for alert in recent_alerts {
@@ -319,13 +326,15 @@ impl DebtRuntimeIntegration {
                 recommendations.push("Monitor processing rates closely".to_string());
                 recommendations.push("Optimize cancellation handlers".to_string());
                 if snapshot.processing_rate < 10.0 {
-                    recommendations.push("Processing rate is very low - investigate bottlenecks".to_string());
+                    recommendations
+                        .push("Processing rate is very low - investigate bottlenecks".to_string());
                 }
             }
             DebtAlertLevel::Watch => {
                 recommendations.push("Continue monitoring debt trends".to_string());
                 if snapshot.oldest_work_age > Duration::from_secs(60) {
-                    recommendations.push("Some work items are aging - check processing pipeline".to_string());
+                    recommendations
+                        .push("Some work items are aging - check processing pipeline".to_string());
                 }
             }
             DebtAlertLevel::Normal => {
@@ -336,7 +345,10 @@ impl DebtRuntimeIntegration {
         // Entity-specific recommendations
         for (entity_id, &depth) in &snapshot.entity_queue_depths {
             if depth > 500 {
-                recommendations.push(format!("Entity {} has high queue depth ({}) - investigate", entity_id, depth));
+                recommendations.push(format!(
+                    "Entity {} has high queue depth ({}) - investigate",
+                    entity_id, depth
+                ));
             }
         }
 
@@ -476,7 +488,7 @@ pub mod integration_examples {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CancelReason, CancelKind, TaskId, RegionId};
+    use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
 
     #[test]
     fn test_integration_creation() {
@@ -493,16 +505,16 @@ mod tests {
         let task_id = TaskId::new(42);
         let cancel_reason = CancelReason::with_user_reason("test".to_string());
 
-        let work_id = integration.on_task_cleanup_started(
-            task_id,
-            &cancel_reason,
-            CancelKind::User,
-            100,
-        );
+        let work_id =
+            integration.on_task_cleanup_started(task_id, &cancel_reason, CancelKind::User, 100);
 
         let snapshot = integration.get_debt_status();
         assert_eq!(snapshot.total_pending, 1);
-        assert!(snapshot.pending_by_type.contains_key(&WorkType::TaskCleanup));
+        assert!(
+            snapshot
+                .pending_by_type
+                .contains_key(&WorkType::TaskCleanup)
+        );
 
         integration.on_cleanup_completed(work_id);
 
@@ -545,13 +557,15 @@ mod tests {
     fn test_batch_completion() {
         let integration = DebtRuntimeIntegration::default();
 
-        let work_ids: Vec<u64> = (0..5).map(|i| {
-            integration.on_waker_cleanup_started(
-                format!("waker-{}", i),
-                &CancelReason::with_user_reason("batch_test".to_string()),
-                CancelKind::User,
-            )
-        }).collect();
+        let work_ids: Vec<u64> = (0..5)
+            .map(|i| {
+                integration.on_waker_cleanup_started(
+                    format!("waker-{}", i),
+                    &CancelReason::with_user_reason("batch_test".to_string()),
+                    CancelKind::User,
+                )
+            })
+            .collect();
 
         let snapshot = integration.get_debt_status();
         assert_eq!(snapshot.total_pending, 5);

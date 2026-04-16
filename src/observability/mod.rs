@@ -41,10 +41,8 @@ pub mod cancellation_debt_monitor;
 pub mod cancellation_tracer;
 pub mod cancellation_visualizer;
 pub mod collector;
-pub mod debt_runtime_integration;
-pub mod runtime_integration;
-pub mod structured_cancellation_analyzer;
 pub mod context;
+pub mod debt_runtime_integration;
 pub mod diagnostics;
 pub mod entry;
 pub mod level;
@@ -53,7 +51,9 @@ pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
 pub mod resource_accounting;
+pub mod runtime_integration;
 pub mod spectral_health;
+pub mod structured_cancellation_analyzer;
 pub mod task_inspector;
 
 pub use analyzer_plugin::{
@@ -64,11 +64,6 @@ pub use analyzer_plugin::{
     PluginExecutionState, PluginLifecycleEvent, PluginLifecyclePhase, PluginRegistrationError,
     SchemaDecision, SchemaNegotiation, negotiate_schema_version, run_analyzer_plugin_pack_smoke,
 };
-pub use cancellation_tracer::{
-    CancellationAnalysis, CancellationTrace, CancellationTraceStep, CancellationTracer,
-    CancellationTracerConfig, CancellationTracerStats, CancellationTracerStatsSnapshot,
-    EntityType, PropagationAnomaly, TraceId, analyze_cancellation_patterns,
-};
 pub use cancellation_analyzer::{
     AnalyzerConfig as CancellationAnalyzerConfig, BottleneckAnalysis, CancellationAnalyzer,
     CleanupEfficiency, CleanupTimingAnalysis, DistributionStats, EntityPerformance,
@@ -76,21 +71,22 @@ pub use cancellation_analyzer::{
     PerformanceRegression, RecommendationPriority, ThroughputMetrics, TrendAnalysis,
     TrendDirection,
 };
-pub use cancellation_visualizer::{
-    AnomalyInfo, AnomalySeverity, BottleneckInfo, CancellationDashboard, CancellationTreeNode,
-    CancellationVisualizer, ThroughputStats, TimingFormat, VisualizerConfig,
-};
 pub use cancellation_debt_monitor::{
     CancellationDebtConfig, CancellationDebtMonitor, DebtAlert, DebtAlertLevel, DebtSnapshot,
     PendingWork, WorkType,
 };
-pub use debt_runtime_integration::{DebtHealthReport, DebtRuntimeIntegration};
-pub use structured_cancellation_analyzer::{
-    AlertSeverity, AlertType, CancellationAlert, LabRuntimeIntegration, RealTimeStats,
-    StructuredCancellationAnalyzer, StructuredCancellationConfig,
+pub use cancellation_tracer::{
+    CancellationAnalysis, CancellationTrace, CancellationTraceStep, CancellationTracer,
+    CancellationTracerConfig, CancellationTracerStats, CancellationTracerStatsSnapshot, EntityType,
+    PropagationAnomaly, TraceId, analyze_cancellation_patterns,
+};
+pub use cancellation_visualizer::{
+    AnomalyInfo, AnomalySeverity, BottleneckInfo, CancellationDashboard, CancellationTreeNode,
+    CancellationVisualizer, ThroughputStats, TimingFormat, VisualizerConfig,
 };
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
+pub use debt_runtime_integration::{DebtHealthReport, DebtRuntimeIntegration};
 pub use diagnostics::{
     BlockReason, CancelReasonInfo, CancellationExplanation, CancellationStep, DeadlockCycle,
     DeadlockSeverity, Diagnostics, DirectionalDeadlockReport, ObligationLeak, Reason,
@@ -114,6 +110,10 @@ pub use otel::{
 };
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
+};
+pub use structured_cancellation_analyzer::{
+    AlertSeverity, AlertType, CancellationAlert, LabRuntimeIntegration, RealTimeStats,
+    StructuredCancellationAnalyzer, StructuredCancellationConfig,
 };
 pub use task_inspector::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire,

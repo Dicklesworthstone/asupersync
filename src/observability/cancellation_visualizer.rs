@@ -6,9 +6,9 @@
 use crate::observability::cancellation_tracer::{
     CancellationTrace, CancellationTraceStep, EntityType, PropagationAnomaly, TraceId,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 /// Configuration for visualization output.
 #[derive(Debug, Clone)]
@@ -144,8 +144,14 @@ impl CancellationVisualizer {
     /// Generate a timeline visualization showing propagation order.
     pub fn visualize_timeline(&self, trace: &CancellationTrace) -> String {
         let mut output = String::new();
-        output.push_str(&format!("=== Cancellation Timeline (Trace {}) ===\n", trace.trace_id.as_u64()));
-        output.push_str(&format!("Root: {} ({})\n", trace.root_entity, trace.root_cancel_reason));
+        output.push_str(&format!(
+            "=== Cancellation Timeline (Trace {}) ===\n",
+            trace.trace_id.as_u64()
+        ));
+        output.push_str(&format!(
+            "Root: {} ({})\n",
+            trace.root_entity, trace.root_cancel_reason
+        ));
         output.push_str(&format!("Start: {:?}\n", trace.start_time));
 
         if trace.steps.is_empty() {
@@ -168,7 +174,11 @@ impl CancellationVisualizer {
             };
 
             let anomaly_marker = if self.config.highlight_anomalies
-                && trace.anomalies.iter().any(|a| self.step_has_anomaly(step, a)) {
+                && trace
+                    .anomalies
+                    .iter()
+                    .any(|a| self.step_has_anomaly(step, a))
+            {
                 " ⚠️"
             } else {
                 ""
@@ -186,23 +196,29 @@ impl CancellationVisualizer {
             if self.config.show_step_details {
                 output.push_str(&format!(
                     "     State: {} | Depth: {} | Kind: {}\n",
-                    step.entity_state,
-                    step.depth,
-                    step.cancel_kind
+                    step.entity_state, step.depth, step.cancel_kind
                 ));
             }
         }
 
         if let Some(total_time) = &trace.total_propagation_time {
-            output.push_str(&format!("\nTotal propagation time: {}\n",
-                self.format_duration(*total_time)));
+            output.push_str(&format!(
+                "\nTotal propagation time: {}\n",
+                self.format_duration(*total_time)
+            ));
         }
 
-        output.push_str(&format!("Entities cancelled: {}\n", trace.entities_cancelled));
+        output.push_str(&format!(
+            "Entities cancelled: {}\n",
+            trace.entities_cancelled
+        ));
         output.push_str(&format!("Max depth: {}\n", trace.max_depth));
 
         if !trace.anomalies.is_empty() {
-            output.push_str(&format!("\n⚠️  {} anomalies detected:\n", trace.anomalies.len()));
+            output.push_str(&format!(
+                "\n⚠️  {} anomalies detected:\n",
+                trace.anomalies.len()
+            ));
             for anomaly in &trace.anomalies {
                 output.push_str(&format!("  - {}\n", self.format_anomaly(anomaly)));
             }
@@ -224,14 +240,16 @@ impl CancellationVisualizer {
             // Root node
             output.push_str(&format!(
                 "  \"{}\" [label=\"{}\\n{}\" style=filled fillcolor=lightblue];\n",
-                trace.root_entity,
-                trace.root_entity,
-                trace.root_cancel_reason
+                trace.root_entity, trace.root_entity, trace.root_cancel_reason
             ));
 
             // Steps as edges
             for step in &trace.steps {
-                let color = if trace.anomalies.iter().any(|a| self.step_has_anomaly(step, a)) {
+                let color = if trace
+                    .anomalies
+                    .iter()
+                    .any(|a| self.step_has_anomaly(step, a))
+                {
                     "red"
                 } else {
                     "black"
@@ -293,9 +311,15 @@ impl CancellationVisualizer {
                     trace_id: trace.trace_id,
                     anomaly_type: match anomaly {
                         PropagationAnomaly::SlowPropagation { .. } => "SlowPropagation".to_string(),
-                        PropagationAnomaly::StuckCancellation { .. } => "StuckCancellation".to_string(),
-                        PropagationAnomaly::IncorrectPropagationOrder { .. } => "IncorrectPropagationOrder".to_string(),
-                        PropagationAnomaly::UnexpectedPropagation { .. } => "UnexpectedPropagation".to_string(),
+                        PropagationAnomaly::StuckCancellation { .. } => {
+                            "StuckCancellation".to_string()
+                        }
+                        PropagationAnomaly::IncorrectPropagationOrder { .. } => {
+                            "IncorrectPropagationOrder".to_string()
+                        }
+                        PropagationAnomaly::UnexpectedPropagation { .. } => {
+                            "UnexpectedPropagation".to_string()
+                        }
                         PropagationAnomaly::ExcessiveDepth { .. } => "ExcessiveDepth".to_string(),
                     },
                     severity: self.anomaly_severity(anomaly),
@@ -341,7 +365,7 @@ impl CancellationVisualizer {
             }
 
             let avg_delay = Duration::from_nanos(
-                delays.iter().map(|d| d.as_nanos() as u64).sum::<u64>() / delays.len() as u64
+                delays.iter().map(|d| d.as_nanos() as u64).sum::<u64>() / delays.len() as u64,
             );
 
             // Consider it a bottleneck if average delay is above threshold
@@ -360,23 +384,32 @@ impl CancellationVisualizer {
         }
 
         // Sort by impact score
-        bottlenecks.sort_by(|a, b| b.impact_score.partial_cmp(&a.impact_score).unwrap_or(std::cmp::Ordering::Equal));
+        bottlenecks.sort_by(|a, b| {
+            b.impact_score
+                .partial_cmp(&a.impact_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         bottlenecks
     }
 
     /// Calculate throughput statistics for entities.
-    fn calculate_entity_throughput(&self, traces: &[CancellationTrace]) -> HashMap<String, ThroughputStats> {
+    fn calculate_entity_throughput(
+        &self,
+        traces: &[CancellationTrace],
+    ) -> HashMap<String, ThroughputStats> {
         let mut stats = HashMap::new();
 
         // Simple implementation - would need more data for full metrics
         for trace in traces {
             for step in &trace.steps {
-                stats.entry(step.entity_id.clone()).or_insert(ThroughputStats {
-                    cancellations_per_second: 1.0, // Placeholder
-                    avg_processing_time: step.elapsed_since_prev,
-                    queue_depth: 0, // Would need queue tracking
-                    success_rate: if step.propagation_completed { 1.0 } else { 0.0 },
-                });
+                stats
+                    .entry(step.entity_id.clone())
+                    .or_insert(ThroughputStats {
+                        cancellations_per_second: 1.0, // Placeholder
+                        avg_processing_time: step.elapsed_since_prev,
+                        queue_depth: 0, // Would need queue tracking
+                        success_rate: if step.propagation_completed { 1.0 } else { 0.0 },
+                    });
             }
         }
 
@@ -426,7 +459,10 @@ impl CancellationVisualizer {
             ""
         };
 
-        output.push_str(&format!("{}├─ {}{}{}\n", prefix, node.entity_id, timing, anomaly_marker));
+        output.push_str(&format!(
+            "{}├─ {}{}{}\n",
+            prefix, node.entity_id, timing, anomaly_marker
+        ));
 
         for child in &node.children {
             output.push_str(&self.format_tree(child, indent + 1));
@@ -460,17 +496,30 @@ impl CancellationVisualizer {
     /// Format an anomaly for display.
     fn format_anomaly(&self, anomaly: &PropagationAnomaly) -> String {
         match anomaly {
-            PropagationAnomaly::SlowPropagation { elapsed, threshold, .. } => {
-                format!("Slow propagation: {} (threshold: {})",
+            PropagationAnomaly::SlowPropagation {
+                elapsed, threshold, ..
+            } => {
+                format!(
+                    "Slow propagation: {} (threshold: {})",
                     self.format_duration(*elapsed),
-                    self.format_duration(*threshold))
+                    self.format_duration(*threshold)
+                )
             }
             PropagationAnomaly::StuckCancellation { stuck_duration, .. } => {
-                format!("Stuck cancellation: timeout after {}",
-                    self.format_duration(*stuck_duration))
+                format!(
+                    "Stuck cancellation: timeout after {}",
+                    self.format_duration(*stuck_duration)
+                )
             }
-            PropagationAnomaly::IncorrectPropagationOrder { parent_entity, child_entity, .. } => {
-                format!("Incorrect ordering: parent {} before child {}", parent_entity, child_entity)
+            PropagationAnomaly::IncorrectPropagationOrder {
+                parent_entity,
+                child_entity,
+                ..
+            } => {
+                format!(
+                    "Incorrect ordering: parent {} before child {}",
+                    parent_entity, child_entity
+                )
             }
             PropagationAnomaly::UnexpectedPropagation { description, .. } => {
                 format!("Unexpected propagation: {}", description)

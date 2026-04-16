@@ -6,9 +6,9 @@
 use crate::observability::cancellation_tracer::{
     CancellationTrace, EntityType, PropagationAnomaly,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
-use serde::{Deserialize, Serialize};
 
 /// Configuration for deep analysis.
 #[derive(Debug, Clone)]
@@ -248,10 +248,7 @@ impl CancellationAnalyzer {
             .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0)) // Convert to ms
             .collect();
 
-        let depths: Vec<f64> = traces
-            .iter()
-            .map(|t| t.max_depth as f64)
-            .collect();
+        let depths: Vec<f64> = traces.iter().map(|t| t.max_depth as f64).collect();
 
         let propagation_time_distribution = self.calculate_distribution_stats(&propagation_times);
         let depth_distribution = self.calculate_distribution_stats(&depths);
@@ -272,7 +269,8 @@ impl CancellationAnalyzer {
         let regressions = self.detect_regressions(traces);
 
         // Generate recommendations
-        let recommendations = self.generate_recommendations(traces, &bottlenecks, &cleanup_analysis);
+        let recommendations =
+            self.generate_recommendations(traces, &bottlenecks, &cleanup_analysis);
 
         let analysis_window = analysis_start.elapsed().unwrap_or(Duration::ZERO);
 
@@ -318,13 +316,12 @@ impl CancellationAnalyzer {
         let max = sorted_values[count - 1];
 
         // Calculate standard deviation
-        let variance = values.iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / count as f64;
+        let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / count as f64;
         let std_dev = variance.sqrt();
 
         // Count outliers (values more than 2 standard deviations from mean)
-        let outlier_count = values.iter()
+        let outlier_count = values
+            .iter()
             .filter(|&&x| (x - mean).abs() > 2.0 * std_dev)
             .count();
 
@@ -373,17 +370,14 @@ impl CancellationAnalyzer {
                 continue;
             }
 
-            let timing_ms: Vec<f64> = timings.iter()
-                .map(|d| d.as_secs_f64() * 1000.0)
-                .collect();
+            let timing_ms: Vec<f64> = timings.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
 
             let stats = self.calculate_distribution_stats(&timing_ms);
             let avg_processing_time = Duration::from_secs_f64(stats.mean / 1000.0);
 
             // Calculate impact as percentage of total cancellation time
             let total_time_contribution = stats.mean * timings.len() as f64;
-            let impact_percentage = total_time_contribution /
-                (stats.mean * total_traces * 10.0); // Rough estimate
+            let impact_percentage = total_time_contribution / (stats.mean * total_traces * 10.0); // Rough estimate
 
             if impact_percentage > self.config.bottleneck_threshold {
                 let confidence = if stats.count >= 50 && stats.std_dev < stats.mean {
@@ -409,8 +403,11 @@ impl CancellationAnalyzer {
         }
 
         // Sort by impact
-        bottlenecks.sort_by(|a, b| b.impact_percentage.partial_cmp(&a.impact_percentage)
-            .unwrap_or(std::cmp::Ordering::Equal));
+        bottlenecks.sort_by(|a, b| {
+            b.impact_percentage
+                .partial_cmp(&a.impact_percentage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         bottlenecks
     }
@@ -423,12 +420,14 @@ impl CancellationAnalyzer {
             suggestions.push("High variability detected - investigate outlier cases".to_string());
         }
 
-        if stats.mean > 100.0 { // 100ms threshold
+        if stats.mean > 100.0 {
+            // 100ms threshold
             suggestions.push("Consider optimizing cancellation handler performance".to_string());
         }
 
         if stats.std_dev > stats.mean {
-            suggestions.push("Inconsistent performance - check for resource contention".to_string());
+            suggestions
+                .push("Inconsistent performance - check for resource contention".to_string());
         }
 
         if suggestions.is_empty() {
@@ -452,9 +451,7 @@ impl CancellationAnalyzer {
         let slow_cleanup_entities = self.identify_slow_cleanup_entities(traces);
 
         // Calculate leak risk score based on cleanup success rate
-        let successful_cleanups = traces.iter()
-            .filter(|t| t.is_complete)
-            .count() as f64;
+        let successful_cleanups = traces.iter().filter(|t| t.is_complete).count() as f64;
         let success_rate = successful_cleanups / traces.len() as f64;
         let leak_risk_score = (1.0 - success_rate) * 100.0;
 
@@ -498,7 +495,7 @@ impl CancellationAnalyzer {
             }
 
             let avg_time = Duration::from_nanos(
-                times.iter().map(|d| d.as_nanos() as u64).sum::<u64>() / times.len() as u64
+                times.iter().map(|d| d.as_nanos() as u64).sum::<u64>() / times.len() as u64,
             );
 
             if avg_time > threshold {
@@ -541,15 +538,17 @@ impl CancellationAnalyzer {
             // Count anomalies per entity
             for anomaly in &trace.anomalies {
                 match anomaly {
-                    PropagationAnomaly::SlowPropagation { entity_id, .. } |
-                    PropagationAnomaly::StuckCancellation { entity_id, .. } |
-                    PropagationAnomaly::ExcessiveDepth { entity_id, .. } => {
+                    PropagationAnomaly::SlowPropagation { entity_id, .. }
+                    | PropagationAnomaly::StuckCancellation { entity_id, .. }
+                    | PropagationAnomaly::ExcessiveDepth { entity_id, .. } => {
                         *entity_anomalies.entry(entity_id.clone()).or_default() += 1;
                     }
                     PropagationAnomaly::IncorrectPropagationOrder { parent_entity, .. } => {
                         *entity_anomalies.entry(parent_entity.clone()).or_default() += 1;
                     }
-                    PropagationAnomaly::UnexpectedPropagation { affected_entities, .. } => {
+                    PropagationAnomaly::UnexpectedPropagation {
+                        affected_entities, ..
+                    } => {
                         for entity_id in affected_entities {
                             *entity_anomalies.entry(entity_id.clone()).or_default() += 1;
                         }
@@ -561,18 +560,14 @@ impl CancellationAnalyzer {
         let mut rankings = Vec::new();
 
         for (entity_id, times) in entity_data {
-            let timing_ms: Vec<f64> = times.iter()
-                .map(|d| d.as_secs_f64() * 1000.0)
-                .collect();
+            let timing_ms: Vec<f64> = times.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
 
             let processing_stats = self.calculate_distribution_stats(&timing_ms);
             let anomaly_count = entity_anomalies.get(&entity_id).copied().unwrap_or(0);
             let anomaly_rate = anomaly_count as f64 / times.len() as f64;
 
             // Calculate throughput
-            let total_time_seconds = times.iter()
-                .map(|d| d.as_secs_f64())
-                .sum::<f64>();
+            let total_time_seconds = times.iter().map(|d| d.as_secs_f64()).sum::<f64>();
             let throughput = if total_time_seconds > 0.0 {
                 times.len() as f64 / total_time_seconds
             } else {
@@ -603,8 +598,11 @@ impl CancellationAnalyzer {
         }
 
         // Sort by performance score
-        rankings.sort_by(|a, b| b.performance_score.partial_cmp(&a.performance_score)
-            .unwrap_or(std::cmp::Ordering::Equal));
+        rankings.sort_by(|a, b| {
+            b.performance_score
+                .partial_cmp(&a.performance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         rankings
     }
@@ -641,8 +639,10 @@ impl CancellationAnalyzer {
                 recommendations.push(OptimizationRecommendation {
                     priority: RecommendationPriority::Critical,
                     target: bottleneck.entity_id.clone(),
-                    description: format!("Optimize {} - causing {}% of cancellation latency",
-                        bottleneck.entity_id, bottleneck.impact_percentage),
+                    description: format!(
+                        "Optimize {} - causing {}% of cancellation latency",
+                        bottleneck.entity_id, bottleneck.impact_percentage
+                    ),
                     estimated_impact: bottleneck.impact_percentage,
                     complexity: ImplementationComplexity::Moderate,
                 });
@@ -654,8 +654,10 @@ impl CancellationAnalyzer {
             recommendations.push(OptimizationRecommendation {
                 priority: RecommendationPriority::High,
                 target: "cleanup".to_string(),
-                description: format!("Improve cleanup reliability - {}% leak risk",
-                    cleanup_analysis.leak_risk_score),
+                description: format!(
+                    "Improve cleanup reliability - {}% leak risk",
+                    cleanup_analysis.leak_risk_score
+                ),
                 estimated_impact: cleanup_analysis.leak_risk_score,
                 complexity: ImplementationComplexity::Complex,
             });
@@ -733,15 +735,13 @@ impl CancellationAnalyzer {
                 stability_trend: TrendDirection::Insufficient,
             },
             regressions: Vec::new(),
-            recommendations: vec![
-                OptimizationRecommendation {
-                    priority: RecommendationPriority::Low,
-                    target: "monitoring".to_string(),
-                    description: format!("Collect more data - only {} traces available", trace_count),
-                    estimated_impact: 0.0,
-                    complexity: ImplementationComplexity::Trivial,
-                }
-            ],
+            recommendations: vec![OptimizationRecommendation {
+                priority: RecommendationPriority::Low,
+                target: "monitoring".to_string(),
+                description: format!("Collect more data - only {} traces available", trace_count),
+                estimated_impact: 0.0,
+                complexity: ImplementationComplexity::Trivial,
+            }],
         }
     }
 }

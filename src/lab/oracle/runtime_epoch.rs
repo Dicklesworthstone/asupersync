@@ -114,9 +114,9 @@ pub enum ConsistencyLevel {
 impl Default for RuntimeEpochConfig {
     fn default() -> Self {
         Self {
-            max_epoch_skew: 2, // Allow 2 epochs of skew
+            max_epoch_skew: 2,                         // Allow 2 epochs of skew
             max_transition_duration_ns: 1_000_000_000, // 1 second max transition
-            sync_window_ns: 10_000_000, // 10ms sync window
+            sync_window_ns: 10_000_000,                // 10ms sync window
             max_violations: 1000,
             panic_on_violation: false,
             capture_stack_traces: true,
@@ -339,7 +339,8 @@ impl ModuleEpochState {
             0
         };
 
-        self.transition_history.push_back((new_epoch, now, duration_ns));
+        self.transition_history
+            .push_back((new_epoch, now, duration_ns));
 
         // Keep history bounded
         while self.transition_history.len() > 100 {
@@ -419,7 +420,12 @@ impl RuntimeEpochOracle {
     }
 
     /// Notify the oracle that a module is starting an epoch transition.
-    pub fn notify_epoch_transition_start(&self, module: RuntimeModule, from_epoch: EpochId, now: Time) {
+    pub fn notify_epoch_transition_start(
+        &self,
+        module: RuntimeModule,
+        from_epoch: EpochId,
+        now: Time,
+    ) {
         let mut states = self.module_states.write();
         if let Some(state) = states.get_mut(&module) {
             state.start_transition(now);
@@ -427,7 +433,12 @@ impl RuntimeEpochOracle {
     }
 
     /// Notify the oracle that a module has completed an epoch transition.
-    pub fn notify_epoch_transition_complete(&self, module: RuntimeModule, to_epoch: EpochId, now: Time) {
+    pub fn notify_epoch_transition_complete(
+        &self,
+        module: RuntimeModule,
+        to_epoch: EpochId,
+        now: Time,
+    ) {
         self.transitions_tracked.fetch_add(1, Ordering::Relaxed);
 
         let transition_duration = {
@@ -455,7 +466,11 @@ impl RuntimeEpochOracle {
         // Update global epoch to the maximum across all modules
         let max_epoch = {
             let states = self.module_states.read();
-            states.values().map(|s| s.current_epoch.as_u64()).max().unwrap_or(1)
+            states
+                .values()
+                .map(|s| s.current_epoch.as_u64())
+                .max()
+                .unwrap_or(1)
         };
         self.global_epoch.store(max_epoch, Ordering::Relaxed);
     }
@@ -464,7 +479,10 @@ impl RuntimeEpochOracle {
     pub fn notify_epoch_update(&self, module: RuntimeModule, update_epoch: EpochId, now: Time) {
         let current_epoch = {
             let states = self.module_states.read();
-            states.get(&module).map(|s| s.current_epoch).unwrap_or(EpochId::new(1))
+            states
+                .get(&module)
+                .map(|s| s.current_epoch)
+                .unwrap_or(EpochId::new(1))
         };
 
         // Check for stale epoch usage
@@ -484,7 +502,8 @@ impl RuntimeEpochOracle {
 
     /// Check for epoch consistency violations across all modules.
     pub fn check_epoch_consistency(&self, now: Time) {
-        self.consistency_checks_performed.fetch_add(1, Ordering::Relaxed);
+        self.consistency_checks_performed
+            .fetch_add(1, Ordering::Relaxed);
 
         let states = self.module_states.read();
         let modules: Vec<_> = states.keys().copied().collect();
@@ -495,7 +514,9 @@ impl RuntimeEpochOracle {
                 let module_a = modules[i];
                 let module_b = modules[j];
 
-                if let (Some(state_a), Some(state_b)) = (states.get(&module_a), states.get(&module_b)) {
+                if let (Some(state_a), Some(state_b)) =
+                    (states.get(&module_a), states.get(&module_b))
+                {
                     let epoch_a = state_a.current_epoch;
                     let epoch_b = state_b.current_epoch;
                     let skew = epoch_a.as_u64().abs_diff(epoch_b.as_u64());
@@ -565,7 +586,8 @@ impl RuntimeEpochOracle {
         self.violations.write().clear();
         self.transitions_tracked.store(0, Ordering::Relaxed);
         self.violations_detected.store(0, Ordering::Relaxed);
-        self.consistency_checks_performed.store(0, Ordering::Relaxed);
+        self.consistency_checks_performed
+            .store(0, Ordering::Relaxed);
     }
 
     /// Get the current global epoch.
@@ -611,7 +633,8 @@ impl RuntimeEpochOracle {
     /// Get detailed module states for debugging.
     pub fn get_module_states(&self) -> Vec<(RuntimeModule, EpochId, bool)> {
         let states = self.module_states.read();
-        states.values()
+        states
+            .values()
             .map(|s| (s.module, s.current_epoch, s.is_transitioning()))
             .collect()
     }
@@ -696,16 +719,26 @@ mod tests {
         let now = Time::ZERO;
 
         // All modules start at epoch 1
-        assert_eq!(oracle.module_epoch(RuntimeModule::Scheduler), Some(EpochId::new(1)));
+        assert_eq!(
+            oracle.module_epoch(RuntimeModule::Scheduler),
+            Some(EpochId::new(1))
+        );
 
         // Normal transition for scheduler
         oracle.notify_epoch_transition_start(RuntimeModule::Scheduler, EpochId::new(1), now);
-        oracle.notify_epoch_transition_complete(RuntimeModule::Scheduler, EpochId::new(2), Time::from_nanos(1000));
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(2),
+            Time::from_nanos(1000),
+        );
 
         let stats = oracle.get_statistics();
         assert_eq!(stats.violations_detected, 0);
         assert_eq!(stats.transitions_tracked, 1);
-        assert_eq!(oracle.module_epoch(RuntimeModule::Scheduler), Some(EpochId::new(2)));
+        assert_eq!(
+            oracle.module_epoch(RuntimeModule::Scheduler),
+            Some(EpochId::new(2))
+        );
     }
 
     #[test]
@@ -731,7 +764,10 @@ mod tests {
 
         let violations = oracle.get_recent_violations(1);
         assert!(!violations.is_empty());
-        assert!(matches!(violations[0], RuntimeEpochViolation::EpochSkew { .. }));
+        assert!(matches!(
+            violations[0],
+            RuntimeEpochViolation::EpochSkew { .. }
+        ));
     }
 
     #[test]
@@ -759,7 +795,10 @@ mod tests {
         assert_eq!(stats.violations_detected, 1);
 
         let violations = oracle.get_recent_violations(1);
-        assert!(matches!(violations[0], RuntimeEpochViolation::SlowTransition { .. }));
+        assert!(matches!(
+            violations[0],
+            RuntimeEpochViolation::SlowTransition { .. }
+        ));
     }
 
     #[test]
@@ -779,7 +818,10 @@ mod tests {
         assert_eq!(stats.violations_detected, 1);
 
         let violations = oracle.get_recent_violations(1);
-        assert!(matches!(violations[0], RuntimeEpochViolation::StaleEpochUpdate { .. }));
+        assert!(matches!(
+            violations[0],
+            RuntimeEpochViolation::StaleEpochUpdate { .. }
+        ));
     }
 
     #[test]
@@ -793,7 +835,11 @@ mod tests {
         assert!(result.is_ok());
 
         // Create a violation by advancing one module too far
-        oracle.notify_epoch_transition_complete(RuntimeModule::Scheduler, EpochId::new(10), Time::ZERO);
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(10),
+            Time::ZERO,
+        );
 
         // Check should now return error
         let result = oracle.check(Time::ZERO);
@@ -807,7 +853,11 @@ mod tests {
         let oracle = RuntimeEpochOracle::with_default_config();
 
         // Advance some epochs and create violations
-        oracle.notify_epoch_transition_complete(RuntimeModule::Scheduler, EpochId::new(5), Time::ZERO);
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(5),
+            Time::ZERO,
+        );
         oracle.check_epoch_consistency(Time::ZERO);
 
         let stats_before = oracle.get_statistics();
@@ -837,8 +887,16 @@ mod tests {
         assert_eq!(oracle.global_epoch().as_u64(), 1);
 
         // Advance some modules
-        oracle.notify_epoch_transition_complete(RuntimeModule::Scheduler, EpochId::new(3), Time::ZERO);
-        oracle.notify_epoch_transition_complete(RuntimeModule::TaskTable, EpochId::new(2), Time::ZERO);
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(3),
+            Time::ZERO,
+        );
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::TaskTable,
+            EpochId::new(2),
+            Time::ZERO,
+        );
 
         // Global epoch should be the maximum
         assert_eq!(oracle.global_epoch().as_u64(), 3);
@@ -855,7 +913,11 @@ mod tests {
         assert_eq!(module_states.len(), RuntimeModule::all_modules().len());
 
         for &expected_module in RuntimeModule::all_modules() {
-            assert!(module_states.iter().any(|(module, _, _)| *module == expected_module));
+            assert!(
+                module_states
+                    .iter()
+                    .any(|(module, _, _)| *module == expected_module)
+            );
         }
     }
 }

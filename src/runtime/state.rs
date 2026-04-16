@@ -1540,7 +1540,8 @@ impl RuntimeState {
         self.metrics.obligation_discharged(info.region);
 
         // Track obligation settlement work in debt monitor
-        let cancel_reason = CancelReason::with_user_reason(format!("obligation_abort_{:?}", info.reason));
+        let cancel_reason =
+            CancelReason::with_user_reason(format!("obligation_abort_{:?}", info.reason));
         self.debt_monitor.queue_work(
             crate::observability::WorkType::ObligationSettlement,
             format!("obligation_{}_{}", info.id, info.holder),
@@ -2292,7 +2293,8 @@ impl RuntimeState {
         self.record_finalizer_registration(finalizer_id, region_id);
 
         // Track finalizer work in debt monitor
-        let cancel_reason = CancelReason::with_user_reason("sync_finalizer_registration".to_string());
+        let cancel_reason =
+            CancelReason::with_user_reason("sync_finalizer_registration".to_string());
         self.debt_monitor.queue_work(
             crate::observability::WorkType::RegionCleanup,
             format!("sync_finalizer_{}_{}", finalizer_id, region_id),
@@ -2340,7 +2342,8 @@ impl RuntimeState {
         self.record_finalizer_registration(finalizer_id, region_id);
 
         // Track async finalizer work in debt monitor
-        let cancel_reason = CancelReason::with_user_reason("async_finalizer_registration".to_string());
+        let cancel_reason =
+            CancelReason::with_user_reason("async_finalizer_registration".to_string());
         self.debt_monitor.queue_work(
             crate::observability::WorkType::RegionCleanup,
             format!("async_finalizer_{}_{}", finalizer_id, region_id),

@@ -63,7 +63,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-
 #[cfg(feature = "cancel-correctness-oracle")]
 macro_rules! oracle_op {
     ($op:expr) => {

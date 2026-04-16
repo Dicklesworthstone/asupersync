@@ -577,7 +577,8 @@ impl EpochConsistencyTracker {
                 detected_at,
                 max_skew,
             } => {
-                let affected_modules: Vec<String> = modules.iter()
+                let affected_modules: Vec<String> = modules
+                    .iter()
                     .map(|(module, epoch)| format!("{}@{}", module, epoch))
                     .collect();
 
@@ -776,7 +777,11 @@ impl EpochConsistencyTracker {
     /// This method is useful for creating diagnostic commands that can reproduce
     /// specific epoch consistency issues for debugging purposes.
     #[must_use]
-    pub fn generate_replay_command(&self, scenario_type: &str, additional_args: &[(&str, &str)]) -> String {
+    pub fn generate_replay_command(
+        &self,
+        scenario_type: &str,
+        additional_args: &[(&str, &str)],
+    ) -> String {
         let base_cmd = format!("epoch-tracker-replay --scenario {}", scenario_type);
 
         let args: Vec<String> = additional_args
@@ -806,7 +811,11 @@ impl EpochConsistencyTracker {
             total_modules = records.len(),
             total_transitions = total_transitions,
             violation_count = violation_count,
-            consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
+            consistency_level = if self.config.strict_ordering {
+                "strict"
+            } else {
+                "relaxed"
+            },
             max_epoch_skew_allowed = self.config.max_epoch_skew,
             slow_transition_threshold_ns = self.config.slow_transition_threshold_ns,
             "epoch_tracker_state"
@@ -850,10 +859,7 @@ impl EpochConsistencyTracker {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.config.enabled = enabled;
 
-        info!(
-            enabled = enabled,
-            "epoch_tracker_enabled_changed"
-        );
+        info!(enabled = enabled, "epoch_tracker_enabled_changed");
     }
 
     /// Updates the slow transition threshold dynamically.
@@ -1079,10 +1085,8 @@ mod tests {
         tracker.log_epoch_state();
 
         // Test replay command generation
-        let replay_cmd = tracker.generate_replay_command(
-            "test_scenario",
-            &[("module", "Scheduler"), ("epoch", "1")]
-        );
+        let replay_cmd = tracker
+            .generate_replay_command("test_scenario", &[("module", "Scheduler"), ("epoch", "1")]);
         crate::assert_with_log!(
             replay_cmd.contains("epoch-tracker-replay"),
             "replay command generated",

@@ -4,12 +4,12 @@
 //! potentially leading to resource exhaustion or delayed cleanup. Provides
 //! early warning and debt management capabilities.
 
-use crate::types::{Time, CancelReason, CancelKind};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, Instant};
+use crate::types::{CancelKind, CancelReason, Time};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Configuration for the cancellation debt monitor.
 #[derive(Debug, Clone)]
@@ -36,9 +36,9 @@ impl Default for CancellationDebtConfig {
             max_queue_depth: 10_000,
             max_pending_duration: Duration::from_secs(30),
             rate_sampling_window: Duration::from_secs(60),
-            min_processing_rate: 100.0, // 100 items/sec minimum
+            min_processing_rate: 100.0,      // 100 items/sec minimum
             debt_threshold_percentage: 75.0, // 75% of capacity
-            enable_auto_relief: false, // Conservative default
+            enable_auto_relief: false,       // Conservative default
             max_tracking_memory_mb: 50,
         }
     }
@@ -168,7 +168,8 @@ impl ProcessingStats {
 
     fn record_processing(&mut self, count: usize, now: SystemTime) {
         self.items_processed.push_back((now, count));
-        self.total_processed.fetch_add(count as u64, Ordering::Relaxed);
+        self.total_processed
+            .fetch_add(count as u64, Ordering::Relaxed);
 
         // Keep only samples within the window
         let cutoff = now - Duration::from_secs(60); // 1 minute window
@@ -183,12 +184,17 @@ impl ProcessingStats {
 
     fn calculate_rate(&mut self, window: Duration, now: SystemTime) -> f64 {
         // Only recalculate if enough time has passed
-        if now.duration_since(self.last_rate_time).unwrap_or(Duration::ZERO) < Duration::from_secs(5) {
+        if now
+            .duration_since(self.last_rate_time)
+            .unwrap_or(Duration::ZERO)
+            < Duration::from_secs(5)
+        {
             return self.last_rate;
         }
 
         let cutoff = now - window;
-        let total_in_window: usize = self.items_processed
+        let total_in_window: usize = self
+            .items_processed
             .iter()
             .filter(|&&(time, _)| time >= cutoff)
             .map(|&(_, count)| count)
@@ -269,18 +275,17 @@ impl CancellationDebtMonitor {
         };
 
         // Update memory usage estimate
-        let work_size = std::mem::size_of::<PendingWork>() +
-                       work.entity_id.len() +
-                       work.cancel_reason.len() +
-                       work.cancel_kind.len();
-        self.memory_usage_bytes.fetch_add(work_size, Ordering::Relaxed);
+        let work_size = std::mem::size_of::<PendingWork>()
+            + work.entity_id.len()
+            + work.cancel_reason.len()
+            + work.cancel_kind.len();
+        self.memory_usage_bytes
+            .fetch_add(work_size, Ordering::Relaxed);
 
         // Add to pending work
         {
             let mut pending = self.pending_work.lock().unwrap();
-            pending.entry(work_type)
-                .or_default()
-                .insert(work_id, work);
+            pending.entry(work_type).or_default().insert(work_id, work);
         }
 
         // Check if we need to trigger debt alerts
@@ -307,16 +312,18 @@ impl CancellationDebtMonitor {
 
         if let Some((work_type, work)) = found_work {
             // Update memory usage
-            let work_size = std::mem::size_of::<PendingWork>() +
-                           work.entity_id.len() +
-                           work.cancel_reason.len() +
-                           work.cancel_kind.len();
-            self.memory_usage_bytes.fetch_sub(work_size, Ordering::Relaxed);
+            let work_size = std::mem::size_of::<PendingWork>()
+                + work.entity_id.len()
+                + work.cancel_reason.len()
+                + work.cancel_kind.len();
+            self.memory_usage_bytes
+                .fetch_sub(work_size, Ordering::Relaxed);
 
             // Update processing statistics
             {
                 let mut stats = self.processing_stats.lock().unwrap();
-                stats.entry(work_type)
+                stats
+                    .entry(work_type)
                     .or_insert_with(ProcessingStats::new)
                     .record_processing(1, now);
             }
@@ -343,11 +350,12 @@ impl CancellationDebtMonitor {
                         *completed_by_type.entry(*work_type).or_default() += 1;
 
                         // Update memory usage
-                        let work_size = std::mem::size_of::<PendingWork>() +
-                                       work.entity_id.len() +
-                                       work.cancel_reason.len() +
-                                       work.cancel_kind.len();
-                        self.memory_usage_bytes.fetch_sub(work_size, Ordering::Relaxed);
+                        let work_size = std::mem::size_of::<PendingWork>()
+                            + work.entity_id.len()
+                            + work.cancel_reason.len()
+                            + work.cancel_kind.len();
+                        self.memory_usage_bytes
+                            .fetch_sub(work_size, Ordering::Relaxed);
                         break;
                     }
                 }
@@ -358,7 +366,8 @@ impl CancellationDebtMonitor {
         {
             let mut stats = self.processing_stats.lock().unwrap();
             for (work_type, count) in completed_by_type {
-                stats.entry(work_type)
+                stats
+                    .entry(work_type)
                     .or_insert_with(ProcessingStats::new)
                     .record_processing(count, now);
             }
@@ -385,7 +394,9 @@ impl CancellationDebtMonitor {
 
             for work in work_map.values() {
                 // Track queue depth per entity
-                *entity_queue_depths.entry(work.entity_id.clone()).or_default() += 1;
+                *entity_queue_depths
+                    .entry(work.entity_id.clone())
+                    .or_default() += 1;
 
                 // Find oldest work
                 if let Ok(age) = now.duration_since(work.queued_at) {
@@ -412,7 +423,8 @@ impl CancellationDebtMonitor {
         };
 
         // Memory usage
-        let memory_usage_mb = self.memory_usage_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
+        let memory_usage_mb =
+            self.memory_usage_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
 
         // Current alert level
         let alert_level = *self.current_alert_level.lock().unwrap();
@@ -500,7 +512,10 @@ impl CancellationDebtMonitor {
         if cleaned_count > 0 {
             self.generate_alert(DebtAlert {
                 level: DebtAlertLevel::Emergency,
-                message: format!("Emergency cleanup removed {} stale work items", cleaned_count),
+                message: format!(
+                    "Emergency cleanup removed {} stale work items",
+                    cleaned_count
+                ),
                 work_type: None,
                 entity_id: None,
                 metric_value: cleaned_count as f64,
@@ -538,26 +553,31 @@ impl CancellationDebtMonitor {
     /// Calculate alert level based on current snapshot.
     fn calculate_alert_level(&self, snapshot: &DebtSnapshot) -> DebtAlertLevel {
         // Emergency: Memory usage > 90% or debt > 95%
-        if snapshot.memory_usage_mb > (self.config.max_tracking_memory_mb as f64 * 0.9) ||
-           snapshot.debt_percentage > 95.0 {
+        if snapshot.memory_usage_mb > (self.config.max_tracking_memory_mb as f64 * 0.9)
+            || snapshot.debt_percentage > 95.0
+        {
             return DebtAlertLevel::Emergency;
         }
 
         // Critical: Debt > 90% or very slow processing
-        if snapshot.debt_percentage > 90.0 ||
-           (snapshot.processing_rate < self.config.min_processing_rate * 0.1 && snapshot.total_pending > 100) {
+        if snapshot.debt_percentage > 90.0
+            || (snapshot.processing_rate < self.config.min_processing_rate * 0.1
+                && snapshot.total_pending > 100)
+        {
             return DebtAlertLevel::Critical;
         }
 
         // Warning: Debt above threshold or slow processing
-        if snapshot.debt_percentage > self.config.debt_threshold_percentage ||
-           snapshot.processing_rate < self.config.min_processing_rate * 0.5 {
+        if snapshot.debt_percentage > self.config.debt_threshold_percentage
+            || snapshot.processing_rate < self.config.min_processing_rate * 0.5
+        {
             return DebtAlertLevel::Warning;
         }
 
         // Watch: Debt > 50% or oldest work is aging
-        if snapshot.debt_percentage > 50.0 ||
-           snapshot.oldest_work_age > self.config.max_pending_duration * 2 {
+        if snapshot.debt_percentage > 50.0
+            || snapshot.oldest_work_age > self.config.max_pending_duration * 2
+        {
             return DebtAlertLevel::Watch;
         }
 
@@ -565,10 +585,19 @@ impl CancellationDebtMonitor {
     }
 
     /// Generate alert for debt level changes.
-    fn generate_debt_level_alert(&self, old_level: DebtAlertLevel, new_level: DebtAlertLevel, snapshot: &DebtSnapshot) {
+    fn generate_debt_level_alert(
+        &self,
+        old_level: DebtAlertLevel,
+        new_level: DebtAlertLevel,
+        snapshot: &DebtSnapshot,
+    ) {
         let message = match new_level {
-            DebtAlertLevel::Emergency => "EMERGENCY: Cancellation debt overflow detected".to_string(),
-            DebtAlertLevel::Critical => "CRITICAL: Severe cancellation debt accumulation".to_string(),
+            DebtAlertLevel::Emergency => {
+                "EMERGENCY: Cancellation debt overflow detected".to_string()
+            }
+            DebtAlertLevel::Critical => {
+                "CRITICAL: Severe cancellation debt accumulation".to_string()
+            }
             DebtAlertLevel::Warning => "WARNING: Elevated cancellation debt levels".to_string(),
             DebtAlertLevel::Watch => "WATCH: Cancellation debt increasing".to_string(),
             DebtAlertLevel::Normal => "INFO: Cancellation debt levels normal".to_string(),
@@ -623,7 +652,10 @@ impl CancellationDebtMonitor {
             if stat.last_rate < self.config.min_processing_rate * 0.1 {
                 self.generate_alert(DebtAlert {
                     level: DebtAlertLevel::Warning,
-                    message: format!("Very slow processing rate for {:?}: {:.1}/sec", work_type, stat.last_rate),
+                    message: format!(
+                        "Very slow processing rate for {:?}: {:.1}/sec",
+                        work_type, stat.last_rate
+                    ),
                     work_type: Some(*work_type),
                     entity_id: None,
                     metric_value: stat.last_rate,
@@ -680,7 +712,7 @@ impl CancellationDebtMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CancelReason, CancelKind};
+    use crate::types::{CancelKind, CancelReason};
 
     #[test]
     fn test_debt_monitor_creation() {
@@ -708,7 +740,11 @@ mod tests {
 
         let snapshot = monitor.get_debt_snapshot();
         assert_eq!(snapshot.total_pending, 1);
-        assert!(snapshot.pending_by_type.contains_key(&WorkType::TaskCleanup));
+        assert!(
+            snapshot
+                .pending_by_type
+                .contains_key(&WorkType::TaskCleanup)
+        );
 
         let completed = monitor.complete_work(work_id);
         assert!(completed);
@@ -745,17 +781,19 @@ mod tests {
     fn test_batch_completion() {
         let monitor = CancellationDebtMonitor::default();
 
-        let work_ids: Vec<u64> = (0..5).map(|i| {
-            monitor.queue_work(
-                WorkType::ResourceFinalization,
-                format!("resource-{}", i),
-                1,
-                50,
-                &CancelReason::with_user_reason("batch_test".to_string()),
-                CancelKind::User,
-                Vec::new(),
-            )
-        }).collect();
+        let work_ids: Vec<u64> = (0..5)
+            .map(|i| {
+                monitor.queue_work(
+                    WorkType::ResourceFinalization,
+                    format!("resource-{}", i),
+                    1,
+                    50,
+                    &CancelReason::with_user_reason("batch_test".to_string()),
+                    CancelKind::User,
+                    Vec::new(),
+                )
+            })
+            .collect();
 
         let completed = monitor.complete_work_batch(&work_ids);
         assert_eq!(completed, 5);

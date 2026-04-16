@@ -63,7 +63,7 @@ impl Default for CancelDebtConfig {
         Self {
             max_debt_items: 1000,
             measurement_window_ns: 10_000_000_000, // 10 seconds
-            max_debt_rate_per_sec: 100.0, // 100 items/second
+            max_debt_rate_per_sec: 100.0,          // 100 items/second
             max_violations: 1000,
             panic_on_violation: false,
             capture_stack_traces: true,
@@ -259,7 +259,8 @@ impl QueueState {
             self.pending_items.pop_front();
         }
 
-        self.completion_times.push_back((completion_time, actual_completed));
+        self.completion_times
+            .push_back((completion_time, actual_completed));
         self.last_completion = Some(completion_time);
         self.total_completed += actual_completed as u64;
 
@@ -274,7 +275,10 @@ impl QueueState {
     }
 
     fn estimated_memory_usage(&self) -> usize {
-        self.pending_items.iter().map(|item| item.estimated_size_bytes).sum()
+        self.pending_items
+            .iter()
+            .map(|item| item.estimated_size_bytes)
+            .sum()
     }
 
     fn completion_rate_over_window(&self, window_ns: u64, now: Time) -> f64 {
@@ -283,7 +287,8 @@ impl QueueState {
         }
 
         let cutoff_time = Time::from_nanos(now.as_nanos().saturating_sub(window_ns));
-        let completions_in_window: usize = self.completion_times
+        let completions_in_window: usize = self
+            .completion_times
             .iter()
             .filter(|(time, _)| *time >= cutoff_time)
             .map(|(_, count)| *count)
@@ -299,7 +304,8 @@ impl QueueState {
         }
 
         let cutoff_time = Time::from_nanos(now.as_nanos().saturating_sub(window_ns));
-        let items_added_in_window = self.pending_items
+        let items_added_in_window = self
+            .pending_items
             .iter()
             .filter(|item| item.created_at >= cutoff_time)
             .count();
@@ -382,7 +388,8 @@ impl CancelDebtOracle {
         };
 
         let mut states = self.queue_states.write();
-        let state = states.entry(queue_type.to_string())
+        let state = states
+            .entry(queue_type.to_string())
             .or_insert_with(|| QueueState::new(queue_type.to_string()));
 
         state.add_work_item(item);
@@ -390,7 +397,8 @@ impl CancelDebtOracle {
 
     /// Record completion of cleanup work items from a queue.
     pub fn on_work_items_completed(&self, queue_type: &str, count: usize, completion_time: Time) {
-        self.completions_tracked.fetch_add(count as u64, Ordering::Relaxed);
+        self.completions_tracked
+            .fetch_add(count as u64, Ordering::Relaxed);
 
         let mut states = self.queue_states.write();
         if let Some(state) = states.get_mut(queue_type) {
@@ -461,8 +469,15 @@ impl CancelDebtOracle {
     /// Get detailed queue states for debugging.
     pub fn get_queue_states(&self) -> Vec<(String, usize, usize)> {
         let states = self.queue_states.read();
-        states.values()
-            .map(|s| (s.queue_type.clone(), s.current_debt(), s.estimated_memory_usage()))
+        states
+            .values()
+            .map(|s| {
+                (
+                    s.queue_type.clone(),
+                    s.current_debt(),
+                    s.estimated_memory_usage(),
+                )
+            })
             .collect()
     }
 
@@ -512,7 +527,8 @@ impl CancelDebtOracle {
 
         // Check resource pressure (warn if using > 1MB)
         let memory_usage = state.estimated_memory_usage();
-        if memory_usage > 1_048_576 { // 1MB threshold
+        if memory_usage > 1_048_576 {
+            // 1MB threshold
             let violation = CancelDebtViolation::ResourcePressure {
                 queue_type: state.queue_type.clone(),
                 estimated_memory_bytes: memory_usage,
@@ -659,7 +675,7 @@ mod tests {
         init_test_logging();
 
         let config = CancelDebtConfig {
-            max_debt_rate_per_sec: 1.0, // Very low rate for testing
+            max_debt_rate_per_sec: 1.0,           // Very low rate for testing
             measurement_window_ns: 1_000_000_000, // 1 second
             ..Default::default()
         };
@@ -685,9 +701,11 @@ mod tests {
         let violations = oracle.get_recent_violations(5);
         assert!(!violations.is_empty());
         // Should have both threshold and rate violations
-        assert!(violations.iter().any(|v| matches!(
-            v, CancelDebtViolation::DebtAccumulationTooFast { .. }
-        )));
+        assert!(
+            violations
+                .iter()
+                .any(|v| matches!(v, CancelDebtViolation::DebtAccumulationTooFast { .. }))
+        );
     }
 
     #[test]
@@ -729,9 +747,11 @@ mod tests {
         assert!(stats.violations_detected > 0);
 
         let violations = oracle.get_recent_violations(5);
-        assert!(violations.iter().any(|v| matches!(
-            v, CancelDebtViolation::CleanupStall { .. }
-        )));
+        assert!(
+            violations
+                .iter()
+                .any(|v| matches!(v, CancelDebtViolation::CleanupStall { .. }))
+        );
     }
 
     #[test]
@@ -745,7 +765,8 @@ mod tests {
         assert!(result.is_ok());
 
         // Create a violation by exceeding threshold
-        for i in 0..1500 { // Above default threshold of 1000
+        for i in 0..1500 {
+            // Above default threshold of 1000
             oracle.on_work_item_added(
                 "finalizers",
                 Some(TaskId::from_u64(i)),
@@ -809,8 +830,10 @@ mod tests {
         oracle.check_debt_accumulation(Time::ZERO);
 
         let violations = oracle.get_recent_violations(10);
-        assert!(violations.iter().any(|v| matches!(
-            v, CancelDebtViolation::ResourcePressure { .. }
-        )));
+        assert!(
+            violations
+                .iter()
+                .any(|v| matches!(v, CancelDebtViolation::ResourcePressure { .. }))
+        );
     }
 }

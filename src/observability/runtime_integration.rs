@@ -12,9 +12,9 @@ use crate::observability::cancellation_tracer::{
 };
 use crate::record::{region::RegionState, task::TaskPhase};
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
-use std::sync::Arc;
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Integration hooks for cancellation tracing in the runtime.
 #[derive(Debug)]
@@ -110,7 +110,7 @@ impl CancellationTracerIntegration {
                 cancel_reason,
                 cancel_kind,
                 "Cancelling".to_string(),
-                None, // No parent for acknowledgment step
+                None,  // No parent for acknowledgment step
                 false, // Still propagating
             );
         }
@@ -151,8 +151,8 @@ impl CancellationTracerIntegration {
                 let region_traces = self.region_traces.read();
 
                 // If no other tasks or regions reference this trace, complete it
-                !task_traces.values().any(|&id| id == trace_id) &&
-                !region_traces.values().any(|&id| id == trace_id)
+                !task_traces.values().any(|&id| id == trace_id)
+                    && !region_traces.values().any(|&id| id == trace_id)
             };
 
             if should_complete_trace {
@@ -223,7 +223,10 @@ impl CancellationTracerIntegration {
     ) {
         if let Some(&trace_id) = self.region_traces.read().get(&region_id) {
             // Only record if this is a cancellation-related transition
-            if matches!(to_state, RegionState::Closing | RegionState::Draining | RegionState::Finalizing) {
+            if matches!(
+                to_state,
+                RegionState::Closing | RegionState::Draining | RegionState::Finalizing
+            ) {
                 if let (Some(reason), Some(kind)) = (cancel_reason, cancel_kind) {
                     self.tracer.record_step(
                         trace_id,
@@ -251,8 +254,8 @@ impl CancellationTracerIntegration {
                 let region_traces = self.region_traces.read();
 
                 // If no other tasks or regions reference this trace, complete it
-                !task_traces.values().any(|&id| id == trace_id) &&
-                !region_traces.values().any(|&id| id == trace_id)
+                !task_traces.values().any(|&id| id == trace_id)
+                    && !region_traces.values().any(|&id| id == trace_id)
             };
 
             if should_complete_trace {
