@@ -112,7 +112,7 @@ where
     Fut: Future<Output = R>,
 {
     init_test_logging();
-    let lab = test_lab();
+    let _lab = test_lab();
     // FIXME: LabRuntime should have a block_on method or similar
     // For now, use a simple pattern - this needs to be properly implemented
     todo!("LabRuntime block_on method needs to be implemented")
