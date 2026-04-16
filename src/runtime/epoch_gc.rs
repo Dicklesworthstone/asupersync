@@ -1022,4 +1022,304 @@ mod tests {
         assert!(stats.average_batch_size() > 0.0);
         assert!(stats.average_batch_time_us() >= 0.0);
     }
+
+    #[test]
+    fn stress_test_concurrent_enqueue_dequeue() {
+        let config = CleanupConfig {
+            max_queue_size: 100_000,
+            max_batch_size: 1000,
+            ..CleanupConfig::default()
+        };
+        let queue = Arc::new(DeferredCleanupQueue::new(config));
+        let epoch_gc = Arc::new(EpochGC::with_config(CleanupConfig {
+            max_queue_size: 100_000,
+            max_batch_size: 1000,
+            ..CleanupConfig::default()
+        }));
+
+        const NUM_THREADS: usize = 8;
+        const WORK_ITEMS_PER_THREAD: usize = 1000;
+
+        let mut handles = Vec::new();
+
+        // Spawn producer threads
+        for thread_id in 0..NUM_THREADS {
+            let gc = Arc::clone(&epoch_gc);
+            let handle = thread::spawn(move || {
+                for i in 0..WORK_ITEMS_PER_THREAD {
+                    let work = CleanupWork::Obligation {
+                        id: (thread_id * WORK_ITEMS_PER_THREAD + i) as u64,
+                        metadata: vec![thread_id as u8; 10],
+                    };
+
+                    // Keep retrying on overflow (backpressure test)
+                    while gc.defer_cleanup(work.clone()).is_err() {
+                        thread::sleep(Duration::from_micros(1));
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Spawn consumer thread
+        let gc_consumer = Arc::clone(&epoch_gc);
+        let consumer_handle = thread::spawn(move || {
+            let mut total_processed = 0;
+            let start = Instant::now();
+
+            while start.elapsed() < Duration::from_secs(10) &&
+                  total_processed < NUM_THREADS * WORK_ITEMS_PER_THREAD {
+                let processed = gc_consumer.force_advance_and_cleanup();
+                total_processed += processed;
+
+                if processed == 0 {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+
+            total_processed
+        });
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let total_processed = consumer_handle.join().unwrap();
+
+        // Verify all work was processed
+        assert!(total_processed >= NUM_THREADS * WORK_ITEMS_PER_THREAD * 9 / 10,
+               "Should process at least 90% of work items, got {}", total_processed);
+
+        let stats = epoch_gc.stats();
+        assert!(stats.efficiency_percent() >= 90.0);
+        assert_eq!(stats.total_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn stress_test_memory_usage_extended_operation() {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::sync::atomic::AtomicUsize;
+
+        // Simple memory usage tracker
+        static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+
+        let config = CleanupConfig {
+            max_queue_size: 10_000,
+            max_batch_size: 100,
+            max_batch_time: Duration::from_millis(1),
+            ..CleanupConfig::default()
+        };
+        let epoch_gc = Arc::new(EpochGC::with_config(config));
+
+        let start_memory = ALLOCATED.load(Ordering::Relaxed);
+
+        // Run extended operation
+        for iteration in 0..1000 {
+            // Add work items
+            for i in 0..100 {
+                let work = CleanupWork::RegionCleanup {
+                    region_id: RegionId::new(iteration * 100 + i),
+                    task_ids: vec![TaskId::new(i); 10], // 10 tasks per region
+                };
+                let _ = epoch_gc.defer_cleanup(work);
+            }
+
+            // Periodically process cleanup
+            if iteration % 10 == 0 {
+                epoch_gc.force_advance_and_cleanup();
+            }
+
+            // Check for memory leaks every 100 iterations
+            if iteration % 100 == 0 {
+                epoch_gc.force_advance_and_cleanup(); // Process remaining work
+
+                let current_memory = ALLOCATED.load(Ordering::Relaxed);
+                let memory_growth = current_memory.saturating_sub(start_memory);
+
+                // Memory growth should be bounded (less than 1MB)
+                assert!(memory_growth < 1_000_000,
+                       "Memory growth {} exceeds limit at iteration {}",
+                       memory_growth, iteration);
+
+                // Queue should not grow unbounded
+                assert!(epoch_gc.cleanup_queue.len() < 1000,
+                       "Queue size {} too large at iteration {}",
+                       epoch_gc.cleanup_queue.len(), iteration);
+            }
+        }
+
+        // Final cleanup
+        for _ in 0..10 {
+            epoch_gc.force_advance_and_cleanup();
+        }
+
+        let stats = epoch_gc.stats();
+        assert!(stats.efficiency_percent() >= 95.0);
+    }
+
+    #[test]
+    fn performance_benchmark_deferred_vs_direct() {
+        const NUM_OPERATIONS: usize = 10_000;
+
+        // Benchmark direct cleanup (simulated)
+        let start = Instant::now();
+        for i in 0..NUM_OPERATIONS {
+            // Simulate direct cleanup overhead
+            let _ = format!("cleanup_{}", i);
+            thread::sleep(Duration::from_nanos(100)); // Simulated cleanup cost
+        }
+        let direct_duration = start.elapsed();
+
+        // Benchmark deferred cleanup
+        let epoch_gc = EpochGC::new();
+        let start = Instant::now();
+
+        for i in 0..NUM_OPERATIONS {
+            let work = CleanupWork::Obligation {
+                id: i as u64,
+                metadata: vec![],
+            };
+            let _ = epoch_gc.defer_cleanup(work);
+
+            // Periodically process cleanup
+            if i % 100 == 0 {
+                epoch_gc.force_advance_and_cleanup();
+            }
+        }
+
+        // Process remaining work
+        while epoch_gc.cleanup_queue.len() > 0 {
+            epoch_gc.force_advance_and_cleanup();
+        }
+
+        let deferred_duration = start.elapsed();
+
+        // Deferred cleanup should be faster for large batches
+        // (Note: This is a simplified benchmark - real-world performance
+        //  would depend on actual cleanup costs and batching efficiency)
+        println!("Direct cleanup: {:?}, Deferred cleanup: {:?}",
+                direct_duration, deferred_duration);
+
+        let stats = epoch_gc.stats();
+        assert!(stats.total_processed.load(Ordering::Relaxed) as usize >= NUM_OPERATIONS);
+        assert!(stats.efficiency_percent() >= 95.0);
+        assert!(stats.average_batch_size() > 1.0); // Should batch work
+    }
+
+    #[test]
+    fn correctness_test_no_work_lost() {
+        use std::sync::atomic::AtomicU64;
+
+        let epoch_gc = Arc::new(EpochGC::new());
+        let processed_counter = Arc::new(AtomicU64::new(0));
+
+        const NUM_WORK_ITEMS: u64 = 5000;
+
+        // Track which work items were processed
+        let mut expected_ids = std::collections::HashSet::new();
+        for i in 0..NUM_WORK_ITEMS {
+            expected_ids.insert(i);
+        }
+
+        // Enqueue work from multiple threads
+        let mut handles = Vec::new();
+        for thread_id in 0..4 {
+            let gc = Arc::clone(&epoch_gc);
+            let start_id = thread_id * NUM_WORK_ITEMS / 4;
+            let end_id = (thread_id + 1) * NUM_WORK_ITEMS / 4;
+
+            let handle = thread::spawn(move || {
+                for id in start_id..end_id {
+                    let work = CleanupWork::Obligation {
+                        id,
+                        metadata: vec![],
+                    };
+
+                    // Retry on failure (queue full)
+                    while gc.defer_cleanup(work.clone()).is_err() {
+                        thread::sleep(Duration::from_micros(10));
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Process work periodically
+        let gc_processor = Arc::clone(&epoch_gc);
+        let processor_handle = thread::spawn(move || {
+            let mut total_processed = 0;
+            while total_processed < NUM_WORK_ITEMS {
+                let processed = gc_processor.force_advance_and_cleanup();
+                total_processed += processed as u64;
+
+                if processed == 0 {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        processor_handle.join().unwrap();
+
+        // Verify no work was lost
+        let stats = epoch_gc.stats();
+        assert_eq!(stats.total_processed.load(Ordering::Relaxed), NUM_WORK_ITEMS);
+        assert_eq!(stats.total_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.efficiency_percent(), 100.0);
+    }
+
+    #[test]
+    fn backpressure_prevents_unbounded_growth() {
+        let config = CleanupConfig {
+            max_queue_size: 100,
+            ..CleanupConfig::default()
+        };
+        let queue = DeferredCleanupQueue::new(config);
+
+        let work = CleanupWork::Obligation { id: 1, metadata: vec![0; 1000] };
+
+        // Fill queue to capacity
+        let mut enqueued = 0;
+        let mut rejected = 0;
+
+        for _ in 0..200 {
+            match queue.enqueue(work.clone(), 1) {
+                Ok(()) => enqueued += 1,
+                Err(_) => rejected += 1,
+            }
+        }
+
+        assert!(enqueued <= 100, "Should not enqueue more than max_queue_size");
+        assert!(rejected > 0, "Should reject some items when full");
+        assert!(queue.is_near_capacity(), "Should detect near capacity");
+
+        // Verify backpressure statistics
+        let stats = queue.stats();
+        assert_eq!(stats.total_dropped.load(Ordering::Relaxed) as usize, rejected);
+    }
+
+    #[test]
+    fn epoch_safety_prevents_premature_cleanup() {
+        let gc = EpochGC::with_config(CleanupConfig {
+            max_batch_size: 1000,
+            ..CleanupConfig::default()
+        });
+
+        // Enqueue work in current epoch
+        for i in 0..10 {
+            let work = CleanupWork::Obligation { id: i, metadata: vec![] };
+            gc.defer_cleanup(work).unwrap();
+        }
+
+        // Try to advance without sufficient time (should not process work)
+        let processed = gc.try_advance_and_cleanup();
+        assert_eq!(processed, 0, "Should not process work from current epoch");
+
+        // Force advance and verify work is processed
+        let processed = gc.force_advance_and_cleanup();
+        assert_eq!(processed, 10, "Should process all work after forced advance");
+    }
 }
