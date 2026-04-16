@@ -646,9 +646,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from_u64(2);
+        let child_task = TaskId::new_for_test(2, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from_u64(2);
+        let child_region = RegionId::new_for_test(2, 0);
 
         // Register parent-child relationship
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
@@ -680,9 +680,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from_u64(2);
+        let child_task = TaskId::new_for_test(2, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from_u64(2);
+        let child_region = RegionId::new_for_test(2, 0);
 
         // Register parent-child relationship
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
@@ -722,9 +722,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from_u64(2);
+        let child_task = TaskId::new_for_test(2, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from_u64(2);
+        let child_region = RegionId::new_for_test(2, 0);
 
         // Register parent-child relationship
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
@@ -754,9 +754,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from_u64(2);
+        let child_task = TaskId::new_for_test(2, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from_u64(2);
+        let child_region = RegionId::new_for_test(2, 0);
 
         // Register parent-child relationship
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
@@ -790,9 +790,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from_u64(2);
+        let child_task = TaskId::new_for_test(2, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from_u64(2);
+        let child_region = RegionId::new_for_test(2, 0);
 
         // Register parent-child relationship
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
@@ -820,9 +820,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from_u64(2);
+        let child_task = TaskId::new_for_test(2, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from_u64(2);
+        let child_region = RegionId::new_for_test(2, 0);
 
         // Add some state
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
@@ -852,9 +852,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from(42);
+        let child_task = TaskId::new_for_test(42, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from(123);
+        let child_region = RegionId::new_for_test(123, 0);
 
         // Spawn a task - this should record the task-region mappings
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
@@ -864,7 +864,7 @@ mod tests {
             parent_task,
             parent_region,
             Time::from_nanos(1000),
-            CancelReason::UserCancelled,
+            CancelReason::user("test"),
         );
 
         // Wait for the ordering window to expire so missing child cancellation is detected
@@ -894,9 +894,9 @@ mod tests {
 
         let oracle = CancelOrderingOracle::with_default_config();
         let parent_task = TaskId::testing_default();
-        let child_task = TaskId::from_u64(2);
+        let child_task = TaskId::new_for_test(2, 0);
         let parent_region = RegionId::testing_default();
-        let child_region = RegionId::from_u64(2);
+        let child_region = RegionId::new_for_test(2, 0);
 
         oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
 
