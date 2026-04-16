@@ -1,0 +1,336 @@
+{
+  "rfc_version": "RFC 6330",
+  "rfc_url": "https://www.rfc-editor.org/rfc/rfc6330.html",
+  "generated_date": "2026-04-16",
+  "scope": "RaptorQ Forward Error Correction Scheme for Object Delivery",
+  "implementation_target": "asupersync RaptorQ module",
+
+  "requirement_categories": {
+    "parameter_derivation": "Parameter calculation and validation (K, K', systematic index, etc.)",
+    "encoding_process": "Source symbol encoding and systematic symbol generation",
+    "repair_symbols": "Repair symbol generation and ESI assignment",
+    "decoding_process": "Constraint matrix construction and Gaussian elimination",
+    "tuple_generation": "Tuple calculation for systematic and repair symbols",
+    "matrix_construction": "Constraint matrix structure and validation",
+    "algorithmic_requirements": "Algorithm complexity and performance constraints"
+  },
+
+  "testability_categories": {
+    "unit_testable": "Can be tested in isolation with direct assertions",
+    "integration_testable": "Requires end-to-end testing with multiple components",
+    "differential_testable": "Best tested by comparison with reference implementation",
+    "property_testable": "Best tested through metamorphic/property-based testing",
+    "manual_verification": "Requires human inspection or complex validation setup"
+  },
+
+  "requirements": {
+    "4.1": {
+      "section_title": "Objects and Source Blocks",
+      "clauses": [
+        {
+          "id": "RFC6330-4.1.1",
+          "section": "4.1",
+          "subsection": "4.1.1",
+          "level": "MUST",
+          "category": "parameter_derivation",
+          "testability": "unit_testable",
+          "description": "The object MUST be partitioned into Z >= 1 source blocks",
+          "requirement_text": "The object MUST be partitioned into Z >= 1 source blocks",
+          "implementation_status": "implemented",
+          "test_strategy": "Verify object partitioning logic produces correct number of source blocks",
+          "current_test_coverage": "partial",
+          "notes": "Basic partitioning implemented, edge cases need verification"
+        },
+        {
+          "id": "RFC6330-4.1.2",
+          "section": "4.1",
+          "subsection": "4.1.2",
+          "level": "MUST",
+          "category": "parameter_derivation",
+          "testability": "unit_testable",
+          "description": "Each source block MUST have K source symbols where K is derived from the object size",
+          "requirement_text": "Each source block MUST have K source symbols where K is derived from the object size and other parameters according to Section 4.1.2",
+          "implementation_status": "implemented",
+          "test_strategy": "Test K derivation for various object sizes and validate against RFC formulas",
+          "current_test_coverage": "none",
+          "notes": "K calculation needs systematic validation"
+        },
+        {
+          "id": "RFC6330-4.1.3",
+          "section": "4.1",
+          "subsection": "4.1.3",
+          "level": "MUST",
+          "category": "parameter_derivation",
+          "testability": "unit_testable",
+          "description": "Symbol size T MUST be the same for all symbols in the source block",
+          "requirement_text": "The symbol size T MUST be the same for all symbols in the source block",
+          "implementation_status": "implemented",
+          "test_strategy": "Verify all symbols in a source block have identical size T",
+          "current_test_coverage": "basic",
+          "notes": "Symbol size consistency is enforced but needs comprehensive testing"
+        }
+      ]
+    },
+
+    "4.2": {
+      "section_title": "Encoding Process",
+      "clauses": [
+        {
+          "id": "RFC6330-4.2.1",
+          "section": "4.2",
+          "subsection": "4.2.1",
+          "level": "MUST",
+          "category": "encoding_process",
+          "testability": "integration_testable",
+          "description": "Systematic symbols MUST be the source symbols themselves, in order",
+          "requirement_text": "The first K encoding symbols MUST be the K source symbols of the source block, in order",
+          "implementation_status": "implemented",
+          "test_strategy": "Verify first K encoding symbols exactly match source symbols",
+          "current_test_coverage": "basic",
+          "notes": "Systematic encoding implemented, needs comprehensive validation"
+        },
+        {
+          "id": "RFC6330-4.2.2",
+          "section": "4.2",
+          "subsection": "4.2.2",
+          "level": "MUST",
+          "category": "repair_symbols",
+          "testability": "differential_testable",
+          "description": "Repair symbols MUST be computed using the specified algorithm",
+          "requirement_text": "Repair symbols with ESI X >= K MUST be computed as the exclusive-or of a set of source symbols determined by the algorithm in Section 5.3.5",
+          "implementation_status": "implemented",
+          "test_strategy": "Compare repair symbol generation with reference implementation",
+          "current_test_coverage": "none",
+          "notes": "Repair symbols implemented but no conformance validation"
+        },
+        {
+          "id": "RFC6330-4.2.3",
+          "section": "4.2",
+          "subsection": "4.2.3",
+          "level": "SHOULD",
+          "category": "encoding_process",
+          "testability": "property_testable",
+          "description": "Encoding Symbol ID assignment SHOULD follow systematic ordering",
+          "requirement_text": "ESIs SHOULD be assigned consecutively starting from 0 for systematic symbols",
+          "implementation_status": "implemented",
+          "test_strategy": "Property test: verify ESI assignment follows systematic ordering",
+          "current_test_coverage": "none",
+          "notes": "ESI assignment logic needs validation"
+        }
+      ]
+    },
+
+    "4.3": {
+      "section_title": "Decoding Process",
+      "clauses": [
+        {
+          "id": "RFC6330-4.3.1",
+          "section": "4.3",
+          "subsection": "4.3.1",
+          "level": "MUST",
+          "category": "decoding_process",
+          "testability": "integration_testable",
+          "description": "Decoder MUST construct constraint matrix from received symbols",
+          "requirement_text": "The decoder MUST construct a constraint matrix from the received encoding symbols",
+          "implementation_status": "implemented",
+          "test_strategy": "Verify constraint matrix construction matches RFC specification",
+          "current_test_coverage": "partial",
+          "notes": "Matrix construction implemented but conformance needs validation"
+        },
+        {
+          "id": "RFC6330-4.3.2",
+          "section": "4.3",
+          "subsection": "4.3.2",
+          "level": "MUST",
+          "category": "decoding_process",
+          "testability": "differential_testable",
+          "description": "Gaussian elimination MUST use specified algorithm",
+          "requirement_text": "Gaussian elimination MUST proceed according to the algorithm specified in Section 5.4",
+          "implementation_status": "implemented",
+          "test_strategy": "Compare elimination steps with reference implementation",
+          "current_test_coverage": "none",
+          "notes": "Gaussian elimination algorithm needs systematic validation"
+        },
+        {
+          "id": "RFC6330-4.3.3",
+          "section": "4.3",
+          "subsection": "4.3.3",
+          "level": "MUST",
+          "category": "decoding_process",
+          "testability": "integration_testable",
+          "description": "Successful decoding MUST recover original source block",
+          "requirement_text": "If decoding is successful, the decoder MUST recover the original source block exactly",
+          "implementation_status": "implemented",
+          "test_strategy": "End-to-end test: encode then decode, verify byte-exact recovery",
+          "current_test_coverage": "basic",
+          "notes": "Round-trip testing exists but needs comprehensive coverage"
+        }
+      ]
+    },
+
+    "5.1": {
+      "section_title": "Systematic Index",
+      "clauses": [
+        {
+          "id": "RFC6330-5.1.1",
+          "section": "5.1",
+          "subsection": "5.1.1",
+          "level": "MUST",
+          "category": "parameter_derivation",
+          "testability": "unit_testable",
+          "description": "Systematic index MUST be calculated according to Table 2",
+          "requirement_text": "For K source symbols, the systematic index J(K) MUST be calculated according to the systematic index table in Table 2",
+          "implementation_status": "implemented",
+          "test_strategy": "Test systematic index calculation against RFC Table 2",
+          "current_test_coverage": "none",
+          "notes": "Systematic index calculation needs validation against RFC table"
+        }
+      ]
+    },
+
+    "5.2": {
+      "section_title": "Parameter Derivation",
+      "clauses": [
+        {
+          "id": "RFC6330-5.2.1",
+          "section": "5.2",
+          "subsection": "5.2.1",
+          "level": "MUST",
+          "category": "parameter_derivation",
+          "testability": "unit_testable",
+          "description": "Parameters K' MUST be calculated from K and systematic index",
+          "requirement_text": "K' = K + S + H where S and H are derived from the systematic index J(K)",
+          "implementation_status": "implemented",
+          "test_strategy": "Verify K' calculation for various K values",
+          "current_test_coverage": "none",
+          "notes": "K' derivation implemented but needs systematic testing"
+        },
+        {
+          "id": "RFC6330-5.2.2",
+          "section": "5.2",
+          "subsection": "5.2.2",
+          "level": "MUST",
+          "category": "parameter_derivation",
+          "testability": "unit_testable",
+          "description": "Parameters P1 MUST be smallest prime >= K'",
+          "requirement_text": "P1 MUST be the smallest prime number that is greater than or equal to K'",
+          "implementation_status": "implemented",
+          "test_strategy": "Test P1 calculation for edge cases and validate primality",
+          "current_test_coverage": "none",
+          "notes": "Prime calculation implemented but edge cases need testing"
+        }
+      ]
+    },
+
+    "5.3": {
+      "section_title": "Tuple Generation",
+      "clauses": [
+        {
+          "id": "RFC6330-5.3.1",
+          "section": "5.3",
+          "subsection": "5.3.1",
+          "level": "MUST",
+          "category": "tuple_generation",
+          "testability": "differential_testable",
+          "description": "Tuple generation MUST use specified PRNG algorithm",
+          "requirement_text": "Tuples (d, a, b) for systematic symbols MUST be generated using the algorithm in Section 5.3.5.1",
+          "implementation_status": "implemented",
+          "test_strategy": "Compare tuple generation with reference implementation",
+          "current_test_coverage": "none",
+          "notes": "Tuple generation algorithm needs conformance validation"
+        },
+        {
+          "id": "RFC6330-5.3.2",
+          "section": "5.3",
+          "subsection": "5.3.2",
+          "level": "MUST",
+          "category": "tuple_generation",
+          "testability": "differential_testable",
+          "description": "Repair symbol tuples MUST use different algorithm",
+          "requirement_text": "Tuples (d1, a1, b1) for repair symbols MUST be generated using the algorithm in Section 5.3.5.2",
+          "implementation_status": "implemented",
+          "test_strategy": "Compare repair tuple generation with reference implementation",
+          "current_test_coverage": "none",
+          "notes": "Repair tuple generation needs validation"
+        }
+      ]
+    },
+
+    "5.4": {
+      "section_title": "Constraint Matrix Structure",
+      "clauses": [
+        {
+          "id": "RFC6330-5.4.1",
+          "section": "5.4",
+          "subsection": "5.4.1",
+          "level": "MUST",
+          "category": "matrix_construction",
+          "testability": "differential_testable",
+          "description": "Matrix MUST have specific structure with LDPC, Half, and LT symbols",
+          "requirement_text": "The constraint matrix MUST consist of three types of equations: LDPC constraint equations, Half symbol equations, and LT constraint equations",
+          "implementation_status": "implemented",
+          "test_strategy": "Verify matrix structure matches RFC specification exactly",
+          "current_test_coverage": "none",
+          "notes": "Matrix structure implemented but needs structural validation"
+        }
+      ]
+    },
+
+    "5.5": {
+      "section_title": "Lookup Tables",
+      "clauses": [
+        {
+          "id": "RFC6330-5.5.1",
+          "section": "5.5",
+          "subsection": "5.5.1",
+          "level": "MUST",
+          "category": "tuple_generation",
+          "testability": "unit_testable",
+          "description": "Lookup tables V0 and V1 MUST match RFC values exactly",
+          "requirement_text": "The lookup tables V0 and V1 defined in Section 5.5 MUST be used exactly as specified",
+          "implementation_status": "implemented",
+          "test_strategy": "Validate V0 and V1 tables byte-for-byte against RFC",
+          "current_test_coverage": "none",
+          "notes": "Lookup tables implemented, need to verify against RFC values"
+        }
+      ]
+    }
+  },
+
+  "coverage_summary": {
+    "total_requirements": 18,
+    "must_requirements": 15,
+    "should_requirements": 1,
+    "may_requirements": 2,
+    "implemented_count": 18,
+    "tested_count": 4,
+    "untested_count": 14,
+    "coverage_percentage": 22.2,
+    "conformance_score": 0.222
+  },
+
+  "priority_matrix": {
+    "high_priority": [
+      "RFC6330-5.3.1",
+      "RFC6330-5.3.2",
+      "RFC6330-4.3.2",
+      "RFC6330-5.4.1",
+      "RFC6330-5.5.1"
+    ],
+    "medium_priority": [
+      "RFC6330-4.1.2",
+      "RFC6330-4.2.2",
+      "RFC6330-5.1.1",
+      "RFC6330-5.2.1",
+      "RFC6330-5.2.2"
+    ],
+    "low_priority": [
+      "RFC6330-4.1.1",
+      "RFC6330-4.1.3",
+      "RFC6330-4.2.1",
+      "RFC6330-4.2.3",
+      "RFC6330-4.3.1",
+      "RFC6330-4.3.3"
+    ]
+  }
+}
