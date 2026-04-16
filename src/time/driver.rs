@@ -430,6 +430,7 @@ impl<T: TimeSource> TimerDriver<T> {
     }
 
     /// Returns the current time from the underlying clock.
+    #[inline]
     #[must_use]
     pub fn now(&self) -> Time {
         self.clock.now()
@@ -504,18 +505,21 @@ impl<T: TimeSource> TimerDriver<T> {
     }
 
     /// Helper to collect expired wakers while holding the lock.
+    #[inline]
     #[allow(clippy::significant_drop_tightening)]
     fn collect_expired(&self, now: Time) -> WakerBatch {
         self.wheel.lock().collect_expired(now)
     }
 
     /// Returns the number of pending timers.
+    #[inline]
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.wheel.lock().len()
     }
 
     /// Returns true if there are no pending timers.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.wheel.lock().is_empty()

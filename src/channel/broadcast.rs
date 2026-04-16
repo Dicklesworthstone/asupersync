@@ -363,22 +363,6 @@ impl<T> Receiver<T> {
 }
 
 impl<T: Clone> Receiver<T> {
-    /// Receives the next message.
-    ///
-    /// # Errors
-    ///
-    /// - `RecvError::Lagged(n)`: The receiver fell behind.
-    /// - `RecvError::Closed`: All senders dropped.
-    /// - `RecvError::PolledAfterCompletion`: This specific future was already resolved.
-    pub async fn recv(&mut self, cx: &Cx) -> Result<T, RecvError> {
-        Recv {
-            receiver: self,
-            cx,
-            waiter: None,
-            completed: false,
-        }
-        .await
-    }
 
     /// Attempts to receive the next message without blocking.
     ///

@@ -60,7 +60,6 @@ impl<T> CachePadded<T> {
     /// Consumes the wrapper and returns the inner value.
     #[must_use]
     #[inline]
-    #[inline]
     pub fn into_inner(self) -> T {
         self.value
     }

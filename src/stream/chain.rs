@@ -31,7 +31,6 @@ impl<S1, S2> Chain<S1, S2> {
 
     /// Returns a reference to the first stream, if still active.
     #[inline]
-    #[inline]
     pub fn first_ref(&self) -> Option<&S1> {
         self.first.as_ref()
     }

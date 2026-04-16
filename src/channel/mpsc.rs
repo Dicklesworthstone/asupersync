@@ -171,7 +171,6 @@ impl<T> ChannelInner<T> {
 /// Panics if `capacity` is 0.
 #[inline]
 #[must_use]
-#[inline]
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "channel capacity must be non-zero");
 
@@ -258,7 +257,6 @@ impl<T> Sender<T> {
     }
 
     /// Returns true if the receiver has been dropped.
-    #[inline]
     #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -364,6 +362,7 @@ impl<T> Sender<T> {
     }
 
     /// Returns a weak reference to this sender.
+    #[inline]
     #[must_use]
     pub fn downgrade(&self) -> WeakSender<T> {
         WeakSender {
@@ -504,6 +503,7 @@ impl<T> Drop for Reserve<'_, T> {
 }
 
 impl<T> Clone for Sender<T> {
+    #[inline]
     fn clone(&self) -> Self {
         self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -579,6 +579,7 @@ impl<T> WeakSender<T> {
 }
 
 impl<T> Clone for WeakSender<T> {
+    #[inline]
     fn clone(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -632,6 +633,7 @@ impl<T> SendPermit<'_, T> {
     }
 
     /// Aborts the reserved slot without sending.
+    #[inline]
     pub fn abort(mut self) {
         self.sent = true;
         let next_waker = {

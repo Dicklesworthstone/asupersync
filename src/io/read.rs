@@ -54,7 +54,6 @@ impl<R1, R2> Chain<R1, R2> {
     /// Creates a new `Chain` adapter.
     #[inline]
     #[must_use]
-    #[inline]
     pub fn new(first: R1, second: R2) -> Self {
         Self {
             first,
@@ -109,7 +108,6 @@ pub struct Take<R> {
 
 impl<R> Take<R> {
     /// Creates a new `Take` adapter.
-    #[inline]
     #[inline]
     #[must_use]
     pub fn new(inner: R, limit: u64) -> Self {

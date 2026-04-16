@@ -60,7 +60,6 @@ impl WakerState {
     /// Creates a new waker state.
     #[inline]
     #[must_use]
-    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -98,7 +97,6 @@ impl WakerState {
     }
 
     /// Returns true if any tasks have been woken.
-    #[inline]
     #[inline]
     #[must_use]
     pub fn has_woken(&self) -> bool {

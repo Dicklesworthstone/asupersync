@@ -110,15 +110,18 @@ impl DetEntropy {
 }
 
 impl EntropySource for DetEntropy {
+    #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         let mut inner = self.inner.lock();
         inner.rng.fill_bytes(dest);
     }
 
+    #[inline]
     fn next_u64(&self) -> u64 {
         self.inner.lock().rng.next_u64()
     }
 
+    #[inline]
     fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource> {
         let mut inner = self.inner.lock();
         let counter = inner.fork_counter;
