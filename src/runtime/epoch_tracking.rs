@@ -94,7 +94,7 @@ pub struct LocalEpochStats {
 // ============================================================================
 
 /// Global epoch counter with automatic advancement.
-#[allow(dead_code)]
+#[allow(dead_code)] // rate-limit state retained for future advancement-policy impl
 pub struct GlobalEpochCounter {
     /// Current global epoch (monotonic, never decreases).
     epoch: AtomicU64,
