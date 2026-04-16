@@ -1574,6 +1574,20 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "row out of bounds")]
+    fn gaussian_set_row_rejects_out_of_range_row() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(2, &[1, 0], DenseRow::new(vec![1]));
+    }
+
+    #[test]
+    #[should_panic(expected = "coefficient length mismatch")]
+    fn gaussian_set_row_rejects_coefficient_length_mismatch() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[1], DenseRow::new(vec![1]));
+    }
+
+    #[test]
+    #[should_panic(expected = "row out of bounds")]
     fn gaussian_set_coefficient_rejects_out_of_range_row() {
         let mut solver = GaussianSolver::new(2, 2);
         solver.set_coefficient(2, 0, Gf256::ONE);
