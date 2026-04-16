@@ -632,6 +632,7 @@ impl Parker {
     }
 
     /// Creates a new parker.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
