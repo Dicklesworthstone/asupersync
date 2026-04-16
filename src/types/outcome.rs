@@ -127,6 +127,7 @@ impl PanicPayload {
 }
 
 impl fmt::Display for PanicPayload {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "panic: {}", self.message)
     }
@@ -193,6 +194,7 @@ impl Severity {
 }
 
 impl fmt::Display for Severity {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ok => write!(f, "ok"),
@@ -224,6 +226,7 @@ where
     T: PartialEq,
     E: PartialEq,
 {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Ok(a), Self::Ok(b)) => a == b,
@@ -446,6 +449,7 @@ impl<T, E> Outcome<T, E> {
 
     /// Maps the success value using the provided function.
     #[inline]
+    #[inline]
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Outcome<U, E> {
         match self {
             Self::Ok(v) => Outcome::Ok(f(v)),
@@ -642,6 +646,7 @@ impl<T, E> Outcome<T, E> {
 }
 
 impl<T, E> From<Result<T, E>> for Outcome<T, E> {
+    #[inline]
     fn from(result: Result<T, E>) -> Self {
         match result {
             Ok(v) => Self::Ok(v),

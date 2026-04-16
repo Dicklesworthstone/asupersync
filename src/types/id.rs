@@ -116,6 +116,7 @@ impl From<ArenaIndex> for SerdeArenaIndex {
 }
 
 impl Serialize for RegionId {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -125,6 +126,7 @@ impl Serialize for RegionId {
 }
 
 impl<'de> Deserialize<'de> for RegionId {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -212,6 +214,7 @@ impl fmt::Display for TaskId {
 }
 
 impl Serialize for TaskId {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -221,6 +224,7 @@ impl Serialize for TaskId {
 }
 
 impl<'de> Deserialize<'de> for TaskId {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -293,6 +297,7 @@ impl fmt::Display for ObligationId {
 }
 
 impl Serialize for ObligationId {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -302,6 +307,7 @@ impl Serialize for ObligationId {
 }
 
 impl<'de> Deserialize<'de> for ObligationId {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
