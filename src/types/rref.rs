@@ -78,6 +78,7 @@ pub struct RRef<T> {
 
 // Manual Clone impl to avoid requiring T: Clone (RRef is Copy regardless of T)
 impl<T> Clone for RRef<T> {
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -95,6 +96,7 @@ impl<T> fmt::Debug for RRef<T> {
 }
 
 impl<T> PartialEq for RRef<T> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.region_id == other.region_id && self.index == other.index
     }
@@ -103,6 +105,7 @@ impl<T> PartialEq for RRef<T> {
 impl<T> Eq for RRef<T> {}
 
 impl<T> Hash for RRef<T> {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.region_id.hash(state);
         self.index.hash(state);
@@ -122,12 +125,14 @@ impl<T> Hash for RRef<T> {
 // These just return stored indices (Copy types) and don't access the underlying data.
 impl<T> RRef<T> {
     /// Returns the region ID that owns this reference.
+    #[inline]
     #[must_use]
     pub const fn region_id(&self) -> RegionId {
         self.region_id
     }
 
     /// Returns the underlying heap index.
+    #[inline]
     #[must_use]
     pub const fn heap_index(&self) -> HeapIndex {
         self.index
@@ -155,6 +160,7 @@ impl<T: Send + Sync + 'static> RRef<T> {
     /// let index = region.heap_alloc(42u32).expect("heap alloc");
     /// let rref = RRef::new(region_id, index);
     /// ```
+    #[inline]
     #[must_use]
     pub const fn new(region_id: RegionId, index: HeapIndex) -> Self {
         Self {
