@@ -371,6 +371,7 @@ impl<T> Arena<T> {
     }
 
     /// Returns true if the index is valid and points to an occupied slot.
+    #[inline]
     #[must_use]
     pub fn contains(&self, index: ArenaIndex) -> bool {
         self.get(index).is_some()
