@@ -33,6 +33,8 @@ pub const INVARIANT_CANCEL_CORRECTNESS: &str = "cancel_correctness";
 pub const INVARIANT_CANCEL_DEBT: &str = "cancel_debt";
 /// Invariant name for the cancel signal ordering oracle.
 pub const INVARIANT_CANCEL_ORDERING: &str = "cancel_signal_ordering";
+/// Invariant name for the runtime epoch consistency oracle.
+pub const INVARIANT_RUNTIME_EPOCH: &str = "runtime_epoch";
 /// Invariant name for the channel atomicity oracle.
 pub const INVARIANT_CHANNEL_ATOMICITY: &str = "channel_atomicity";
 /// Invariant name for the waker deduplication oracle.
@@ -852,6 +854,7 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::CancelCorrectness(_) => INVARIANT_CANCEL_CORRECTNESS,
         OracleViolation::CancelDebt(_) => INVARIANT_CANCEL_DEBT,
         OracleViolation::CancelOrdering(_) => INVARIANT_CANCEL_ORDERING,
+        OracleViolation::RuntimeEpoch(_) => INVARIANT_RUNTIME_EPOCH,
         OracleViolation::ChannelAtomicity(_) => INVARIANT_CHANNEL_ATOMICITY,
         OracleViolation::WakerDedup(_) => INVARIANT_WAKER_DEDUP,
         OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,

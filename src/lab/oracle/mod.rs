@@ -54,6 +54,7 @@ pub mod quiescence;
 pub mod region_leak;
 pub mod region_tree;
 pub mod rref_access;
+pub mod runtime_epoch;
 pub mod spork;
 pub mod task_leak;
 pub mod waker_dedup;
@@ -76,6 +77,10 @@ pub use cancel_debt::{
 pub use cancel_signal_ordering::{
     CancelOrderingConfig, CancelOrderingOracle, CancelOrderingStatistics,
     CancelOrderingViolation,
+};
+pub use runtime_epoch::{
+    ConsistencyLevel, RuntimeEpochConfig, RuntimeEpochOracle, RuntimeEpochStatistics,
+    RuntimeEpochViolation, RuntimeModule,
 };
 pub use cancellation_protocol::{
     CancellationProtocolOracle, CancellationProtocolViolation, TaskStateKind,
@@ -162,6 +167,8 @@ pub enum OracleViolation {
     CancelDebt(CancelDebtViolation),
     /// Cancel signal ordering violated.
     CancelOrdering(CancelOrderingViolation),
+    /// Runtime epoch consistency violated.
+    RuntimeEpoch(RuntimeEpochViolation),
     /// Channel atomicity violation (reservation lifecycle, waker consistency, etc.).
     ChannelAtomicity(ChannelAtomicityViolation),
     /// Waker deduplication violation (lost/spurious wakeups, state inconsistency).
@@ -212,6 +219,7 @@ impl std::fmt::Display for OracleViolation {
             Self::CancelCorrectness(v) => write!(f, "Cancel-correctness violation: {v}"),
             Self::CancelDebt(v) => write!(f, "Cancel debt violation: {v}"),
             Self::CancelOrdering(v) => write!(f, "Cancel ordering violation: {v}"),
+            Self::RuntimeEpoch(v) => write!(f, "Runtime epoch violation: {v}"),
             Self::ChannelAtomicity(v) => write!(f, "Channel atomicity violation: {v}"),
             Self::WakerDedup(v) => write!(f, "Waker deduplication violation: {v}"),
             Self::ActorLeak(v) => write!(f, "Actor leak: {v}"),
@@ -265,6 +273,8 @@ pub struct OracleSuite {
     pub cancel_debt: CancelDebtOracle,
     /// Cancel signal ordering oracle.
     pub cancel_signal_ordering: CancelOrderingOracle,
+    /// Runtime epoch consistency oracle.
+    pub runtime_epoch: RuntimeEpochOracle,
     /// Channel atomicity oracle.
     pub channel_atomicity: ChannelAtomicityOracle,
     /// Waker deduplication oracle.
@@ -360,6 +370,7 @@ impl OracleSuite {
         self.cancel_correctness.reset();
         self.cancel_debt.reset();
         self.cancel_signal_ordering.reset();
+        self.runtime_epoch.reset();
 
         for event in state.finalizer_history() {
             match *event {
@@ -529,6 +540,10 @@ impl OracleSuite {
             violations.push(OracleViolation::CancelOrdering(v));
         }
 
+        if let Err(v) = self.runtime_epoch.check(now) {
+            violations.push(OracleViolation::RuntimeEpoch(v));
+        }
+
         let channel_atomicity_violations = self.channel_atomicity.check_for_violations();
         match channel_atomicity_violations {
             Ok(violations_vec) => {
@@ -625,6 +640,7 @@ impl OracleSuite {
         self.cancel_correctness.reset();
         self.cancel_debt.reset();
         self.cancel_signal_ordering.reset();
+        self.runtime_epoch.reset();
         self.channel_atomicity.reset();
         self.waker_dedup.reset();
         self.actor_leak.reset();
@@ -800,6 +816,17 @@ impl OracleSuite {
                 OracleStats {
                     entities_tracked: self.cancel_signal_ordering.get_statistics().tracked_signals,
                     events_recorded: self.cancel_signal_ordering.get_statistics().signals_processed as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "runtime_epoch",
+                self.runtime_epoch
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::RuntimeEpoch),
+                OracleStats {
+                    entities_tracked: self.runtime_epoch.get_statistics().monitored_modules,
+                    events_recorded: self.runtime_epoch.get_statistics().epoch_transitions as usize,
                 },
             ),
             OracleEntryReport::from_result(
