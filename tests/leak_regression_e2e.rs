@@ -1305,6 +1305,10 @@ fn resource_accounting_tracks_lab_obligations() {
         "accounting should agree: zero pending"
     );
     assert!(snap.is_leak_free(), "no leaks should be recorded");
+    assert!(
+        snap.is_cleanup_complete(),
+        "cleanup should be complete when there are no leaks or pending obligations"
+    );
     assert!(snap.total_reserved() > 0, "should have created obligations");
 
     // Verify accounting invariant: reserved = committed + aborted + leaked + pending
@@ -1316,6 +1320,43 @@ fn resource_accounting_tracks_lab_obligations() {
             stats.kind, stats.reserved, stats.committed, stats.aborted, stats.leaked
         );
     }
+}
+
+#[test]
+fn resource_accounting_pending_obligations_are_not_cleanup_complete() {
+    init_test_logging();
+
+    let accounting = ResourceAccounting::new();
+    let config = LabConfig::new(0x5D3)
+        .panic_on_leak(false)
+        .panic_on_futurelock(false)
+        .max_steps(1_000)
+        .trace_capacity(32);
+
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async {})
+        .expect("task creation should succeed");
+
+    let _obl_id = runtime
+        .state
+        .create_obligation(ObligationKind::Lease, task_id, root, None)
+        .expect("obligation creation should succeed");
+    accounting.obligation_reserved(ObligationKind::Lease);
+
+    let snap = accounting.snapshot();
+    assert_eq!(runtime.state.pending_obligation_count(), 1);
+    assert_eq!(snap.obligations_pending, 1);
+    assert!(
+        snap.is_leak_free(),
+        "pending obligations are not leaked yet"
+    );
+    assert!(
+        !snap.is_cleanup_complete(),
+        "cleanup must remain incomplete while the runtime still holds obligations"
+    );
 }
 
 #[test]
