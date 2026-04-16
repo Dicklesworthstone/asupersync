@@ -40,16 +40,19 @@ impl Hasher for DetHasher {
         }
     }
 
+    #[inline]
     fn write_u8(&mut self, i: u8) {
         self.mix_byte(i);
     }
 
+    #[inline]
     fn write_u16(&mut self, i: u16) {
         let bytes = i.to_le_bytes();
         self.mix_byte(bytes[0]);
         self.mix_byte(bytes[1]);
     }
 
+    #[inline]
     fn write_u32(&mut self, i: u32) {
         let bytes = i.to_le_bytes();
         self.mix_byte(bytes[0]);
@@ -58,6 +61,7 @@ impl Hasher for DetHasher {
         self.mix_byte(bytes[3]);
     }
 
+    #[inline]
     fn write_u64(&mut self, i: u64) {
         let bytes = i.to_le_bytes();
         self.mix_byte(bytes[0]);
@@ -70,6 +74,7 @@ impl Hasher for DetHasher {
         self.mix_byte(bytes[7]);
     }
 
+    #[inline]
     fn write_u128(&mut self, i: u128) {
         let bytes = i.to_le_bytes();
         for &byte in &bytes {
@@ -77,31 +82,38 @@ impl Hasher for DetHasher {
         }
     }
 
+    #[inline]
     fn write_usize(&mut self, i: usize) {
         // Always cast to u64 for width-independent consistent hashing.
         self.write_u64(i as u64);
     }
 
+    #[inline]
     fn write_i8(&mut self, i: i8) {
         self.write_u8(i.cast_unsigned());
     }
 
+    #[inline]
     fn write_i16(&mut self, i: i16) {
         self.write_u16(i.cast_unsigned());
     }
 
+    #[inline]
     fn write_i32(&mut self, i: i32) {
         self.write_u32(i.cast_unsigned());
     }
 
+    #[inline]
     fn write_i64(&mut self, i: i64) {
         self.write_u64(i.cast_unsigned());
     }
 
+    #[inline]
     fn write_i128(&mut self, i: i128) {
         self.write_u128(i.cast_unsigned());
     }
 
+    #[inline]
     fn write_isize(&mut self, i: isize) {
         self.write_i64(i as i64);
     }

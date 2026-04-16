@@ -139,6 +139,7 @@ impl<T> Mutex<T> {
     }
 
     /// Returns the number of tasks currently waiting for the lock.
+    #[inline]
     #[must_use]
     pub fn waiters(&self) -> usize {
         self.state.lock().waiters.len()
@@ -171,12 +172,14 @@ impl<T> Mutex<T> {
     }
 
     /// Returns a mutable reference to the underlying data.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         assert!(!self.is_poisoned(), "mutex is poisoned");
         self.data.get_mut()
     }
 
     /// Consumes the mutex, returning the underlying data.
+    #[inline]
     pub fn into_inner(self) -> T {
         assert!(!self.is_poisoned(), "mutex is poisoned");
         self.data.into_inner()
