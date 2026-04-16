@@ -641,7 +641,7 @@ impl LabInjectionRunner {
     fn poll_to_completion<F: Future>(
         future: InstrumentedFuture<F>,
     ) -> InstrumentedPollResult<F::Output> {
-        use std::task::{Context, Poll, Wake, Waker};
+        use std::task::{Context, Poll, Waker};
 
         let waker = Waker::noop();
         let mut cx = Context::from_waker(&waker);

@@ -764,7 +764,7 @@ impl InjectionRunner {
     fn poll_instrumented_to_completion<F: Future>(
         future: InstrumentedFuture<F>,
     ) -> InstrumentedPollResult<F::Output> {
-        use std::task::{Wake, Waker};
+        use std::task::Waker;
 
         let waker = Waker::noop();
         let mut cx = std::task::Context::from_waker(&waker);

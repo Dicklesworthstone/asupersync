@@ -16,8 +16,7 @@
 use crate::cx::Cx;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 /// Error returned by [`Bracket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,7 +525,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     // =========================================================================
     // Test Utilities
