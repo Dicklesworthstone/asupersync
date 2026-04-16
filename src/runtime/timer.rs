@@ -46,6 +46,7 @@ pub struct TimerHeap {
 impl TimerHeap {
     /// Creates a new empty timer heap.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }

@@ -48,6 +48,7 @@ impl std::fmt::Display for SnapshotVersion {
 impl SnapshotVersion {
     /// Check if `other` is compatible (same major, <= minor).
     #[must_use]
+    #[inline]
     pub fn is_compatible_with(&self, other: &Self) -> bool {
         self.major == other.major && self.minor >= other.minor
     }
@@ -696,11 +697,13 @@ impl ControllerRegistry {
 
     /// Get the current mode of a controller.
     #[must_use]
+    #[inline]
     pub fn mode(&self, id: ControllerId) -> Option<ControllerMode> {
         self.controllers.get(&id).map(|c| c.mode)
     }
 
     /// Set the mode of a controller.
+    #[inline]
     pub fn set_mode(&mut self, id: ControllerId, mode: ControllerMode) -> bool {
         let Some(controller) = self.controllers.get_mut(&id) else {
             return false;
