@@ -295,6 +295,7 @@ impl SymbolPool {
     }
 }
 
+#[inline]
 fn next_symbol_pool_id() -> u64 {
     static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_SYMBOL_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -441,6 +442,7 @@ impl ResourceTracker {
 
     /// Returns the configured limits.
     #[must_use]
+    #[inline]
     pub fn limits(&self) -> ResourceLimits {
         self.inner.lock().limits.clone()
     }
@@ -459,6 +461,7 @@ impl ResourceTracker {
 
     /// Returns whether a request can be satisfied.
     #[must_use]
+    #[inline]
     pub fn can_acquire(&self, request: &ResourceRequest) -> bool {
         let inner = self.inner.lock();
         let mut projected = inner.current;
