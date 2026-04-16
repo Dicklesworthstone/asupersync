@@ -46,6 +46,7 @@ impl EntropySource for OsEntropy {
         Arc::new(Self)
     }
 
+    #[inline]
     fn source_id(&self) -> &'static str {
         "os"
     }
@@ -126,6 +127,7 @@ impl EntropySource for DetEntropy {
         Arc::new(Self::with_fork_counter(child_seed, 0))
     }
 
+    #[inline]
     fn source_id(&self) -> &'static str {
         "deterministic"
     }
@@ -158,6 +160,7 @@ impl EntropySource for BrowserEntropy {
         Arc::new(Self)
     }
 
+    #[inline]
     fn source_id(&self) -> &'static str {
         "browser"
     }
@@ -171,6 +174,7 @@ pub struct ThreadLocalEntropy {
 
 impl ThreadLocalEntropy {
     /// Create a thread-local entropy factory from a global seed.
+    #[inline]
     #[must_use]
     pub const fn new(global_seed: u64) -> Self {
         Self { global_seed }
@@ -204,6 +208,7 @@ pub fn disable_strict_entropy() {
 }
 
 /// Returns true if strict entropy isolation is enabled.
+#[inline]
 #[must_use]
 pub fn strict_entropy_enabled() -> bool {
     STRICT_ENTROPY.load(Ordering::SeqCst)
