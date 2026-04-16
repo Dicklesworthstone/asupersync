@@ -87,6 +87,7 @@ impl<S> Throttle<S> {
 impl<S: Stream> Stream for Throttle<S> {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
         if *this.done {
