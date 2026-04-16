@@ -67,6 +67,7 @@ impl AuthenticationTag {
     ///
     /// This is never produced by [`Self::compute`] and should not be used as a
     /// stand-in for a real authenticated symbol.
+    #[inline]
     #[must_use]
     pub const fn zero() -> Self {
         Self {
@@ -75,12 +76,14 @@ impl AuthenticationTag {
     }
 
     /// Creates a tag from raw bytes.
+    #[inline]
     #[must_use]
     pub const fn from_bytes(bytes: [u8; TAG_SIZE]) -> Self {
         Self { bytes }
     }
 
     /// Returns the raw bytes of the tag.
+    #[inline]
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; TAG_SIZE] {
         &self.bytes
