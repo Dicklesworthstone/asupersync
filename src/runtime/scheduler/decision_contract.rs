@@ -92,6 +92,7 @@ impl SchedulerDecisionContract {
 
     /// Create the default scheduler decision contract.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self::with_losses_and_policy(Self::DEFAULT_LOSSES.to_vec(), FallbackPolicy::default())
     }
@@ -105,6 +106,7 @@ impl SchedulerDecisionContract {
     /// Panics if the loss matrix dimensions are wrong or contain
     /// negative values.
     #[must_use]
+    #[inline]
     pub fn with_losses_and_policy(losses: Vec<f64>, fallback: FallbackPolicy) -> Self {
         let states = vec![
             "healthy".into(),
@@ -137,6 +139,7 @@ impl SchedulerDecisionContract {
     /// - **Unstable**: significant cancel/region drain activity
     /// - **Partitioned**: combined deadline + cancel pressure
     #[must_use]
+    #[inline]
     #[allow(clippy::suboptimal_flops)] // readability: keep formulas in natural math form
     pub fn snapshot_likelihoods(snapshot: &StateSnapshot) -> [f64; 4] {
         let cancel_load = f64::from(snapshot.total_cancelling_tasks());
@@ -176,6 +179,7 @@ impl SchedulerDecisionContract {
 }
 
 impl Default for SchedulerDecisionContract {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -183,22 +187,27 @@ impl Default for SchedulerDecisionContract {
 
 #[allow(clippy::unnecessary_literal_bound)]
 impl DecisionContract for SchedulerDecisionContract {
+    #[inline]
     fn name(&self) -> &str {
         "scheduler"
     }
 
+    #[inline]
     fn state_space(&self) -> &[String] {
         &self.states
     }
 
+    #[inline]
     fn action_set(&self) -> &[String] {
         &self.actions
     }
 
+    #[inline]
     fn loss_matrix(&self) -> &LossMatrix {
         &self.losses
     }
 
+    #[inline]
     fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
         // Defensive guard: malformed posterior dimensions should not panic
         // scheduler decision logic.
@@ -214,6 +223,7 @@ impl DecisionContract for SchedulerDecisionContract {
         posterior.bayesian_update(&likelihoods);
     }
 
+    #[inline]
     fn choose_action(&self, posterior: &Posterior) -> usize {
         if posterior.len() != state::COUNT {
             return self.fallback_action();
@@ -221,11 +231,13 @@ impl DecisionContract for SchedulerDecisionContract {
         self.losses.bayes_action(posterior)
     }
 
+    #[inline]
     fn fallback_action(&self) -> usize {
         // Conservative scheduling is the safe fallback.
         action::CONSERVATIVE
     }
 
+    #[inline]
     fn fallback_policy(&self) -> &FallbackPolicy {
         &self.fallback
     }
@@ -242,6 +254,7 @@ mod tests {
     use franken_decision::{EvalContext, Posterior, evaluate};
     use franken_kernel::{DecisionId, TraceId};
 
+    #[inline]
     fn test_ctx(cal: f64) -> EvalContext {
         EvalContext {
             calibration_score: cal,
@@ -253,6 +266,7 @@ mod tests {
         }
     }
 
+    #[inline]
     fn zero_snapshot() -> StateSnapshot {
         StateSnapshot {
             time: Time::ZERO,

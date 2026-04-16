@@ -60,6 +60,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    #[inline]
     fn task(id: u32) -> TaskId {
         TaskId::new_for_test(id, 0)
     }
