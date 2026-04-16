@@ -825,8 +825,8 @@ impl OracleSuite {
                     .err()
                     .map(OracleViolation::RuntimeEpoch),
                 OracleStats {
-                    entities_tracked: self.runtime_epoch.get_statistics().monitored_modules,
-                    events_recorded: self.runtime_epoch.get_statistics().epoch_transitions as usize,
+                    entities_tracked: self.runtime_epoch.get_statistics().tracked_modules,
+                    events_recorded: self.runtime_epoch.get_statistics().transitions_tracked as usize,
                 },
             ),
             OracleEntryReport::from_result(

@@ -285,10 +285,10 @@ impl StructuredCancellationAnalyzer {
     fn update_active_traces_count(&self) {
         let stats = self.tracer.stats();
         let mut real_time_stats = self.stats.lock().unwrap();
-        real_time_stats.active_traces = stats.active_traces;
+        real_time_stats.active_traces = stats.traces_collected as usize;
 
         // Calculate memory usage estimate
-        let memory_mb = (stats.active_traces * 10 + stats.traces_collected * 2) / 1024; // Rough estimate
+        let memory_mb = (stats.traces_collected * 10 + stats.traces_collected * 2) / 1024; // Rough estimate
         real_time_stats.memory_usage_percentage =
             (memory_mb as f64 / self.config.max_memory_usage_mb as f64 * 100.0).min(100.0);
     }
