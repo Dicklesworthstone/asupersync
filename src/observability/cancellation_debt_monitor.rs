@@ -733,7 +733,7 @@ mod tests {
             "test-task".to_string(),
             10,
             100,
-            &CancelReason::with_user_reason("test".to_string()),
+            &CancelReason::user("test"),
             CancelKind::User,
             Vec::new(),
         );
@@ -766,7 +766,7 @@ mod tests {
                 format!("task-{}", i),
                 1,
                 10,
-                &CancelReason::with_user_reason("test".to_string()),
+                &CancelReason::user("test"),
                 CancelKind::User,
                 Vec::new(),
             );
@@ -788,7 +788,7 @@ mod tests {
                     format!("resource-{}", i),
                     1,
                     50,
-                    &CancelReason::with_user_reason("batch_test".to_string()),
+                    &CancelReason::user("batch_test"),
                     CancelKind::User,
                     Vec::new(),
                 )
@@ -812,7 +812,7 @@ mod tests {
             "low-priority".to_string(),
             1,
             10,
-            &CancelReason::with_user_reason("test".to_string()),
+            &CancelReason::user("test"),
             CancelKind::User,
             Vec::new(),
         );
@@ -822,7 +822,7 @@ mod tests {
             "high-priority".to_string(),
             100,
             10,
-            &CancelReason::with_user_reason("test".to_string()),
+            &CancelReason::user("test"),
             CancelKind::User,
             Vec::new(),
         );
@@ -843,7 +843,7 @@ mod tests {
             "old-work".to_string(),
             1,
             10,
-            &CancelReason::with_user_reason("test".to_string()),
+            &CancelReason::user("test"),
             CancelKind::User,
             Vec::new(),
         );
