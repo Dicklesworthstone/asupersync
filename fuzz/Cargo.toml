@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = ".." }
+asupersync = { path = "..", features = ["tls"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
@@ -134,6 +134,13 @@ bench = false
 [[bin]]
 name = "fuzz_quic_core_protocol"
 path = "fuzz_targets/quic_core_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tls_message_parsing"
+path = "fuzz_targets/tls_message_parsing.rs"
 test = false
 doc = false
 bench = false
