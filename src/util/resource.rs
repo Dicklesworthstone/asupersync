@@ -26,6 +26,7 @@ pub struct PoolConfig {
 impl PoolConfig {
     /// Returns a normalized config with `max_size >= initial_size`.
     #[must_use]
+    #[inline]
     pub fn normalized(mut self) -> Self {
         if self.max_size < self.initial_size {
             self.max_size = self.initial_size;
@@ -38,6 +39,7 @@ impl PoolConfig {
 }
 
 impl Default for PoolConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             symbol_size: 1024,
@@ -60,6 +62,7 @@ pub struct SymbolBuffer {
 impl SymbolBuffer {
     /// Creates a new buffer with the given symbol size.
     #[must_use]
+    #[inline]
     pub fn new(symbol_size: u16) -> Self {
         let len = symbol_size as usize;
         Self {
@@ -78,6 +81,7 @@ impl SymbolBuffer {
 
     /// Returns the buffer as a mutable slice.
     #[must_use]
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.data
     }
@@ -313,6 +317,7 @@ pub struct ResourceLimits {
 }
 
 impl Default for ResourceLimits {
+    #[inline]
     fn default() -> Self {
         Self {
             max_symbol_memory: usize::MAX,
@@ -415,6 +420,7 @@ pub struct ResourceTracker {
 impl ResourceTracker {
     /// Creates a new tracker with the given limits.
     #[must_use]
+    #[inline]
     pub fn new(limits: ResourceLimits) -> Self {
         Self {
             inner: Arc::new(Mutex::new(ResourceTrackerInner {
@@ -428,6 +434,7 @@ impl ResourceTracker {
 
     /// Returns the current usage snapshot.
     #[must_use]
+    #[inline]
     pub fn usage(&self) -> ResourceUsage {
         self.inner.lock().current
     }

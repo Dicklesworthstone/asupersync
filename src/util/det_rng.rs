@@ -76,6 +76,7 @@ impl DetRng {
     }
 
     /// Fills a buffer with pseudo-random bytes.
+    #[inline]
     pub fn fill_bytes(&mut self, dest: &mut [u8]) {
         let mut i = 0;
         while i < dest.len() {
@@ -88,6 +89,7 @@ impl DetRng {
     }
 
     /// Shuffles a slice in place using the Fisher-Yates algorithm.
+    #[inline]
     pub fn shuffle<T>(&mut self, slice: &mut [T]) {
         for i in (1..slice.len()).rev() {
             let j = self.next_usize(i + 1);

@@ -27,6 +27,7 @@ impl DetHasher {
 }
 
 impl Default for DetHasher {
+    #[inline]
     fn default() -> Self {
         Self { state: Self::SEED }
     }
