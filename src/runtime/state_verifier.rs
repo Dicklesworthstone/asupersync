@@ -120,13 +120,21 @@ impl StateVerifierStats {
 /// Snapshot of state verifier statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateVerifierStatsSnapshot {
+    /// Total number of state transitions verified.
     pub total_transitions: u64,
+    /// Total number of violations detected.
     pub violations_detected: u64,
+    /// Number of task state transitions.
     pub task_transitions: u64,
+    /// Number of region state transitions.
     pub region_transitions: u64,
+    /// Number of obligation state transitions.
     pub obligation_transitions: u64,
+    /// Number of task-related violations.
     pub task_violations: u64,
+    /// Number of region-related violations.
     pub region_violations: u64,
+    /// Number of obligation-related violations.
     pub obligation_violations: u64,
 }
 
