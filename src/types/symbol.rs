@@ -307,6 +307,7 @@ impl Symbol {
 
     /// Returns the symbol's data payload.
     #[must_use]
+    #[inline]
     pub fn data(&self) -> &[u8] {
         &self.data
     }
@@ -325,18 +326,21 @@ impl Symbol {
 
     /// Returns the size of the data payload in bytes.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
     /// Returns true if the data payload is empty.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
     /// Returns the object ID this symbol belongs to.
     #[must_use]
+    #[inline]
     pub const fn object_id(&self) -> ObjectId {
         self.id.object_id()
     }
