@@ -522,7 +522,7 @@ impl VerificationSuite {
         if test_result {
             println!("  {test_name}: PASSED");
         } else {
-            println!("  {}: FAILED", test_name);
+            println!("  {test_name}: FAILED");
         }
 
         test_result
@@ -578,7 +578,7 @@ impl VerificationSuite {
                     while receiver.recv(&cx).await.is_ok() {
                         count += 1;
                     }
-                    assert!(count >= 50, "Receiver only got {} messages", count);
+                    assert!(count >= 50, "Receiver only got {count} messages");
                 }
                 true
             }),
@@ -654,7 +654,7 @@ mod tests {
                 println!("    Violations: {}", category_result.violations);
             }
             for failure in &category_result.failure_details {
-                println!("    Failure: {}", failure);
+                println!("    Failure: {failure}");
             }
         }
 
