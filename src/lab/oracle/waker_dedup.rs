@@ -1154,7 +1154,7 @@ mod tests {
             channel_id: ChannelId(1),
             registered_at: SystemTime::now(),
             expected_wake_at: SystemTime::now(),
-            trace_id: Some(TraceId::new()),
+            trace_id: Some(TraceId::new_for_test(1)),
         };
 
         let record = ViolationRecord::new(violation, &config);
