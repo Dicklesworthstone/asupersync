@@ -396,14 +396,35 @@ impl CancelCorrectnessOracle {
         violations.iter().rev().take(limit).cloned().collect()
     }
 
-    /// Clear all tracked state (for testing).
-    #[cfg(test)]
-    pub fn clear_state(&self) {
+    /// Check for violations following the oracle pattern.
+    ///
+    /// Returns the first violation found, or Ok(()) if no violations are present.
+    pub fn check(&self, now: Time) -> Result<(), CancelCorrectnessViolation> {
+        // First check for stuck cancellations
+        self.check_stuck_cancellations(now);
+
+        // Return the first violation if any exist
+        let violations = self.violations.read();
+        if let Some(violation) = violations.front() {
+            return Err(violation.clone());
+        }
+
+        Ok(())
+    }
+
+    /// Reset the oracle to its initial state.
+    pub fn reset(&self) {
         self.task_states.write().clear();
         self.violations.write().clear();
         self.witnesses_processed.store(0, Ordering::Relaxed);
         self.violations_detected.store(0, Ordering::Relaxed);
         self.stuck_checks_performed.store(0, Ordering::Relaxed);
+    }
+
+    /// Clear all tracked state (for testing).
+    #[cfg(test)]
+    pub fn clear_state(&self) {
+        self.reset();
     }
 
     fn validate_transition(

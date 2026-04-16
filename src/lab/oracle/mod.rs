@@ -337,6 +337,7 @@ impl OracleSuite {
         self.region_tree.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.snapshot_from_state(state, now);
+        self.cancel_correctness.reset();
 
         for event in state.finalizer_history() {
             match *event {
@@ -494,6 +495,10 @@ impl OracleSuite {
             violations.push(OracleViolation::CancellationProtocol(v));
         }
 
+        if let Err(v) = self.cancel_correctness.check(now) {
+            violations.push(OracleViolation::CancelCorrectness(v));
+        }
+
         let channel_atomicity_violations = self.channel_atomicity.check_for_violations();
         match channel_atomicity_violations {
             Ok(violations_vec) => {
@@ -587,6 +592,7 @@ impl OracleSuite {
         self.ambient_authority.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
+        self.cancel_correctness.reset();
         self.channel_atomicity.reset();
         self.waker_dedup.reset();
         self.actor_leak.reset();
@@ -729,6 +735,17 @@ impl OracleSuite {
                     entities_tracked: self.cancellation_protocol.region_count(),
                     events_recorded: self.cancellation_protocol.region_count()
                         + self.cancellation_protocol.cancel_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "cancel_correctness",
+                self.cancel_correctness
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::CancelCorrectness),
+                OracleStats {
+                    entities_tracked: self.cancel_correctness.get_statistics().active_tasks,
+                    events_recorded: self.cancel_correctness.get_statistics().witnesses_processed as usize,
                 },
             ),
             OracleEntryReport::from_result(
@@ -1246,7 +1263,7 @@ mod tests {
     #[test]
     fn oracle_suite_default_is_clean() {
         init_test("oracle_suite_default_is_clean");
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let violations = suite.check_all(Time::ZERO);
         let empty = violations.is_empty();
         crate::assert_with_log!(empty, "suite clean", true, empty);
