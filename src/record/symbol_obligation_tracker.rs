@@ -242,6 +242,7 @@ impl SymbolObligation {
 
     /// Returns true if this obligation is pending (not resolved).
     #[must_use]
+    #[inline]
     pub fn is_pending(&self) -> bool {
         self.inner.is_pending()
     }
@@ -321,18 +322,21 @@ impl SymbolObligation {
 
     /// Returns the symbol-specific obligation kind.
     #[must_use]
+    #[inline]
     pub fn symbol_kind(&self) -> &SymbolObligationKind {
         &self.kind
     }
 
     /// Returns the underlying obligation state.
     #[must_use]
+    #[inline]
     pub fn state(&self) -> ObligationState {
         self.inner.state
     }
 
     /// Returns the obligation ID.
     #[must_use]
+    #[inline]
     pub fn id(&self) -> ObligationId {
         self.inner.id
     }
