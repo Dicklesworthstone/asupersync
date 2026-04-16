@@ -182,6 +182,7 @@ impl<T> OneShotInner<T> {
 /// tx.send(&cx, 42);
 /// let value = rx.recv(&cx).await?;
 /// ```
+#[inline]
 #[must_use]
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Mutex::new(OneShotInner::new()));

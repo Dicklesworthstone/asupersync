@@ -223,6 +223,7 @@ impl<T> WatchInner<T> {
 /// ```ignore
 /// let (tx, rx) = watch::channel(42);
 /// ```
+#[inline]
 #[must_use]
 pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(WatchInner::new(initial));
@@ -579,6 +580,7 @@ impl<T> Receiver<T> {
     }
 
     /// Returns the version number last seen by this receiver.
+    #[inline]
     #[must_use]
     pub fn seen_version(&self) -> u64 {
         self.seen_version
