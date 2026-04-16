@@ -45,6 +45,7 @@ impl<T> Default for RaptorQSenderBuilder<T> {
 impl RaptorQSenderBuilder<()> {
     /// Creates a new sender builder.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -53,6 +54,7 @@ impl RaptorQSenderBuilder<()> {
 impl<T> RaptorQSenderBuilder<T> {
     /// Sets the configuration.
     #[must_use]
+    #[inline]
     pub fn config(mut self, config: RaptorQConfig) -> Self {
         self.config = Some(config);
         self
@@ -60,6 +62,7 @@ impl<T> RaptorQSenderBuilder<T> {
 
     /// Sets the transport sink.
     #[must_use]
+    #[inline]
     pub fn transport<U>(self, transport: U) -> RaptorQSenderBuilder<U> {
         RaptorQSenderBuilder {
             config: self.config,
@@ -71,6 +74,7 @@ impl<T> RaptorQSenderBuilder<T> {
 
     /// Sets the security context for symbol signing.
     #[must_use]
+    #[inline]
     pub fn security(mut self, ctx: SecurityContext) -> Self {
         self.security = Some(ctx);
         self
@@ -78,6 +82,7 @@ impl<T> RaptorQSenderBuilder<T> {
 
     /// Sets the metrics registry.
     #[must_use]
+    #[inline]
     pub fn metrics(mut self, metrics: Metrics) -> Self {
         self.metrics = Some(metrics);
         self
@@ -142,6 +147,7 @@ impl<S> Default for RaptorQReceiverBuilder<S> {
 impl RaptorQReceiverBuilder<()> {
     /// Creates a new receiver builder.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -150,6 +156,7 @@ impl RaptorQReceiverBuilder<()> {
 impl<S> RaptorQReceiverBuilder<S> {
     /// Sets the configuration.
     #[must_use]
+    #[inline]
     pub fn config(mut self, config: RaptorQConfig) -> Self {
         self.config = Some(config);
         self
@@ -157,6 +164,7 @@ impl<S> RaptorQReceiverBuilder<S> {
 
     /// Sets the symbol source stream.
     #[must_use]
+    #[inline]
     pub fn source<U>(self, source: U) -> RaptorQReceiverBuilder<U> {
         RaptorQReceiverBuilder {
             config: self.config,
@@ -175,6 +183,7 @@ impl<S> RaptorQReceiverBuilder<S> {
 
     /// Sets the metrics registry.
     #[must_use]
+    #[inline]
     pub fn metrics(mut self, metrics: Metrics) -> Self {
         self.metrics = Some(metrics);
         self

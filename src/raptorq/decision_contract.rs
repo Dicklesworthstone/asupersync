@@ -261,18 +261,22 @@ impl Default for RaptorQDecisionContract {
 
 impl DecisionContract for RaptorQDecisionContract {
     #[allow(clippy::unnecessary_literal_bound)]
+    #[inline]
     fn name(&self) -> &str {
         "raptorq_expected_loss_governance"
     }
 
+    #[inline]
     fn state_space(&self) -> &[String] {
         &self.states
     }
 
+    #[inline]
     fn action_set(&self) -> &[String] {
         &self.actions
     }
 
+    #[inline]
     fn loss_matrix(&self) -> &LossMatrix {
         &self.losses
     }
@@ -295,10 +299,12 @@ impl DecisionContract for RaptorQDecisionContract {
         choose_action_from_expected_loss_terms(expected_loss_terms(&self.losses, posterior))
     }
 
+    #[inline]
     fn fallback_action(&self) -> usize {
         action::FALLBACK
     }
 
+    #[inline]
     fn fallback_policy(&self) -> &FallbackPolicy {
         &self.fallback
     }
@@ -354,10 +360,12 @@ pub fn evaluate_governance(snapshot: &GovernanceSnapshot) -> GovernanceTelemetry
 
 /// Returns true when `reason` is a canonical runtime-emittable G7 fallback reason.
 #[must_use]
+#[inline]
 pub fn is_runtime_fallback_reason(reason: &str) -> bool {
     G7_RUNTIME_FALLBACK_REASONS.contains(&reason)
 }
 
+#[inline]
 fn clamp_permille(value: usize) -> u32 {
     value.min(PERMILLE_SCALE as usize) as u32
 }
@@ -393,14 +401,17 @@ fn normalize_permille_generic<const N: usize>(scores: [u32; N], zero_total: [u16
     normalized
 }
 
+#[inline]
 fn normalize_permille(scores: [u32; state::COUNT]) -> [u16; state::COUNT] {
     normalize_permille_generic(scores, [250; state::COUNT])
 }
 
+#[inline]
 fn normalize_contributor_permille(scores: [u32; 3]) -> [u16; 3] {
     normalize_permille_generic(scores, [0; 3])
 }
 
+#[inline]
 fn posterior_from_permille(posterior_permille: [u16; state::COUNT]) -> Posterior {
     Posterior::new(
         posterior_permille
@@ -411,6 +422,7 @@ fn posterior_from_permille(posterior_permille: [u16; state::COUNT]) -> Posterior
     .expect("normalized posterior permille should convert to Posterior")
 }
 
+#[inline]
 fn policy_conflict_permille(snapshot: &GovernanceSnapshot) -> u16 {
     let mut best = u32::MAX;
     let mut second = u32::MAX;
@@ -448,6 +460,7 @@ fn expected_loss_terms(losses: &LossMatrix, posterior: &Posterior) -> [u32; acti
     terms
 }
 
+#[inline]
 fn choose_action_from_expected_loss_terms(expected_loss_terms: [u32; action::COUNT]) -> usize {
     // G7 uses a conservative deterministic tie-breaker:
     // fallback > rollback > canary_hold > continue.
@@ -460,6 +473,7 @@ fn choose_action_from_expected_loss_terms(expected_loss_terms: [u32; action::COU
         .unwrap_or(action::FALLBACK)
 }
 
+#[inline]
 fn concentration_score(posterior_permille: [u16; state::COUNT]) -> u16 {
     let max_prob = posterior_permille.into_iter().max().unwrap_or(250);
     if max_prob <= 250 {
@@ -468,6 +482,7 @@ fn concentration_score(posterior_permille: [u16; state::COUNT]) -> u16 {
     ((u32::from(max_prob - 250) * PERMILLE_SCALE) / 750) as u16
 }
 
+#[inline]
 fn action_margin_score(expected_loss_terms: [u32; action::COUNT]) -> u16 {
     let mut ordered = expected_loss_terms;
     ordered.sort_unstable();
@@ -475,6 +490,7 @@ fn action_margin_score(expected_loss_terms: [u32; action::COUNT]) -> u16 {
     (gap * PERMILLE_SCALE / ACTION_MARGIN_CAP) as u16
 }
 
+#[inline]
 fn dominant_state(posterior_permille: [u16; state::COUNT]) -> usize {
     posterior_permille
         .iter()
@@ -595,6 +611,7 @@ fn top_evidence_contributors(snapshot: &GovernanceSnapshot) -> [GovernanceEviden
     ]
 }
 
+#[inline]
 const fn action_label(index: usize) -> &'static str {
     match index {
         action::CONTINUE => "continue",

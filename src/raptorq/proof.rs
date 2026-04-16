@@ -54,6 +54,7 @@ pub struct DecodeProof {
 impl DecodeProof {
     /// Create a new proof builder.
     #[must_use]
+    #[inline]
     pub fn builder(config: DecodeConfig) -> DecodeProofBuilder {
         DecodeProofBuilder::new(config)
     }
@@ -87,6 +88,7 @@ impl DecodeProof {
     }
 }
 
+#[inline]
 fn recovered_source_hash(source: &[Vec<u8>]) -> u64 {
     use std::hash::{Hash, Hasher};
 
@@ -104,6 +106,7 @@ struct ReceivedEsiMultisetHashState {
 }
 
 impl ReceivedEsiMultisetHashState {
+    #[inline]
     fn observe(&mut self, esi: u32, is_source: bool) {
         use std::hash::{Hash, Hasher};
 
@@ -121,6 +124,7 @@ impl ReceivedEsiMultisetHashState {
             .wrapping_add(digest.rotate_left(17) ^ digest.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     }
 
+    #[inline]
     fn finish(self) -> u64 {
         use std::hash::{Hash, Hasher};
 
@@ -185,6 +189,7 @@ impl fmt::Display for ReplayError {
 
 impl std::error::Error for ReplayError {}
 
+#[inline]
 fn mismatch<T: fmt::Debug>(field: &'static str, expected: T, actual: T) -> ReplayError {
     ReplayError::Mismatch {
         field,
@@ -193,6 +198,7 @@ fn mismatch<T: fmt::Debug>(field: &'static str, expected: T, actual: T) -> Repla
     }
 }
 
+#[inline]
 fn sequence_mismatch(
     label: &'static str,
     index: usize,
