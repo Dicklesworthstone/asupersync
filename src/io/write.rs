@@ -30,6 +30,7 @@ pub trait AsyncWrite {
     }
 
     /// Returns whether this writer has efficient vectored writes.
+    #[inline]
     fn is_write_vectored(&self) -> bool {
         false
     }
@@ -53,6 +54,7 @@ pub trait AsyncWriteVectored: AsyncWrite {
     }
 
     /// Returns whether this writer has efficient vectored writes.
+    #[inline]
     fn is_write_vectored(&self) -> bool {
         AsyncWrite::is_write_vectored(self)
     }
