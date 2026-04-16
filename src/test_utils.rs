@@ -106,7 +106,7 @@ pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
 ///
 /// Creates a default lab runtime and runs the provided closure using the regular runtime.
 /// This is commonly used for channel stress tests and other lab-based testing.
-pub fn lab_with_config<F, Fut, R>(f: F) -> R
+pub fn lab_with_config<F, Fut, R>(_f: F) -> R
 where
     F: FnOnce(LabRuntime) -> Fut,
     Fut: Future<Output = R>,
