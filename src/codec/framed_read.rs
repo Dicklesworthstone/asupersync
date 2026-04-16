@@ -37,6 +37,7 @@ pub struct FramedRead<R, D> {
 
 impl<R, D> FramedRead<R, D> {
     /// Creates a new `FramedRead` with the default buffer capacity.
+    #[inline]
     pub fn new(inner: R, decoder: D) -> Self {
         Self::with_capacity(inner, decoder, DEFAULT_CAPACITY)
     }
@@ -52,6 +53,7 @@ impl<R, D> FramedRead<R, D> {
     }
 
     /// Returns a reference to the underlying reader.
+    #[inline]
     #[must_use]
     pub fn get_ref(&self) -> &R {
         &self.inner
@@ -63,6 +65,7 @@ impl<R, D> FramedRead<R, D> {
     }
 
     /// Returns a reference to the decoder.
+    #[inline]
     #[must_use]
     pub fn decoder(&self) -> &D {
         &self.decoder
@@ -74,12 +77,14 @@ impl<R, D> FramedRead<R, D> {
     }
 
     /// Returns a reference to the read buffer.
+    #[inline]
     #[must_use]
     pub fn read_buffer(&self) -> &BytesMut {
         &self.buffer
     }
 
     /// Consumes `self` and returns the inner reader.
+    #[inline]
     pub fn into_inner(self) -> R {
         self.inner
     }

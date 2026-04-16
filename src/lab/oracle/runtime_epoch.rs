@@ -138,52 +138,83 @@ impl Default for RuntimeEpochConfig {
 pub enum RuntimeEpochViolation {
     /// Modules are operating on different epochs beyond allowed skew.
     EpochSkew {
+        /// First module involved in the epoch skew.
         module_a: RuntimeModule,
+        /// Epoch ID of the first module.
         epoch_a: EpochId,
+        /// Second module involved in the epoch skew.
         module_b: RuntimeModule,
+        /// Epoch ID of the second module.
         epoch_b: EpochId,
+        /// Amount of skew between the epochs.
         skew_amount: u64,
+        /// Timestamp when the skew was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Epoch transition took longer than expected.
     SlowTransition {
+        /// Module that had the slow transition.
         module: RuntimeModule,
+        /// Starting epoch ID.
         from_epoch: EpochId,
+        /// Target epoch ID.
         to_epoch: EpochId,
+        /// Duration of the transition in nanoseconds.
         transition_duration_ns: u64,
+        /// Timestamp when the slow transition was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Module missed an epoch transition notification.
     MissedTransition {
+        /// Module that missed the transition.
         module: RuntimeModule,
+        /// Expected epoch ID after transition.
         expected_epoch: EpochId,
+        /// Actual epoch ID found in module.
         actual_epoch: EpochId,
+        /// Timestamp when the missed transition was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Module used stale epoch information for state updates.
     StaleEpochUpdate {
+        /// Module that performed the stale update.
         module: RuntimeModule,
+        /// Epoch ID used for the update (stale).
         update_epoch: EpochId,
+        /// Current epoch ID that should have been used.
         current_epoch: EpochId,
+        /// Amount of staleness in epoch units.
         staleness_amount: u64,
+        /// Timestamp when the stale update was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Modules advanced epochs in incorrect order.
     OrderViolation {
+        /// First module involved in the order violation.
         first_module: RuntimeModule,
+        /// Epoch ID of the first module.
         first_epoch: EpochId,
+        /// Second module involved in the order violation.
         second_module: RuntimeModule,
+        /// Epoch ID of the second module.
         second_epoch: EpochId,
+        /// Description of the expected ordering.
         expected_order: String,
+        /// Timestamp when the order violation was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 

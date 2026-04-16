@@ -144,6 +144,7 @@ impl Bytes {
     /// let hello = b.slice(0..5);
     /// assert_eq!(&hello[..], b"hello");
     /// ```
+    #[inline]
     #[must_use]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
         use std::ops::Bound;
