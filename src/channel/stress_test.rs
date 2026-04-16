@@ -422,8 +422,9 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_mpsc_light_stress() {
+    #[test]
+    fn test_mpsc_light_stress() {
+        lab_with_config(|_rt| async move {
         let config = StressTestConfig {
             base: AtomicityTestConfig {
                 capacity: 4,
@@ -453,20 +454,27 @@ mod tests {
         );
         assert!(result.atomicity_maintained, "Atomicity violations detected");
         assert_eq!(result.total_violations, 0, "Should have no violations");
+        });
     }
 
-    #[tokio::test]
-    async fn test_oneshot_stress_basic() {
-        oneshot_stress_test().await.unwrap();
+    #[test]
+    fn test_oneshot_stress_basic() {
+        lab_with_config(|_rt| async move {
+            oneshot_stress_test().await.unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_broadcast_stress_basic() {
-        broadcast_stress_test().await.unwrap();
+    #[test]
+    fn test_broadcast_stress_basic() {
+        lab_with_config(|_rt| async move {
+            broadcast_stress_test().await.unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_watch_stress_basic() {
-        watch_stress_test().await.unwrap();
+    #[test]
+    fn test_watch_stress_basic() {
+        lab_with_config(|_rt| async move {
+            watch_stress_test().await.unwrap();
+        });
     }
 }
