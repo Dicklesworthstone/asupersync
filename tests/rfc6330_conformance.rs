@@ -30,16 +30,37 @@ use asupersync::raptorq::rfc6330::{rand, deg, next_prime_ge, tuple, repair_indic
 use asupersync::raptorq::systematic::SystematicEncoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
-/// Test result for conformance tracking.
+/// Test result for conformance tracking with structured logging schema.
+/// Schema version: raptorq-log-schema-v1
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConformanceResult {
+    /// Unique test identifier (e.g., "RFC6330-5.3.5.1-001")
     pub test_id: String,
+    /// RFC section being tested (e.g., "5.3.5.1")
     pub rfc_section: String,
+    /// Requirement level from RFC (MUST, SHOULD, MAY)
     pub requirement_level: RequirementLevel,
+    /// Test outcome
     pub verdict: TestVerdict,
+    /// Human-readable description
     pub description: String,
+    /// Detailed error information for failures
     pub error_details: Option<String>,
+    /// Scenario ID for cross-reference with E2E tests
+    pub scenario_id: String,
+    /// Deterministic seed for reproducibility
+    pub seed: Option<u64>,
+    /// Parameter set used (e.g., "k=10,symbol_size=64")
+    pub parameter_set: String,
+    /// Output artifact path (logs, proofs, etc.)
+    pub artifact_path: Option<String>,
+    /// Exact reproduction command
+    pub repro_command: String,
+    /// Schema version for structured logging
+    pub schema_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +268,12 @@ fn test_rand_function_determinism(vector: &GoldenVector<(u32, u8, u32), u32>) ->
         } else {
             None
         },
+        scenario_id: "RQ-U-RFC6330-RAND".to_string(),
+        seed: Some(y as u64),
+        parameter_set: format!("y={},i={},m={}", y, i, m),
+        artifact_path: None,
+        repro_command: format!("rch exec -- cargo test --test rfc6330_conformance {} -- --exact --nocapture", vector.id),
+        schema_version: "raptorq-log-schema-v1".to_string(),
     }
 }
 
@@ -271,6 +298,12 @@ fn test_deg_function(vector: &GoldenVector<u32, usize>) -> ConformanceResult {
         } else {
             None
         },
+        scenario_id: "RQ-U-RFC6330-DEG".to_string(),
+        seed: Some(vector.input as u64),
+        parameter_set: format!("v={}", vector.input),
+        artifact_path: None,
+        repro_command: format!("rch exec -- cargo test --test rfc6330_conformance {} -- --exact --nocapture", vector.id),
+        schema_version: "raptorq-log-schema-v1".to_string(),
     }
 }
 
@@ -568,6 +601,61 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
     report
 }
 
+/// Output structured JSON logs for CI parsing and deterministic replay.
+/// Implements GAP-D7 structured logging schema requirements.
+pub fn output_structured_logs(results: &[ConformanceResult], output_path: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(Serialize)]
+    struct StructuredLogOutput {
+        schema_version: &'static str,
+        generated_at: String,
+        suite_type: &'static str,
+        test_count: usize,
+        pass_count: usize,
+        fail_count: usize,
+        must_coverage: f64,
+        results: &'_ [ConformanceResult],
+    }
+
+    let must_tests: Vec<_> = results.iter()
+        .filter(|r| matches!(r.requirement_level, RequirementLevel::Must))
+        .collect();
+    let pass_count = results.iter()
+        .filter(|r| r.verdict == TestVerdict::Pass)
+        .count();
+    let must_pass_count = must_tests.iter()
+        .filter(|r| r.verdict == TestVerdict::Pass)
+        .count();
+
+    let output = StructuredLogOutput {
+        schema_version: "raptorq-log-schema-v1",
+        generated_at: format!("{:?}", std::time::SystemTime::now()),
+        suite_type: "rfc6330_conformance",
+        test_count: results.len(),
+        pass_count,
+        fail_count: results.len() - pass_count,
+        must_coverage: if must_tests.is_empty() { 0.0 } else { must_pass_count as f64 / must_tests.len() as f64 },
+        results,
+    };
+
+    let json = serde_json::to_string_pretty(&output)?;
+
+    if let Some(path) = output_path {
+        fs::write(path, &json)?;
+        eprintln!("📋 Structured conformance log written to: {}", path.display());
+    } else {
+        println!("{}", json);
+    }
+
+    // Also emit JSON-lines format for CI parsing
+    eprintln!("📊 RFC 6330 Structured Logs (GAP-D7 Schema v1):");
+    for result in results {
+        let json_line = serde_json::to_string(result)?;
+        eprintln!("{}", json_line);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,10 +670,9 @@ mod tests {
         let report = generate_conformance_report(&results);
         println!("{}", report);
 
-        // Output structured results for CI parsing
-        for result in &results {
-            eprintln!("{{\"id\":\"{}\",\"verdict\":\"{:?}\",\"level\":\"{:?}\",\"section\":\"{}\"}}",
-                result.test_id, result.verdict, result.requirement_level, result.rfc_section);
+        // Output structured results using GAP-D7 schema
+        if let Err(e) = output_structured_logs(&results, None) {
+            eprintln!("Warning: Failed to generate structured logs: {}", e);
         }
 
         // Check for any failures
