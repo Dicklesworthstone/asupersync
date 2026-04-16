@@ -112,10 +112,15 @@ pub struct BottleneckInfo {
 /// Information about a detected anomaly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnomalyInfo {
+    /// Trace ID associated with the anomaly.
     pub trace_id: TraceId,
+    /// Type or category of the anomaly.
     pub anomaly_type: String,
+    /// Severity level of the anomaly.
     pub severity: AnomalySeverity,
+    /// Human-readable description of the anomaly.
     pub description: String,
+    /// When the anomaly was detected.
     pub detected_at: std::time::SystemTime,
 }
 
