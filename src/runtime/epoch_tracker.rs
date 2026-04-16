@@ -826,7 +826,7 @@ impl EpochConsistencyTracker {
         // Log recent violations summary
         if violation_count > 0 {
             let violations = self.violations.read();
-            for (idx, violation) in violations.iter().enumerate().take(5) {
+            for (idx, _violation) in violations.iter().enumerate().take(5) {
                 debug!(
                     violation_index = idx,
                     violation_type = match violation {
