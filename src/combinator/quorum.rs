@@ -61,6 +61,7 @@ pub struct Quorum<T, E> {
 
 impl<T, E> Quorum<T, E> {
     /// Creates a new quorum combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {

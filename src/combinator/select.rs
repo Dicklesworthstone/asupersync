@@ -36,11 +36,13 @@ pub enum Either<A, B> {
 
 impl<A, B> Either<A, B> {
     /// Returns true if this is the Left variant.
+    #[inline]
     pub fn is_left(&self) -> bool {
         matches!(self, Self::Left(_))
     }
 
     /// Returns true if this is the Right variant.
+    #[inline]
     pub fn is_right(&self) -> bool {
         matches!(self, Self::Right(_))
     }
@@ -80,6 +82,7 @@ pub struct Select<A, B> {
 
 impl<A, B> Select<A, B> {
     /// Creates a new select combinator.
+    #[inline]
     pub fn new(a: A, b: B) -> Self {
         Self {
             a,
@@ -139,6 +142,7 @@ pub struct SelectAll<F> {
 
 impl<F> SelectAll<F> {
     /// Creates a new select_all combinator.
+    #[inline]
     #[must_use]
     pub fn new(futures: Vec<F>) -> Self {
         assert!(

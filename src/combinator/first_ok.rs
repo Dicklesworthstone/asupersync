@@ -59,6 +59,7 @@ pub struct FirstOk<T, E> {
 
 impl<T, E> FirstOk<T, E> {
     /// Creates a new first_ok combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {

@@ -71,12 +71,14 @@ impl<T> Timeout<T> {
     }
 
     /// Returns true if the deadline has passed.
+    #[inline]
     #[must_use]
     pub fn is_expired(&self, now: Time) -> bool {
         now >= self.deadline
     }
 
     /// Returns the remaining time until the deadline, or zero if expired.
+    #[inline]
     #[must_use]
     pub fn remaining(&self, now: Time) -> Duration {
         if now >= self.deadline {
@@ -109,6 +111,7 @@ pub struct TimeoutError {
 
 impl TimeoutError {
     /// Creates a new timeout error with the given deadline.
+    #[inline]
     #[must_use]
     pub const fn new(deadline: Time) -> Self {
         Self {
@@ -118,6 +121,7 @@ impl TimeoutError {
     }
 
     /// Creates a new timeout error with a message.
+    #[inline]
     #[must_use]
     pub const fn with_message(deadline: Time, message: &'static str) -> Self {
         Self {
@@ -127,6 +131,7 @@ impl TimeoutError {
     }
 
     /// Converts to a CancelReason for use in Outcome::Cancelled.
+    #[inline]
     #[must_use]
     pub const fn into_cancel_reason(self) -> CancelReason {
         CancelReason::timeout()
@@ -155,12 +160,14 @@ pub enum TimedResult<T, E> {
 
 impl<T, E> TimedResult<T, E> {
     /// Returns true if the operation completed.
+    #[inline]
     #[must_use]
     pub const fn is_completed(&self) -> bool {
         matches!(self, Self::Completed(_))
     }
 
     /// Returns true if the operation timed out.
+    #[inline]
     #[must_use]
     pub const fn is_timed_out(&self) -> bool {
         matches!(self, Self::TimedOut(_))
@@ -257,6 +264,7 @@ pub fn make_timed_result<T, E>(
 ///
 /// # Returns
 /// The tighter (earlier) of the two deadlines.
+#[inline]
 #[must_use]
 pub const fn effective_deadline(requested: Time, existing: Option<Time>) -> Time {
     match existing {
@@ -276,6 +284,7 @@ pub struct TimeoutConfig {
 
 impl TimeoutConfig {
     /// Creates a new timeout configuration.
+    #[inline]
     #[must_use]
     pub const fn new(deadline: Time) -> Self {
         Self {
@@ -285,6 +294,7 @@ impl TimeoutConfig {
     }
 
     /// Creates a configuration that ignores nested timeouts.
+    #[inline]
     #[must_use]
     pub const fn absolute(deadline: Time) -> Self {
         Self {
@@ -294,6 +304,7 @@ impl TimeoutConfig {
     }
 
     /// Returns the final deadline to use, considering any existing deadline.
+    #[inline]
     #[must_use]
     pub const fn resolve(&self, existing: Option<Time>) -> Time {
         if self.use_effective {

@@ -139,6 +139,7 @@ pub struct Race<A, B> {
 
 impl<A, B> Race<A, B> {
     /// Creates a new race combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -200,6 +201,7 @@ pub struct RaceAll<T> {
 
 impl<T> RaceAll<T> {
     /// Creates a new N-way race combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self { _t: PhantomData }
