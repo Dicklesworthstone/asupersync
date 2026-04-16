@@ -74,6 +74,7 @@ impl<A, B> Join<A, B> {
 }
 
 impl<A, B> Default for Join<A, B> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
