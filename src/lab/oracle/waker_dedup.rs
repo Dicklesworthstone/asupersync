@@ -108,60 +108,97 @@ pub enum EnforcementMode {
 pub enum WakerDedupViolation {
     /// Waker was registered but never woken when it should have been
     LostWakeup {
+        /// ID of the waker that was lost.
         waker_id: WakerId,
+        /// ID of the channel where the wakeup was lost.
         channel_id: ChannelId,
+        /// When the waker was originally registered.
         registered_at: SystemTime,
+        /// When the wakeup was expected to occur.
         expected_wake_at: SystemTime,
+        /// Optional trace ID for correlation.
         trace_id: Option<TraceId>,
     },
     /// Waker was woken when it wasn't supposed to be (spurious wakeup)
     SpuriousWakeup {
+        /// ID of the spuriously woken waker.
         waker_id: WakerId,
+        /// ID of the channel where spurious wakeup occurred.
         channel_id: ChannelId,
+        /// When the spurious wakeup occurred.
         woken_at: SystemTime,
+        /// Human-readable reason for the spurious wakeup.
         reason: String,
+        /// Optional trace ID for correlation.
         trace_id: Option<TraceId>,
     },
     /// Waker state inconsistency between oracle tracking and actual state
     InconsistentQueuedState {
+        /// ID of the waker with inconsistent state.
         waker_id: WakerId,
+        /// ID of the channel with the inconsistency.
         channel_id: ChannelId,
+        /// Whether the waker was expected to be queued.
         expected_queued: bool,
+        /// Whether the waker was actually queued.
         actual_queued: bool,
+        /// When the inconsistency was detected.
         detected_at: SystemTime,
+        /// Optional trace ID for correlation.
         trace_id: Option<TraceId>,
     },
     /// Race condition detected between waker registration and wakeup
     RegistrationRace {
+        /// ID of the waker involved in the race.
         waker_id: WakerId,
+        /// ID of the channel where the race occurred.
         channel_id: ChannelId,
+        /// When the waker registration started.
         registration_time: SystemTime,
+        /// When the wakeup occurred.
         wakeup_time: SystemTime,
+        /// Optional trace ID for correlation.
         trace_id: Option<TraceId>,
     },
     /// Waker was woken multiple times without re-registration
     DoubleWakeup {
+        /// ID of the doubly-woken waker.
         waker_id: WakerId,
+        /// ID of the channel where double wakeup occurred.
         channel_id: ChannelId,
+        /// When the first wakeup occurred.
         first_wake_at: SystemTime,
+        /// When the second wakeup occurred.
         second_wake_at: SystemTime,
+        /// Optional trace ID for correlation.
         trace_id: Option<TraceId>,
     },
     /// Waker was leaked (not properly cleaned up)
     WakerLeak {
+        /// ID of the leaked waker.
         waker_id: WakerId,
+        /// ID of the channel where the waker was leaked.
         channel_id: ChannelId,
+        /// When the waker was originally registered.
         registered_at: SystemTime,
+        /// When the leak was detected.
         detected_at: SystemTime,
+        /// Optional trace ID for correlation.
         trace_id: Option<TraceId>,
     },
     /// Waker operation on unknown or already-dropped waker
     UseAfterDrop {
+        /// ID of the dropped waker that was used.
         waker_id: WakerId,
+        /// ID of the channel where use-after-drop occurred.
         channel_id: ChannelId,
+        /// When the waker was originally dropped.
         dropped_at: SystemTime,
+        /// When the illegal operation was attempted.
         operation_at: SystemTime,
+        /// Description of the operation that was attempted.
         operation: String,
+        /// Optional trace ID for correlation.
         trace_id: Option<TraceId>,
     },
 }
@@ -297,14 +334,20 @@ impl std::fmt::Display for WakerDedupViolation {
 /// Enhanced violation record with diagnostics
 #[derive(Debug, Clone)]
 pub struct ViolationRecord {
+    /// The underlying waker deduplication violation.
     pub violation: WakerDedupViolation,
+    /// When the violation was recorded.
     pub timestamp: SystemTime,
+    /// Optional trace ID for correlation across systems.
     pub trace_id: Option<TraceId>,
+    /// Optional stack trace captured at violation time.
     pub stack_trace: Option<String>,
+    /// Optional command to replay the scenario.
     pub replay_command: Option<String>,
 }
 
 impl ViolationRecord {
+    /// Create a new violation record with enhanced diagnostics.
     pub fn new(violation: WakerDedupViolation, config: &WakerDedupConfig) -> Self {
         let trace_id = match &violation {
             WakerDedupViolation::LostWakeup { trace_id, .. } => *trace_id,
@@ -337,6 +380,7 @@ impl ViolationRecord {
         }
     }
 
+    /// Emit a structured log entry for this violation record.
     pub fn emit_structured_log(&self) {
         let timestamp_millis = self
             .timestamp
@@ -359,11 +403,17 @@ impl ViolationRecord {
 /// State tracking for a waker
 #[derive(Debug, Clone)]
 pub struct WakerState {
+    /// Unique identifier for this waker.
     pub waker_id: WakerId,
+    /// ID of the channel this waker is associated with.
     pub channel_id: ChannelId,
+    /// When this waker was registered.
     pub registered_at: SystemTime,
+    /// Optional trace ID for correlation.
     pub trace_id: Option<TraceId>,
+    /// Current status of the waker.
     pub status: WakerStatus,
+    /// When the last operation on this waker occurred.
     pub last_operation_at: SystemTime,
 }
 
