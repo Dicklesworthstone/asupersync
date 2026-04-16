@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "asupersync-fuzz"
 version = "0.0.0"
@@ -9,15 +11,13 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-# Note: asupersync dependency commented out until main crate compiles.
-# Once compilation issues are resolved, uncomment to add targets that
-# test actual implementation.
-# asupersync = { path = ".." }
+asupersync = { path = ".." }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
 # Optional: for structured fuzzing
 bytes = "1"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # For seed generation and corpus management
@@ -57,6 +57,13 @@ bench = false
 [[bin]]
 name = "fuzz_interest_flags"
 path = "fuzz_targets/interest_flags.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_typed_symbol_parser"
+path = "fuzz_targets/typed_symbol_parser.rs"
 test = false
 doc = false
 bench = false

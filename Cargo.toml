@@ -257,6 +257,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "testing"] }
 lz4_flex = "0.12"
 toml = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.14"
 rayon = "1.11"
