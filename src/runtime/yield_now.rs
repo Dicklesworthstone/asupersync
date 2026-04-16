@@ -1,3 +1,8 @@
+//! Cooperative yielding primitive for the asupersync runtime.
+//!
+//! This module provides the `yield_now()` function that allows tasks to voluntarily
+//! yield execution back to the runtime scheduler, enabling fair cooperative multitasking.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};

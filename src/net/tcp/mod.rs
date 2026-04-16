@@ -1,3 +1,10 @@
+//! TCP networking primitives for the asupersync runtime.
+//!
+//! This module provides TCP socket operations including listening, connecting,
+//! and streaming with full integration into the asupersync async runtime.
+//! Includes support for split operations, virtual TCP for testing, and
+//! cross-platform compatibility.
+
 pub mod listener;
 pub mod socket;
 pub mod split;
