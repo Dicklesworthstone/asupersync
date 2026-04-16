@@ -150,7 +150,6 @@ impl Notify {
     /// Creates a new `Notify` in the empty state.
     #[inline]
     #[must_use]
-    #[inline]
     pub fn new() -> Self {
         Self {
             generation: AtomicU64::new(0),
@@ -264,7 +263,6 @@ impl Notify {
 
     /// Returns the number of tasks currently waiting.
     #[inline]
-    #[inline]
     #[must_use]
     pub fn waiter_count(&self) -> usize {
         let waiters = self.waiters.lock();
@@ -298,6 +296,7 @@ impl Notify {
     /// notification when no waiter is present. This is used when a later
     /// broadcast already covered the original waiter set, but a post-broadcast
     /// waiter may still need the in-flight `notify_one` baton.
+    #[inline]
     fn pass_baton_if_waiter_exists(mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
         let start = waiters.scan_start;
         for i in start..waiters.entries.len() {
@@ -353,6 +352,7 @@ impl Notified<'_> {
         Poll::Ready(())
     }
 
+    #[inline]
     fn try_consume_stored_notification(&self) -> bool {
         let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
         while stored > 0 {
@@ -369,6 +369,7 @@ impl Notified<'_> {
         false
     }
 
+    #[inline]
     fn poll_init(&mut self, cx: &Context<'_>) -> Poll<()> {
         // Lock-free fast path: observe broadcast generation bump.
         let current_gen = self.notify.generation.load(Ordering::Acquire);
@@ -408,6 +409,7 @@ impl Notified<'_> {
         Poll::Pending
     }
 
+    #[inline]
     fn poll_waiting(&mut self, cx: &Context<'_>) -> Poll<()> {
         // Lock-free fast path check.
         let current_gen = self.notify.generation.load(Ordering::Acquire);
