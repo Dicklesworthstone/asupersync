@@ -30,10 +30,13 @@ impl Ord for SchedulerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Higher priority first (BinaryHeap is max-heap)
         // For equal priorities, earlier generation (lower number) comes first
-        self.priority.cmp(&other.priority).then_with(|| {
-            let diff = other.generation.wrapping_sub(self.generation).cast_signed();
-            diff.cmp(&0)
-        }).then_with(|| other.task.cmp(&self.task))
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
+            })
+            .then_with(|| other.task.cmp(&self.task))
     }
 }
 
@@ -60,10 +63,14 @@ impl Ord for TimedEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Earlier deadline first (reverse comparison for min-heap behavior via max-heap)
         // For equal deadlines, earlier generation comes first
-        other.deadline.cmp(&self.deadline).then_with(|| {
-            let diff = other.generation.wrapping_sub(self.generation).cast_signed();
-            diff.cmp(&0)
-        }).then_with(|| other.task.cmp(&self.task))
+        other
+            .deadline
+            .cmp(&self.deadline)
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
+            })
+            .then_with(|| other.task.cmp(&self.task))
     }
 }
 
@@ -1005,6 +1012,12 @@ impl Scheduler {
                 stolen += 1;
             }
         }
+
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            out.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+            "stolen ready batch must preserve non-increasing priority order"
+        );
 
         stolen
     }
@@ -2116,6 +2129,69 @@ mod tests {
             buf[0].0
         );
         crate::test_complete!("steal_ready_batch_into_clears_buffer");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_preserves_priority_order() {
+        init_test("steal_ready_batch_into_preserves_priority_order");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 10);
+        sched.schedule(task(2), 90);
+        sched.schedule(task(3), 50);
+        sched.schedule(task(4), 80);
+        sched.schedule(task(5), 20);
+        sched.schedule(task(6), 70);
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(3, &mut buf);
+
+        crate::assert_with_log!(count == 3, "stole requested batch", 3usize, count);
+        crate::assert_with_log!(
+            buf.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+            "stolen batch preserves non-increasing priority order",
+            true,
+            buf.windows(2).all(|pair| pair[0].1 >= pair[1].1)
+        );
+        crate::assert_with_log!(
+            buf[0] == (task(2), 90),
+            "highest priority first",
+            (task(2), 90),
+            buf[0]
+        );
+        crate::assert_with_log!(
+            buf[1] == (task(4), 80),
+            "second-highest priority second",
+            (task(4), 80),
+            buf[1]
+        );
+        crate::assert_with_log!(
+            buf[2] == (task(6), 70),
+            "third-highest priority third",
+            (task(6), 70),
+            buf[2]
+        );
+        crate::test_complete!("steal_ready_batch_into_preserves_priority_order");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_preserves_fifo_within_priority() {
+        init_test("steal_ready_batch_into_preserves_fifo_within_priority");
+        let mut sched = Scheduler::new();
+        for i in 0..6 {
+            sched.schedule(task(i), 50);
+        }
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(3, &mut buf);
+
+        crate::assert_with_log!(count == 3, "stole requested batch", 3usize, count);
+        crate::assert_with_log!(
+            buf == vec![(task(0), 50), (task(1), 50), (task(2), 50)],
+            "equal-priority steals preserve FIFO generation order",
+            vec![(task(0), 50), (task(1), 50), (task(2), 50)],
+            buf.clone()
+        );
+        crate::test_complete!("steal_ready_batch_into_preserves_fifo_within_priority");
     }
 
     // ── pop_timed_only edge cases ─────────────────────────────────────────
