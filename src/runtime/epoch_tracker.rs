@@ -803,7 +803,7 @@ impl EpochConsistencyTracker {
     pub fn log_epoch_state(&self) {
         let records = self.module_records.read();
         let violation_count = self.violation_count();
-        let total_transitions = self.global_transition_count.load(Ordering::Relaxed);
+        let _total_transitions = self.global_transition_count.load(Ordering::Relaxed);
 
         // Log overall epoch state
         info!(
@@ -821,9 +821,9 @@ impl EpochConsistencyTracker {
         );
 
         // Log per-module state
-        for (&module, record) in records.iter() {
+        for (&_module, _record) in records.iter() {
             debug!(
-                module_id = %module,
+                module_id = %_module,
                 current_epoch = %record.current_epoch,
                 transition_count = record.transition_count,
                 last_transition_time_ns = record.last_transition_time.as_nanos(),
