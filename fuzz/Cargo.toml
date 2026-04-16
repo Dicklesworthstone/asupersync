@@ -162,3 +162,10 @@ path = "fuzz_targets/redis_resp_protocol.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_http_accept_encoding_negotiation"
+path = "fuzz_targets/http_accept_encoding_negotiation.rs"
+test = false
+doc = false
+bench = false
