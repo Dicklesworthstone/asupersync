@@ -31,6 +31,7 @@ impl LogLevel {
     /// assert!(LogLevel::Error.is_enabled_at(LogLevel::Info));
     /// assert!(!LogLevel::Debug.is_enabled_at(LogLevel::Info));
     /// ```
+    #[inline]
     #[must_use]
     pub const fn is_enabled_at(&self, threshold: Self) -> bool {
         // Since we derive Ord, comparison works as expected:
@@ -49,6 +50,7 @@ impl LogLevel {
     }
 
     /// Returns a single-character representation (T, D, I, W, E).
+    #[inline]
     #[must_use]
     pub const fn as_char(&self) -> char {
         match self {
@@ -61,6 +63,7 @@ impl LogLevel {
     }
 
     /// Returns the string representation in lowercase.
+    #[inline]
     #[must_use]
     pub const fn as_str_lower(&self) -> &'static str {
         match self {

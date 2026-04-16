@@ -17,6 +17,7 @@ pub struct Enumerate<S> {
 }
 
 impl<S> Enumerate<S> {
+    #[inline]
     pub(crate) fn new(stream: S) -> Self {
         Self {
             stream,
