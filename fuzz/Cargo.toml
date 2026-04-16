@@ -190,3 +190,24 @@ path = "fuzz_targets/dns_protocol_parsing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_trace_file_parsing"
+path = "fuzz_targets/trace_file_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_replay_event_deserialization"
+path = "fuzz_targets/replay_event_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_compression"
+path = "fuzz_targets/trace_compression.rs"
+test = false
+doc = false
+bench = false
