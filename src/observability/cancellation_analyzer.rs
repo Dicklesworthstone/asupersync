@@ -65,14 +65,23 @@ pub struct PerformanceAnalysis {
 /// Statistical distribution information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributionStats {
+    /// Total number of samples.
     pub count: usize,
+    /// Arithmetic mean of the samples.
     pub mean: f64,
+    /// Median value of the samples.
     pub median: f64,
+    /// Standard deviation of the samples.
     pub std_dev: f64,
+    /// 95th percentile value.
     pub percentile_95: f64,
+    /// 99th percentile value.
     pub percentile_99: f64,
+    /// Minimum observed value.
     pub min: f64,
+    /// Maximum observed value.
     pub max: f64,
+    /// Number of outlier samples detected.
     pub outlier_count: usize,
 }
 
@@ -81,6 +90,7 @@ pub struct DistributionStats {
 pub struct BottleneckAnalysis {
     /// Entity causing the bottleneck.
     pub entity_id: String,
+    /// Type of the entity causing the bottleneck.
     pub entity_type: EntityType,
     /// Contribution to total cancellation latency.
     pub impact_percentage: f64,
@@ -123,7 +133,9 @@ pub struct CleanupEfficiency {
 /// Performance metrics for individual entities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityPerformance {
+    /// Unique identifier for the entity.
     pub entity_id: String,
+    /// Type of the entity being measured.
     pub entity_type: EntityType,
     /// Overall performance score (higher is better).
     pub performance_score: f64,
@@ -133,6 +145,7 @@ pub struct EntityPerformance {
     pub throughput: ThroughputMetrics,
     /// Error and anomaly rates.
     pub error_rate: f64,
+    /// Rate of anomalies detected (0.0 to 1.0).
     pub anomaly_rate: f64,
 }
 
@@ -163,10 +176,14 @@ pub struct TrendAnalysis {
 /// Direction of a trend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TrendDirection {
+    /// Trend is improving over time.
     Improving,
+    /// Trend is stable with no significant change.
     Stable,
+    /// Trend is degrading or worsening over time.
     Degrading,
-    Insufficient, // Not enough data
+    /// Insufficient data to determine trend direction.
+    Insufficient,
 }
 
 /// Detected performance regression.
@@ -211,10 +228,15 @@ pub enum RecommendationPriority {
 /// Implementation complexity estimate.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ImplementationComplexity {
+    /// Very simple change requiring minimal effort.
     Trivial,
+    /// Simple change with low implementation cost.
     Simple,
+    /// Moderate complexity requiring some design work.
     Moderate,
+    /// Complex change requiring significant development effort.
     Complex,
+    /// Major architectural change affecting multiple components.
     Architectural,
 }
 
