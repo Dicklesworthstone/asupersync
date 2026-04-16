@@ -390,6 +390,8 @@ pub struct RuntimeState {
     epoch_tracker: super::epoch_tracker::EpochConsistencyTracker,
     /// State machine transition verifier for runtime entities.
     state_verifier: Arc<super::state_verifier::StateTransitionVerifier>,
+    /// Cancellation debt accumulation monitor.
+    debt_monitor: Arc<crate::observability::CancellationDebtMonitor>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -431,6 +433,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("finalizer_history_len", &self.finalizer_history.len())
             .field("next_finalizer_id", &self.next_finalizer_id)
             .field("state_verifier", &"<StateTransitionVerifier>")
+            .field("debt_monitor", &"<CancellationDebtMonitor>")
             .finish()
     }
 }
@@ -481,6 +484,7 @@ impl RuntimeState {
             state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
                 super::state_verifier::StateVerifierConfig::default(),
             )),
+            debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
         }
     }
 
@@ -697,6 +701,14 @@ impl RuntimeState {
     /// Sets the metrics provider for this runtime.
     pub fn set_metrics_provider(&mut self, provider: Arc<dyn MetricsProvider>) {
         self.metrics = provider;
+    }
+
+    /// Returns the cancellation debt monitor for this runtime.
+    #[inline]
+    #[must_use]
+    pub fn debt_monitor(&self) -> Arc<crate::observability::CancellationDebtMonitor> {
+        self.debt_monitor.clone()
+    }
     }
 
     /// Returns a shared reference to a task record by ID.
@@ -1527,6 +1539,18 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
+
+        // Track obligation settlement work in debt monitor
+        let cancel_reason = CancelReason::with_user_reason(format!("obligation_abort_{:?}", info.reason));
+        self.debt_monitor.queue_work(
+            crate::observability::WorkType::ObligationSettlement,
+            format!("obligation_{}_{}", info.id, info.holder),
+            1, // Low priority for aborts
+            1, // Low cost estimate
+            &cancel_reason,
+            CancelKind::System,
+            Vec::new(),
+        );
 
         // Notify epoch tracker of obligation abort
         self.epoch_tracker.notify_epoch_transition(

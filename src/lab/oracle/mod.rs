@@ -37,6 +37,7 @@
 pub mod actor;
 pub mod ambient_authority;
 pub mod cancel_correctness;
+pub mod cancel_debt;
 pub mod cancel_signal_ordering;
 pub mod cancellation_protocol;
 pub mod channel_atomicity;
@@ -67,6 +68,10 @@ pub use ambient_authority::{
 pub use cancel_correctness::{
     CancelCorrectnessConfig, CancelCorrectnessOracle, CancelCorrectnessStatistics,
     CancelCorrectnessViolation,
+};
+pub use cancel_debt::{
+    CancelDebtConfig, CancelDebtOracle, CancelDebtStatistics,
+    CancelDebtViolation,
 };
 pub use cancel_signal_ordering::{
     CancelOrderingConfig, CancelOrderingOracle, CancelOrderingStatistics,
@@ -153,6 +158,8 @@ pub enum OracleViolation {
     CancellationProtocol(CancellationProtocolViolation),
     /// Cancel-correctness property violated.
     CancelCorrectness(CancelCorrectnessViolation),
+    /// Cancel debt accumulation violated.
+    CancelDebt(CancelDebtViolation),
     /// Cancel signal ordering violated.
     CancelOrdering(CancelOrderingViolation),
     /// Channel atomicity violation (reservation lifecycle, waker consistency, etc.).
@@ -203,6 +210,7 @@ impl std::fmt::Display for OracleViolation {
             Self::DeadlineMonotone(v) => write!(f, "Deadline monotonicity violation: {v}"),
             Self::CancellationProtocol(v) => write!(f, "Cancellation protocol violation: {v}"),
             Self::CancelCorrectness(v) => write!(f, "Cancel-correctness violation: {v}"),
+            Self::CancelDebt(v) => write!(f, "Cancel debt violation: {v}"),
             Self::CancelOrdering(v) => write!(f, "Cancel ordering violation: {v}"),
             Self::ChannelAtomicity(v) => write!(f, "Channel atomicity violation: {v}"),
             Self::WakerDedup(v) => write!(f, "Waker deduplication violation: {v}"),
@@ -253,6 +261,8 @@ pub struct OracleSuite {
     pub cancellation_protocol: CancellationProtocolOracle,
     /// Cancel-correctness property oracle.
     pub cancel_correctness: CancelCorrectnessOracle,
+    /// Cancel debt accumulation oracle.
+    pub cancel_debt: CancelDebtOracle,
     /// Cancel signal ordering oracle.
     pub cancel_signal_ordering: CancelOrderingOracle,
     /// Channel atomicity oracle.
@@ -348,6 +358,7 @@ impl OracleSuite {
         self.deadline_monotone.reset();
         self.cancellation_protocol.snapshot_from_state(state, now);
         self.cancel_correctness.reset();
+        self.cancel_debt.reset();
         self.cancel_signal_ordering.reset();
 
         for event in state.finalizer_history() {
@@ -510,6 +521,10 @@ impl OracleSuite {
             violations.push(OracleViolation::CancelCorrectness(v));
         }
 
+        if let Err(v) = self.cancel_debt.check(now) {
+            violations.push(OracleViolation::CancelDebt(v));
+        }
+
         if let Err(v) = self.cancel_signal_ordering.check(now) {
             violations.push(OracleViolation::CancelOrdering(v));
         }
@@ -608,6 +623,7 @@ impl OracleSuite {
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
         self.cancel_correctness.reset();
+        self.cancel_debt.reset();
         self.cancel_signal_ordering.reset();
         self.channel_atomicity.reset();
         self.waker_dedup.reset();
@@ -762,6 +778,17 @@ impl OracleSuite {
                 OracleStats {
                     entities_tracked: self.cancel_correctness.get_statistics().active_tasks,
                     events_recorded: self.cancel_correctness.get_statistics().witnesses_processed as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "cancel_debt",
+                self.cancel_debt
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::CancelDebt),
+                OracleStats {
+                    entities_tracked: self.cancel_debt.get_statistics().tracked_queues,
+                    events_recorded: self.cancel_debt.get_statistics().work_items_tracked as usize,
                 },
             ),
             OracleEntryReport::from_result(
