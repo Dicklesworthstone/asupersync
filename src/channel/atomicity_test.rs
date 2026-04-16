@@ -244,7 +244,7 @@ impl CancellationInjector {
 
         // Simple LCG for deterministic randomness
         let mut state = self.rng_state.load(Ordering::Relaxed);
-        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
         self.rng_state.store(state, Ordering::Relaxed);
 
         let random = (state >> 16) as f64 / u32::MAX as f64;

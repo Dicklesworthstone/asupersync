@@ -1107,7 +1107,7 @@ mod tests {
         tracker.notify_epoch_transition_start(ModuleId::Scheduler, EpochId::GENESIS, now);
 
         // Simulate some delay
-        let later = Time::from_nanos(1001000); // 1ms later
+        let later = Time::from_nanos(1_001_000); // 1ms later
         tracker.notify_epoch_transition(
             ModuleId::Scheduler,
             EpochId::GENESIS,
@@ -1154,7 +1154,7 @@ mod tests {
         );
 
         // Test threshold update
-        tracker.set_slow_transition_threshold(5000000); // 5ms
+        tracker.set_slow_transition_threshold(5_000_000); // 5ms
 
         // Re-enable and verify it works
         tracker.set_enabled(true);
