@@ -217,6 +217,7 @@ pub struct SelectAllDrain<F> {
 
 impl<F> SelectAllDrain<F> {
     /// Creates a new drain-aware select_all combinator.
+    #[inline]
     #[must_use]
     pub fn new(futures: Vec<F>) -> Self {
         assert!(

@@ -68,6 +68,7 @@ impl RetryPolicy {
     /// - 30s max delay
     /// - 2.0 multiplier
     /// - 0.1 jitter (10%)
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -80,6 +81,7 @@ impl RetryPolicy {
     }
 
     /// Creates a policy with the specified number of attempts.
+    #[inline]
     #[must_use]
     pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
         self.max_attempts = max_attempts.max(1);
@@ -87,6 +89,7 @@ impl RetryPolicy {
     }
 
     /// Sets the initial delay for the first retry.
+    #[inline]
     #[must_use]
     pub fn with_initial_delay(mut self, delay: Duration) -> Self {
         self.initial_delay = delay;
@@ -94,6 +97,7 @@ impl RetryPolicy {
     }
 
     /// Sets the maximum delay cap.
+    #[inline]
     #[must_use]
     pub fn with_max_delay(mut self, delay: Duration) -> Self {
         self.max_delay = delay;
@@ -101,6 +105,7 @@ impl RetryPolicy {
     }
 
     /// Sets the backoff multiplier.
+    #[inline]
     #[must_use]
     pub fn with_multiplier(mut self, multiplier: f64) -> Self {
         self.multiplier = multiplier.max(1.0);
@@ -108,6 +113,7 @@ impl RetryPolicy {
     }
 
     /// Sets the jitter factor (0.0 to 1.0).
+    #[inline]
     #[must_use]
     pub fn with_jitter(mut self, jitter: f64) -> Self {
         self.jitter = jitter.clamp(0.0, 1.0);
@@ -115,6 +121,7 @@ impl RetryPolicy {
     }
 
     /// Creates a policy with no jitter (fully deterministic delays).
+    #[inline]
     #[must_use]
     pub fn no_jitter(mut self) -> Self {
         self.jitter = 0.0;
@@ -122,6 +129,7 @@ impl RetryPolicy {
     }
 
     /// Creates a policy with fixed delays (no exponential backoff).
+    #[inline]
     #[must_use]
     pub fn fixed_delay(delay: Duration, max_attempts: u32) -> Self {
         Self {
@@ -134,6 +142,7 @@ impl RetryPolicy {
     }
 
     /// Creates a policy for immediate retries (no delay).
+    #[inline]
     #[must_use]
     pub fn immediate(max_attempts: u32) -> Self {
         Self {
@@ -161,6 +170,7 @@ impl RetryPolicy {
 }
 
 impl Default for RetryPolicy {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
