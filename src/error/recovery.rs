@@ -36,6 +36,7 @@ pub struct ExponentialBackoff {
 
 impl ExponentialBackoff {
     /// Creates a new exponential backoff strategy.
+    #[inline]
     #[must_use]
     pub fn new(initial: Duration, max: Duration, multiplier: f64, max_attempts: u32) -> Self {
         Self {
@@ -48,6 +49,7 @@ impl ExponentialBackoff {
     }
 
     /// Sets the jitter factor.
+    #[inline]
     #[must_use]
     pub fn with_jitter(mut self, jitter: f64) -> Self {
         self.jitter = if jitter.is_finite() {
@@ -136,6 +138,7 @@ pub struct CircuitBreaker {
 
 impl CircuitBreaker {
     /// Creates a new circuit breaker.
+    #[inline]
     #[must_use]
     pub fn new(failure_threshold: u32, recovery_timeout: Duration) -> Self {
         Self {
@@ -205,6 +208,7 @@ impl CircuitBreaker {
         }
     }
 
+    #[inline]
     fn state(&self) -> CircuitState {
         match self.state.load(Ordering::Acquire) {
             0 => CircuitState::Closed,
@@ -213,6 +217,7 @@ impl CircuitBreaker {
         }
     }
 
+    #[inline]
     fn transition(&self, from: CircuitState, to: CircuitState) -> bool {
         self.state
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
