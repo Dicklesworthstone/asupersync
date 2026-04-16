@@ -21,6 +21,24 @@ impl<S> Fuse<S> {
             stream: Some(stream),
         }
     }
+
+    /// Returns a reference to the underlying stream, if it hasn't been fused.
+    #[inline]
+    pub fn get_ref(&self) -> Option<&S> {
+        self.stream.as_ref()
+    }
+
+    /// Returns a mutable reference to the underlying stream, if it hasn't been fused.
+    #[inline]
+    pub fn get_mut(&mut self) -> Option<&mut S> {
+        self.stream.as_mut()
+    }
+
+    /// Consumes the combinator, returning the underlying stream if it hasn't been fused.
+    #[inline]
+    pub fn into_inner(self) -> Option<S> {
+        self.stream
+    }
 }
 
 impl<S: Stream> Stream for Fuse<S> {
@@ -42,6 +60,7 @@ impl<S: Stream> Stream for Fuse<S> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.as_ref().map_or((0, Some(0)), Stream::size_hint)
     }

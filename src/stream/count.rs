@@ -29,6 +29,7 @@ pub struct Count<S> {
 
 impl<S> Count<S> {
     /// Creates a new `Count` future.
+    #[inline]
     pub(crate) fn new(stream: S) -> Self {
         Self {
             stream,

@@ -116,6 +116,7 @@ impl<S: Stream> Stream for Peekable<S> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self.peeked {
             PeekSlot::Exhausted => (0, Some(0)),

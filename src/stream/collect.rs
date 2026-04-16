@@ -26,6 +26,7 @@ pub struct Collect<S, C> {
 
 impl<S, C> Collect<S, C> {
     /// Creates a new `Collect` future.
+    #[inline]
     pub(crate) fn new(stream: S, collection: C) -> Self {
         Self {
             stream,
