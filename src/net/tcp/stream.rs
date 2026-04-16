@@ -107,6 +107,7 @@ where
     ///
     /// Note: Phase 0 does not support keepalive on all platforms; enabling
     /// this may return `io::ErrorKind::Unsupported`.
+    #[inline]
     #[must_use]
     pub fn keepalive(mut self, keepalive: Option<Duration>) -> Self {
         self.keepalive = keepalive.map_or(KeepaliveConfig::Disabled, KeepaliveConfig::Enabled);
@@ -567,6 +568,7 @@ fn timeout_now() -> Time {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[inline]
 fn timeout_now_with_fallback(fallback_now: fn() -> Time) -> Time {
     Cx::current()
         .and_then(|current| current.timer_driver())
@@ -579,6 +581,7 @@ fn timeout_now_with_fallback(fallback_now: fn() -> Time) -> Time {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[inline]
 fn duration_to_nanos_saturating(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
