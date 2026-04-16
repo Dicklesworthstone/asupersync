@@ -409,6 +409,7 @@ impl Symbol {
     /// Creates an explicit repair symbol for testing purposes.
     #[doc(hidden)]
     #[must_use]
+    #[inline]
     pub fn new_repair_for_test(object_value: u64, sbn: u8, esi: u32, data: &[u8]) -> Self {
         Self {
             id: SymbolId::new_for_test(object_value, sbn, esi),
@@ -461,6 +462,7 @@ pub struct ObjectParams {
 impl ObjectParams {
     /// Creates new object parameters.
     #[must_use]
+    #[inline]
     pub const fn new(
         object_id: ObjectId,
         object_size: u64,
@@ -483,6 +485,7 @@ impl ObjectParams {
     /// decode threshold is the total source-symbol count across all source
     /// blocks, not the per-block `K`.
     #[must_use]
+    #[inline]
     pub const fn min_symbols_for_decode(&self) -> u32 {
         self.total_source_symbols()
     }
@@ -506,6 +509,7 @@ impl ObjectParams {
     /// Creates object parameters for testing.
     #[doc(hidden)]
     #[must_use]
+    #[inline]
     pub const fn new_for_test(object_value: u64, size: u64) -> Self {
         let symbol_size = DEFAULT_SYMBOL_SIZE as u64;
         let symbols_per_block = if size == 0 {
