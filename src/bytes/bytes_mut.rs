@@ -34,6 +34,7 @@ pub struct BytesMut {
 
 impl BytesMut {
     /// Create an empty `BytesMut`.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self { data: Vec::new() }
@@ -50,6 +51,7 @@ impl BytesMut {
     /// assert!(buf.is_empty());
     /// assert!(buf.capacity() >= 100);
     /// ```
+    #[inline]
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -303,6 +305,7 @@ impl BytesMut {
 }
 
 impl Default for BytesMut {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -311,12 +314,14 @@ impl Default for BytesMut {
 impl Deref for BytesMut {
     type Target = [u8];
 
+    #[inline]
     fn deref(&self) -> &[u8] {
         &self.data
     }
 }
 
 impl DerefMut for BytesMut {
+    #[inline]
     fn deref_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
