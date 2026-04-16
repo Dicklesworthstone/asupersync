@@ -148,6 +148,7 @@ pub struct LeakEscalation {
 
 impl LeakEscalation {
     /// Creates a new escalation policy.
+    #[inline]
     #[must_use]
     pub const fn new(threshold: u64, escalate_to: ObligationLeakResponse) -> Self {
         let threshold = if threshold == 0 { 1 } else { threshold };
