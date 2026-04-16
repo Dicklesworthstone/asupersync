@@ -60,6 +60,7 @@ pub enum SendError<T> {
 }
 
 impl<T> std::fmt::Display for SendError<T> {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disconnected(_) => write!(f, "sending on a closed oneshot channel"),
@@ -81,6 +82,7 @@ pub enum RecvError {
 }
 
 impl std::fmt::Display for RecvError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "receiving on a closed oneshot channel"),
@@ -102,6 +104,7 @@ pub enum TryRecvError {
 }
 
 impl std::fmt::Display for TryRecvError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "oneshot channel is empty"),
@@ -226,6 +229,7 @@ impl<T> Sender<T> {
     /// the sender is still available. After returning, the permit
     /// owns the obligation.
     #[must_use]
+    #[inline]
     pub fn reserve(self, cx: &Cx) -> SendPermit<T> {
         cx.trace("oneshot::reserve creating permit");
 
@@ -343,6 +347,7 @@ impl<T> SendPermit<T> {
     ///
     /// This consumes the permit without sending a value. The receiver
     /// will see a `Closed` error when attempting to receive.
+    #[inline]
     pub fn abort(mut self) {
         let waker = {
             let mut inner = self.inner.lock();
@@ -389,6 +394,7 @@ pub(crate) struct RecvUninterruptibleFuture<'a, T> {
 
 impl<T> RecvUninterruptibleFuture<'_, T> {
     #[must_use]
+    #[inline]
     pub(crate) fn receiver_finished(&self) -> bool {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }
@@ -641,6 +647,7 @@ impl<T> Receiver<T> {
     /// Used internally by `TaskHandle::join` which must wait for task termination
     /// to uphold structural guarantees, even if the caller's context is cancelled.
     #[must_use]
+    #[inline]
     pub(crate) fn recv_uninterruptible(&mut self) -> RecvUninterruptibleFuture<'_, T> {
         RecvUninterruptibleFuture {
             receiver: self,
