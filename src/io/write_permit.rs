@@ -39,6 +39,7 @@ where
     W: AsyncWrite + Unpin + ?Sized,
 {
     /// Create a new write permit for the given writer.
+    #[inline]
     pub fn new(writer: &'a mut W) -> Self {
         Self {
             writer,
@@ -48,6 +49,7 @@ where
     }
 
     /// Create a new write permit with pre-allocated capacity.
+    #[inline]
     pub fn with_capacity(writer: &'a mut W, capacity: usize) -> Self {
         Self {
             writer,
@@ -67,12 +69,14 @@ where
     }
 
     /// Returns the amount of data currently staged.
+    #[inline]
     #[must_use]
     pub fn staged_len(&self) -> usize {
         self.data.as_ref().map_or(0, Vec::len)
     }
 
     /// Returns whether any data has been staged.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.data.as_ref().is_none_or(Vec::is_empty)
@@ -108,6 +112,7 @@ where
     /// Abort the write operation, discarding all staged data.
     ///
     /// This is equivalent to dropping the permit, but is more explicit.
+    #[inline]
     pub fn abort(self) {
         // Data is dropped
         drop(self);
