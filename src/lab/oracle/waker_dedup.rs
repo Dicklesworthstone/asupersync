@@ -170,7 +170,11 @@ impl std::fmt::Display for WakerDedupViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WakerDedupViolation::LostWakeup {
-                waker_id, channel_id, registered_at, expected_wake_at, trace_id,
+                waker_id,
+                channel_id,
+                registered_at,
+                expected_wake_at,
+                trace_id,
             } => {
                 write!(
                     f,
@@ -183,7 +187,11 @@ impl std::fmt::Display for WakerDedupViolation {
                 Ok(())
             }
             WakerDedupViolation::SpuriousWakeup {
-                waker_id, channel_id, woken_at, reason, trace_id,
+                waker_id,
+                channel_id,
+                woken_at,
+                reason,
+                trace_id,
             } => {
                 write!(
                     f,
@@ -196,7 +204,12 @@ impl std::fmt::Display for WakerDedupViolation {
                 Ok(())
             }
             WakerDedupViolation::InconsistentQueuedState {
-                waker_id, channel_id, expected_queued, actual_queued, detected_at, trace_id,
+                waker_id,
+                channel_id,
+                expected_queued,
+                actual_queued,
+                detected_at,
+                trace_id,
             } => {
                 write!(
                     f,
@@ -209,7 +222,11 @@ impl std::fmt::Display for WakerDedupViolation {
                 Ok(())
             }
             WakerDedupViolation::RegistrationRace {
-                waker_id, channel_id, registration_time, wakeup_time, trace_id,
+                waker_id,
+                channel_id,
+                registration_time,
+                wakeup_time,
+                trace_id,
             } => {
                 write!(
                     f,
@@ -222,7 +239,11 @@ impl std::fmt::Display for WakerDedupViolation {
                 Ok(())
             }
             WakerDedupViolation::DoubleWakeup {
-                waker_id, channel_id, first_wake_at, second_wake_at, trace_id,
+                waker_id,
+                channel_id,
+                first_wake_at,
+                second_wake_at,
+                trace_id,
             } => {
                 write!(
                     f,
@@ -235,7 +256,11 @@ impl std::fmt::Display for WakerDedupViolation {
                 Ok(())
             }
             WakerDedupViolation::WakerLeak {
-                waker_id, channel_id, registered_at, detected_at, trace_id,
+                waker_id,
+                channel_id,
+                registered_at,
+                detected_at,
+                trace_id,
             } => {
                 write!(
                     f,
@@ -248,7 +273,12 @@ impl std::fmt::Display for WakerDedupViolation {
                 Ok(())
             }
             WakerDedupViolation::UseAfterDrop {
-                waker_id, channel_id, dropped_at, operation_at, operation, trace_id,
+                waker_id,
+                channel_id,
+                dropped_at,
+                operation_at,
+                operation,
+                trace_id,
             } => {
                 write!(
                     f,
@@ -308,7 +338,8 @@ impl ViolationRecord {
     }
 
     pub fn emit_structured_log(&self) {
-        let timestamp_millis = self.timestamp
+        let timestamp_millis = self
+            .timestamp
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
@@ -452,7 +483,11 @@ impl WakerDedupOracle {
             channel_id,
             registered_at: now,
             trace_id,
-            status: if is_queued { WakerStatus::Queued } else { WakerStatus::Woken { at: now } },
+            status: if is_queued {
+                WakerStatus::Queued
+            } else {
+                WakerStatus::Woken { at: now }
+            },
             last_operation_at: now,
         };
 
@@ -474,7 +509,12 @@ impl WakerDedupOracle {
     }
 
     /// Record a waker wake request (should lead to actual wakeup)
-    pub fn on_waker_wake_requested(&mut self, waker_id: WakerId, _reason: String, trace_id: Option<TraceId>) {
+    pub fn on_waker_wake_requested(
+        &mut self,
+        waker_id: WakerId,
+        _reason: String,
+        trace_id: Option<TraceId>,
+    ) {
         if !self.config.track_wakeup_events {
             return;
         }
@@ -612,7 +652,12 @@ impl WakerDedupOracle {
     }
 
     /// Verify queued state consistency
-    pub fn verify_queued_state(&mut self, waker_id: WakerId, actual_queued: bool, trace_id: Option<TraceId>) {
+    pub fn verify_queued_state(
+        &mut self,
+        waker_id: WakerId,
+        actual_queued: bool,
+        trace_id: Option<TraceId>,
+    ) {
         if !self.config.track_queued_state {
             return;
         }
@@ -687,7 +732,9 @@ impl WakerDedupOracle {
 
         // Apply enforcement mode
         match self.config.enforcement {
-            EnforcementMode::Panic => panic!("Waker deduplication violation detected: {}", violation),
+            EnforcementMode::Panic => {
+                panic!("Waker deduplication violation detected: {}", violation)
+            }
             EnforcementMode::Warn => eprintln!("⚠️  Waker deduplication violation: {}", violation),
             EnforcementMode::Collect => {} // Just collect, no immediate action
         }
@@ -840,7 +887,8 @@ impl WakerDedupOracle {
             }
             // Sort by last operation time and remove oldest
             to_remove.sort_by_key(|id| self.wakers[id].last_operation_at);
-            let remove_count = (self.wakers.len() - self.config.max_tracked_wakers).min(to_remove.len());
+            let remove_count =
+                (self.wakers.len() - self.config.max_tracked_wakers).min(to_remove.len());
             for waker_id in &to_remove[..remove_count] {
                 if let Some(state) = self.wakers.remove(waker_id) {
                     if let Some(channel_set) = self.channel_wakers.get_mut(&state.channel_id) {
@@ -903,7 +951,10 @@ mod tests {
 
         let violations = oracle.check_for_violations().unwrap();
         assert_eq!(violations.len(), 1);
-        assert!(matches!(violations[0], WakerDedupViolation::DoubleWakeup { .. }));
+        assert!(matches!(
+            violations[0],
+            WakerDedupViolation::DoubleWakeup { .. }
+        ));
     }
 
     #[test]
@@ -920,7 +971,10 @@ mod tests {
 
         let violations = oracle.check_for_violations().unwrap();
         assert_eq!(violations.len(), 1);
-        assert!(matches!(violations[0], WakerDedupViolation::SpuriousWakeup { .. }));
+        assert!(matches!(
+            violations[0],
+            WakerDedupViolation::SpuriousWakeup { .. }
+        ));
     }
 
     #[test]
@@ -939,7 +993,10 @@ mod tests {
 
         let violations = oracle.check_for_violations().unwrap();
         assert_eq!(violations.len(), 1);
-        assert!(matches!(violations[0], WakerDedupViolation::UseAfterDrop { .. }));
+        assert!(matches!(
+            violations[0],
+            WakerDedupViolation::UseAfterDrop { .. }
+        ));
     }
 
     #[test]
@@ -957,7 +1014,10 @@ mod tests {
 
         let violations = oracle.check_for_violations().unwrap();
         assert_eq!(violations.len(), 1);
-        assert!(matches!(violations[0], WakerDedupViolation::InconsistentQueuedState { .. }));
+        assert!(matches!(
+            violations[0],
+            WakerDedupViolation::InconsistentQueuedState { .. }
+        ));
     }
 
     #[test]
@@ -974,7 +1034,9 @@ mod tests {
         oracle.on_waker_registered(waker_id, channel_id, true, None);
 
         // Simulate recent wakeup
-        oracle.recent_wakeups.push_back((waker_id, SystemTime::now()));
+        oracle
+            .recent_wakeups
+            .push_back((waker_id, SystemTime::now()));
 
         // Register again soon after wakeup (simulating race)
         oracle.on_waker_registered(waker_id, channel_id, true, None);
@@ -1003,7 +1065,10 @@ mod tests {
 
         let violations = oracle.check_for_violations().unwrap();
         assert_eq!(violations.len(), 1);
-        assert!(matches!(violations[0], WakerDedupViolation::WakerLeak { .. }));
+        assert!(matches!(
+            violations[0],
+            WakerDedupViolation::WakerLeak { .. }
+        ));
     }
 
     #[test]

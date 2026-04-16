@@ -72,7 +72,8 @@ pub use cancellation_protocol::{
 };
 pub use channel_atomicity::{
     ChannelAtomicityConfig, ChannelAtomicityOracle, ChannelAtomicityStatistics,
-    ChannelAtomicityViolation, ChannelId, EnforcementMode, ReservationId, ViolationRecord, WakerId,
+    ChannelAtomicityViolation, ChannelId, EnforcementMode, ReservationId, ViolationRecord,
+    WakerId as ChannelWakerId,
 };
 pub use deadline_monotone::{DeadlineMonotoneOracle, DeadlineMonotoneViolation};
 pub use determinism::{
@@ -107,8 +108,8 @@ pub use spork::{
 };
 pub use task_leak::{TaskLeakOracle, TaskLeakViolation};
 pub use waker_dedup::{
-    WakerDedupOracle, WakerDedupViolation, WakerDedupConfig, WakerDedupStatistics,
-    WakerId as WakerDedupId, WakerStatus, ViolationRecord as WakerViolationRecord,
+    ViolationRecord as WakerViolationRecord, WakerDedupConfig, WakerDedupOracle,
+    WakerDedupStatistics, WakerDedupViolation, WakerId as WakerDedupId, WakerStatus,
 };
 
 use serde::{Deserialize, Serialize};
@@ -773,7 +774,8 @@ impl OracleSuite {
                     entities_tracked: self.waker_dedup.statistics().active_wakers as usize,
                     events_recorded: (self.waker_dedup.statistics().total_wakers_registered
                         + self.waker_dedup.statistics().total_wakers_woken
-                        + self.waker_dedup.statistics().total_wakers_dropped) as usize,
+                        + self.waker_dedup.statistics().total_wakers_dropped)
+                        as usize,
                 },
             ),
             OracleEntryReport::from_result(

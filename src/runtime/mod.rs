@@ -187,8 +187,8 @@ pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, Sharded
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
 pub use state_verifier::{
-    StateTransitionVerifier, StateVerifierConfig, StateViolation, StateVerifierStatsSnapshot,
-    StateEntityType, RegionStateTransitions, ObligationStateTransitions,
+    ObligationStateTransitions, RegionStateTransitions, StateEntityType, StateTransitionVerifier,
+    StateVerifierConfig, StateVerifierStatsSnapshot, StateViolation,
 };
 pub use stored_task::StoredTask;
 pub use task_handle::{JoinError, TaskHandle};

@@ -7,12 +7,12 @@
 //! The verifier enforces the state machine contracts defined in each state type and provides
 //! debugging capabilities to detect illegal state transitions early during development.
 
-use crate::record::{ObligationState, task::TaskPhase, region::RegionState};
-use crate::types::{TaskId, RegionId, ObligationId};
+use crate::record::{ObligationState, region::RegionState, task::TaskPhase};
+use crate::types::{ObligationId, RegionId, TaskId};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use serde::{Deserialize, Serialize};
 
 /// Configuration for state transition monitoring.
 #[derive(Debug, Clone)]
@@ -222,7 +222,8 @@ impl StateTransitionVerifier {
         context: &str,
     ) -> Result<(), StateViolation> {
         let valid = from.is_valid_transition(to);
-        self.stats.record_transition(StateEntityType::Obligation, valid);
+        self.stats
+            .record_transition(StateEntityType::Obligation, valid);
 
         if !valid {
             let violation = StateViolation {
@@ -272,7 +273,10 @@ impl StateTransitionVerifier {
         if self.config.panic_on_violation {
             panic!(
                 "Invalid state transition: {} {} -> {} (context: {})",
-                violation.entity_type as u8, violation.from_state, violation.to_state, violation.context
+                violation.entity_type as u8,
+                violation.from_state,
+                violation.to_state,
+                violation.context
             );
         }
     }
@@ -284,7 +288,10 @@ impl StateTransitionVerifier {
 
     /// Gets all recorded violations.
     pub fn violations(&self) -> Vec<StateViolation> {
-        self.violations.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.violations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Clears all recorded violations.
@@ -375,8 +382,7 @@ impl ObligationStateTransitions for ObligationState {
         matches!(
             (self, next),
             // Reserved → Committed | Aborted | Leaked
-            (Reserved, Committed | Aborted | Leaked)
-            // All terminal states are absorbing (no outbound transitions)
+            (Reserved, Committed | Aborted | Leaked) // All terminal states are absorbing (no outbound transitions)
         )
     }
 }
@@ -447,10 +453,18 @@ mod tests {
         let task_id = TaskId::new(1);
 
         // Valid transition
-        assert!(verifier.validate_task_transition(task_id, Created, Running, "test").is_ok());
+        assert!(
+            verifier
+                .validate_task_transition(task_id, Created, Running, "test")
+                .is_ok()
+        );
 
         // Invalid transition
-        assert!(verifier.validate_task_transition(task_id, Created, Finalizing, "test").is_err());
+        assert!(
+            verifier
+                .validate_task_transition(task_id, Created, Finalizing, "test")
+                .is_err()
+        );
 
         let stats = verifier.stats();
         assert_eq!(stats.task_transitions, 2);
@@ -469,10 +483,18 @@ mod tests {
         let region_id = RegionId::new(1);
 
         // Valid transition
-        assert!(verifier.validate_region_transition(region_id, Open, Closing, "test").is_ok());
+        assert!(
+            verifier
+                .validate_region_transition(region_id, Open, Closing, "test")
+                .is_ok()
+        );
 
         // Invalid transition
-        assert!(verifier.validate_region_transition(region_id, Open, Closed, "test").is_err());
+        assert!(
+            verifier
+                .validate_region_transition(region_id, Open, Closed, "test")
+                .is_err()
+        );
 
         let stats = verifier.stats();
         assert_eq!(stats.region_transitions, 2);
@@ -491,10 +513,18 @@ mod tests {
         let obligation_id = ObligationId::new(1);
 
         // Valid transition
-        assert!(verifier.validate_obligation_transition(obligation_id, Reserved, Committed, "test").is_ok());
+        assert!(
+            verifier
+                .validate_obligation_transition(obligation_id, Reserved, Committed, "test")
+                .is_ok()
+        );
 
         // Invalid transition
-        assert!(verifier.validate_obligation_transition(obligation_id, Committed, Reserved, "test").is_err());
+        assert!(
+            verifier
+                .validate_obligation_transition(obligation_id, Committed, Reserved, "test")
+                .is_err()
+        );
 
         let stats = verifier.stats();
         assert_eq!(stats.obligation_transitions, 2);
@@ -514,7 +544,8 @@ mod tests {
         let obligation_id = ObligationId::new(1);
 
         // Generate violations
-        let _ = verifier.validate_obligation_transition(obligation_id, Committed, Reserved, "test1");
+        let _ =
+            verifier.validate_obligation_transition(obligation_id, Committed, Reserved, "test1");
         let _ = verifier.validate_obligation_transition(obligation_id, Aborted, Reserved, "test2");
         let _ = verifier.validate_obligation_transition(obligation_id, Leaked, Reserved, "test3");
 

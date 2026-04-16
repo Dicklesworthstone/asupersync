@@ -116,7 +116,13 @@ pub enum CancelCorrectnessViolation {
 impl fmt::Display for CancelCorrectnessViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PrematureCompletion { task_id, region_id, last_phase, completion_time, .. } => {
+            Self::PrematureCompletion {
+                task_id,
+                region_id,
+                last_phase,
+                completion_time,
+                ..
+            } => {
                 write!(
                     f,
                     "Premature completion: task {}@{} completed at {} without proper cancellation (last phase: {:?})",
@@ -126,7 +132,14 @@ impl fmt::Display for CancelCorrectnessViolation {
                     last_phase
                 )
             }
-            Self::StuckCancellation { task_id, region_id, phase, stuck_since, detected_at, .. } => {
+            Self::StuckCancellation {
+                task_id,
+                region_id,
+                phase,
+                stuck_since,
+                detected_at,
+                ..
+            } => {
                 write!(
                     f,
                     "Stuck cancellation: task {}@{} stuck in {:?} phase from {} to {} ({} ns)",
@@ -138,7 +151,14 @@ impl fmt::Display for CancelCorrectnessViolation {
                     detected_at.as_nanos() - stuck_since.as_nanos()
                 )
             }
-            Self::InvalidTransition { task_id, region_id, from_phase, to_phase, transition_time, .. } => {
+            Self::InvalidTransition {
+                task_id,
+                region_id,
+                from_phase,
+                to_phase,
+                transition_time,
+                ..
+            } => {
                 write!(
                     f,
                     "Invalid transition: task {}@{} attempted {:?} → {:?} at {}",
@@ -149,7 +169,13 @@ impl fmt::Display for CancelCorrectnessViolation {
                     transition_time.as_nanos()
                 )
             }
-            Self::MissedFinalization { task_id, region_id, from_phase, completion_time, .. } => {
+            Self::MissedFinalization {
+                task_id,
+                region_id,
+                from_phase,
+                completion_time,
+                ..
+            } => {
                 write!(
                     f,
                     "Missed finalization: task {}@{} jumped from {:?} to completion at {} without finalization",
@@ -159,7 +185,14 @@ impl fmt::Display for CancelCorrectnessViolation {
                     completion_time.as_nanos()
                 )
             }
-            Self::PropagationFailure { parent_task, child_task, parent_region, child_region, detected_at, .. } => {
+            Self::PropagationFailure {
+                parent_task,
+                child_task,
+                parent_region,
+                child_region,
+                detected_at,
+                ..
+            } => {
                 write!(
                     f,
                     "Propagation failure: cancellation from parent {}@{} failed to propagate to child {}@{} at {}",
@@ -298,7 +331,9 @@ impl CancelCorrectnessOracle {
 
         for state in task_states.values() {
             // Check if task has been in current phase too long
-            let duration_ns = now.as_nanos().saturating_sub(state.last_transition.as_nanos());
+            let duration_ns = now
+                .as_nanos()
+                .saturating_sub(state.last_transition.as_nanos());
 
             if duration_ns > max_duration && state.current_phase != CancelPhase::Completed {
                 let violation = CancelCorrectnessViolation::StuckCancellation {
@@ -358,12 +393,7 @@ impl CancelCorrectnessOracle {
     /// Get recent violations for debugging.
     pub fn get_recent_violations(&self, limit: usize) -> Vec<CancelCorrectnessViolation> {
         let violations = self.violations.read();
-        violations
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        violations.iter().rev().take(limit).cloned().collect()
     }
 
     /// Clear all tracked state (for testing).
@@ -400,7 +430,8 @@ impl CancelCorrectnessOracle {
 
             // Check for skipped finalization
             if current_state.current_phase == CancelPhase::Cancelling
-                && new_witness.phase == CancelPhase::Completed {
+                && new_witness.phase == CancelPhase::Completed
+            {
                 let violation = CancelCorrectnessViolation::MissedFinalization {
                     task_id: current_state.task_id,
                     region_id: current_state.region_id,
@@ -475,8 +506,8 @@ impl fmt::Display for CancelCorrectnessStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{RegionId, TaskId, Time};
     use crate::test_utils::init_test_logging;
+    use crate::types::{RegionId, TaskId, Time};
 
     #[test]
     fn test_normal_cancellation_flow() {
@@ -491,17 +522,35 @@ mod tests {
         let reason = CancelReason::user("test_cancel");
 
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Requested, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Requested,
+                reason.clone(),
+            ),
             now,
         );
 
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Cancelling, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Cancelling,
+                reason.clone(),
+            ),
             now,
         );
 
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Finalizing, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Finalizing,
+                reason.clone(),
+            ),
             now,
         );
 
@@ -541,7 +590,10 @@ mod tests {
 
         let violations = oracle.get_recent_violations(1);
         assert_eq!(violations.len(), 1);
-        assert!(matches!(violations[0], CancelCorrectnessViolation::PrematureCompletion { .. }));
+        assert!(matches!(
+            violations[0],
+            CancelCorrectnessViolation::PrematureCompletion { .. }
+        ));
     }
 
     #[test]
@@ -557,12 +609,24 @@ mod tests {
 
         // Normal start
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Requested, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Requested,
+                reason.clone(),
+            ),
             now,
         );
 
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Finalizing, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Finalizing,
+                reason.clone(),
+            ),
             now,
         );
 
@@ -576,7 +640,10 @@ mod tests {
         assert_eq!(stats.violations_detected, 1);
 
         let violations = oracle.get_recent_violations(1);
-        assert!(matches!(violations[0], CancelCorrectnessViolation::InvalidTransition { .. }));
+        assert!(matches!(
+            violations[0],
+            CancelCorrectnessViolation::InvalidTransition { .. }
+        ));
     }
 
     #[test]
@@ -592,12 +659,24 @@ mod tests {
 
         // Skip finalization: Requested → Cancelling → Completed (missing Finalizing)
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Requested, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Requested,
+                reason.clone(),
+            ),
             now,
         );
 
         oracle.notify_cancel_witness(
-            CancelWitness::new(task_id, region_id, 1, CancelPhase::Cancelling, reason.clone()),
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Cancelling,
+                reason.clone(),
+            ),
             now,
         );
 
@@ -610,6 +689,9 @@ mod tests {
         assert_eq!(stats.violations_detected, 1);
 
         let violations = oracle.get_recent_violations(1);
-        assert!(matches!(violations[0], CancelCorrectnessViolation::MissedFinalization { .. }));
+        assert!(matches!(
+            violations[0],
+            CancelCorrectnessViolation::MissedFinalization { .. }
+        ));
     }
 }

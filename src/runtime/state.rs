@@ -479,7 +479,7 @@ impl RuntimeState {
             next_finalizer_id: 0,
             epoch_tracker: super::epoch_tracker::EpochConsistencyTracker::new(),
             state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
-                super::state_verifier::StateVerifierConfig::default()
+                super::state_verifier::StateVerifierConfig::default(),
             )),
         }
     }
