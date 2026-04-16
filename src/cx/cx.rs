@@ -517,6 +517,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// Returns `None` if no pressure handle was attached to this context.
     #[must_use]
+    #[inline]
     pub fn pressure(&self) -> Option<&SystemPressure> {
         self.handles.pressure.as_deref()
     }
