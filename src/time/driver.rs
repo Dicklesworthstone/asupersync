@@ -213,12 +213,14 @@ impl BrowserMonotonicClock {
 
     /// Returns true when the browser clock is suspended.
     #[must_use]
+    #[inline]
     pub fn is_suspended(&self) -> bool {
         self.paused.load(Ordering::Acquire)
     }
 
     /// Returns pending deferred advancement.
     #[must_use]
+    #[inline]
     pub fn pending_catch_up(&self) -> Duration {
         Duration::from_nanos(self.pending_catch_up_ns.load(Ordering::Acquire))
     }
@@ -362,6 +364,7 @@ impl VirtualClock {
 
     /// Returns true if the clock is paused.
     #[must_use]
+    #[inline]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
     }

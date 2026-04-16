@@ -418,6 +418,7 @@ impl Sleep {
 
     /// Returns true if this sleep has been polled at least once.
     #[must_use]
+    #[inline]
     pub fn was_polled(&self) -> bool {
         self.polled.load(std::sync::atomic::Ordering::Relaxed)
     }
