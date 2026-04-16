@@ -574,9 +574,9 @@ impl EpochConsistencyTracker {
             EpochConsistencyViolation::ModuleDesync {
                 modules,
                 detected_at: _,
-                max_skew,
+                max_skew: _,
             } => {
-                let affected_modules: Vec<String> = modules
+                let _affected_modules: Vec<String> = modules
                     .iter()
                     .map(|(module, epoch)| format!("{}@{}", module, epoch))
                     .collect();
@@ -594,7 +594,7 @@ impl EpochConsistencyTracker {
                 );
             }
             EpochConsistencyViolation::SlowTransition {
-                module,
+                module: _,
                 from_epoch,
                 to_epoch,
                 started_at,
