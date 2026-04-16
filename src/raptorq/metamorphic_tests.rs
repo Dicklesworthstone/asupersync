@@ -83,7 +83,7 @@ fn symbols_to_received(symbols: &[AuthenticatedSymbol], k: usize) -> Vec<Receive
             is_source: i < k,
             columns: vec![i],
             coefficients: vec![Gf256::ONE],
-            data: auth_symbol.symbol().data().clone(),
+            data: auth_symbol.symbol().data().to_vec(),
         })
         .collect()
 }
