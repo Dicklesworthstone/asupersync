@@ -88,3 +88,10 @@ path = "fuzz_targets/raptorq_decoder.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_length_delimited_codec"
+path = "fuzz_targets/length_delimited_codec.rs"
+test = false
+doc = false
+bench = false
