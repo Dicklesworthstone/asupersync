@@ -110,6 +110,7 @@ impl TraceId {
     }
 
     /// Construct from big-endian bytes.
+    #[must_use]
     pub const fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(u128::from_be_bytes(bytes))
     }
@@ -152,11 +153,13 @@ pub struct DecisionId(#[serde(with = "hex_u128")] u128);
 
 impl DecisionId {
     /// Create from raw 128-bit value.
+    #[must_use]
     pub const fn from_raw(raw: u128) -> Self {
         Self(raw)
     }
 
     /// Create from millisecond timestamp and random bits.
+    #[must_use]
     pub const fn from_parts(ts_ms: u64, random: u128) -> Self {
         let ts_bits = (ts_ms as u128) << 80;
         let rand_bits = random & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
@@ -164,16 +167,19 @@ impl DecisionId {
     }
 
     /// Extract the millisecond timestamp.
+    #[must_use]
     pub const fn timestamp_ms(self) -> u64 {
         (self.0 >> 80) as u64
     }
 
     /// Return the raw 128-bit value.
+    #[must_use]
     pub const fn as_u128(self) -> u128 {
         self.0
     }
 
     /// Return the bytes in big-endian order.
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; 16] {
         self.0.to_be_bytes()
     }
