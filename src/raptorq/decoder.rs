@@ -425,6 +425,7 @@ impl DenseFactorCache {
         result
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -464,11 +465,13 @@ impl Equation {
     }
 
     /// Returns the degree (number of nonzero terms).
+    #[inline]
     fn degree(&self) -> usize {
         self.terms.len()
     }
 
     /// Returns the coefficient for the given column, or zero.
+    #[inline]
     fn coef(&self, col: usize) -> Gf256 {
         self.terms
             .binary_search_by_key(&col, |(c, _)| *c)

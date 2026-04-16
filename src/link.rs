@@ -514,6 +514,7 @@ impl LinkSet {
 
     /// Returns the number of active links.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.records.len()
     }
@@ -736,6 +737,7 @@ impl ExitBatch {
 
     /// Returns the number of signals in the batch.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
