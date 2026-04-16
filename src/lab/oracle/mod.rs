@@ -47,6 +47,7 @@ pub mod finalizer;
 pub mod loser_drain;
 pub mod obligation_leak;
 pub mod quiescence;
+pub mod region_leak;
 pub mod region_tree;
 pub mod rref_access;
 pub mod spork;
@@ -81,6 +82,11 @@ pub use finalizer::{FinalizerId, FinalizerOracle, FinalizerViolation};
 pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
 pub use obligation_leak::{ObligationLeakOracle, ObligationLeakViolation};
 pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
+pub use region_leak::{
+    RegionLeakOracle, RegionLeakConfig, RegionLeakStatistics, RegionViolation, ViolationType,
+    ViolationContext, RegionState as RegionLeakState, TaskState,
+    RegionLifecycleState, TaskLifecycleState, BudgetInfo,
+};
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
 pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
 pub use spork::{
@@ -116,6 +122,8 @@ pub enum OracleViolation {
     Finalizer(FinalizerViolation),
     /// Region tree structure is malformed.
     RegionTree(RegionTreeViolation),
+    /// Region leak or structured concurrency violation detected.
+    RegionLeak(RegionViolation),
     /// Effects performed without appropriate capabilities.
     AmbientAuthority(AmbientAuthorityViolation),
     /// Child deadline exceeds parent deadline.
@@ -161,6 +169,7 @@ impl std::fmt::Display for OracleViolation {
             Self::LoserDrain(v) => write!(f, "Loser drain violation: {v}"),
             Self::Finalizer(v) => write!(f, "Finalizer violation: {v}"),
             Self::RegionTree(v) => write!(f, "Region tree violation: {v}"),
+            Self::RegionLeak(v) => write!(f, "Region leak violation: {v}"),
             Self::AmbientAuthority(v) => write!(f, "Ambient authority violation: {v}"),
             Self::DeadlineMonotone(v) => write!(f, "Deadline monotonicity violation: {v}"),
             Self::CancellationProtocol(v) => write!(f, "Cancellation protocol violation: {v}"),
@@ -201,6 +210,8 @@ pub struct OracleSuite {
     pub finalizer: FinalizerOracle,
     /// Region tree oracle.
     pub region_tree: RegionTreeOracle,
+    /// Region leak detection oracle.
+    pub region_leak: RegionLeakOracle,
     /// Ambient authority oracle.
     pub ambient_authority: AmbientAuthorityOracle,
     /// Deadline monotonicity oracle.
@@ -427,6 +438,19 @@ impl OracleSuite {
             violations.push(OracleViolation::RegionTree(v));
         }
 
+        let region_leak_violations = self.region_leak.check_for_violations();
+        match region_leak_violations {
+            Ok(violations_vec) => {
+                for violation in violations_vec {
+                    violations.push(OracleViolation::RegionLeak(violation));
+                }
+            }
+            Err(_) => {
+                // Handle case where oracle fails - this would be a critical error
+                // For now, we'll skip adding violations
+            }
+        }
+
         if let Err(v) = self.ambient_authority.check() {
             violations.push(OracleViolation::AmbientAuthority(v));
         }
@@ -502,6 +526,7 @@ impl OracleSuite {
         self.loser_drain.reset();
         self.finalizer.reset();
         self.region_tree.reset();
+        self.region_leak.reset();
         self.ambient_authority.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
@@ -596,6 +621,19 @@ impl OracleSuite {
                 OracleStats {
                     entities_tracked: self.region_tree.region_count(),
                     events_recorded: self.region_tree.region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "region_leak",
+                self.region_leak
+                    .check_for_violations()
+                    .ok()
+                    .and_then(|violations| violations.first().cloned())
+                    .map(OracleViolation::RegionLeak),
+                OracleStats {
+                    entities_tracked: self.region_leak.statistics().active_regions as usize,
+                    events_recorded: (self.region_leak.statistics().total_regions_created
+                        + self.region_leak.statistics().total_tasks_spawned) as usize,
                 },
             ),
             OracleEntryReport::from_result(

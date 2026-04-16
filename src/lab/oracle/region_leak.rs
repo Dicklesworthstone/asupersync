@@ -52,7 +52,6 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::{Serialize, Deserialize};
 
 use crate::types::{RegionId, TaskId, Budget, Outcome};
-use crate::trace::TraceContext;
 
 /// Configuration for region leak detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,7 +112,7 @@ pub struct RegionState {
     pub child_regions: HashSet<RegionId>,
     pub expected_finalizers: u32,
     pub completed_finalizers: u32,
-    pub creation_context: Option<TraceContext>,
+    pub creation_context: Option<String>,
     pub budget: Budget,
 }
 
@@ -199,7 +198,7 @@ pub struct TaskState {
     pub spawn_time: Instant,
     pub last_poll_time: Option<Instant>,
     pub state: TaskLifecycleState,
-    pub spawn_context: Option<TraceContext>,
+    pub spawn_context: Option<String>,
 }
 
 /// Lifecycle states for tasks
@@ -213,7 +212,7 @@ pub enum TaskLifecycleState {
 }
 
 /// The main region leak detection oracle
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RegionLeakOracle {
     config: RegionLeakConfig,
     regions: HashMap<RegionId, RegionState>,
@@ -268,7 +267,7 @@ impl RegionLeakOracle {
         &mut self,
         region_id: RegionId,
         parent_id: Option<RegionId>,
-        context: Option<TraceContext>,
+        context: Option<String>,
         budget: Budget,
     ) {
         let now = Instant::now();
@@ -334,7 +333,7 @@ impl RegionLeakOracle {
         &mut self,
         task_id: TaskId,
         region_id: RegionId,
-        context: Option<TraceContext>,
+        context: Option<String>,
     ) {
         let now = Instant::now();
 
@@ -873,5 +872,28 @@ mod tests {
         let violations = oracle.check_for_violations().unwrap();
         assert!(!violations.is_empty());
         assert!(matches!(violations[0].violation_type, ViolationType::OrphanedTasks));
+    }
+}
+
+impl std::fmt::Display for RegionViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.violation_type, self.description)
+    }
+}
+
+impl std::fmt::Display for ViolationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ViolationType::StuckCreation => write!(f, "Stuck Creation"),
+            ViolationType::StuckClosing => write!(f, "Stuck Closing"),
+            ViolationType::StuckFinalizing => write!(f, "Stuck Finalizing"),
+            ViolationType::IdleRegion => write!(f, "Idle Region"),
+            ViolationType::LongRunningTask => write!(f, "Long Running Task"),
+            ViolationType::OrphanedChildren => write!(f, "Orphaned Children"),
+            ViolationType::OrphanedTasks => write!(f, "Orphaned Tasks"),
+            ViolationType::FinalizersIncomplete => write!(f, "Finalizers Incomplete"),
+            ViolationType::ResourceLeak => write!(f, "Resource Leak"),
+            ViolationType::CircularDependency => write!(f, "Circular Dependency"),
+        }
     }
 }
