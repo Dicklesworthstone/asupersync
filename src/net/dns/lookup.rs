@@ -21,30 +21,35 @@ impl LookupIp {
 
     /// Returns the resolved addresses.
     #[must_use]
+    #[inline]
     pub fn addresses(&self) -> &[IpAddr] {
         &self.addresses
     }
 
     /// Returns the TTL (time to live) for the cached result.
     #[must_use]
+    #[inline]
     pub fn ttl(&self) -> Duration {
         self.ttl
     }
 
     /// Returns the first address, if any.
     #[must_use]
+    #[inline]
     pub fn first(&self) -> Option<IpAddr> {
         self.addresses.first().copied()
     }
 
     /// Returns true if no addresses were resolved.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.addresses.is_empty()
     }
 
     /// Returns the number of resolved addresses.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.addresses.len()
     }
