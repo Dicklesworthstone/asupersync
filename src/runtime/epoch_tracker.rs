@@ -645,11 +645,11 @@ impl EpochConsistencyTracker {
             EpochConsistencyViolation::AdvancementOrderViolation {
                 module: _,
                 advanced_to,
-                dependency_module,
+                dependency_module: _,
                 dependency_epoch,
-                detected_at,
+                detected_at: _,
             } => {
-                let epoch_skew = if advanced_to > dependency_epoch {
+                let _epoch_skew = if advanced_to > dependency_epoch {
                     advanced_to.as_u64() - dependency_epoch.as_u64()
                 } else {
                     dependency_epoch.as_u64() - advanced_to.as_u64()
