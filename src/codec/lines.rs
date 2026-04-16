@@ -48,6 +48,7 @@ impl LinesCodecError {
 }
 
 impl From<io::Error> for LinesCodecError {
+    #[inline]
     fn from(err: io::Error) -> Self {
         Self::Io(err)
     }

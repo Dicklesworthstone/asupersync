@@ -644,7 +644,7 @@ impl LabInjectionRunner {
         use std::task::{Context, Poll, Waker};
 
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         let mut pinned = Box::pin(future);
 
         loop {

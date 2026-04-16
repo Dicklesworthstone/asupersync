@@ -337,6 +337,7 @@ impl QueueState {
             .sum()
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn completion_rate_over_window(&self, window_ns: u64, now: Time) -> f64 {
         if self.completion_times.is_empty() {
             return 0.0;
@@ -354,6 +355,7 @@ impl QueueState {
         completions_in_window as f64 / window_seconds
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn debt_accumulation_rate(&self, window_ns: u64, now: Time) -> f64 {
         if self.pending_items.len() < 2 {
             return 0.0;
