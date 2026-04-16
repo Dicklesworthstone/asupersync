@@ -171,6 +171,7 @@ impl<T> ChannelInner<T> {
 /// Panics if `capacity` is 0.
 #[inline]
 #[must_use]
+#[inline]
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "channel capacity must be non-zero");
 
@@ -257,6 +258,7 @@ impl<T> Sender<T> {
     }
 
     /// Returns true if the receiver has been dropped.
+    #[inline]
     #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -547,6 +549,7 @@ impl<T> WeakSender<T> {
     /// Attempts to upgrade this weak sender to a strong sender.
     ///
     /// Returns `None` if all senders have been dropped.
+    #[inline]
     #[must_use]
     pub fn upgrade(&self) -> Option<Sender<T>> {
         self.shared.upgrade().and_then(|shared| {

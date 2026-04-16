@@ -72,6 +72,7 @@ impl<T> Timeout<T> {
     /// Creates a timeout from a std Duration.
     #[inline]
     #[must_use]
+    #[inline]
     pub fn after(now: Time, duration: Duration) -> Self {
         Self::after_nanos(now, duration_to_nanos(duration))
     }
