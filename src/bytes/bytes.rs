@@ -229,6 +229,7 @@ impl Bytes {
     /// assert_eq!(&hello[..], b"hello ");
     /// assert_eq!(&b[..], b"world");
     /// ```
+    #[inline]
     #[must_use]
     pub fn split_to(&mut self, at: usize) -> Self {
         assert!(
@@ -259,6 +260,7 @@ impl Bytes {
     }
 
     /// Clear the buffer, making it empty.
+    #[inline]
     pub fn clear(&mut self) {
         self.len = 0;
     }
@@ -275,6 +277,7 @@ impl Bytes {
 }
 
 impl Default for Bytes {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -283,18 +286,21 @@ impl Default for Bytes {
 impl Deref for Bytes {
     type Target = [u8];
 
+    #[inline]
     fn deref(&self) -> &[u8] {
         self.as_slice()
     }
 }
 
 impl AsRef<[u8]> for Bytes {
+    #[inline]
     fn as_ref(&self) -> &[u8] {
         self.as_slice()
     }
 }
 
 impl From<Vec<u8>> for Bytes {
+    #[inline]
     fn from(vec: Vec<u8>) -> Self {
         if vec.is_empty() {
             return Self::new();
@@ -309,18 +315,21 @@ impl From<Vec<u8>> for Bytes {
 }
 
 impl From<&'static [u8]> for Bytes {
+    #[inline]
     fn from(slice: &'static [u8]) -> Self {
         Self::from_static(slice)
     }
 }
 
 impl From<&'static str> for Bytes {
+    #[inline]
     fn from(s: &'static str) -> Self {
         Self::from_static(s.as_bytes())
     }
 }
 
 impl From<String> for Bytes {
+    #[inline]
     fn from(s: String) -> Self {
         Self::from(s.into_bytes())
     }
@@ -337,6 +346,7 @@ impl std::fmt::Debug for Bytes {
 }
 
 impl PartialEq for Bytes {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.as_slice() == other.as_slice()
     }
@@ -345,24 +355,28 @@ impl PartialEq for Bytes {
 impl Eq for Bytes {}
 
 impl PartialEq<[u8]> for Bytes {
+    #[inline]
     fn eq(&self, other: &[u8]) -> bool {
         self.as_slice() == other
     }
 }
 
 impl PartialEq<Bytes> for [u8] {
+    #[inline]
     fn eq(&self, other: &Bytes) -> bool {
         self == other.as_slice()
     }
 }
 
 impl PartialEq<Vec<u8>> for Bytes {
+    #[inline]
     fn eq(&self, other: &Vec<u8>) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
 impl std::hash::Hash for Bytes {
+    #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.as_slice().hash(state);
     }
@@ -381,6 +395,7 @@ pub struct BytesCursor {
 
 impl BytesCursor {
     /// Create a new cursor at position 0.
+    #[inline]
     #[must_use]
     pub fn new(bytes: Bytes) -> Self {
         Self {
@@ -390,24 +405,28 @@ impl BytesCursor {
     }
 
     /// Get a reference to the underlying Bytes.
+    #[inline]
     #[must_use]
     pub fn get_ref(&self) -> &Bytes {
         &self.inner
     }
 
     /// Consume the cursor, returning the underlying Bytes.
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> Bytes {
         self.inner
     }
 
     /// Get the current position.
+    #[inline]
     #[must_use]
     pub fn position(&self) -> usize {
         self.pos
     }
 
     /// Set the position.
+    #[inline]
     pub fn set_position(&mut self, pos: usize) {
         self.pos = pos;
     }
@@ -456,6 +475,7 @@ impl Bytes {
     /// assert_eq!(cursor.get_u8(), 1);
     /// assert_eq!(cursor.remaining(), 2);
     /// ```
+    #[inline]
     #[must_use]
     pub fn reader(self) -> BytesCursor {
         BytesCursor::new(self)

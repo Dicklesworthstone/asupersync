@@ -58,6 +58,7 @@ impl Barrier {
     ///
     /// # Panics
     /// Panics if `parties == 0`.
+    #[inline]
     #[must_use]
     pub fn new(parties: usize) -> Self {
         assert!(parties > 0, "barrier requires at least 1 party");
@@ -73,6 +74,7 @@ impl Barrier {
     }
 
     /// Returns the number of parties required to trip the barrier.
+    #[inline]
     #[must_use]
     pub fn parties(&self) -> usize {
         self.parties
