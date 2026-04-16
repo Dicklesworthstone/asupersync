@@ -520,7 +520,7 @@ mod tests {
         });
 
         use ObligationState::*;
-        let obligation_id = ObligationId::new(1);
+        let obligation_id = ObligationId::new_for_test(1, 0);
 
         // Valid transition
         assert!(
@@ -551,7 +551,7 @@ mod tests {
         });
 
         use ObligationState::*;
-        let obligation_id = ObligationId::new(1);
+        let obligation_id = ObligationId::new_for_test(1, 0);
 
         // Generate violations
         let _ =
@@ -578,7 +578,7 @@ mod tests {
         });
 
         use ObligationState::*;
-        let obligation_id = ObligationId::new(1);
+        let obligation_id = ObligationId::new_for_test(1, 0);
 
         // This should panic
         let _ = verifier.validate_obligation_transition(obligation_id, Committed, Reserved, "test");

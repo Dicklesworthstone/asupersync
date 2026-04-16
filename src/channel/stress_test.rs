@@ -179,7 +179,7 @@ pub async fn mpsc_stress_test(
         });
 
         match round_result {
-            Ok(Some(received_count)) => {
+            Ok(Some(_received_count)) => {
                 let stats = oracle.stats();
                 let sent = stats.messages_sent.load(Ordering::Acquire);
                 let received = stats.messages_received.load(Ordering::Acquire);
@@ -277,7 +277,7 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread().build()?;
     let handle = runtime.handle();
     runtime.block_on(async move {
-        let cx = Cx::for_testing();
+        let _cx = Cx::for_testing();
         let (sender, _) = broadcast::channel::<u32>(100);
         let num_subscribers = 10;
         let num_messages = 500;

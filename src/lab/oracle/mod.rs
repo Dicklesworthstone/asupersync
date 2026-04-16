@@ -1393,7 +1393,7 @@ mod tests {
 
     #[test]
     fn oracle_suite_debug() {
-        let mut suite = OracleSuite::new();
+        let suite = OracleSuite::new();
         let dbg = format!("{suite:?}");
         assert!(dbg.contains("OracleSuite"));
     }

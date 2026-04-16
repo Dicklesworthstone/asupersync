@@ -800,7 +800,7 @@ mod tests {
         // Simulate concurrent witnesses for the same task
         std::thread::scope(|s| {
             for i in 0..4 {
-                s.spawn(|| {
+                s.spawn(move || {
                     oracle.notify_cancel_witness(
                         CancelWitness::new(
                             task_id,
