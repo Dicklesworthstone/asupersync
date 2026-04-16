@@ -22,6 +22,7 @@ impl DetRng {
     ///
     /// The seed must be non-zero. If zero is provided, it will be replaced with 1.
     #[must_use]
+    #[inline]
     pub const fn new(seed: u64) -> Self {
         Self {
             state: if seed == 0 { 1 } else { seed },
@@ -42,6 +43,7 @@ impl DetRng {
     }
 
     /// Generates a pseudo-random u32 value.
+    #[inline]
     pub fn next_u32(&mut self) -> u32 {
         (self.next_u64() >> 32) as u32
     }
@@ -68,6 +70,7 @@ impl DetRng {
     }
 
     /// Generates a pseudo-random boolean.
+    #[inline]
     pub fn next_bool(&mut self) -> bool {
         self.next_u64() & 1 == 1
     }
