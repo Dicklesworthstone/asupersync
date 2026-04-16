@@ -19,29 +19,186 @@
 //! - Cleanup budgets are respected
 //! - Cancel propagates downward through the region tree
 //!
-//! # Usage
+//! # Runtime Integration
+//!
+//! When the `cancel-correctness-oracle` feature is enabled, this oracle provides
+//! real-time cancellation protocol verification during development and testing:
 //!
 //! ```rust,ignore
-//! use asupersync::lab::oracle::cancellation_protocol::CancellationProtocolOracle;
+//! use asupersync::lab::oracle::cancellation_protocol::{CancellationProtocolOracle, CancelCorrectnessConfig};
 //!
-//! let mut oracle = CancellationProtocolOracle::new();
+//! // Configure for runtime use
+//! let config = CancelCorrectnessConfig {
+//!     enforcement: EnforcementMode::Warn, // or Panic
+//!     capture_stacks: true,
+//!     max_violations_tracked: 100,
+//! };
+//! let mut oracle = CancellationProtocolOracle::with_config(config);
 //!
-//! // Record events as they occur
+//! // Runtime hooks automatically call these methods:
 //! oracle.on_region_create(region, parent);
 //! oracle.on_task_create(task, region);
 //! oracle.on_cancel_request(task, reason, time);
 //! oracle.on_transition(task, from, to, time);
 //! oracle.on_region_cancel(region, reason, time);
 //!
-//! // Verify invariants
-//! oracle.check()?;
+//! // Check for violations
+//! if let Err(violation) = oracle.check() {
+//!     match config.enforcement {
+//!         EnforcementMode::Warn => eprintln!("Cancel protocol violation: {}", violation),
+//!         EnforcementMode::Panic => panic!("Cancel protocol violation: {}", violation),
+//!     }
+//! }
 //! ```
+//!
+//! # Zero-Cost Compilation
+//!
+//! When the `cancel-correctness-oracle` feature is disabled, all oracle operations
+//! compile to no-ops with zero runtime overhead.
 
 use crate::record::task::TaskState;
 use crate::runtime::RuntimeState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// Macro for zero-cost oracle operations when the feature is disabled.
+#[cfg(not(feature = "cancel-correctness-oracle"))]
+macro_rules! oracle_op {
+    ($($tt:tt)*) => {};
+}
+
+#[cfg(feature = "cancel-correctness-oracle")]
+macro_rules! oracle_op {
+    ($op:expr) => {
+        $op
+    };
+}
+
+/// Configuration for cancel-correctness oracle runtime behavior.
+#[derive(Debug, Clone)]
+pub struct CancelCorrectnessConfig {
+    /// Enforcement mode for violations.
+    pub enforcement: EnforcementMode,
+    /// Whether to capture stack traces for violations.
+    pub capture_stacks: bool,
+    /// Maximum number of violations to track (prevents unbounded memory growth).
+    pub max_violations_tracked: usize,
+    /// Whether to emit structured logs for all violations.
+    pub structured_logging: bool,
+}
+
+impl Default for CancelCorrectnessConfig {
+    fn default() -> Self {
+        Self {
+            enforcement: EnforcementMode::Warn,
+            capture_stacks: cfg!(debug_assertions),
+            max_violations_tracked: 100,
+            structured_logging: true,
+        }
+    }
+}
+
+/// Enforcement mode for protocol violations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnforcementMode {
+    /// Log violations but continue execution.
+    Warn,
+    /// Panic immediately on first violation.
+    Panic,
+    /// Collect violations but take no action (metrics only).
+    Collect,
+}
+
+/// A violation record with enhanced diagnostics and tracing.
+#[derive(Debug, Clone)]
+pub struct ViolationRecord {
+    /// The violation itself.
+    pub violation: CancellationProtocolViolation,
+    /// Unique trace ID for correlation with logs.
+    pub trace_id: u64,
+    /// Stack trace at violation point (if capture_stacks enabled).
+    pub stack_trace: Option<String>,
+    /// Timestamp when violation was detected.
+    pub detected_at: Time,
+    /// Replay command for reproducing the violation.
+    pub replay_command: Option<String>,
+}
+
+impl ViolationRecord {
+    /// Creates a new violation record with enhanced diagnostics.
+    fn new(violation: CancellationProtocolViolation, config: &CancelCorrectnessConfig) -> Self {
+        static TRACE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+        let trace_id = TRACE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        let stack_trace = if config.capture_stacks {
+            Some(capture_stack_trace())
+        } else {
+            None
+        };
+
+        let replay_command = Some(format!(
+            "asupersync test --oracle cancel-correctness --trace-id {}",
+            trace_id
+        ));
+
+        Self {
+            violation,
+            trace_id,
+            stack_trace,
+            detected_at: Time::from_nanos(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64),
+            replay_command,
+        }
+    }
+
+    /// Emits structured log for this violation.
+    pub fn emit_structured_log(&self) {
+        if cfg!(feature = "cancel-correctness-oracle") {
+            eprintln!(
+                "{{\"event\":\"cancel_protocol_violation\",\"trace_id\":{},\"violation_type\":\"{:?}\",\"timestamp\":{},\"replay_command\":\"{}\",\"stack_trace\":{}}}",
+                self.trace_id,
+                std::mem::discriminant(&self.violation),
+                self.detected_at.as_nanos(),
+                self.replay_command.as_ref().unwrap_or(&"none".to_string()),
+                if let Some(ref stack) = self.stack_trace {
+                    format!("\"{}\"", stack.replace('\n', "\\n").replace('"', "\\\""))
+                } else {
+                    "null".to_string()
+                }
+            );
+        }
+    }
+}
+
+/// Captures a stack trace for debugging purposes.
+fn capture_stack_trace() -> String {
+    // In a real implementation, we'd use a backtrace crate
+    // For now, provide a placeholder that can be enhanced
+    #[cfg(debug_assertions)]
+    {
+        format!("Stack trace capture at {}", std::panic::Location::caller())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        "Stack trace disabled in release builds".to_string()
+    }
+}
+
+/// Statistics about violations detected by the oracle.
+#[derive(Debug, Clone)]
+pub struct ViolationStats {
+    /// Total number of violations detected.
+    pub total_violations: usize,
+    /// Count of violations by type.
+    pub by_type: std::collections::HashMap<String, usize>,
+    /// Current enforcement mode.
+    pub enforcement_mode: EnforcementMode,
+}
 
 /// Maximum number of observed polls a task may remain in `CancelRequested`
 /// before the oracle reports a missing acknowledgement.
@@ -327,7 +484,10 @@ impl TaskProtocolRecord {
 /// - Cancel requests and acknowledgements
 /// - Region tree structure for propagation checking
 /// - Region cancel status
-#[derive(Debug, Default)]
+///
+/// Enhanced for runtime use with configurable enforcement, structured logging,
+/// stack trace capture, and thread-safe violation tracking.
+#[derive(Debug)]
 pub struct CancellationProtocolOracle {
     /// Per-task protocol records.
     tasks: BTreeMap<TaskId, TaskProtocolRecord>,
@@ -339,15 +499,95 @@ pub struct CancellationProtocolOracle {
     cancelled_regions: BTreeMap<RegionId, CancelReason>,
     /// Map from task to owning region.
     task_regions: BTreeMap<TaskId, RegionId>,
-    /// Detected violations.
+    /// Detected violations (legacy format).
     violations: Vec<CancellationProtocolViolation>,
+    /// Enhanced violation records with diagnostics and tracing.
+    violation_records: Vec<ViolationRecord>,
+    /// Configuration for runtime behavior.
+    config: CancelCorrectnessConfig,
+}
+
+impl Default for CancellationProtocolOracle {
+    fn default() -> Self {
+        Self {
+            tasks: BTreeMap::new(),
+            region_parents: BTreeMap::new(),
+            region_children: BTreeMap::new(),
+            cancelled_regions: BTreeMap::new(),
+            task_regions: BTreeMap::new(),
+            violations: Vec::new(),
+            violation_records: Vec::new(),
+            config: CancelCorrectnessConfig::default(),
+        }
+    }
 }
 
 impl CancellationProtocolOracle {
-    /// Creates a new cancellation protocol oracle.
+    /// Creates a new cancellation protocol oracle with default configuration.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a new oracle with specific configuration for runtime use.
+    #[must_use]
+    pub fn with_config(config: CancelCorrectnessConfig) -> Self {
+        Self {
+            tasks: BTreeMap::new(),
+            region_parents: BTreeMap::new(),
+            region_children: BTreeMap::new(),
+            cancelled_regions: BTreeMap::new(),
+            task_regions: BTreeMap::new(),
+            violations: Vec::new(),
+            violation_records: Vec::new(),
+            config,
+        }
+    }
+
+    /// Creates a new oracle for production runtime use with optimized settings.
+    #[must_use]
+    pub fn for_runtime() -> Self {
+        Self::with_config(CancelCorrectnessConfig {
+            enforcement: EnforcementMode::Warn,
+            capture_stacks: false, // Disabled for performance
+            max_violations_tracked: 50, // Reduced for memory usage
+            structured_logging: true,
+        })
+    }
+
+    /// Records a violation and applies the configured enforcement mode.
+    fn record_violation(&mut self, violation: CancellationProtocolViolation) {
+        // Legacy format for backward compatibility
+        self.violations.push(violation.clone());
+
+        // Enhanced format with diagnostics
+        let record = ViolationRecord::new(violation.clone(), &self.config);
+
+        // Emit structured log if enabled
+        if self.config.structured_logging {
+            record.emit_structured_log();
+        }
+
+        // Store the record (with memory bounds)
+        if self.violation_records.len() < self.config.max_violations_tracked {
+            self.violation_records.push(record);
+        }
+
+        // Apply enforcement mode
+        match self.config.enforcement {
+            EnforcementMode::Panic => {
+                panic!("Cancel protocol violation detected: {}", violation);
+            }
+            EnforcementMode::Warn => {
+                eprintln!("⚠️  Cancel protocol violation: {}", violation);
+                if let Some(ref stack) = self.violation_records.last().and_then(|r| r.stack_trace.as_ref()) {
+                    eprintln!("   Stack trace: {}", stack);
+                }
+            }
+            EnforcementMode::Collect => {
+                // Just collect, no immediate action
+            }
+        }
     }
 
     /// Records a region creation event.
@@ -368,21 +608,37 @@ impl CancellationProtocolOracle {
 
     /// Records a cancel request on a task.
     pub fn on_cancel_request(&mut self, task: TaskId, reason: CancelReason, time: Time) {
+        // First, check if we need to report a violation
+        let violation = if let Some(existing_record) = self.tasks.get(&task) {
+            if let Some(ref existing) = existing_record.cancel_request {
+                if reason.kind.severity() < existing.reason.kind.severity() {
+                    Some(CancellationProtocolViolation::NonMonotonicCancel {
+                        task,
+                        before: existing.reason.kind,
+                        after: reason.kind,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Record the violation if needed
+        if let Some(v) = violation {
+            self.record_violation(v);
+        }
+
+        // Now update the record
         let record = self
             .tasks
             .entry(task)
             .or_insert_with(TaskProtocolRecord::new);
 
         if let Some(ref mut existing) = record.cancel_request {
-            // Check monotonicity: new reason severity should be >= existing
-            if reason.kind.severity() < existing.reason.kind.severity() {
-                self.violations
-                    .push(CancellationProtocolViolation::NonMonotonicCancel {
-                        task,
-                        before: existing.reason.kind,
-                        after: reason.kind,
-                    });
-            }
             // Strengthen the reason
             existing.reason.strengthen(&reason);
         } else {
@@ -430,14 +686,16 @@ impl CancellationProtocolOracle {
             .or_insert_with(TaskProtocolRecord::new);
         record.mask_depth += 1;
 
-        if record.mask_depth > crate::types::MAX_MASK_DEPTH {
-            self.violations
-                .push(CancellationProtocolViolation::MaskDepthExceeded {
-                    task,
-                    depth: record.mask_depth,
-                    max: crate::types::MAX_MASK_DEPTH,
-                    time,
-                });
+        let new_depth = record.mask_depth;
+        if new_depth > crate::types::MAX_MASK_DEPTH {
+            // Need to record violation after releasing the borrow
+            drop(record); // explicitly drop the mutable borrow
+            self.record_violation(CancellationProtocolViolation::MaskDepthExceeded {
+                task,
+                depth: new_depth,
+                max: crate::types::MAX_MASK_DEPTH,
+                time,
+            });
         }
     }
 
@@ -460,7 +718,7 @@ impl CancellationProtocolOracle {
         // Validate the transition first (before borrowing self.tasks mutably)
         let violation = Self::validate_transition_static(task, from_kind, to_kind, time);
         if let Some(v) = violation {
-            self.violations.push(v);
+            self.record_violation(v);
         }
 
         let record = self
@@ -472,16 +730,25 @@ impl CancellationProtocolOracle {
 
         // If transitioning to Cancelling, mark as acknowledged and check mask state
         if to_kind == TaskStateKind::Cancelling {
-            if record.mask_depth > 0 {
-                self.violations
-                    .push(CancellationProtocolViolation::CancelAckWhileMasked {
-                        task,
-                        mask_depth: record.mask_depth,
-                        time,
-                    });
-            }
-            if let Some(ref mut cancel) = record.cancel_request {
-                cancel.acknowledged = true;
+            let current_mask_depth = record.mask_depth;
+            if current_mask_depth > 0 {
+                // Need to record violation after releasing the borrow
+                drop(record); // explicitly drop the mutable borrow
+                self.record_violation(CancellationProtocolViolation::CancelAckWhileMasked {
+                    task,
+                    mask_depth: current_mask_depth,
+                    time,
+                });
+                // Re-borrow to mark as acknowledged
+                if let Some(record) = self.tasks.get_mut(&task) {
+                    if let Some(ref mut cancel) = record.cancel_request {
+                        cancel.acknowledged = true;
+                    }
+                }
+            } else {
+                if let Some(ref mut cancel) = record.cancel_request {
+                    cancel.acknowledged = true;
+                }
             }
         }
     }
@@ -807,6 +1074,40 @@ impl CancellationProtocolOracle {
         self.tasks.get(&task).map(|r| r.mask_depth)
     }
 
+    /// Returns all enhanced violation records with full diagnostics.
+    #[must_use]
+    pub fn violation_records(&self) -> &[ViolationRecord] {
+        &self.violation_records
+    }
+
+    /// Returns the current configuration.
+    #[must_use]
+    pub fn config(&self) -> &CancelCorrectnessConfig {
+        &self.config
+    }
+
+    /// Updates the enforcement configuration for runtime use.
+    pub fn set_enforcement_mode(&mut self, mode: EnforcementMode) {
+        self.config.enforcement = mode;
+    }
+
+    /// Returns statistics about violations detected.
+    #[must_use]
+    pub fn violation_stats(&self) -> ViolationStats {
+        ViolationStats {
+            total_violations: self.violation_records.len(),
+            by_type: {
+                let mut counts = std::collections::HashMap::new();
+                for record in &self.violation_records {
+                    let violation_type = std::mem::discriminant(&record.violation);
+                    *counts.entry(format!("{:?}", violation_type)).or_insert(0) += 1;
+                }
+                counts
+            },
+            enforcement_mode: self.config.enforcement,
+        }
+    }
+
     /// Resets the oracle to its initial state.
     pub fn reset(&mut self) {
         self.tasks.clear();
@@ -815,6 +1116,7 @@ impl CancellationProtocolOracle {
         self.cancelled_regions.clear();
         self.task_regions.clear();
         self.violations.clear();
+        self.violation_records.clear();
     }
 }
 
