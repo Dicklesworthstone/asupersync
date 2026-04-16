@@ -265,12 +265,14 @@ impl RobustSoliton {
 
     /// Number of input symbols (K).
     #[must_use]
+    #[inline]
     pub fn k(&self) -> usize {
         self.k
     }
 
     /// Maximum possible degree (equals K).
     #[must_use]
+    #[inline]
     pub fn max_degree(&self) -> usize {
         self.k
     }
