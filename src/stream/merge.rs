@@ -25,6 +25,7 @@ pub struct Merge<S> {
 
 impl<S> Merge<S> {
     /// Creates a new `Merge` from the given streams.
+    #[inline]
     pub(crate) fn new(streams: impl IntoIterator<Item = S>) -> Self {
         Self {
             streams: streams.into_iter().collect(),
@@ -46,7 +47,21 @@ impl<S> Merge<S> {
         self.streams.is_empty()
     }
 
+    /// Returns a reference to the active streams.
+    #[inline]
+    #[must_use]
+    pub fn get_ref(&self) -> &VecDeque<S> {
+        &self.streams
+    }
+
+    /// Returns a mutable reference to the active streams.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut VecDeque<S> {
+        &mut self.streams
+    }
+
     /// Consumes the combinator, returning the remaining streams.
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> VecDeque<S> {
         self.streams
@@ -133,6 +148,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let mut lower = 0usize;
         let mut upper = Some(0usize);
@@ -151,6 +167,7 @@ where
 }
 
 /// Merge multiple streams into a single stream.
+#[inline]
 pub fn merge<S>(streams: impl IntoIterator<Item = S>) -> Merge<S>
 where
     S: Stream,
