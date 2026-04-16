@@ -912,12 +912,14 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Records a local logical event and returns the updated time.
+    #[inline]
     #[must_use]
     pub fn logical_tick(&self) -> LogicalTime {
         self.handles.logical_clock.tick()
     }
 
     /// Merges a received logical time and returns the updated time.
+    #[inline]
     #[must_use]
     pub fn logical_receive(&self, sender_time: &LogicalTime) -> LogicalTime {
         self.handles.logical_clock.receive(sender_time)
@@ -949,6 +951,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// When true, time operations can use the runtime's timer wheel.
     /// When false, time operations fall back to OS-level timing.
+    #[inline]
     #[must_use]
     pub fn has_timer(&self) -> bool
     where
@@ -992,6 +995,7 @@ impl<Caps> Cx<Caps> {
     /// Returns true if I/O capability is available.
     ///
     /// Convenience method to check if I/O operations can be performed.
+    #[inline]
     #[must_use]
     pub fn has_io(&self) -> bool
     where
@@ -1014,6 +1018,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns true if a fetch adapter capability is available.
+    #[inline]
     #[must_use]
     pub fn has_fetch_cap(&self) -> bool
     where
@@ -1045,6 +1050,7 @@ impl<Caps> Cx<Caps> {
     /// Returns true if the remote capability is available.
     ///
     /// Convenience method to check if remote task operations can be performed.
+    #[inline]
     #[must_use]
     pub fn has_remote(&self) -> bool
     where
