@@ -20,6 +20,7 @@ pub trait BudgetTimeExt {
 }
 
 impl BudgetTimeExt for Budget {
+    #[inline]
     fn remaining_duration(&self, now: Time) -> Option<Duration> {
         self.deadline.map(|d| {
             if now >= d {
@@ -30,10 +31,12 @@ impl BudgetTimeExt for Budget {
         })
     }
 
+    #[inline]
     fn deadline_sleep(&self) -> Option<Sleep> {
         self.deadline.map(sleep_until)
     }
 
+    #[inline]
     fn deadline_elapsed(&self, now: Time) -> bool {
         self.deadline.is_some_and(|d| d <= now)
     }
