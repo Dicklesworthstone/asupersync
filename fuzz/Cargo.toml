@@ -95,3 +95,10 @@ path = "fuzz_targets/length_delimited_codec.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_lines_codec"
+path = "fuzz_targets/lines_codec.rs"
+test = false
+doc = false
+bench = false
