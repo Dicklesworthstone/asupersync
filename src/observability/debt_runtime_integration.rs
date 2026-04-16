@@ -504,7 +504,7 @@ mod tests {
     fn test_task_cleanup_tracking() {
         let integration = DebtRuntimeIntegration::default();
 
-        let task_id = TaskId::new(42);
+        let task_id = TaskId::new_for_test(42, 0);
         let cancel_reason = CancelReason::user("test");
 
         let work_id =
@@ -588,7 +588,7 @@ mod tests {
         // Queue enough work to trigger emergency level
         for i in 0..12 {
             integration.on_task_cleanup_started(
-                TaskId::new(i),
+                TaskId::new_for_test(i, 0),
                 &CancelReason::user("emergency_test"),
                 CancelKind::User,
                 50,
