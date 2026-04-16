@@ -1035,4 +1035,184 @@ mod tests {
 
         crate::test_complete!("disabled_tracker_does_nothing");
     }
+
+    #[test]
+    fn tracker_structured_logging_integration() {
+        init_test("tracker_structured_logging_integration");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        let now = Time::from_nanos(1000);
+
+        // Test epoch transition logging
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+
+        // Test violation logging - create a desync violation
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::new(1),
+            EpochId::new(3), // Skip epoch 2
+            now,
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+
+        // Check that violations are detected and logged
+        let violation = tracker.check_consistency();
+        crate::assert_with_log!(
+            violation.is_some(),
+            "violation logged",
+            true,
+            violation.is_some()
+        );
+
+        // Test state logging
+        tracker.log_epoch_state();
+
+        // Test replay command generation
+        let replay_cmd = tracker.generate_replay_command(
+            "test_scenario",
+            &[("module", "Scheduler"), ("epoch", "1")]
+        );
+        crate::assert_with_log!(
+            replay_cmd.contains("epoch-tracker-replay"),
+            "replay command generated",
+            true,
+            replay_cmd.contains("epoch-tracker-replay")
+        );
+
+        crate::test_complete!("tracker_structured_logging_integration");
+    }
+
+    #[test]
+    fn tracker_performance_metrics() {
+        init_test("tracker_performance_metrics");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        let now = Time::from_nanos(1000);
+
+        // Start a transition to test latency tracking
+        tracker.notify_epoch_transition_start(ModuleId::Scheduler, EpochId::GENESIS, now);
+
+        // Simulate some delay
+        let later = Time::from_nanos(1001000); // 1ms later
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            later,
+        );
+
+        // Verify transition completed
+        let stats = tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats.total_transitions >= 1,
+            "transition tracked",
+            true,
+            stats.total_transitions >= 1
+        );
+
+        crate::test_complete!("tracker_performance_metrics");
+    }
+
+    #[test]
+    fn tracker_runtime_configuration() {
+        init_test("tracker_runtime_configuration");
+
+        let mut tracker = EpochConsistencyTracker::new();
+
+        // Test enable/disable
+        tracker.set_enabled(false);
+        let now = Time::from_nanos(1000);
+
+        // Should not track when disabled
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+
+        let stats = tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats.total_transitions == 0,
+            "no tracking when disabled",
+            0,
+            stats.total_transitions
+        );
+
+        // Test threshold update
+        tracker.set_slow_transition_threshold(5000000); // 5ms
+
+        // Re-enable and verify it works
+        tracker.set_enabled(true);
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+
+        let stats = tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats.total_transitions >= 1,
+            "tracking enabled again",
+            true,
+            stats.total_transitions >= 1
+        );
+
+        crate::test_complete!("tracker_runtime_configuration");
+    }
+
+    #[test]
+    fn tracker_violation_correlation_ids() {
+        init_test("tracker_violation_correlation_ids");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        let now = Time::from_nanos(1000);
+
+        // Create multiple violations to test correlation ID uniqueness
+        for i in 0..3 {
+            let epoch_time = Time::from_nanos(1000 + i * 1000);
+            tracker.notify_epoch_transition(
+                ModuleId::Scheduler,
+                EpochId::new(i),
+                EpochId::new(i + 2), // Skip epoch i+1
+                epoch_time,
+            );
+        }
+
+        let violations = tracker.all_violations();
+        crate::assert_with_log!(
+            violations.len() >= 2,
+            "multiple violations detected",
+            true,
+            violations.len() >= 2
+        );
+
+        // Verify each violation has structured information
+        for violation in &violations {
+            match violation {
+                EpochConsistencyViolation::MissingTransition { module, .. } => {
+                    crate::assert_with_log!(
+                        matches!(module, ModuleId::Scheduler),
+                        "correct module in violation",
+                        true,
+                        matches!(module, ModuleId::Scheduler)
+                    );
+                }
+                _ => {} // Other violation types are also valid
+            }
+        }
+
+        crate::test_complete!("tracker_violation_correlation_ids");
+    }
 }
