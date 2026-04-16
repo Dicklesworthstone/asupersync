@@ -247,6 +247,7 @@ impl BytesMut {
     /// buf.resize(5, 0);
     /// assert_eq!(&buf[..], b"hello");
     /// ```
+    #[inline]
     pub fn resize(&mut self, new_len: usize, value: u8) {
         self.data.resize(new_len, value);
     }
@@ -257,6 +258,7 @@ impl BytesMut {
     ///
     /// Panics if the range is out of bounds.
     #[must_use]
+    #[inline]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> &[u8] {
         use std::ops::Bound;
 
@@ -277,6 +279,7 @@ impl BytesMut {
 
     /// Returns the remaining spare capacity as a mutable slice.
     #[must_use]
+    #[inline]
     pub fn spare_capacity_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
         self.data.spare_capacity_mut()
     }
@@ -294,6 +297,7 @@ impl BytesMut {
     /// # Panics
     ///
     /// Panics if `len > capacity`.
+    #[inline]
     pub fn set_len(&mut self, len: usize) {
         assert!(
             len <= self.capacity(),

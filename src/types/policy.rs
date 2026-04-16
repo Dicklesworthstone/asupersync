@@ -179,6 +179,7 @@ impl Policy for CollectAll {
 }
 
 impl fmt::Display for PolicyAction {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Continue => write!(f, "continue"),
