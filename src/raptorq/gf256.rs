@@ -335,6 +335,7 @@ pub enum DualKernelModeFallbackReason {
 impl DualKernelModeFallbackReason {
     /// Stable machine-readable identifier for structured logs.
     #[must_use]
+    #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::UnknownRequestedMode => "unknown-requested-mode",
@@ -354,6 +355,7 @@ pub enum DualKernelDecision {
 impl DualKernelDecision {
     /// Returns true when the decision selects fused dual-lane execution.
     #[must_use]
+    #[inline]
     pub const fn is_fused(self) -> bool {
         matches!(self, Self::Fused)
     }
@@ -385,6 +387,7 @@ pub enum DualKernelDecisionReason {
 impl DualKernelDecisionReason {
     /// Stable machine-readable identifier for structured logs.
     #[must_use]
+    #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ForcedSequentialMode => "forced-sequential-mode",
@@ -412,6 +415,7 @@ pub struct DualKernelDecisionDetail {
 impl DualKernelDecisionDetail {
     /// Returns true when the decision selects fused dual-lane execution.
     #[must_use]
+    #[inline]
     pub const fn is_fused(self) -> bool {
         self.decision.is_fused()
     }
@@ -520,6 +524,7 @@ pub enum Gf256ArchitectureClass {
 impl Gf256ArchitectureClass {
     /// Stable machine-readable identifier for structured logs.
     #[must_use]
+    #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GenericScalar => "generic-scalar",
@@ -543,6 +548,7 @@ pub enum Gf256ProfilePackId {
 impl Gf256ProfilePackId {
     /// Stable machine-readable identifier for structured logs.
     #[must_use]
+    #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ScalarConservativeV1 => "scalar-conservative-v1",
@@ -577,6 +583,7 @@ pub enum Gf256ProfileEvidenceStatus {
 impl Gf256ProfileEvidenceStatus {
     /// Stable machine-readable identifier for structured logs.
     #[must_use]
+    #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Canonical => "canonical",
@@ -603,12 +610,14 @@ impl DualKernelOverrideMask {
 
     /// Returns an empty override mask.
     #[must_use]
+    #[inline]
     pub const fn empty() -> Self {
         Self(0)
     }
 
     /// Returns raw bit representation for structured logging/debug artifacts.
     #[must_use]
+    #[inline]
     pub const fn bits(self) -> u8 {
         self.0
     }
@@ -660,6 +669,7 @@ impl DualKernelOverrideMask {
 
     /// Whether `ASUPERSYNC_GF256_PROFILE_PACK` was provided for this policy selection.
     #[must_use]
+    #[inline]
     pub const fn profile_pack_env_requested(self) -> bool {
         (self.0 & Self::PROFILE_PACK_ENV_REQUESTED) != 0
     }
@@ -672,12 +682,14 @@ impl DualKernelOverrideMask {
 
     /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL` was provided as an env override request.
     #[must_use]
+    #[inline]
     pub const fn mul_min_total_env_override(self) -> bool {
         (self.0 & Self::MUL_MIN_TOTAL_ENV_OVERRIDE) != 0
     }
 
     /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL` was provided as an env override request.
     #[must_use]
+    #[inline]
     pub const fn mul_max_total_env_override(self) -> bool {
         (self.0 & Self::MUL_MAX_TOTAL_ENV_OVERRIDE) != 0
     }
