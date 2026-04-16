@@ -81,3 +81,10 @@ path = "fuzz_targets/postgres_wire_protocol.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_raptorq_decoder"
+path = "fuzz_targets/raptorq_decoder.rs"
+test = false
+doc = false
+bench = false
