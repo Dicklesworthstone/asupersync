@@ -127,18 +127,26 @@ pub struct AnomalyInfo {
 /// Severity level of an anomaly.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum AnomalySeverity {
+    /// Low severity anomaly, informational.
     Low,
+    /// Medium severity anomaly, monitor.
     Medium,
+    /// High severity anomaly, investigate.
     High,
+    /// Critical severity anomaly, immediate attention required.
     Critical,
 }
 
 /// Throughput statistics for an entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThroughputStats {
+    /// Number of cancellations processed per second.
     pub cancellations_per_second: f64,
+    /// Average time to process a cancellation.
     pub avg_processing_time: Duration,
+    /// Current depth of the processing queue.
     pub queue_depth: usize,
+    /// Success rate for cancellation processing (0.0 to 1.0).
     pub success_rate: f64,
 }
 

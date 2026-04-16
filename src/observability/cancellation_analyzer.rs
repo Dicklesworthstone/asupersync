@@ -219,9 +219,13 @@ pub struct OptimizationRecommendation {
 /// Priority level for recommendations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RecommendationPriority {
+    /// Critical priority - immediate action required.
     Critical,
+    /// High priority - action needed soon.
     High,
+    /// Medium priority - address when convenient.
     Medium,
+    /// Low priority - nice to have improvement.
     Low,
 }
 

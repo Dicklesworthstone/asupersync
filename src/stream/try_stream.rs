@@ -37,6 +37,7 @@ impl<E: std::error::Error + 'static> std::error::Error for TryStreamError<E> {
 }
 
 impl<E> From<E> for TryStreamError<E> {
+    #[inline]
     fn from(value: E) -> Self {
         Self::Inner(value)
     }
@@ -63,6 +64,7 @@ pub struct TryCollect<S, C> {
 
 impl<S, C> TryCollect<S, C> {
     /// Creates a new `TryCollect` future.
+    #[inline]
     pub(crate) fn new(stream: S, collection: C) -> Self {
         Self {
             stream,
@@ -126,6 +128,7 @@ pub struct TryFold<S, F, Acc> {
 
 impl<S, F, Acc> TryFold<S, F, Acc> {
     /// Creates a new `TryFold` future.
+    #[inline]
     pub(crate) fn new(stream: S, init: Acc, f: F) -> Self {
         Self {
             stream,
@@ -202,6 +205,7 @@ pub struct TryForEach<S, F> {
 
 impl<S, F> TryForEach<S, F> {
     /// Creates a new `TryForEach` future.
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,

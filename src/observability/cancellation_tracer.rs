@@ -238,7 +238,9 @@ pub struct CancellationTracerStatsSnapshot {
     pub stuck_cancellations: u64,
     /// Number of incorrect propagation order incidents.
     pub incorrect_orders: u64,
+    /// Average depth of cancellation traces.
     pub avg_trace_depth: u64,
+    /// Average propagation time in microseconds.
     pub avg_propagation_time_us: u64,
 }
 

@@ -25,6 +25,24 @@ impl<S> Take<S> {
             done: false,
         }
     }
+
+    /// Returns a reference to the underlying stream.
+    #[inline]
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Consumes the combinator, returning the underlying stream.
+    #[inline]
+    pub fn into_inner(self) -> S {
+        self.stream
+    }
 }
 
 impl<S: Stream> Stream for Take<S> {
