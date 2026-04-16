@@ -509,7 +509,7 @@ impl ChannelAtomicityOracle {
             return;
         }
 
-        if let Some(mut state) = self.reservations.get_mut(&reservation_id) {
+        if let Some(state) = self.reservations.get_mut(&reservation_id) {
             let commit_time = SystemTime::now();
             match &state.status {
                 ReservationStatus::Active => {
@@ -553,7 +553,7 @@ impl ChannelAtomicityOracle {
             return;
         }
 
-        if let Some(mut state) = self.reservations.get_mut(&reservation_id) {
+        if let Some(state) = self.reservations.get_mut(&reservation_id) {
             let abort_time = SystemTime::now();
             match &state.status {
                 ReservationStatus::Active => {
@@ -635,7 +635,7 @@ impl ChannelAtomicityOracle {
             return;
         }
 
-        if let Some(mut state) = self.wakers.get_mut(&waker_id) {
+        if let Some(state) = self.wakers.get_mut(&waker_id) {
             state.actual_wakeup_at = Some(actual_at);
             self.stats.total_wakeups_actual += 1;
 

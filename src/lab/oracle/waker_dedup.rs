@@ -628,7 +628,7 @@ impl WakerDedupOracle {
 
         let now = SystemTime::now();
 
-        if let Some(mut state) = self.wakers.get_mut(&waker_id) {
+        if let Some(state) = self.wakers.get_mut(&waker_id) {
             match &state.status {
                 WakerStatus::Queued => {
                     // Waker was dropped while queued - this is normal cleanup

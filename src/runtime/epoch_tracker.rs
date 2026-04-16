@@ -835,7 +835,7 @@ impl EpochConsistencyTracker {
         // Log recent violations summary
         if violation_count > 0 {
             let violations = self.violations.read();
-            for (idx, _violation) in violations.iter().enumerate().take(5) {
+            for (_idx, _violation) in violations.iter().enumerate().take(5) {
                 debug!(
                     violation_index = idx,
                     violation_type = match violation {
@@ -866,7 +866,7 @@ impl EpochConsistencyTracker {
     /// This allows tuning the sensitivity of slow transition detection
     /// based on runtime conditions or performance requirements.
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
-        let old_threshold = self.config.slow_transition_threshold_ns;
+        let _old_threshold = self.config.slow_transition_threshold_ns;
         self.config.slow_transition_threshold_ns = threshold_ns;
 
         info!(
