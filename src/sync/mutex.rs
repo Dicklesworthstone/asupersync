@@ -47,6 +47,7 @@ pub enum LockError {
 }
 
 impl std::fmt::Display for LockError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Poisoned => write!(f, "mutex poisoned"),
@@ -68,6 +69,7 @@ pub enum TryLockError {
 }
 
 impl std::fmt::Display for TryLockError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Locked => write!(f, "mutex is locked"),
@@ -226,6 +228,7 @@ pub struct LockFuture<'a, 'b, T> {
 }
 
 impl<T> LockFuture<'_, '_, T> {
+    #[inline]
     fn cleanup_waiter(&mut self) {
         if let Some(waiter_id) = self.waiter_id.take() {
             let waker_to_wake = {

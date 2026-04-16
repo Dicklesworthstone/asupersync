@@ -46,6 +46,7 @@ pub enum AcquireError {
 }
 
 impl std::fmt::Display for AcquireError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "semaphore closed"),
@@ -64,6 +65,7 @@ impl std::error::Error for AcquireError {}
 pub struct TryAcquireError;
 
 impl std::fmt::Display for TryAcquireError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "no semaphore permits available")
     }
