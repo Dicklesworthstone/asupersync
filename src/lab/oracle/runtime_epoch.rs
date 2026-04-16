@@ -35,12 +35,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Runtime modules that participate in epoch synchronization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeModule {
+    /// Task scheduler module.
     Scheduler,
+    /// Region management table module.
     RegionTable,
+    /// Task tracking table module.
     TaskTable,
+    /// Obligation tracking table module.
     ObligationTable,
+    /// Timer wheel for scheduling delayed operations.
     TimerWheel,
+    /// I/O reactor for async operations.
     IoReactor,
+    /// Cancellation protocol handler module.
     CancelProtocol,
 }
 

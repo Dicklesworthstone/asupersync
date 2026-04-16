@@ -99,6 +99,7 @@ impl Default for DbPoolConfig {
 
 impl DbPoolConfig {
     /// Create a config with the given max size.
+    #[inline]
     #[must_use]
     pub fn with_max_size(max_size: usize) -> Self {
         Self {
@@ -108,6 +109,7 @@ impl DbPoolConfig {
     }
 
     /// Set the minimum idle connections.
+    #[inline]
     #[must_use]
     pub fn min_idle(mut self, min_idle: usize) -> Self {
         self.min_idle = min_idle;
@@ -115,6 +117,7 @@ impl DbPoolConfig {
     }
 
     /// Set the maximum pool size.
+    #[inline]
     #[must_use]
     pub fn max_size(mut self, max_size: usize) -> Self {
         self.max_size = max_size;
@@ -122,6 +125,7 @@ impl DbPoolConfig {
     }
 
     /// Enable or disable checkout validation.
+    #[inline]
     #[must_use]
     pub fn validate_on_checkout(mut self, enabled: bool) -> Self {
         self.validate_on_checkout = enabled;
@@ -129,6 +133,7 @@ impl DbPoolConfig {
     }
 
     /// Set the idle timeout.
+    #[inline]
     #[must_use]
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = timeout;
@@ -136,6 +141,7 @@ impl DbPoolConfig {
     }
 
     /// Set the maximum connection lifetime.
+    #[inline]
     #[must_use]
     pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
         self.max_lifetime = lifetime;
@@ -143,6 +149,7 @@ impl DbPoolConfig {
     }
 
     /// Set the connection acquisition timeout.
+    #[inline]
     #[must_use]
     pub fn connection_timeout(mut self, timeout: Duration) -> Self {
         self.connection_timeout = timeout;

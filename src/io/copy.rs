@@ -37,6 +37,7 @@ const DEFAULT_BUF_SIZE: usize = 8192;
 /// assert_eq!(n, 11);
 /// assert_eq!(writer, b"hello world");
 /// ```
+#[inline]
 pub fn copy<'a, R, W>(reader: &'a mut R, writer: &'a mut W) -> Copy<'a, R, W>
 where
     R: AsyncRead + Unpin + ?Sized,
@@ -222,6 +223,7 @@ where
 /// # Cancel Safety
 ///
 /// This future is cancel-safe. Bytes already written remain committed.
+#[inline]
 pub fn copy_buf<'a, R, W>(reader: &'a mut R, writer: &'a mut W) -> CopyBuf<'a, R, W>
 where
     R: AsyncBufRead + Unpin + ?Sized,

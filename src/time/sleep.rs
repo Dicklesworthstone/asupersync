@@ -124,17 +124,20 @@ struct ReadyWaker {
 }
 
 impl Wake for ReadyWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.ready.store(true, Ordering::Release);
         self.inner.wake_by_ref();
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.ready.store(true, Ordering::Release);
         self.inner.wake_by_ref();
     }
 }
 
+#[inline]
 fn readiness_waker(ready: Arc<AtomicBool>, inner: Waker) -> Waker {
     Waker::from(Arc::new(ReadyWaker { ready, inner }))
 }

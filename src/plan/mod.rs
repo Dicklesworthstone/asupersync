@@ -14,6 +14,7 @@ pub struct PlanId(usize);
 
 impl PlanId {
     /// Creates a new plan id from a raw index.
+    #[inline]
     #[must_use]
     pub const fn new(index: usize) -> Self {
         Self(index)
