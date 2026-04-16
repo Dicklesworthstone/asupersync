@@ -46,6 +46,7 @@ impl ContentEncoding {
 
     /// Returns the HTTP header token for this encoding.
     #[must_use]
+    #[inline]
     pub const fn as_token(&self) -> &'static str {
         match self {
             Self::Identity => "identity",
