@@ -28,7 +28,6 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 /// Configuration for the cancel-correctness oracle.
 #[derive(Debug, Clone)]

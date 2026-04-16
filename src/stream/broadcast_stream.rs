@@ -5,6 +5,7 @@ use crate::cx::Cx;
 use crate::stream::Stream;
 use crate::util::ArenaIndex;
 use std::pin::Pin;
+use std::ptr;
 use std::task::{Context, Poll};
 
 /// Stream wrapper for broadcast receiver.
@@ -18,6 +19,7 @@ pub struct BroadcastStream<T> {
 
 impl<T: Clone> BroadcastStream<T> {
     /// Creates a new broadcast stream from the receiver.
+    #[inline]
     #[must_use]
     pub fn new(cx: Cx, recv: broadcast::Receiver<T>) -> Self {
         Self {
@@ -26,6 +28,45 @@ impl<T: Clone> BroadcastStream<T> {
             terminated: false,
             waiter: None,
         }
+    }
+
+    /// Returns a reference to the underlying broadcast receiver.
+    #[inline]
+    #[must_use]
+    pub fn get_ref(&self) -> &broadcast::Receiver<T> {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the underlying broadcast receiver.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut broadcast::Receiver<T> {
+        &mut self.inner
+    }
+
+    /// Returns a reference to the capability context.
+    #[inline]
+    #[must_use]
+    pub fn cx(&self) -> &Cx {
+        &self.cx
+    }
+
+    /// Consumes the stream, returning the underlying broadcast receiver.
+    #[inline]
+    #[must_use]
+    #[allow(unsafe_code)]
+    pub fn into_inner(mut self) -> broadcast::Receiver<T> {
+        // Manually clear waiter registration before moving out inner receiver
+        self.inner.clear_waiter_registration(&mut self.waiter);
+
+        // Use ptr::read to extract inner without running Drop
+        // SAFETY: We've manually performed the cleanup that Drop would do,
+        // and we use mem::forget to prevent Drop from running again.
+        let inner = unsafe { ptr::read(&self.inner) };
+
+        // Prevent Drop from running
+        std::mem::forget(self);
+
+        inner
     }
 }
 

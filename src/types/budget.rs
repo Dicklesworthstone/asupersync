@@ -655,6 +655,7 @@ impl MinPlusCurve {
     /// # Errors
     /// Returns [`CurveError::EmptySamples`] if `samples` is empty, or
     /// [`CurveError::NonMonotone`] if samples are not nondecreasing.
+    #[inline]
     pub fn new(samples: Vec<u64>, tail_rate: u64) -> Result<Self, CurveError> {
         if samples.is_empty() {
             return Err(CurveError::EmptySamples);
