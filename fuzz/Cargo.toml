@@ -225,3 +225,10 @@ path = "fuzz_targets/symbol_id_deserialization.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_raptorq_symbol_parsing"
+path = "fuzz_targets/raptorq_symbol_parsing.rs"
+test = false
+doc = false
+bench = false
