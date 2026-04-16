@@ -1016,9 +1016,7 @@ impl CleanupCoordinator {
         let pending_set = {
             self.pending.write().remove(&object_id)
         };
-        {
-            self.completed.write().insert(object_id)
-        };
+        self.completed.write().insert(object_id);
 
         if let Some(set) = pending_set {
             let symbol_count = set.symbols.len();
