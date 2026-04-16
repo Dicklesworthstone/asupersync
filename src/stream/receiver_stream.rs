@@ -26,6 +26,7 @@ pub struct ReceiverStream<T> {
 
 impl<T> ReceiverStream<T> {
     /// Creates a new stream wrapper with an explicit capability context.
+    #[inline]
     #[must_use]
     pub fn new(cx: Cx, inner: mpsc::Receiver<T>) -> Self {
         cx.trace("stream::ReceiverStream created");
@@ -37,23 +38,27 @@ impl<T> ReceiverStream<T> {
     }
 
     /// Returns a reference to the inner receiver.
+    #[inline]
     #[must_use]
     pub fn get_ref(&self) -> &mpsc::Receiver<T> {
         &self.inner
     }
 
     /// Returns a mutable reference to the inner receiver.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut mpsc::Receiver<T> {
         &mut self.inner
     }
 
     /// Returns a reference to the capability context.
+    #[inline]
     #[must_use]
     pub fn cx(&self) -> &Cx {
         &self.cx
     }
 
     /// Unwraps the stream into the inner receiver.
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> mpsc::Receiver<T> {
         self.inner

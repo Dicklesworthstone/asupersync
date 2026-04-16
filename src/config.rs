@@ -139,6 +139,7 @@ impl Default for ServerConfig {
 #[cfg(not(target_arch = "wasm32"))]
 impl ServerConfig {
     /// Create a server config from a deployment profile.
+    #[inline]
     #[must_use]
     pub fn from_profile(profile: ServerProfile) -> Self {
         match profile {
@@ -179,6 +180,7 @@ impl ServerConfig {
     }
 
     /// Set the bind address.
+    #[inline]
     #[must_use]
     pub fn bind_addr(mut self, addr: SocketAddr) -> Self {
         self.bind_addr = addr;
@@ -186,6 +188,7 @@ impl ServerConfig {
     }
 
     /// Set the HTTP configuration.
+    #[inline]
     #[must_use]
     pub fn http(mut self, config: Http1Config) -> Self {
         self.http = config;
@@ -193,6 +196,7 @@ impl ServerConfig {
     }
 
     /// Set the listener configuration.
+    #[inline]
     #[must_use]
     pub fn listener(mut self, config: Http1ListenerConfig) -> Self {
         self.listener = config;
@@ -200,6 +204,7 @@ impl ServerConfig {
     }
 
     /// Set the connection pool configuration.
+    #[inline]
     #[must_use]
     pub fn pool(mut self, config: PoolConfig) -> Self {
         self.pool = config;
@@ -207,6 +212,7 @@ impl ServerConfig {
     }
 
     /// Set the shutdown timeout.
+    #[inline]
     #[must_use]
     pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
@@ -214,6 +220,7 @@ impl ServerConfig {
     }
 
     /// Set the worker thread count.
+    #[inline]
     #[must_use]
     pub fn worker_threads(mut self, threads: Option<usize>) -> Self {
         self.worker_threads = threads;
@@ -313,6 +320,7 @@ impl Default for TransportConfig {
 
 impl TransportConfig {
     /// Produces an aggregator configuration with deterministic conservative fallbacks.
+    #[inline]
     #[must_use]
     pub fn aggregator_config(&self) -> AggregatorConfig {
         let path_policy = match self.path_strategy {

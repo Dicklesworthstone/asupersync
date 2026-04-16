@@ -17,6 +17,7 @@ pub struct WatchStream<T> {
 
 impl<T: Clone> WatchStream<T> {
     /// Create from watch receiver.
+    #[inline]
     #[must_use]
     pub fn new(cx: Cx, recv: watch::Receiver<T>) -> Self {
         Self {
@@ -28,6 +29,7 @@ impl<T: Clone> WatchStream<T> {
     }
 
     /// Create, skipping the initial value.
+    #[inline]
     #[must_use]
     pub fn from_changes(cx: Cx, recv: watch::Receiver<T>) -> Self {
         let mut stream = Self::new(cx, recv);
@@ -35,6 +37,26 @@ impl<T: Clone> WatchStream<T> {
         stream.inner.mark_seen();
         stream.has_seen_initial = true;
         stream
+    }
+
+    /// Returns a reference to the underlying watch receiver.
+    #[inline]
+    #[must_use]
+    pub fn get_ref(&self) -> &watch::Receiver<T> {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the underlying watch receiver.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut watch::Receiver<T> {
+        &mut self.inner
+    }
+
+    /// Consumes the stream, returning the underlying watch receiver.
+    #[inline]
+    #[must_use]
+    pub fn into_inner(self) -> watch::Receiver<T> {
+        self.inner
     }
 }
 
