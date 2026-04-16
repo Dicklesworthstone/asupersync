@@ -4,15 +4,18 @@
 //! across all channel types under various stress conditions, cancellation
 //! scenarios, and edge cases.
 
-use super::atomicity_test::{AtomicityTestConfig, AtomicityOracle, AtomicityStats};
+use super::atomicity_test::{AtomicityOracle, AtomicityStats, AtomicityTestConfig};
 use super::stress_test::{StressTestConfig, StressTestResult, mpsc_stress_test};
-use crate::channel::{mpsc, oneshot, broadcast, watch};
+use crate::channel::{broadcast, mpsc, oneshot, watch};
 use crate::cx::Cx;
 use crate::test_utils::lab_with_config;
 use crate::time::{sleep, timeout};
 
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 /// Comprehensive test suite configuration.
@@ -198,7 +201,9 @@ impl VerificationSuite {
             category.total_messages += 400;
         } else {
             all_passed = false;
-            category.failure_details.push("Basic MPSC test failed".to_string());
+            category
+                .failure_details
+                .push("Basic MPSC test failed".to_string());
         }
 
         // High concurrency test
@@ -224,16 +229,24 @@ impl VerificationSuite {
                         category.passed_count += 1;
                         category.total_messages += result.total_messages;
                         category.avg_throughput += result.avg_throughput;
-                        println!("  High concurrency MPSC: PASSED ({} msg/s)", result.avg_throughput);
+                        println!(
+                            "  High concurrency MPSC: PASSED ({} msg/s)",
+                            result.avg_throughput
+                        );
                     } else {
                         all_passed = false;
                         category.violations += result.total_violations;
-                        category.failure_details.push(format!("High concurrency MPSC failed: {} violations", result.total_violations));
+                        category.failure_details.push(format!(
+                            "High concurrency MPSC failed: {} violations",
+                            result.total_violations
+                        ));
                     }
                 }
                 Err(e) => {
                     all_passed = false;
-                    category.failure_details.push(format!("High concurrency MPSC error: {}", e));
+                    category
+                        .failure_details
+                        .push(format!("High concurrency MPSC error: {}", e));
                 }
             }
         }
@@ -250,17 +263,26 @@ impl VerificationSuite {
                 ..Default::default()
             };
 
-            if self.run_basic_mpsc_test(cancel_config, "Extreme Cancellation MPSC").await {
+            if self
+                .run_basic_mpsc_test(cancel_config, "Extreme Cancellation MPSC")
+                .await
+            {
                 category.passed_count += 1;
                 category.total_messages += 200; // Approximate due to cancellations
             } else {
                 all_passed = false;
-                category.failure_details.push("Extreme cancellation MPSC test failed".to_string());
+                category
+                    .failure_details
+                    .push("Extreme cancellation MPSC test failed".to_string());
             }
         }
 
         self.results.insert("MPSC".to_string(), category);
-        (self.results["MPSC"].test_count, self.results["MPSC"].passed_count, all_passed)
+        (
+            self.results["MPSC"].test_count,
+            self.results["MPSC"].passed_count,
+            all_passed,
+        )
     }
 
     /// Test other channel types for basic correctness.
@@ -277,7 +299,9 @@ impl VerificationSuite {
             println!("  Oneshot channels: PASSED");
         } else {
             all_passed = false;
-            category.failure_details.push("Oneshot test failed".to_string());
+            category
+                .failure_details
+                .push("Oneshot test failed".to_string());
         }
 
         // Broadcast channel test
@@ -287,7 +311,9 @@ impl VerificationSuite {
             println!("  Broadcast channels: PASSED");
         } else {
             all_passed = false;
-            category.failure_details.push("Broadcast test failed".to_string());
+            category
+                .failure_details
+                .push("Broadcast test failed".to_string());
         }
 
         // Watch channel test
@@ -297,11 +323,17 @@ impl VerificationSuite {
             println!("  Watch channels: PASSED");
         } else {
             all_passed = false;
-            category.failure_details.push("Watch test failed".to_string());
+            category
+                .failure_details
+                .push("Watch test failed".to_string());
         }
 
         self.results.insert("Other".to_string(), category);
-        (self.results["Other"].test_count, self.results["Other"].passed_count, all_passed)
+        (
+            self.results["Other"].test_count,
+            self.results["Other"].passed_count,
+            all_passed,
+        )
     }
 
     /// Test edge cases and boundary conditions.
@@ -322,11 +354,16 @@ impl VerificationSuite {
             ..Default::default()
         };
 
-        if self.run_basic_mpsc_test(tiny_config, "Capacity-1 Channel").await {
+        if self
+            .run_basic_mpsc_test(tiny_config, "Capacity-1 Channel")
+            .await
+        {
             category.passed_count += 1;
         } else {
             all_passed = false;
-            category.failure_details.push("Capacity-1 test failed".to_string());
+            category
+                .failure_details
+                .push("Capacity-1 test failed".to_string());
         }
 
         // Very large capacity channel
@@ -340,15 +377,24 @@ impl VerificationSuite {
             ..Default::default()
         };
 
-        if self.run_basic_mpsc_test(large_config, "Large Capacity Channel").await {
+        if self
+            .run_basic_mpsc_test(large_config, "Large Capacity Channel")
+            .await
+        {
             category.passed_count += 1;
         } else {
             all_passed = false;
-            category.failure_details.push("Large capacity test failed".to_string());
+            category
+                .failure_details
+                .push("Large capacity test failed".to_string());
         }
 
         self.results.insert("EdgeCases".to_string(), category);
-        (self.results["EdgeCases"].test_count, self.results["EdgeCases"].passed_count, all_passed)
+        (
+            self.results["EdgeCases"].test_count,
+            self.results["EdgeCases"].passed_count,
+            all_passed,
+        )
     }
 
     /// Test cancellation timing scenarios.
@@ -378,12 +424,19 @@ impl VerificationSuite {
                 category.passed_count += 1;
             } else {
                 all_passed = false;
-                category.failure_details.push(format!("{} test failed", phase_name));
+                category
+                    .failure_details
+                    .push(format!("{} test failed", phase_name));
             }
         }
 
-        self.results.insert("CancellationTiming".to_string(), category);
-        (self.results["CancellationTiming"].test_count, self.results["CancellationTiming"].passed_count, all_passed)
+        self.results
+            .insert("CancellationTiming".to_string(), category);
+        (
+            self.results["CancellationTiming"].test_count,
+            self.results["CancellationTiming"].passed_count,
+            all_passed,
+        )
     }
 
     /// Run a basic MPSC atomicity test with the given configuration.
@@ -411,7 +464,9 @@ impl VerificationSuite {
                 for i in 0..config.num_producers {
                     let sender = sender.clone();
                     let producer_oracle = Arc::clone(&oracle);
-                    let injector = Arc::new(super::atomicity_test::CancellationInjector::new(config.cancel_probability));
+                    let injector = Arc::new(super::atomicity_test::CancellationInjector::new(
+                        config.cancel_probability,
+                    ));
 
                     let messages: Vec<u32> = (0..config.messages_per_producer)
                         .map(|j| (i * config.messages_per_producer + j) as u32)
@@ -435,14 +490,17 @@ impl VerificationSuite {
                 let _ = consumer.await;
 
                 oracle.verify_final_consistency()
-            }).await {
+            })
+            .await
+            {
                 Ok(consistent) => consistent,
                 Err(_) => {
                     eprintln!("  {}: TIMEOUT", test_name);
                     false
                 }
             }
-        }).await;
+        })
+        .await;
 
         if test_result {
             println!("  {}: PASSED", test_name);
@@ -474,7 +532,8 @@ impl VerificationSuite {
                 }
             }
             true
-        }).await
+        })
+        .await;
     }
 
     /// Test broadcast channel atomicity.
@@ -508,7 +567,8 @@ impl VerificationSuite {
                 assert!(count >= 90, "Receiver only got {} messages", count);
             }
             true
-        }).await
+        })
+        .await;
     }
 
     /// Test watch channel atomicity.
@@ -529,7 +589,8 @@ impl VerificationSuite {
             let final_value = *receiver.borrow();
             assert_eq!(final_value, 50);
             true
-        }).await
+        })
+        .await;
     }
 }
 
@@ -569,7 +630,10 @@ mod tests {
         println!("  Summary: {}", result.violation_summary);
 
         for (category, category_result) in &result.results_by_category {
-            println!("  {}: {}/{} passed", category, category_result.passed_count, category_result.test_count);
+            println!(
+                "  {}: {}/{} passed",
+                category, category_result.passed_count, category_result.test_count
+            );
             if category_result.violations > 0 {
                 println!("    Violations: {}", category_result.violations);
             }
@@ -578,8 +642,15 @@ mod tests {
             }
         }
 
-        assert!(result.overall_success, "Verification suite failed: {}", result.violation_summary);
-        assert_eq!(result.tests_passed, result.tests_executed, "Some tests failed");
+        assert!(
+            result.overall_success,
+            "Verification suite failed: {}",
+            result.violation_summary
+        );
+        assert_eq!(
+            result.tests_passed, result.tests_executed,
+            "Some tests failed"
+        );
     }
 
     #[test]
@@ -592,6 +663,10 @@ mod tests {
         println!("  Tests: {}/{}", result.tests_passed, result.tests_executed);
         println!("  Success: {}", result.overall_success);
 
-        assert!(result.overall_success, "Verification suite failed: {}", result.violation_summary);
+        assert!(
+            result.overall_success,
+            "Verification suite failed: {}",
+            result.violation_summary
+        );
     }
 }

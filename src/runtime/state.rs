@@ -386,6 +386,8 @@ pub struct RuntimeState {
     finalizer_history: Vec<FinalizerHistoryEvent>,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
+    /// Epoch consistency tracker for runtime state transitions.
+    epoch_tracker: super::epoch_tracker::EpochConsistencyTracker,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -472,6 +474,7 @@ impl RuntimeState {
             async_finalizer_tasks: HashMap::new(),
             finalizer_history: Vec::new(),
             next_finalizer_id: 0,
+            epoch_tracker: super::epoch_tracker::EpochConsistencyTracker::new(),
         }
     }
 
@@ -886,6 +889,15 @@ impl RuntimeState {
         self.root_region = Some(id);
         self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, None));
         self.metrics.region_created(id, None);
+
+        // Notify epoch tracker of region creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::RegionTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         id
     }
 
@@ -902,6 +914,15 @@ impl RuntimeState {
 
         self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, Some(parent)));
         self.metrics.region_created(id, Some(parent));
+
+        // Notify epoch tracker of region creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::RegionTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         Ok(id)
     }
 
@@ -1075,6 +1096,14 @@ impl RuntimeState {
         // Store the wrapped future with task_id for poll tracing
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+
+        // Notify epoch tracker of task creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::TaskTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
 
         Ok((task_id, handle))
     }
@@ -1369,6 +1398,14 @@ impl RuntimeState {
         });
         self.metrics.obligation_created(region);
 
+        // Notify epoch tracker of obligation creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::ObligationTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         Ok(obligation_id)
     }
 
@@ -1409,6 +1446,14 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
+
+        // Notify epoch tracker of obligation commit
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::ObligationTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
@@ -1463,6 +1508,14 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
+
+        // Notify epoch tracker of obligation abort
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::ObligationTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
@@ -2418,6 +2471,14 @@ impl RuntimeState {
     /// self-calls would deadlock on non-reentrant mutexes).
     #[allow(clippy::too_many_lines)]
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
+        // Notify epoch tracker of region state advancement
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::RegionTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         let mut current = Some(initial_region);
 
         while let Some(region_id) = current.take() {

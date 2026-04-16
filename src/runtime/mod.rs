@@ -123,6 +123,7 @@ pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
 pub mod env_config;
+pub mod epoch_tracker;
 pub mod io_driver;
 pub mod io_op;
 /// Proof-carrying decision-plane kernel for runtime controllers.
@@ -165,6 +166,9 @@ pub use builder::{
 pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,
+};
+pub use epoch_tracker::{
+    EpochConsistencyConfig, EpochConsistencyTracker, EpochConsistencyViolation, ModuleId,
 };
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use io_op::IoOp;
