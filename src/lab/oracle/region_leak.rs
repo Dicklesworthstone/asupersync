@@ -145,12 +145,19 @@ pub enum RegionLifecycleState {
 /// A detected region leak or structured concurrency violation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionViolation {
+    /// Type of violation detected.
     pub violation_type: ViolationType,
+    /// ID of the region where violation occurred.
     pub region_id: RegionId,
+    /// Timestamp when the violation was detected.
     pub detected_at: SystemTime,
+    /// Duration the violation has been present.
     pub duration: Duration,
+    /// Human-readable description of the violation.
     pub description: String,
+    /// Additional context information about the violation.
     pub context: ViolationContext,
+    /// Suggested fix or remediation for the violation.
     pub suggested_fix: String,
 }
 
@@ -182,43 +189,66 @@ pub enum ViolationType {
 /// Detailed context about a violation for debugging
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViolationContext {
+    /// List of active task IDs in the region.
     pub active_tasks: Vec<TaskId>,
+    /// List of child region IDs.
     pub child_regions: Vec<RegionId>,
+    /// Optional parent region ID.
     pub parent_region: Option<RegionId>,
+    /// Description of the last activity in the region.
     pub last_activity_description: String,
+    /// Number of outstanding finalizers.
     pub outstanding_finalizers: u32,
+    /// Budget information for the region.
     pub budget_info: BudgetInfo,
+    /// Optional stack trace at violation detection time.
     pub stack_trace: Option<String>,
+    /// List of related region IDs that may have violations.
     pub related_violations: Vec<RegionId>,
 }
 
 /// Budget information for violation context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetInfo {
+    /// Type of budget (time, memory, etc.).
     pub budget_type: String,
+    /// Initial budget amount allocated.
     pub initial_amount: String,
+    /// Remaining budget amount available.
     pub remaining_amount: String,
+    /// Current exhaustion state of the budget.
     pub exhaustion_state: String,
 }
 
 /// Task information tracked by the oracle
 #[derive(Debug, Clone)]
 pub struct TaskState {
+    /// Unique identifier for the task.
     pub task_id: TaskId,
+    /// ID of the region containing this task.
     pub region_id: RegionId,
+    /// Timestamp when the task was spawned.
     pub spawn_time: Instant,
+    /// Optional timestamp of the last poll operation.
     pub last_poll_time: Option<Instant>,
+    /// Current lifecycle state of the task.
     pub state: TaskLifecycleState,
+    /// Optional context string for task spawn debugging.
     pub spawn_context: Option<String>,
 }
 
 /// Lifecycle states for tasks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskLifecycleState {
+    /// Task has been spawned but not yet polled.
     Spawned,
+    /// Task is actively running (being polled).
     Running,
+    /// Task has completed successfully.
     Completed,
+    /// Task was cancelled.
     Cancelled,
+    /// Task panicked during execution.
     Panicked,
 }
 
@@ -800,13 +830,21 @@ impl ViolationContext {
 /// Statistics about region leak monitoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionLeakStatistics {
+    /// Total number of regions created since monitoring began.
     pub total_regions_created: u64,
+    /// Total number of regions properly closed.
     pub total_regions_closed: u64,
+    /// Total number of tasks spawned.
     pub total_tasks_spawned: u64,
+    /// Total number of tasks that completed successfully.
     pub total_tasks_completed: u64,
+    /// Current number of active regions.
     pub active_regions: u64,
+    /// Current number of active tasks.
     pub active_tasks: u64,
+    /// Total number of violations detected.
     pub total_violations: u64,
+    /// Total duration the monitor has been active.
     pub monitoring_duration: Duration,
 }
 

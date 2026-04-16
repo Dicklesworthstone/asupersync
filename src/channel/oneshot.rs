@@ -135,6 +135,7 @@ struct OneShotInner<T> {
 }
 
 impl<T> OneShotInner<T> {
+    #[inline]
     fn new() -> Self {
         Self {
             value: None,
@@ -148,22 +149,26 @@ impl<T> OneShotInner<T> {
     }
 
     /// Returns true if the channel is closed (sender gone and no value).
+    #[inline]
     fn is_closed(&self) -> bool {
         self.sender_consumed && !self.permit_outstanding && self.value.is_none()
     }
 
     /// Returns true if a value is ready to receive.
+    #[inline]
     fn is_ready(&self) -> bool {
         self.value.is_some()
     }
 
     /// Clears the registered waker and its waiter identity.
+    #[inline]
     fn clear_waker(&mut self) {
         self.waker = None;
         self.waker_id = None;
     }
 
     /// Takes the registered waker and clears its waiter identity.
+    #[inline]
     fn take_waker(&mut self) -> Option<Waker> {
         self.waker_id = None;
         self.waker.take()

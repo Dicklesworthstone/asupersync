@@ -24,6 +24,7 @@ use core::fmt;
 use std::marker::PhantomData;
 use std::time::Duration;
 
+#[inline]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -38,6 +39,7 @@ pub struct Timeout<T> {
 
 impl<T> Timeout<T> {
     /// Creates a new timeout with the given deadline.
+    #[inline]
     #[must_use]
     pub const fn new(deadline: Time) -> Self {
         Self {
@@ -47,24 +49,28 @@ impl<T> Timeout<T> {
     }
 
     /// Creates a timeout from a duration in nanoseconds from now.
+    #[inline]
     #[must_use]
     pub const fn after_nanos(now: Time, nanos: u64) -> Self {
         Self::new(now.saturating_add_nanos(nanos))
     }
 
     /// Creates a timeout from a duration in milliseconds from now.
+    #[inline]
     #[must_use]
     pub const fn after_millis(now: Time, millis: u64) -> Self {
         Self::after_nanos(now, millis.saturating_mul(1_000_000))
     }
 
     /// Creates a timeout from a duration in seconds from now.
+    #[inline]
     #[must_use]
     pub const fn after_secs(now: Time, secs: u64) -> Self {
         Self::after_nanos(now, secs.saturating_mul(1_000_000_000))
     }
 
     /// Creates a timeout from a std Duration.
+    #[inline]
     #[must_use]
     pub fn after(now: Time, duration: Duration) -> Self {
         Self::after_nanos(now, duration_to_nanos(duration))

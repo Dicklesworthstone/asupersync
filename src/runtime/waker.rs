@@ -126,10 +126,12 @@ struct TaskWaker {
 }
 
 impl Wake for TaskWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.state.wake(self.task, self.source);
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.state.wake(self.task, self.source);
     }
