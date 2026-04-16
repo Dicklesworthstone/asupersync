@@ -69,9 +69,13 @@ impl Default for CancelOrderingConfig {
 pub enum CancelOrderingViolation {
     /// Child was cancelled before its parent.
     ChildBeforeParent {
+        /// ID of the parent task that should have been cancelled first.
         parent_task: TaskId,
+        /// ID of the child task that was cancelled first.
         child_task: TaskId,
+        /// ID of the parent region.
         parent_region: RegionId,
+        /// ID of the child region.
         child_region: RegionId,
         child_cancel_time: Time,
         parent_cancel_time: Time,

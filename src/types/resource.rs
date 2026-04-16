@@ -32,6 +32,7 @@ pub struct PoolConfig {
 impl PoolConfig {
     /// Creates a new pool configuration.
     #[must_use]
+    #[inline]
     pub const fn new(
         symbol_size: u16,
         initial_size: usize,
@@ -91,6 +92,7 @@ pub struct SymbolBuffer {
 impl SymbolBuffer {
     /// Creates a new zero-initialized buffer of the given size.
     #[must_use]
+    #[inline]
     pub fn new(symbol_size: u16) -> Self {
         let size = usize::from(symbol_size);
         Self {
@@ -122,6 +124,7 @@ impl SymbolBuffer {
     }
 
     /// Returns a mutable view of the buffer.
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.data
     }
@@ -182,6 +185,7 @@ pub struct SymbolPool {
 impl SymbolPool {
     /// Creates a new symbol pool using the provided configuration.
     #[must_use]
+    #[inline]
     pub fn new(mut config: PoolConfig) -> Self {
         if config.max_size < config.initial_size {
             config.max_size = config.initial_size;
@@ -344,6 +348,7 @@ impl SymbolPool {
     }
 }
 
+#[inline]
 fn next_symbol_pool_id() -> u64 {
     static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_SYMBOL_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -417,6 +422,7 @@ pub struct ResourceRequest {
 impl ResourceRequest {
     /// Creates a new resource request.
     #[must_use]
+    #[inline]
     pub const fn new(
         symbol_memory: usize,
         encoding_ops: usize,
@@ -489,6 +495,7 @@ pub struct ResourceTracker {
 impl ResourceTracker {
     /// Creates a new tracker with the given limits.
     #[must_use]
+    #[inline]
     pub fn new(limits: ResourceLimits) -> Self {
         Self {
             limits,
@@ -499,6 +506,7 @@ impl ResourceTracker {
 
     /// Creates a shared tracker wrapped in `Arc<parking_lot::Mutex<_>>`.
     #[must_use]
+    #[inline]
     pub fn shared(limits: ResourceLimits) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::new(limits)))
     }
@@ -742,10 +750,12 @@ impl Drop for ResourceGuard {
     }
 }
 
+#[inline]
 fn exceeds(limit: usize, requested: usize) -> bool {
     limit == 0 && requested > 0 || (limit > 0 && requested > limit)
 }
 
+#[inline]
 fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool {
     if limit == 0 {
         return requested > 0;
@@ -754,6 +764,7 @@ fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool 
 }
 
 #[allow(clippy::cast_precision_loss)]
+#[inline]
 fn ratio(usage: usize, limit: usize) -> f64 {
     if limit == 0 {
         if usage == 0 { 0.0 } else { 1.0 }

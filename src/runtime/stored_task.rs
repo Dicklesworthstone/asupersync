@@ -30,6 +30,7 @@ impl StoredTask {
     ///
     /// The future should already be wrapped to handle its result (typically
     /// by sending through a oneshot channel).
+    #[inline]
     pub fn new<F>(future: F) -> Self
     where
         F: Future<Output = Outcome<(), ()>> + Send + 'static,
@@ -45,6 +46,7 @@ impl StoredTask {
     /// Creates a new stored task from a future with a task ID.
     ///
     /// The task ID is used for tracing poll events.
+    #[inline]
     pub fn new_with_id<F>(future: F, task_id: TaskId) -> Self
     where
         F: Future<Output = Outcome<(), ()>> + Send + 'static,
@@ -143,6 +145,7 @@ pub struct LocalStoredTask {
 
 impl LocalStoredTask {
     /// Creates a new local stored task from a future.
+    #[inline]
     pub fn new<F>(future: F) -> Self
     where
         F: Future<Output = Outcome<(), ()>> + 'static,
@@ -156,6 +159,7 @@ impl LocalStoredTask {
     }
 
     /// Creates a new local stored task with a task ID.
+    #[inline]
     pub fn new_with_id<F>(future: F, task_id: TaskId) -> Self
     where
         F: Future<Output = Outcome<(), ()>> + 'static,

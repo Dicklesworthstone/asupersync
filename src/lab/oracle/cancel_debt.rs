@@ -85,34 +85,51 @@ pub enum CancelDebtViolation {
         queue_type: String,
         /// Timestamp when threshold violation was detected.
         detected_at: Time,
+        /// Optional stack trace captured at violation time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Debt accumulation rate exceeded the maximum allowed rate.
     DebtAccumulationTooFast {
+        /// Current rate at which debt is accumulating (items per second).
         current_rate: f64,
+        /// Maximum allowed accumulation rate.
         max_rate: f64,
+        /// Size of the measurement window in nanoseconds.
         window_size_ns: u64,
+        /// Type of queue where debt accumulation rate was exceeded.
         queue_type: String,
+        /// Timestamp when rate violation was detected.
         detected_at: Time,
+        /// Optional stack trace captured at violation time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Cleanup processing has stalled (no progress in expected timeframe).
     CleanupStall {
+        /// Type of queue where cleanup has stalled.
         queue_type: String,
+        /// Duration of the stall in nanoseconds.
         stall_duration_ns: u64,
+        /// Number of items pending cleanup.
         pending_items: usize,
+        /// Timestamp when stall was detected.
         detected_at: Time,
+        /// Optional stack trace captured at stall detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Resource pressure from accumulated cleanup work.
     ResourcePressure {
+        /// Type of queue causing resource pressure.
         queue_type: String,
+        /// Estimated memory usage from pending cleanup work.
         estimated_memory_bytes: usize,
+        /// Current amount of accumulated cleanup debt.
         current_debt: usize,
+        /// Timestamp when resource pressure was detected.
         detected_at: Time,
+        /// Optional stack trace captured at pressure detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 }
@@ -203,10 +220,15 @@ struct CleanupWorkItem {
 /// Type of cleanup work.
 #[derive(Debug, Clone)]
 pub enum CleanupWorkType {
+    /// Finalizing cancelled tasks.
     TaskFinalization,
+    /// Cleaning up closed regions.
     RegionCleanup,
+    /// Discharging obligations and permits.
     ObligationDischarge,
+    /// Deallocating resources and memory.
     ResourceDeallocation,
+    /// Executing finalizer functions.
     FinalizerExecution,
 }
 

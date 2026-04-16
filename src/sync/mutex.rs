@@ -111,6 +111,7 @@ struct Waiter {
 
 impl<T> Mutex<T> {
     /// Creates a new mutex in an unlocked state.
+    #[inline]
     #[must_use]
     pub fn new(value: T) -> Self {
         Self {
@@ -146,6 +147,7 @@ impl<T> Mutex<T> {
     }
 
     /// Acquires the mutex asynchronously.
+    #[inline]
     pub fn lock<'a, 'b>(&'a self, cx: &'b Cx) -> LockFuture<'a, 'b, T> {
         LockFuture {
             mutex: self,
@@ -156,6 +158,7 @@ impl<T> Mutex<T> {
     }
 
     /// Tries to acquire the mutex without waiting.
+    #[inline]
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
@@ -185,6 +188,7 @@ impl<T> Mutex<T> {
         self.data.into_inner()
     }
 
+    #[inline]
     fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
     }

@@ -27,6 +27,7 @@ pub struct SystemPressure {
 impl SystemPressure {
     /// Create a new pressure state at full headroom (1.0).
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self {
             headroom_bits: AtomicU32::new(1.0_f32.to_bits()),
@@ -37,6 +38,7 @@ impl SystemPressure {
     ///
     /// Headroom is clamped to `[0.0, 1.0]`.
     #[must_use]
+    #[inline]
     pub fn with_headroom(headroom: f32) -> Self {
         let clamped = headroom.clamp(0.0, 1.0);
         Self {
@@ -57,6 +59,7 @@ impl SystemPressure {
     /// Update the headroom value.
     ///
     /// Headroom is clamped to `[0.0, 1.0]`.
+    #[inline]
     pub fn set_headroom(&self, headroom: f32) {
         let clamped = headroom.clamp(0.0, 1.0);
         self.headroom_bits
@@ -109,6 +112,7 @@ impl SystemPressure {
 }
 
 impl Default for SystemPressure {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }

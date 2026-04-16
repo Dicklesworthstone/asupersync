@@ -263,6 +263,7 @@ impl Sleep {
     ///
     /// * `deadline` - The deadline when this sleep completes
     /// * `time_getter` - Function that returns the current time
+    #[inline]
     #[must_use]
     pub fn with_time_getter(deadline: Time, time_getter: fn() -> Time) -> Self {
         Self {
@@ -287,6 +288,7 @@ impl Sleep {
     /// This preserves capability-correct timing when the creator needs the
     /// future to keep using the captured driver even if it is later polled
     /// outside that creator's ambient `Cx`.
+    #[inline]
     #[must_use]
     pub(crate) fn with_timer_driver(deadline: Time, timer_driver: TimerDriverHandle) -> Self {
         Self {
@@ -346,6 +348,7 @@ impl Sleep {
     ///
     /// This can be used to reuse a `Sleep` instance without allocating a new one.
     /// Any registered timer is cancelled and will be re-registered on next poll.
+    #[inline]
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
         self.polled
@@ -384,6 +387,7 @@ impl Sleep {
     /// Resets this sleep to complete after the given duration from `now`.
     ///
     /// Any registered timer is cancelled and will be re-registered on next poll.
+    #[inline]
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         self.polled

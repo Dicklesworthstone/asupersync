@@ -132,6 +132,7 @@ fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64)
 
 impl Semaphore {
     /// Creates a new semaphore with the given number of permits.
+    #[inline]
     #[must_use]
     pub fn new(permits: usize) -> Self {
         Self {
@@ -171,6 +172,7 @@ impl Semaphore {
     }
 
     /// Closes the semaphore.
+    #[inline]
     pub fn close(&self) {
         let taken = {
             let mut state = self.state.lock();
@@ -187,6 +189,7 @@ impl Semaphore {
     }
 
     /// Acquires the given number of permits asynchronously.
+    #[inline]
     pub fn acquire<'a, 'b>(&'a self, cx: &'b Cx, count: usize) -> AcquireFuture<'a, 'b> {
         assert!(count > 0, "cannot acquire 0 permits");
         AcquireFuture {
@@ -230,6 +233,7 @@ impl Semaphore {
     /// Adds permits back to the semaphore.
     ///
     /// Saturates at `usize::MAX` if adding would overflow.
+    #[inline]
     pub fn add_permits(&self, count: usize) {
         if count == 0 {
             return;
