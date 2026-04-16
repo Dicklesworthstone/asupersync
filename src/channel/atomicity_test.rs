@@ -7,7 +7,7 @@
 use crate::channel::mpsc::{self, RecvError, SendError};
 use crate::cx::Cx;
 use crate::time::sleep;
-use crate::types::{Time};
+use crate::types::Time;
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,7 +45,7 @@ impl Default for AtomicityTestConfig {
 }
 
 /// Statistics collected during atomicity verification.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct AtomicityStats {
     /// Total messages sent successfully.
     pub messages_sent: AtomicU64,
@@ -209,7 +209,10 @@ impl AtomicityOracle {
 
     /// Returns all collected snapshots.
     pub fn snapshots(&self) -> Vec<ChannelSnapshot> {
-        self.snapshots.lock().unwrap_or_default().clone()
+        match self.snapshots.lock() {
+            Ok(snapshots) => snapshots.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     /// Verifies that the final state is consistent.
@@ -310,7 +313,7 @@ where
     for (i, message) in messages.into_iter().enumerate() {
         // Random delay to increase interleaving
         if i % 10 == 0 {
-            sleep(Duration::from_micros(1)).await;
+            sleep(cx.now(), Duration::from_micros(1)).await;
         }
 
         // Check for cancellation injection during reserve
@@ -329,7 +332,8 @@ where
                 oracle.record_reserve_cancellation();
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(SendError::Disconnected(_)) => return Err(SendError::Disconnected(message)),
+            Err(SendError::Full(_)) => return Err(SendError::Full(message)),
         };
 
         // Check for cancellation injection during commit
