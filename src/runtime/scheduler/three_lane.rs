@@ -6523,6 +6523,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fast_queue_stolen_remainder_preserves_priority_order() {
+        // The first stolen task executes immediately. The remainder should be
+        // pushed into the thief's fast_queue so subsequent local pops preserve
+        // the victim ready-lane priority order.
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        scheduler.set_steal_batch_size(3);
+
+        for (task, priority) in [(1, 90), (2, 80), (3, 70), (4, 60), (5, 50), (6, 40)] {
+            scheduler.workers[0]
+                .local
+                .lock()
+                .schedule(TaskId::new_for_test(task, 0), priority);
+        }
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[1];
+
+        let stolen = thief.try_steal();
+        assert_eq!(
+            stolen,
+            Some(TaskId::new_for_test(1, 0)),
+            "thief should execute the highest-priority stolen task first"
+        );
+
+        let queued_second = thief.fast_queue.pop();
+        assert_eq!(
+            queued_second,
+            Some(TaskId::new_for_test(2, 0)),
+            "first queued remainder should preserve the second-highest stolen priority"
+        );
+
+        let queued_third = thief.fast_queue.pop();
+        assert_eq!(
+            queued_third,
+            Some(TaskId::new_for_test(3, 0)),
+            "second queued remainder should preserve the third-highest stolen priority"
+        );
+
+        assert!(
+            thief.fast_queue.is_empty(),
+            "all stolen remainder tasks should have been drained from the fast_queue"
+        );
+
+        let mut victim = workers[0].local.lock();
+        assert_eq!(
+            victim.pop_ready_only(),
+            Some(TaskId::new_for_test(4, 0)),
+            "victim should retain the highest-priority unstolen ready task"
+        );
+        assert_eq!(
+            victim.pop_ready_only(),
+            Some(TaskId::new_for_test(5, 0)),
+            "victim should preserve ready-lane order after a steal"
+        );
+        assert_eq!(
+            victim.pop_ready_only(),
+            Some(TaskId::new_for_test(6, 0)),
+            "victim should eventually drain its final unstolen ready task"
+        );
+        assert!(
+            victim.is_empty(),
+            "victim scheduler should drain cleanly after stealing"
+        );
+    }
+
     // ── Non-stealable local task tests (bd-1s3c0) ────────────────────────
 
     #[test]

@@ -1020,8 +1020,9 @@ impl Scheduler {
                 "stolen ready batch must preserve non-increasing priority order"
             );
             let mut seen = std::collections::BTreeSet::new();
+            let duplicate_free = out.iter().all(|(task, _)| seen.insert(*task));
             debug_assert!(
-                out.iter().all(|(task, _)| seen.insert(*task)),
+                duplicate_free,
                 "stolen ready batch must not contain duplicate task ids"
             );
         }
