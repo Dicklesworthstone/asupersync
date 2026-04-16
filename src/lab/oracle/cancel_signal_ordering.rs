@@ -451,9 +451,10 @@ impl CancelOrderingOracle {
             if let Some(parent_signal) = state.find_cancel_signal(parent_task) {
                 // Parent was already cancelled - this is correct ordering
                 return;
-            } else {
-                // Child cancelled but parent not yet cancelled - potential violation
-                let violation = CancelOrderingViolation::OrphanedChildCancellation {
+            }
+
+            // Child cancelled but parent not yet cancelled - potential violation
+            let violation = CancelOrderingViolation::OrphanedChildCancellation {
                     child_task: new_signal.task_id,
                     parent_task: Some(parent_task),
                     child_region: new_signal.region_id,
