@@ -474,6 +474,16 @@ fn render_saga_handler_body(
     }
 }
 
+fn entry_channel_role(local: &LocalType) -> &'static str {
+    match local {
+        LocalType::Send { .. } | LocalType::InternalChoice { .. } => "Initiator",
+        LocalType::Recv { .. } | LocalType::ExternalChoice { .. } => "Responder",
+        LocalType::Rec { body, .. } => entry_channel_role(body),
+        LocalType::Compensate { forward, .. } => entry_channel_role(forward),
+        LocalType::RecVar { .. } | LocalType::End => "Initiator",
+    }
+}
+
 // ============================================================================
 // Enhanced pipeline with local type threading
 // ============================================================================
@@ -533,6 +543,7 @@ fn render_saga_module_with_local(
     execution_plan: &SagaExecutionPlan,
 ) -> String {
     let fn_name = format!("{protocol}_{participant}");
+    let entry_role = entry_channel_role(local_type);
     let mut code = String::new();
 
     // Module header
@@ -654,7 +665,7 @@ fn render_saga_module_with_local(
     writeln!(code, "/// - Evidence emission (`cx.emit_evidence()`)").ok();
     writeln!(code, "pub async fn {fn_name}(").ok();
     writeln!(code, "    cx: &Cx,").ok();
-    writeln!(code, "    chan: Chan<Initiator, {participant}_Session>,").ok();
+    writeln!(code, "    chan: Chan<{entry_role}, {participant}_Session>,").ok();
     writeln!(code, ") {{").ok();
 
     // Entry checkpoint + trace
@@ -1225,6 +1236,28 @@ mod tests {
 
         let worker = &output.participants["worker"];
         assert!(worker.source_code.contains("worker_Session"));
+    }
+
+    #[test]
+    fn worker_source_uses_responder_entry_channel() {
+        let protocol = example_two_phase_commit();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+        let worker = &output.participants["worker"];
+
+        assert!(
+            worker
+                .source_code
+                .contains("chan: Chan<Responder, worker_Session>"),
+            "worker should use responder polarity for its entry channel"
+        );
+        assert!(
+            !worker
+                .source_code
+                .contains("chan: Chan<Initiator, worker_Session>"),
+            "worker should not be rendered as an initiator"
+        );
     }
 
     // ------------------------------------------------------------------
