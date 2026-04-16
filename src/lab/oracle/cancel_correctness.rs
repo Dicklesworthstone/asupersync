@@ -542,9 +542,7 @@ impl CancelCorrectnessOracle {
     fn record_violation(&self, violation: CancelCorrectnessViolation) {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
-        if self.config.panic_on_violation {
-            panic!("Cancel-correctness violation detected: {violation}");
-        }
+        assert!(!self.config.panic_on_violation, "Cancel-correctness violation detected: {violation}");
 
         // Record violation for later inspection
         let mut violations = self.violations.write();

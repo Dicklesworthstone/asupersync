@@ -644,6 +644,7 @@ impl<R: Send + 'static> Reply<R> {
     }
 
     /// Check if the caller is still waiting for a reply.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.permit
@@ -1069,24 +1070,28 @@ impl<S: GenServer> GenServerHandle<S> {
     }
 
     /// Returns the server's overflow policy for cast messages.
+    #[inline]
     #[must_use]
     pub fn cast_overflow_policy(&self) -> CastOverflowPolicy {
         self.overflow_policy
     }
 
     /// Returns the server's actor ID.
+    #[inline]
     #[must_use]
     pub const fn actor_id(&self) -> ActorId {
         self.actor_id
     }
 
     /// Returns the server's task ID.
+    #[inline]
     #[must_use]
     pub fn task_id(&self) -> TaskId {
         self.task_id
     }
 
     /// Returns true if the server has finished.
+    #[inline]
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
@@ -1464,12 +1469,14 @@ impl<S: GenServer> GenServerRef<S> {
     }
 
     /// Returns true if the server has stopped.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
 
     /// Returns true if the server is still alive.
+    #[inline]
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.state.load() != ActorState::Stopped
@@ -2490,7 +2497,9 @@ mod tests {
 
         let (mut client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                *client_cx_cell_for_task.lock() = Some(cx.clone());
+                {
+                    *client_cx_cell_for_task.lock() = Some(cx.clone());
+                }
                 server_ref.call(&cx, CounterCall::Get).await
             })
             .unwrap();
@@ -2620,7 +2629,9 @@ mod tests {
 
         let (mut client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                *client_cx_cell_for_task.lock() = Some(cx.clone());
+                {
+                    *client_cx_cell_for_task.lock() = Some(cx.clone());
+                }
                 server_ref.cast(&cx, CounterCast::Reset).await
             })
             .unwrap();
@@ -6312,7 +6323,9 @@ mod tests {
         assert_eq!(registry.lock().whereis("panic_svc"), Some(child_task));
 
         // Drive the child once so it crashes in on_start.
-        runtime.scheduler.lock().schedule(child_task, 0);
+        {
+            runtime.scheduler.lock().schedule(child_task, 0);
+        }
         runtime.run_until_idle();
 
         // Region stop must still clean the registry + resolve the lease.

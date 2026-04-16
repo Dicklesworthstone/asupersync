@@ -263,7 +263,7 @@ pub struct QueueDebtSnapshot {
 }
 
 impl CleanupWorkType {
-    fn name(&self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Self::TaskFinalization => "task_finalization",
             Self::RegionCleanup => "region_cleanup",
@@ -273,7 +273,7 @@ impl CleanupWorkType {
         }
     }
 
-    fn estimated_size_bytes(&self) -> usize {
+    fn estimated_size_bytes(self) -> usize {
         match self {
             Self::TaskFinalization => 200,     // Task record + metadata
             Self::RegionCleanup => 300,        // Region state + cleanup
@@ -374,10 +374,7 @@ impl QueueState {
     }
 
     fn stall_duration(&self, now: Time) -> u64 {
-        match self.last_completion {
-            Some(last) => now.as_nanos().saturating_sub(last.as_nanos()),
-            None => 0, // No completions yet, not considered a stall
-        }
+        self.last_completion.map_or(0, |last| now.as_nanos().saturating_sub(last.as_nanos()))
     }
 }
 
@@ -407,6 +404,7 @@ impl Default for CancelDebtOracle {
 
 impl CancelDebtOracle {
     /// Creates a new cancellation debt oracle with the given configuration.
+    #[must_use]
     pub fn new(config: CancelDebtConfig) -> Self {
         Self {
             config,
@@ -420,6 +418,7 @@ impl CancelDebtOracle {
     }
 
     /// Creates a new oracle with default configuration.
+    #[must_use]
     pub fn with_default_config() -> Self {
         Self::new(CancelDebtConfig::default())
     }
