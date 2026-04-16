@@ -146,6 +146,7 @@ impl SymbolCancelToken {
     }
 
     /// Returns the token ID.
+    #[inline]
     #[must_use]
     pub fn token_id(&self) -> u64 {
         self.state.token_id
@@ -454,42 +455,49 @@ impl CancelMessage {
     }
 
     /// Returns the token ID.
+    #[inline]
     #[must_use]
     pub const fn token_id(&self) -> u64 {
         self.token_id
     }
 
     /// Returns the object ID.
+    #[inline]
     #[must_use]
     pub const fn object_id(&self) -> ObjectId {
         self.object_id
     }
 
     /// Returns the cancellation kind.
+    #[inline]
     #[must_use]
     pub const fn kind(&self) -> CancelKind {
         self.kind
     }
 
     /// Returns when the cancellation was initiated.
+    #[inline]
     #[must_use]
     pub const fn initiated_at(&self) -> Time {
         self.initiated_at
     }
 
     /// Returns the sequence number.
+    #[inline]
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
     }
 
     /// Returns the current hop count.
+    #[inline]
     #[must_use]
     pub const fn hops(&self) -> u8 {
         self.hops
     }
 
     /// Returns true if the message can be forwarded (not at max hops).
+    #[inline]
     #[must_use]
     pub const fn can_forward(&self) -> bool {
         self.hops < self.max_hops
@@ -509,6 +517,7 @@ impl CancelMessage {
     }
 
     /// Sets the maximum hops.
+    #[inline]
     #[must_use]
     pub const fn with_max_hops(mut self, max: u8) -> Self {
         self.max_hops = max;
@@ -570,12 +579,14 @@ pub struct PeerId(String);
 
 impl PeerId {
     /// Creates a new peer ID.
+    #[inline]
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
     /// Returns the ID as a string slice.
+    #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
