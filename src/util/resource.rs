@@ -71,6 +71,7 @@ impl SymbolBuffer {
 
     /// Returns the buffer as a slice.
     #[must_use]
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
@@ -83,12 +84,14 @@ impl SymbolBuffer {
 
     /// Returns the buffer length in bytes.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
     /// Returns true if the buffer is empty.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
