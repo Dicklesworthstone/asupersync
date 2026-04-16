@@ -1605,24 +1605,28 @@ fn gf256_profile_pack_manifest_snapshot_for(
 }
 
 /// Returns the deterministic dual-lane decision for dual-mul path lengths.
+#[inline]
 #[must_use]
 pub fn dual_mul_kernel_decision(len_a: usize, len_b: usize) -> DualKernelDecision {
     dual_mul_kernel_decision_detail(len_a, len_b).decision
 }
 
 /// Returns deterministic dual-lane decision details for dual-mul path lengths.
+#[inline]
 #[must_use]
 pub fn dual_mul_kernel_decision_detail(len_a: usize, len_b: usize) -> DualKernelDecisionDetail {
     dual_mul_decision_detail_with_policy(dual_policy(), len_a, len_b)
 }
 
 /// Returns the deterministic dual-lane decision for dual-addmul path lengths.
+#[inline]
 #[must_use]
 pub fn dual_addmul_kernel_decision(len_a: usize, len_b: usize) -> DualKernelDecision {
     dual_addmul_kernel_decision_detail(len_a, len_b).decision
 }
 
 /// Returns deterministic dual-lane decision details for dual-addmul path lengths.
+#[inline]
 #[must_use]
 pub fn dual_addmul_kernel_decision_detail(len_a: usize, len_b: usize) -> DualKernelDecisionDetail {
     dual_addmul_decision_detail_with_policy(dual_policy(), len_a, len_b)
@@ -1633,6 +1637,7 @@ fn should_use_dual_addmul_fused(len_a: usize, len_b: usize) -> bool {
     dual_addmul_kernel_decision_detail(len_a, len_b).is_fused()
 }
 /// Returns the active runtime-selected GF(256) bulk kernel family.
+#[inline]
 #[must_use]
 pub fn active_kernel() -> Gf256Kernel {
     dispatch().kind
