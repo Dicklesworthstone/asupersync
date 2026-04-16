@@ -48,6 +48,7 @@ impl RegionId {
 
     /// Creates a region ID for testing/benchmarking purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
         Self(ArenaIndex::new(index, generation))
@@ -58,6 +59,7 @@ impl RegionId {
     /// This creates an ID with index 0 and generation 0, suitable for
     /// unit tests that don't care about specific ID values.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn testing_default() -> Self {
         Self(ArenaIndex::new(0, 0))
@@ -68,6 +70,7 @@ impl RegionId {
     ///
     /// This is intended for production request handling that needs unique
     /// identifiers without full runtime region registration.
+    #[inline]
     #[must_use]
     pub fn new_ephemeral() -> Self {
         let index = EPHEMERAL_REGION_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -96,12 +99,14 @@ struct SerdeArenaIndex {
 }
 
 impl SerdeArenaIndex {
+    #[inline]
     const fn to_arena(self) -> ArenaIndex {
         ArenaIndex::new(self.index, self.generation)
     }
 }
 
 impl From<ArenaIndex> for SerdeArenaIndex {
+    #[inline]
     fn from(value: ArenaIndex) -> Self {
         Self {
             index: value.index(),
@@ -111,6 +116,7 @@ impl From<ArenaIndex> for SerdeArenaIndex {
 }
 
 impl Serialize for RegionId {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -120,6 +126,7 @@ impl Serialize for RegionId {
 }
 
 impl<'de> Deserialize<'de> for RegionId {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -165,6 +172,7 @@ impl TaskId {
 
     /// Creates a task ID for testing/benchmarking purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
         Self(ArenaIndex::new(index, generation))
@@ -175,6 +183,7 @@ impl TaskId {
     /// This creates an ID with index 0 and generation 0, suitable for
     /// unit tests that don't care about specific ID values.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn testing_default() -> Self {
         Self(ArenaIndex::new(0, 0))
@@ -182,6 +191,7 @@ impl TaskId {
 
     /// Creates a new ephemeral task ID for request-scoped contexts created
     /// outside the runtime scheduler.
+    #[inline]
     #[must_use]
     pub fn new_ephemeral() -> Self {
         let index = EPHEMERAL_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -204,6 +214,7 @@ impl fmt::Display for TaskId {
 }
 
 impl Serialize for TaskId {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -213,6 +224,7 @@ impl Serialize for TaskId {
 }
 
 impl<'de> Deserialize<'de> for TaskId {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -258,6 +270,7 @@ impl ObligationId {
 
     /// Creates an obligation ID for testing/benchmarking purposes.
     #[doc(hidden)]
+    #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
         Self(ArenaIndex::new(index, generation))
@@ -284,6 +297,7 @@ impl fmt::Display for ObligationId {
 }
 
 impl Serialize for ObligationId {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -293,6 +307,7 @@ impl Serialize for ObligationId {
 }
 
 impl<'de> Deserialize<'de> for ObligationId {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -374,7 +389,8 @@ impl Time {
 
     /// Returns the duration between two times in nanoseconds.
     ///
-    /// Returns 0 if `self` is before `earlier`.
+    /// Returns 0 if `self` is before `earlier` (time travel protection).
+    /// This method uses saturating arithmetic to prevent overflow.
     #[inline]
     #[must_use]
     pub const fn duration_since(self, earlier: Self) -> u64 {
@@ -400,6 +416,7 @@ impl fmt::Debug for Time {
 }
 
 impl fmt::Display for Time {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0 >= 1_000_000_000 {
             write!(

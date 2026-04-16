@@ -31,21 +31,25 @@ pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
 pub struct OsEntropy;
 
 impl EntropySource for OsEntropy {
+    #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         check_ambient_entropy("os");
         getrandom::fill(dest).expect("OS entropy failed");
     }
 
+    #[inline]
     fn next_u64(&self) -> u64 {
         let mut buf = [0u8; 8];
         self.fill_bytes(&mut buf);
         u64::from_le_bytes(buf)
     }
 
+    #[inline]
     fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
         Arc::new(Self)
     }
 
+    #[inline]
     fn source_id(&self) -> &'static str {
         "os"
     }
@@ -66,6 +70,7 @@ struct DetEntropyInner {
 
 impl DetEntropy {
     /// Create a deterministic entropy source from a seed.
+    #[inline]
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {
@@ -87,11 +92,13 @@ impl DetEntropy {
         }
     }
 
+    #[inline]
     fn task_seed(task_id: TaskId) -> u64 {
         let idx = task_id.arena_index();
         ((u64::from(idx.generation())) << 32) | u64::from(idx.index())
     }
 
+    #[inline]
     pub(crate) fn mix_seed(mut seed: u64) -> u64 {
         seed ^= seed >> 30;
         seed = seed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -103,15 +110,18 @@ impl DetEntropy {
 }
 
 impl EntropySource for DetEntropy {
+    #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         let mut inner = self.inner.lock();
         inner.rng.fill_bytes(dest);
     }
 
+    #[inline]
     fn next_u64(&self) -> u64 {
         self.inner.lock().rng.next_u64()
     }
 
+    #[inline]
     fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource> {
         let mut inner = self.inner.lock();
         let counter = inner.fork_counter;
@@ -125,6 +135,7 @@ impl EntropySource for DetEntropy {
         Arc::new(Self::with_fork_counter(child_seed, 0))
     }
 
+    #[inline]
     fn source_id(&self) -> &'static str {
         "deterministic"
     }
@@ -142,21 +153,25 @@ impl EntropySource for DetEntropy {
 pub struct BrowserEntropy;
 
 impl EntropySource for BrowserEntropy {
+    #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         check_ambient_entropy("browser");
         getrandom::fill(dest).expect("browser entropy failed");
     }
 
+    #[inline]
     fn next_u64(&self) -> u64 {
         let mut buf = [0u8; 8];
         self.fill_bytes(&mut buf);
         u64::from_le_bytes(buf)
     }
 
+    #[inline]
     fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
         Arc::new(Self)
     }
 
+    #[inline]
     fn source_id(&self) -> &'static str {
         "browser"
     }
@@ -170,6 +185,7 @@ pub struct ThreadLocalEntropy {
 
 impl ThreadLocalEntropy {
     /// Create a thread-local entropy factory from a global seed.
+    #[inline]
     #[must_use]
     pub const fn new(global_seed: u64) -> Self {
         Self { global_seed }
@@ -177,6 +193,7 @@ impl ThreadLocalEntropy {
 
     /// Deterministically derive an entropy source for a worker index.
     #[must_use]
+    #[inline]
     pub fn for_thread(&self, thread_index: usize) -> DetEntropy {
         let combined = self
             .global_seed
@@ -193,22 +210,26 @@ impl ThreadLocalEntropy {
 static STRICT_ENTROPY: AtomicBool = AtomicBool::new(false);
 
 /// Enable strict entropy isolation globally.
+#[inline]
 pub fn enable_strict_entropy() {
     STRICT_ENTROPY.store(true, Ordering::SeqCst);
 }
 
 /// Disable strict entropy isolation globally.
+#[inline]
 pub fn disable_strict_entropy() {
     STRICT_ENTROPY.store(false, Ordering::SeqCst);
 }
 
 /// Returns true if strict entropy isolation is enabled.
+#[inline]
 #[must_use]
 pub fn strict_entropy_enabled() -> bool {
     STRICT_ENTROPY.load(Ordering::SeqCst)
 }
 
 /// Panic if strict entropy isolation is enabled.
+#[inline]
 pub fn check_ambient_entropy(source: &str) {
     assert!(
         !strict_entropy_enabled(),
@@ -225,6 +246,7 @@ pub struct StrictEntropyGuard {
 impl StrictEntropyGuard {
     /// Enables strict entropy isolation until dropped.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         let previous = STRICT_ENTROPY.swap(true, Ordering::SeqCst);
         Self { previous }

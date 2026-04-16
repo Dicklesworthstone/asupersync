@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "asupersync-fuzz"
 version = "0.0.0"
@@ -9,15 +11,17 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-# Note: asupersync dependency commented out until main crate compiles.
-# Once compilation issues are resolved, uncomment to add targets that
-# test actual implementation.
-# asupersync = { path = ".." }
+asupersync = { path = "..", features = ["tls"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
 # Optional: for structured fuzzing
 bytes = "1"
+serde = { version = "1", features = ["derive"] }
+
+# For SCRAM-SHA-256 parsing
+base64 = "0.22"
+sha2 = "0.10"
 
 [dev-dependencies]
 # For seed generation and corpus management
@@ -57,6 +61,174 @@ bench = false
 [[bin]]
 name = "fuzz_interest_flags"
 path = "fuzz_targets/interest_flags.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_typed_symbol_parser"
+path = "fuzz_targets/typed_symbol_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mysql_wire_protocol"
+path = "fuzz_targets/mysql_wire_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_postgres_wire_protocol"
+path = "fuzz_targets/postgres_wire_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_decoder"
+path = "fuzz_targets/raptorq_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_length_delimited_codec"
+path = "fuzz_targets/length_delimited_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_lines_codec"
+path = "fuzz_targets/lines_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_gf256_operations"
+path = "fuzz_targets/gf256_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_channel_state_machine"
+path = "fuzz_targets/channel_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_websocket_frame_parsing"
+path = "fuzz_targets/websocket_frame_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h3_native_protocol"
+path = "fuzz_targets/h3_native_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_core_protocol"
+path = "fuzz_targets/quic_core_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tls_message_parsing"
+path = "fuzz_targets/tls_message_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_postgres_scram_auth"
+path = "fuzz_targets/postgres_scram_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_redis_resp_protocol"
+path = "fuzz_targets/redis_resp_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_accept_encoding_negotiation"
+path = "fuzz_targets/http_accept_encoding_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_jetstream_json_api_parsing"
+path = "fuzz_targets/jetstream_json_api_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_compression_decompression"
+path = "fuzz_targets/http_compression_decompression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sql_injection_detection"
+path = "fuzz_targets/sql_injection_detection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dns_protocol_parsing"
+path = "fuzz_targets/dns_protocol_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_file_parsing"
+path = "fuzz_targets/trace_file_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_replay_event_deserialization"
+path = "fuzz_targets/replay_event_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_compression"
+path = "fuzz_targets/trace_compression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_symbol_id_deserialization"
+path = "fuzz_targets/symbol_id_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_symbol_parsing"
+path = "fuzz_targets/raptorq_symbol_parsing.rs"
 test = false
 doc = false
 bench = false

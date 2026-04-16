@@ -115,6 +115,7 @@ use crate::util::DetRng;
 
 /// Configuration for the lab runtime.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct LabConfig {
     /// Random seed for deterministic scheduling.
     pub seed: u64,
@@ -157,6 +158,15 @@ pub struct LabConfig {
     /// completes in <1 second of real time because sleep/timeout deadlines
     /// are jumped to instantly rather than waited for.
     pub auto_advance_time: bool,
+    /// Whether to enable real-time cancellation protocol oracle verification.
+    ///
+    /// When enabled, the runtime will continuously verify that the cancellation
+    /// protocol is followed correctly during execution.
+    pub enable_cancellation_oracle: bool,
+    /// Whether to panic when cancellation protocol violations are detected.
+    ///
+    /// When false, violations are logged as warnings instead of panicking.
+    pub panic_on_cancellation_violation: bool,
 }
 
 impl LabConfig {
@@ -175,6 +185,8 @@ impl LabConfig {
             chaos: None,
             replay_recording: None,
             auto_advance_time: false,
+            enable_cancellation_oracle: true,
+            panic_on_cancellation_violation: true,
         }
     }
 
@@ -303,6 +315,36 @@ impl LabConfig {
     #[must_use]
     pub fn has_replay_recording(&self) -> bool {
         self.replay_recording.as_ref().is_some_and(|c| c.enabled)
+    }
+
+    /// Enables or disables real-time cancellation protocol oracle verification.
+    #[must_use]
+    pub const fn with_cancellation_oracle(mut self, enable: bool) -> Self {
+        self.enable_cancellation_oracle = enable;
+        self
+    }
+
+    /// Sets whether to panic on cancellation protocol violations.
+    ///
+    /// When false, violations are logged as warnings instead of panicking.
+    #[must_use]
+    pub const fn panic_on_cancellation_violation(mut self, value: bool) -> Self {
+        self.panic_on_cancellation_violation = value;
+        self
+    }
+
+    /// Enables cancellation oracle in warning mode (logs violations but doesn't panic).
+    #[must_use]
+    pub const fn with_cancellation_oracle_warnings(mut self) -> Self {
+        self.enable_cancellation_oracle = true;
+        self.panic_on_cancellation_violation = false;
+        self
+    }
+
+    /// Returns true if real-time cancellation protocol oracle verification is enabled.
+    #[must_use]
+    pub const fn has_cancellation_oracle(&self) -> bool {
+        self.enable_cancellation_oracle
     }
 
     /// Creates a deterministic RNG from this configuration.

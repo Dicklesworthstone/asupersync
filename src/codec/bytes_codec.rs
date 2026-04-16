@@ -13,6 +13,7 @@ pub struct BytesCodec;
 
 impl BytesCodec {
     /// Creates a new `BytesCodec`.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -23,6 +24,7 @@ impl Decoder for BytesCodec {
     type Item = BytesMut;
     type Error = io::Error;
 
+    #[inline]
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<BytesMut>, io::Error> {
         if src.is_empty() {
             Ok(None)
@@ -36,6 +38,7 @@ impl Decoder for BytesCodec {
 impl Encoder<Bytes> for BytesCodec {
     type Error = io::Error;
 
+    #[inline]
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), io::Error> {
         dst.reserve(item.len());
         dst.put_slice(&item);
@@ -46,6 +49,7 @@ impl Encoder<Bytes> for BytesCodec {
 impl Encoder<BytesMut> for BytesCodec {
     type Error = io::Error;
 
+    #[inline]
     fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> Result<(), io::Error> {
         dst.reserve(item.len());
         dst.put_slice(&item);
@@ -56,6 +60,7 @@ impl Encoder<BytesMut> for BytesCodec {
 impl Encoder<Vec<u8>> for BytesCodec {
     type Error = io::Error;
 
+    #[inline]
     fn encode(&mut self, item: Vec<u8>, dst: &mut BytesMut) -> Result<(), io::Error> {
         dst.reserve(item.len());
         dst.put_slice(&item);

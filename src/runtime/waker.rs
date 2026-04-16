@@ -75,6 +75,7 @@ impl WakerState {
     ///
     /// The `source` is recorded when the waker fires, enabling causality
     /// analysis in tracing output.
+    #[inline]
     #[must_use]
     pub fn waker_for_source(self: &Arc<Self>, task: TaskId, source: WakeSource) -> Waker {
         Waker::from(Arc::new(TaskWaker {
@@ -104,6 +105,7 @@ impl WakerState {
     }
 
     #[allow(unused_variables)] // source used by trace! macro when tracing is enabled
+    #[inline]
     fn wake(&self, task: TaskId, source: WakeSource) {
         let mut woken = self.woken.lock();
         if woken.insert(task) {
@@ -124,10 +126,12 @@ struct TaskWaker {
 }
 
 impl Wake for TaskWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.state.wake(self.task, self.source);
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.state.wake(self.task, self.source);
     }

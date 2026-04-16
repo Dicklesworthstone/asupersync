@@ -75,6 +75,7 @@ struct WaiterEntry {
 }
 
 impl WaiterSlab {
+    #[inline]
     fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -177,6 +178,7 @@ impl Notify {
     /// will be delivered to the next task that calls `notified().await`.
     ///
     /// If multiple tasks are waiting, exactly one will be woken.
+    #[inline]
     pub fn notify_one(&self) {
         let waker_to_wake = {
             let mut waiters = self.waiters.lock();
@@ -227,6 +229,7 @@ impl Notify {
     ///
     /// This wakes all tasks that are currently waiting. Tasks that
     /// start waiting after this call will not be affected.
+    #[inline]
     pub fn notify_waiters(&self) {
         // Increment generation to signal all waiters.
         let new_generation = self.generation.fetch_add(1, Ordering::Release) + 1;
@@ -293,6 +296,7 @@ impl Notify {
     /// notification when no waiter is present. This is used when a later
     /// broadcast already covered the original waiter set, but a post-broadcast
     /// waiter may still need the in-flight `notify_one` baton.
+    #[inline]
     fn pass_baton_if_waiter_exists(mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
         let start = waiters.scan_start;
         for i in start..waiters.entries.len() {
@@ -313,6 +317,7 @@ impl Notify {
 }
 
 impl Default for Notify {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -347,6 +352,7 @@ impl Notified<'_> {
         Poll::Ready(())
     }
 
+    #[inline]
     fn try_consume_stored_notification(&self) -> bool {
         let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
         while stored > 0 {
@@ -363,6 +369,7 @@ impl Notified<'_> {
         false
     }
 
+    #[inline]
     fn poll_init(&mut self, cx: &Context<'_>) -> Poll<()> {
         // Lock-free fast path: observe broadcast generation bump.
         let current_gen = self.notify.generation.load(Ordering::Acquire);
@@ -402,6 +409,7 @@ impl Notified<'_> {
         Poll::Pending
     }
 
+    #[inline]
     fn poll_waiting(&mut self, cx: &Context<'_>) -> Poll<()> {
         // Lock-free fast path check.
         let current_gen = self.notify.generation.load(Ordering::Acquire);

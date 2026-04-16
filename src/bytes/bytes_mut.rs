@@ -34,6 +34,7 @@ pub struct BytesMut {
 
 impl BytesMut {
     /// Create an empty `BytesMut`.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self { data: Vec::new() }
@@ -50,6 +51,7 @@ impl BytesMut {
     /// assert!(buf.is_empty());
     /// assert!(buf.capacity() >= 100);
     /// ```
+    #[inline]
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -245,6 +247,7 @@ impl BytesMut {
     /// buf.resize(5, 0);
     /// assert_eq!(&buf[..], b"hello");
     /// ```
+    #[inline]
     pub fn resize(&mut self, new_len: usize, value: u8) {
         self.data.resize(new_len, value);
     }
@@ -255,6 +258,7 @@ impl BytesMut {
     ///
     /// Panics if the range is out of bounds.
     #[must_use]
+    #[inline]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> &[u8] {
         use std::ops::Bound;
 
@@ -275,6 +279,7 @@ impl BytesMut {
 
     /// Returns the remaining spare capacity as a mutable slice.
     #[must_use]
+    #[inline]
     pub fn spare_capacity_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
         self.data.spare_capacity_mut()
     }
@@ -292,6 +297,7 @@ impl BytesMut {
     /// # Panics
     ///
     /// Panics if `len > capacity`.
+    #[inline]
     pub fn set_len(&mut self, len: usize) {
         assert!(
             len <= self.capacity(),
@@ -303,6 +309,7 @@ impl BytesMut {
 }
 
 impl Default for BytesMut {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -311,36 +318,42 @@ impl Default for BytesMut {
 impl Deref for BytesMut {
     type Target = [u8];
 
+    #[inline]
     fn deref(&self) -> &[u8] {
         &self.data
     }
 }
 
 impl DerefMut for BytesMut {
+    #[inline]
     fn deref_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 }
 
 impl AsRef<[u8]> for BytesMut {
+    #[inline]
     fn as_ref(&self) -> &[u8] {
         &self.data
     }
 }
 
 impl AsMut<[u8]> for BytesMut {
+    #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 }
 
 impl From<Vec<u8>> for BytesMut {
+    #[inline]
     fn from(vec: Vec<u8>) -> Self {
         Self { data: vec }
     }
 }
 
 impl From<&[u8]> for BytesMut {
+    #[inline]
     fn from(slice: &[u8]) -> Self {
         Self {
             data: slice.to_vec(),
@@ -349,6 +362,7 @@ impl From<&[u8]> for BytesMut {
 }
 
 impl From<&str> for BytesMut {
+    #[inline]
     fn from(s: &str) -> Self {
         Self {
             data: s.as_bytes().to_vec(),
@@ -357,6 +371,7 @@ impl From<&str> for BytesMut {
 }
 
 impl From<String> for BytesMut {
+    #[inline]
     fn from(s: String) -> Self {
         Self {
             data: s.into_bytes(),
@@ -375,6 +390,7 @@ impl std::fmt::Debug for BytesMut {
 }
 
 impl PartialEq for BytesMut {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.data == other.data
     }
@@ -383,24 +399,28 @@ impl PartialEq for BytesMut {
 impl Eq for BytesMut {}
 
 impl PartialEq<[u8]> for BytesMut {
+    #[inline]
     fn eq(&self, other: &[u8]) -> bool {
         self.data.as_slice() == other
     }
 }
 
 impl PartialEq<BytesMut> for [u8] {
+    #[inline]
     fn eq(&self, other: &BytesMut) -> bool {
         self == other.data.as_slice()
     }
 }
 
 impl PartialEq<Vec<u8>> for BytesMut {
+    #[inline]
     fn eq(&self, other: &Vec<u8>) -> bool {
         &self.data == other
     }
 }
 
 impl std::hash::Hash for BytesMut {
+    #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.data.hash(state);
     }

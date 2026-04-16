@@ -48,18 +48,21 @@ impl AuthenticatedSymbol {
 
     /// Returns a reference to the inner symbol.
     #[must_use]
+    #[inline]
     pub fn symbol(&self) -> &Symbol {
         &self.symbol
     }
 
     /// Returns a reference to the authentication tag.
     #[must_use]
+    #[inline]
     pub fn tag(&self) -> &AuthenticationTag {
         &self.tag
     }
 
     /// Returns true if this symbol has been verified.
     #[must_use]
+    #[inline]
     pub fn is_verified(&self) -> bool {
         self.verified
     }

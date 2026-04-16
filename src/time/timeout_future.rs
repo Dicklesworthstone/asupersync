@@ -122,6 +122,7 @@ impl<F> TimeoutFuture<F> {
 
     /// Returns the timeout deadline.
     #[must_use]
+    #[inline]
     pub const fn deadline(&self) -> Time {
         self.sleep.deadline()
     }
@@ -130,23 +131,27 @@ impl<F> TimeoutFuture<F> {
     ///
     /// Returns `Duration::ZERO` if the timeout has elapsed.
     #[must_use]
+    #[inline]
     pub fn remaining(&self, now: Time) -> Duration {
         self.sleep.remaining(now)
     }
 
     /// Returns true if the timeout has elapsed.
     #[must_use]
+    #[inline]
     pub fn is_elapsed(&self, now: Time) -> bool {
         self.sleep.is_elapsed(now)
     }
 
     /// Returns a reference to the inner future.
     #[must_use]
+    #[inline]
     pub const fn inner(&self) -> &F {
         &self.future
     }
 
     /// Returns a mutable reference to the inner future.
+    #[inline]
     pub fn inner_mut(&mut self) -> &mut F {
         &mut self.future
     }
@@ -155,6 +160,7 @@ impl<F> TimeoutFuture<F> {
     ///
     /// Note: This discards the timeout and lets the future run indefinitely.
     #[must_use]
+    #[inline]
     pub fn into_inner(self) -> F {
         self.future
     }

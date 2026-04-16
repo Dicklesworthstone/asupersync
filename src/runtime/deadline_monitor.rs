@@ -213,6 +213,7 @@ impl DeadlineMonitor {
 
     /// Returns a reference to the monitor configuration.
     #[must_use]
+    #[inline]
     pub fn config(&self) -> &MonitorConfig {
         &self.config
     }

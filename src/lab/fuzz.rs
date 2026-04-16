@@ -416,6 +416,7 @@ fn violation_category(v: &InvariantViolation) -> String {
         InvariantViolation::ActorLeak { .. } => "actor_leak".to_string(),
         InvariantViolation::QuiescenceViolation => "quiescence_violation".to_string(),
         InvariantViolation::Futurelock { .. } => "futurelock".to_string(),
+        InvariantViolation::CancellationProtocol { .. } => "cancellation_protocol".to_string(),
     }
 }
 

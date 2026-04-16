@@ -24,6 +24,7 @@ use core::fmt;
 use std::marker::PhantomData;
 use std::time::Duration;
 
+#[inline]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -38,6 +39,7 @@ pub struct Timeout<T> {
 
 impl<T> Timeout<T> {
     /// Creates a new timeout with the given deadline.
+    #[inline]
     #[must_use]
     pub const fn new(deadline: Time) -> Self {
         Self {
@@ -47,36 +49,42 @@ impl<T> Timeout<T> {
     }
 
     /// Creates a timeout from a duration in nanoseconds from now.
+    #[inline]
     #[must_use]
     pub const fn after_nanos(now: Time, nanos: u64) -> Self {
         Self::new(now.saturating_add_nanos(nanos))
     }
 
     /// Creates a timeout from a duration in milliseconds from now.
+    #[inline]
     #[must_use]
     pub const fn after_millis(now: Time, millis: u64) -> Self {
         Self::after_nanos(now, millis.saturating_mul(1_000_000))
     }
 
     /// Creates a timeout from a duration in seconds from now.
+    #[inline]
     #[must_use]
     pub const fn after_secs(now: Time, secs: u64) -> Self {
         Self::after_nanos(now, secs.saturating_mul(1_000_000_000))
     }
 
     /// Creates a timeout from a std Duration.
+    #[inline]
     #[must_use]
     pub fn after(now: Time, duration: Duration) -> Self {
         Self::after_nanos(now, duration_to_nanos(duration))
     }
 
     /// Returns true if the deadline has passed.
+    #[inline]
     #[must_use]
     pub fn is_expired(&self, now: Time) -> bool {
         now >= self.deadline
     }
 
     /// Returns the remaining time until the deadline, or zero if expired.
+    #[inline]
     #[must_use]
     pub fn remaining(&self, now: Time) -> Duration {
         if now >= self.deadline {
@@ -89,6 +97,7 @@ impl<T> Timeout<T> {
 }
 
 impl<T> Clone for Timeout<T> {
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -109,6 +118,7 @@ pub struct TimeoutError {
 
 impl TimeoutError {
     /// Creates a new timeout error with the given deadline.
+    #[inline]
     #[must_use]
     pub const fn new(deadline: Time) -> Self {
         Self {
@@ -118,6 +128,7 @@ impl TimeoutError {
     }
 
     /// Creates a new timeout error with a message.
+    #[inline]
     #[must_use]
     pub const fn with_message(deadline: Time, message: &'static str) -> Self {
         Self {
@@ -127,6 +138,7 @@ impl TimeoutError {
     }
 
     /// Converts to a CancelReason for use in Outcome::Cancelled.
+    #[inline]
     #[must_use]
     pub const fn into_cancel_reason(self) -> CancelReason {
         CancelReason::timeout()
@@ -155,18 +167,21 @@ pub enum TimedResult<T, E> {
 
 impl<T, E> TimedResult<T, E> {
     /// Returns true if the operation completed.
+    #[inline]
     #[must_use]
     pub const fn is_completed(&self) -> bool {
         matches!(self, Self::Completed(_))
     }
 
     /// Returns true if the operation timed out.
+    #[inline]
     #[must_use]
     pub const fn is_timed_out(&self) -> bool {
         matches!(self, Self::TimedOut(_))
     }
 
     /// Converts to an Outcome, treating timeout as cancellation.
+    #[inline]
     pub fn into_outcome(self) -> Outcome<T, E> {
         match self {
             Self::Completed(outcome) => outcome,
@@ -175,6 +190,7 @@ impl<T, E> TimedResult<T, E> {
     }
 
     /// Converts to a Result, treating timeout as an error.
+    #[inline]
     pub fn into_result(self) -> Result<T, TimedError<E>> {
         match self {
             Self::Completed(outcome) => match outcome {
@@ -222,6 +238,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for TimedError<E> {}
 /// * `outcome` - The outcome from the operation
 /// * `deadline` - The deadline that was set
 /// * `completed_in_time` - Whether the operation completed before the deadline
+#[inline]
 #[must_use]
 pub fn make_timed_result<T, E>(
     outcome: Outcome<T, E>,
@@ -257,6 +274,7 @@ pub fn make_timed_result<T, E>(
 ///
 /// # Returns
 /// The tighter (earlier) of the two deadlines.
+#[inline]
 #[must_use]
 pub const fn effective_deadline(requested: Time, existing: Option<Time>) -> Time {
     match existing {
@@ -276,6 +294,7 @@ pub struct TimeoutConfig {
 
 impl TimeoutConfig {
     /// Creates a new timeout configuration.
+    #[inline]
     #[must_use]
     pub const fn new(deadline: Time) -> Self {
         Self {
@@ -285,6 +304,7 @@ impl TimeoutConfig {
     }
 
     /// Creates a configuration that ignores nested timeouts.
+    #[inline]
     #[must_use]
     pub const fn absolute(deadline: Time) -> Self {
         Self {
@@ -294,6 +314,7 @@ impl TimeoutConfig {
     }
 
     /// Returns the final deadline to use, considering any existing deadline.
+    #[inline]
     #[must_use]
     pub const fn resolve(&self, existing: Option<Time>) -> Time {
         if self.use_effective {

@@ -130,6 +130,7 @@ impl CancelAttributionConfig {
     pub const DEFAULT_MAX_MEMORY: usize = 4096;
 
     /// Creates a new configuration with custom limits.
+    #[inline]
     #[must_use]
     pub const fn new(max_chain_depth: usize, max_chain_memory: usize) -> Self {
         Self {
@@ -139,6 +140,7 @@ impl CancelAttributionConfig {
     }
 
     /// Creates a configuration with no limits (for testing or special cases).
+    #[inline]
     #[must_use]
     pub const fn unlimited() -> Self {
         Self {
@@ -159,12 +161,14 @@ impl CancelAttributionConfig {
     /// - 1 byte: truncated flag
     /// - 8 bytes: truncated_at_depth (`Option<usize>`)
     /// - Total: ~80 bytes (rounded up for alignment)
+    #[inline]
     #[must_use]
     pub const fn single_reason_cost() -> usize {
         80
     }
 
     /// Estimates memory cost for a chain of given depth.
+    #[inline]
     #[must_use]
     pub const fn estimated_chain_cost(depth: usize) -> usize {
         if depth == 0 {
@@ -229,6 +233,7 @@ pub enum CancelPhase {
 }
 
 impl CancelPhase {
+    #[inline]
     fn rank(self) -> u8 {
         match self {
             Self::Requested => 0,
@@ -259,6 +264,7 @@ pub struct CancelWitness {
 
 impl CancelWitness {
     /// Creates a new cancellation witness.
+    #[inline]
     #[must_use]
     pub fn new(
         task_id: TaskId,
@@ -339,6 +345,7 @@ pub enum CancelWitnessError {
 
 impl CancelKind {
     /// Returns the variant name as a static string (matches `Debug` output).
+    #[inline]
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -366,6 +373,7 @@ impl CancelKind {
     /// - 3: FailFast, RaceLost (sibling/peer outcomes)
     /// - 4: ParentCancelled, ResourceUnavailable (structural/resource)
     /// - 5: Shutdown (system-level)
+    #[inline]
     #[must_use]
     pub const fn severity(self) -> u8 {
         match self {
@@ -380,6 +388,7 @@ impl CancelKind {
 }
 
 impl fmt::Display for CancelKind {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::User => write!(f, "user"),
@@ -441,6 +450,7 @@ impl CancelReason {
     /// Creates a new cancellation reason with the given kind and origin.
     ///
     /// This is the primary constructor that requires full attribution.
+    #[inline]
     #[must_use]
     pub const fn with_origin(kind: CancelKind, origin_region: RegionId, timestamp: Time) -> Self {
         Self {
@@ -459,6 +469,7 @@ impl CancelReason {
     ///
     /// Uses `RegionId::testing_default()` and `Time::ZERO` for attribution.
     /// Prefer `with_origin` in production code.
+    #[inline]
     #[must_use]
     pub const fn new(kind: CancelKind) -> Self {
         Self {
@@ -474,6 +485,7 @@ impl CancelReason {
     }
 
     /// Creates a user cancellation reason with a message.
+    #[inline]
     #[must_use]
     pub const fn user(message: &'static str) -> Self {
         Self {
@@ -489,30 +501,35 @@ impl CancelReason {
     }
 
     /// Creates a timeout cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn timeout() -> Self {
         Self::new(CancelKind::Timeout)
     }
 
     /// Creates a deadline cancellation reason (budget deadline exceeded).
+    #[inline]
     #[must_use]
     pub const fn deadline() -> Self {
         Self::new(CancelKind::Deadline)
     }
 
     /// Creates a poll quota cancellation reason (budget poll quota exceeded).
+    #[inline]
     #[must_use]
     pub const fn poll_quota() -> Self {
         Self::new(CancelKind::PollQuota)
     }
 
     /// Creates a cost budget cancellation reason (budget cost quota exceeded).
+    #[inline]
     #[must_use]
     pub const fn cost_budget() -> Self {
         Self::new(CancelKind::CostBudget)
     }
 
     /// Creates a fail-fast cancellation reason (sibling failed).
+    #[inline]
     #[must_use]
     pub const fn sibling_failed() -> Self {
         Self::new(CancelKind::FailFast)
@@ -521,6 +538,7 @@ impl CancelReason {
     /// Creates a fail-fast cancellation reason (alias for sibling_failed).
     ///
     /// Used when a task is cancelled because a sibling failed in a fail-fast region.
+    #[inline]
     #[must_use]
     pub const fn fail_fast() -> Self {
         Self::new(CancelKind::FailFast)
@@ -529,6 +547,7 @@ impl CancelReason {
     /// Creates a race loser cancellation reason.
     ///
     /// Used when a task is cancelled because another task in a race completed first.
+    #[inline]
     #[must_use]
     pub const fn race_loser() -> Self {
         Self::new(CancelKind::RaceLost)
@@ -537,30 +556,35 @@ impl CancelReason {
     /// Creates a race lost cancellation reason (alias for race_loser).
     ///
     /// Used when a task is cancelled because another task in a race completed first.
+    #[inline]
     #[must_use]
     pub const fn race_lost() -> Self {
         Self::new(CancelKind::RaceLost)
     }
 
     /// Creates a parent-cancelled cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn parent_cancelled() -> Self {
         Self::new(CancelKind::ParentCancelled)
     }
 
     /// Creates a resource unavailable cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn resource_unavailable() -> Self {
         Self::new(CancelKind::ResourceUnavailable)
     }
 
     /// Creates a shutdown cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn shutdown() -> Self {
         Self::new(CancelKind::Shutdown)
     }
 
     /// Creates a linked-exit cancellation reason (Spork link propagation).
+    #[inline]
     #[must_use]
     pub const fn linked_exit() -> Self {
         Self::new(CancelKind::LinkedExit)
@@ -571,6 +595,7 @@ impl CancelReason {
     // ========================================================================
 
     /// Sets the origin task for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_task(mut self, task: TaskId) -> Self {
         self.origin_task = Some(task);
@@ -578,6 +603,7 @@ impl CancelReason {
     }
 
     /// Sets a message for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_message(mut self, message: &'static str) -> Self {
         self.message = Some(message);
@@ -588,6 +614,7 @@ impl CancelReason {
     ///
     /// This does not apply any limits to the chain depth.
     /// For production use with limits, prefer [`with_cause_limited`][Self::with_cause_limited].
+    #[inline]
     #[must_use]
     pub fn with_cause(mut self, cause: Self) -> Self {
         self.cause = Some(Box::new(cause));
@@ -707,6 +734,7 @@ impl CancelReason {
     }
 
     /// Sets the timestamp for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_timestamp(mut self, timestamp: Time) -> Self {
         self.timestamp = timestamp;
@@ -714,6 +742,7 @@ impl CancelReason {
     }
 
     /// Sets the origin region for this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn with_region(mut self, region: RegionId) -> Self {
         self.origin_region = region;
@@ -733,6 +762,7 @@ impl CancelReason {
     ///     println!("Cause: {:?}", reason.kind);
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn chain(&self) -> CancelReasonChain<'_> {
         CancelReasonChain {
@@ -753,6 +783,7 @@ impl CancelReason {
     }
 
     /// Returns the depth of the cause chain (1 = no parent, 2 = one parent, etc.).
+    #[inline]
     #[must_use]
     pub fn chain_depth(&self) -> usize {
         self.chain().count()
@@ -788,12 +819,14 @@ impl CancelReason {
     /// - 3: FailFast/RaceLost (sibling events)
     /// - 4: ParentCancelled/ResourceUnavailable (external pressure)
     /// - 5: Shutdown (highest priority, minimal cleanup)
+    #[inline]
     #[must_use]
     pub const fn severity(&self) -> u8 {
         self.kind.severity()
     }
 
     /// Returns true if this reason's kind matches the given kind.
+    #[inline]
     #[must_use]
     pub const fn is_kind(&self, kind: CancelKind) -> bool {
         matches!(
@@ -816,12 +849,14 @@ impl CancelReason {
     }
 
     /// Returns true if this reason indicates shutdown.
+    #[inline]
     #[must_use]
     pub const fn is_shutdown(&self) -> bool {
         matches!(self.kind, CancelKind::Shutdown)
     }
 
     /// Returns true if this is a budget-related cancellation (Deadline, PollQuota, CostBudget).
+    #[inline]
     #[must_use]
     pub const fn is_budget_exceeded(&self) -> bool {
         matches!(
@@ -831,6 +866,7 @@ impl CancelReason {
     }
 
     /// Returns true if this is a timeout or deadline cancellation.
+    #[inline]
     #[must_use]
     pub const fn is_time_exceeded(&self) -> bool {
         matches!(self.kind, CancelKind::Timeout | CancelKind::Deadline)
@@ -946,48 +982,56 @@ impl CancelReason {
     // ========================================================================
 
     /// Returns the kind of this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn kind(&self) -> CancelKind {
         self.kind
     }
 
     /// Returns the origin region of this cancellation.
+    #[inline]
     #[must_use]
     pub const fn origin_region(&self) -> RegionId {
         self.origin_region
     }
 
     /// Returns the origin task of this cancellation (if any).
+    #[inline]
     #[must_use]
     pub const fn origin_task(&self) -> Option<TaskId> {
         self.origin_task
     }
 
     /// Returns the timestamp when this cancellation was requested.
+    #[inline]
     #[must_use]
     pub const fn timestamp(&self) -> Time {
         self.timestamp
     }
 
     /// Returns the message associated with this cancellation (if any).
+    #[inline]
     #[must_use]
     pub const fn message(&self) -> Option<&'static str> {
         self.message
     }
 
     /// Returns a reference to the parent cause (if any).
+    #[inline]
     #[must_use]
     pub fn cause(&self) -> Option<&Self> {
         self.cause.as_deref()
     }
 
     /// Returns true if this reason's cause chain was truncated due to limits.
+    #[inline]
     #[must_use]
     pub const fn is_truncated(&self) -> bool {
         self.truncated
     }
 
     /// Returns the depth at which truncation occurred (if any).
+    #[inline]
     #[must_use]
     pub const fn truncated_at_depth(&self) -> Option<usize> {
         self.truncated_at_depth

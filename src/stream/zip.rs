@@ -25,6 +25,7 @@ pub struct Zip<S1: Stream, S2: Stream> {
 
 impl<S1: Stream, S2: Stream> Zip<S1, S2> {
     /// Creates a new `Zip` stream.
+    #[inline]
     pub(crate) fn new(stream1: S1, stream2: S2) -> Self {
         Self {
             stream1,
@@ -36,21 +37,25 @@ impl<S1: Stream, S2: Stream> Zip<S1, S2> {
     }
 
     /// Returns a reference to the first stream.
+    #[inline]
     pub fn first_ref(&self) -> &S1 {
         &self.stream1
     }
 
     /// Returns a reference to the second stream.
+    #[inline]
     pub fn second_ref(&self) -> &S2 {
         &self.stream2
     }
 
     /// Returns mutable references to the underlying streams.
+    #[inline]
     pub fn get_mut(&mut self) -> (&mut S1, &mut S2) {
         (&mut self.stream1, &mut self.stream2)
     }
 
     /// Consumes the combinator, returning the underlying streams.
+    #[inline]
     pub fn into_inner(self) -> (S1, S2) {
         (self.stream1, self.stream2)
     }
@@ -104,6 +109,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.exhausted {
             return (0, Some(0));

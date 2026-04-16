@@ -3211,6 +3211,7 @@ fn promoted_violation_categories(
             InvariantViolation::ActorLeak { .. } => "actor_leak".to_string(),
             InvariantViolation::QuiescenceViolation => "quiescence_violation".to_string(),
             InvariantViolation::Futurelock { .. } => "futurelock".to_string(),
+            InvariantViolation::CancellationProtocol { .. } => "cancellation_protocol".to_string(),
         })
         .collect();
     categories.sort_unstable();

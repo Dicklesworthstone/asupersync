@@ -184,6 +184,7 @@ pub struct Http1Codec {
 
 impl Http1Codec {
     /// Create a new codec with default limits.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -194,6 +195,7 @@ impl Http1Codec {
     }
 
     /// Set the maximum header block size.
+    #[inline]
     #[must_use]
     pub fn max_headers_size(mut self, size: usize) -> Self {
         self.max_headers_size = size;
@@ -201,6 +203,7 @@ impl Http1Codec {
     }
 
     /// Set the maximum body size.
+    #[inline]
     #[must_use]
     pub fn max_body_size(mut self, size: usize) -> Self {
         self.max_body_size = size;
@@ -216,6 +219,7 @@ impl Default for Http1Codec {
 
 /// Find the position of `\r\n\r\n` in `buf`, returning the index of the
 /// first byte after the delimiter.
+#[inline]
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
     memmem::find(buf, b"\r\n\r\n").map(|idx| idx + 4)
 }

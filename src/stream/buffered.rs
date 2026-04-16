@@ -28,6 +28,7 @@ struct BufferedEntry<Fut: Future> {
 }
 
 impl<Fut: Future> BufferedEntry<Fut> {
+    #[inline]
     fn new(fut: Fut) -> Self {
         Self { fut, output: None }
     }
@@ -55,6 +56,7 @@ where
     S::Item: Future,
 {
     /// Creates a new `Buffered` stream with the given limit.
+    #[inline]
     pub(crate) fn new(stream: S, limit: usize) -> Self {
         assert!(limit > 0, "buffered limit must be non-zero");
         Self {
@@ -67,16 +69,19 @@ where
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -96,6 +101,7 @@ where
 {
     type Item = <S::Item as Future>::Output;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
@@ -172,6 +178,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.stream.size_hint();
         let in_flight = self.in_flight.len();
@@ -232,6 +239,7 @@ where
     S::Item: Future,
 {
     /// Creates a new `BufferUnordered` stream with the given limit.
+    #[inline]
     pub(crate) fn new(stream: S, limit: usize) -> Self {
         assert!(limit > 0, "buffer_unordered limit must be non-zero");
         Self {
@@ -243,16 +251,19 @@ where
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -272,6 +283,7 @@ where
 {
     type Item = <S::Item as Future>::Output;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
@@ -316,6 +328,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.stream.size_hint();
         let in_flight = self.in_flight.len();

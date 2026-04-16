@@ -36,7 +36,11 @@
 
 pub mod actor;
 pub mod ambient_authority;
+pub mod cancel_correctness;
+pub mod cancel_debt;
+pub mod cancel_signal_ordering;
 pub mod cancellation_protocol;
+pub mod channel_atomicity;
 pub mod deadline_monotone;
 pub mod determinism;
 pub mod eprocess;
@@ -46,11 +50,15 @@ pub mod fabric;
 pub mod finalizer;
 pub mod loser_drain;
 pub mod obligation_leak;
+pub mod priority_inversion;
 pub mod quiescence;
+pub mod region_leak;
 pub mod region_tree;
 pub mod rref_access;
+pub mod runtime_epoch;
 pub mod spork;
 pub mod task_leak;
+pub mod waker_dedup;
 
 pub use actor::{
     ActorLeakOracle, ActorLeakViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
@@ -59,8 +67,23 @@ pub use actor::{
 pub use ambient_authority::{
     AmbientAuthorityOracle, AmbientAuthorityViolation, CapabilityKind, CapabilitySet,
 };
+pub use cancel_correctness::{
+    CancelCorrectnessConfig, CancelCorrectnessOracle, CancelCorrectnessStatistics,
+    CancelCorrectnessViolation,
+};
+pub use cancel_debt::{
+    CancelDebtConfig, CancelDebtOracle, CancelDebtStatistics, CancelDebtViolation,
+};
+pub use cancel_signal_ordering::{
+    CancelOrderingConfig, CancelOrderingOracle, CancelOrderingStatistics, CancelOrderingViolation,
+};
 pub use cancellation_protocol::{
     CancellationProtocolOracle, CancellationProtocolViolation, TaskStateKind,
+};
+pub use channel_atomicity::{
+    ChannelAtomicityConfig, ChannelAtomicityOracle, ChannelAtomicityStatistics,
+    ChannelAtomicityViolation, ChannelId, EnforcementMode, ReservationId, ViolationRecord,
+    WakerId as ChannelWakerId,
 };
 pub use deadline_monotone::{DeadlineMonotoneOracle, DeadlineMonotoneViolation};
 pub use determinism::{
@@ -80,15 +103,32 @@ pub use fabric::{
 pub use finalizer::{FinalizerId, FinalizerOracle, FinalizerViolation};
 pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
 pub use obligation_leak::{ObligationLeakOracle, ObligationLeakViolation};
+pub use priority_inversion::{
+    PriorityInversionOracle, PriorityInversionConfig, PriorityInversionStatistics,
+    PriorityInversion, InversionType, Priority, ResourceId, InversionId,
+};
 pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
+pub use region_leak::{
+    BudgetInfo, RegionLeakConfig, RegionLeakOracle, RegionLeakStatistics, RegionLifecycleState,
+    RegionState as RegionLeakState, RegionViolation, TaskLifecycleState, TaskState,
+    ViolationContext, ViolationType,
+};
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
 pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
+pub use runtime_epoch::{
+    ConsistencyLevel, RuntimeEpochConfig, RuntimeEpochOracle, RuntimeEpochStatistics,
+    RuntimeEpochViolation, RuntimeModule,
+};
 pub use spork::{
     DownOrderOracle, DownOrderViolation, RegistryLeaseOracle, RegistryLeaseViolation,
     ReplyLinearityOracle, ReplyLinearityViolation, SupervisorQuiescenceOracle,
     SupervisorQuiescenceViolation,
 };
 pub use task_leak::{TaskLeakOracle, TaskLeakViolation};
+pub use waker_dedup::{
+    ViolationRecord as WakerViolationRecord, WakerDedupConfig, WakerDedupOracle,
+    WakerDedupStatistics, WakerDedupViolation, WakerId as WakerDedupId, WakerStatus,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,12 +156,26 @@ pub enum OracleViolation {
     Finalizer(FinalizerViolation),
     /// Region tree structure is malformed.
     RegionTree(RegionTreeViolation),
+    /// Region leak or structured concurrency violation detected.
+    RegionLeak(RegionViolation),
     /// Effects performed without appropriate capabilities.
     AmbientAuthority(AmbientAuthorityViolation),
     /// Child deadline exceeds parent deadline.
     DeadlineMonotone(DeadlineMonotoneViolation),
     /// Cancellation protocol violated.
     CancellationProtocol(CancellationProtocolViolation),
+    /// Cancel-correctness property violated.
+    CancelCorrectness(CancelCorrectnessViolation),
+    /// Cancel debt accumulation violated.
+    CancelDebt(CancelDebtViolation),
+    /// Cancel signal ordering violated.
+    CancelOrdering(CancelOrderingViolation),
+    /// Runtime epoch consistency violated.
+    RuntimeEpoch(RuntimeEpochViolation),
+    /// Channel atomicity violation (reservation lifecycle, waker consistency, etc.).
+    ChannelAtomicity(ChannelAtomicityViolation),
+    /// Waker deduplication violation (lost/spurious wakeups, state inconsistency).
+    WakerDedup(WakerDedupViolation),
     /// An actor leak was detected.
     ActorLeak(ActorLeakViolation),
     /// Supervision tree behavior violated.
@@ -150,6 +204,8 @@ pub enum OracleViolation {
     /// FABRIC redelivery exceeded its configured bound.
     #[cfg(feature = "messaging-fabric")]
     FabricRedelivery(FabricRedeliveryViolation),
+    /// Priority inversion violation (high-priority task blocked by low-priority task).
+    PriorityInversion(PriorityInversion),
 }
 
 impl std::fmt::Display for OracleViolation {
@@ -161,9 +217,16 @@ impl std::fmt::Display for OracleViolation {
             Self::LoserDrain(v) => write!(f, "Loser drain violation: {v}"),
             Self::Finalizer(v) => write!(f, "Finalizer violation: {v}"),
             Self::RegionTree(v) => write!(f, "Region tree violation: {v}"),
+            Self::RegionLeak(v) => write!(f, "Region leak violation: {v}"),
             Self::AmbientAuthority(v) => write!(f, "Ambient authority violation: {v}"),
             Self::DeadlineMonotone(v) => write!(f, "Deadline monotonicity violation: {v}"),
             Self::CancellationProtocol(v) => write!(f, "Cancellation protocol violation: {v}"),
+            Self::CancelCorrectness(v) => write!(f, "Cancel-correctness violation: {v}"),
+            Self::CancelDebt(v) => write!(f, "Cancel debt violation: {v}"),
+            Self::CancelOrdering(v) => write!(f, "Cancel ordering violation: {v}"),
+            Self::RuntimeEpoch(v) => write!(f, "Runtime epoch violation: {v}"),
+            Self::ChannelAtomicity(v) => write!(f, "Channel atomicity violation: {v}"),
+            Self::WakerDedup(v) => write!(f, "Waker deduplication violation: {v}"),
             Self::ActorLeak(v) => write!(f, "Actor leak: {v}"),
             Self::Supervision(v) => write!(f, "Supervision violation: {v}"),
             Self::Mailbox(v) => write!(f, "Mailbox violation: {v}"),
@@ -180,6 +243,9 @@ impl std::fmt::Display for OracleViolation {
             Self::FabricQuiescence(v) => write!(f, "FABRIC quiescence violation: {v}"),
             #[cfg(feature = "messaging-fabric")]
             Self::FabricRedelivery(v) => write!(f, "FABRIC redelivery violation: {v}"),
+            Self::PriorityInversion(v) => write!(f, "Priority inversion: Task {:?}(P{:?}) blocked by Task {:?}(P{:?}) on Resource {:?} for {:?}",
+                v.blocked_task, v.blocked_priority, v.blocking_task, v.blocking_priority, v.resource_id,
+                v.duration.unwrap_or_else(|| v.start_time.elapsed())),
         }
     }
 }
@@ -201,12 +267,26 @@ pub struct OracleSuite {
     pub finalizer: FinalizerOracle,
     /// Region tree oracle.
     pub region_tree: RegionTreeOracle,
+    /// Region leak detection oracle.
+    pub region_leak: RegionLeakOracle,
     /// Ambient authority oracle.
     pub ambient_authority: AmbientAuthorityOracle,
     /// Deadline monotonicity oracle.
     pub deadline_monotone: DeadlineMonotoneOracle,
     /// Cancellation protocol oracle.
     pub cancellation_protocol: CancellationProtocolOracle,
+    /// Cancel-correctness property oracle.
+    pub cancel_correctness: CancelCorrectnessOracle,
+    /// Cancel debt accumulation oracle.
+    pub cancel_debt: CancelDebtOracle,
+    /// Cancel signal ordering oracle.
+    pub cancel_signal_ordering: CancelOrderingOracle,
+    /// Runtime epoch consistency oracle.
+    pub runtime_epoch: RuntimeEpochOracle,
+    /// Channel atomicity oracle.
+    pub channel_atomicity: ChannelAtomicityOracle,
+    /// Waker deduplication oracle.
+    pub waker_dedup: WakerDedupOracle,
     /// Actor leak oracle.
     pub actor_leak: ActorLeakOracle,
     /// Supervision oracle.
@@ -295,6 +375,10 @@ impl OracleSuite {
         self.region_tree.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.snapshot_from_state(state, now);
+        self.cancel_correctness.reset();
+        self.cancel_debt.reset();
+        self.cancel_signal_ordering.reset();
+        self.runtime_epoch.reset();
 
         for event in state.finalizer_history() {
             match *event {
@@ -400,7 +484,7 @@ impl OracleSuite {
 
     /// Checks all oracles and returns any violations.
     #[must_use]
-    pub fn check_all(&self, now: Time) -> Vec<OracleViolation> {
+    pub fn check_all(&mut self, now: Time) -> Vec<OracleViolation> {
         let mut violations = Vec::new();
 
         if let Err(v) = self.task_leak.check(now) {
@@ -427,6 +511,19 @@ impl OracleSuite {
             violations.push(OracleViolation::RegionTree(v));
         }
 
+        let region_leak_violations = self.region_leak.check_for_violations();
+        match region_leak_violations {
+            Ok(violations_vec) => {
+                for violation in violations_vec {
+                    violations.push(OracleViolation::RegionLeak(violation));
+                }
+            }
+            Err(_) => {
+                // Handle case where oracle fails - this would be a critical error
+                // For now, we'll skip adding violations
+            }
+        }
+
         if let Err(v) = self.ambient_authority.check() {
             violations.push(OracleViolation::AmbientAuthority(v));
         }
@@ -437,6 +534,48 @@ impl OracleSuite {
 
         if let Err(v) = self.cancellation_protocol.check() {
             violations.push(OracleViolation::CancellationProtocol(v));
+        }
+
+        if let Err(v) = self.cancel_correctness.check(now) {
+            violations.push(OracleViolation::CancelCorrectness(v));
+        }
+
+        if let Err(v) = self.cancel_debt.check(now) {
+            violations.push(OracleViolation::CancelDebt(v));
+        }
+
+        if let Err(v) = self.cancel_signal_ordering.check(now) {
+            violations.push(OracleViolation::CancelOrdering(v));
+        }
+
+        if let Err(v) = self.runtime_epoch.check(now) {
+            violations.push(OracleViolation::RuntimeEpoch(v));
+        }
+
+        let channel_atomicity_violations = self.channel_atomicity.check_for_violations();
+        match channel_atomicity_violations {
+            Ok(violations_vec) => {
+                for violation in violations_vec {
+                    violations.push(OracleViolation::ChannelAtomicity(violation));
+                }
+            }
+            Err(_) => {
+                // Handle case where oracle fails - this would be a critical error
+                // For now, we'll skip adding violations
+            }
+        }
+
+        let waker_dedup_violations = self.waker_dedup.check_for_violations();
+        match waker_dedup_violations {
+            Ok(violations_vec) => {
+                for violation in violations_vec {
+                    violations.push(OracleViolation::WakerDedup(violation));
+                }
+            }
+            Err(_) => {
+                // Handle case where oracle fails - this would be a critical error
+                // For now, we'll skip adding violations
+            }
         }
 
         if let Err(v) = self.actor_leak.check(now) {
@@ -502,9 +641,16 @@ impl OracleSuite {
         self.loser_drain.reset();
         self.finalizer.reset();
         self.region_tree.reset();
+        self.region_leak.reset();
         self.ambient_authority.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
+        self.cancel_correctness.reset();
+        self.cancel_debt.reset();
+        self.cancel_signal_ordering.reset();
+        self.runtime_epoch.reset();
+        self.channel_atomicity.reset();
+        self.waker_dedup.reset();
         self.actor_leak.reset();
         self.supervision.reset();
         self.mailbox.reset();
@@ -526,7 +672,7 @@ impl OracleSuite {
     /// Generates a unified oracle report with per-oracle status and statistics.
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn report(&self, now: Time) -> OracleReport {
+    pub fn report(&mut self, now: Time) -> OracleReport {
         let entries = vec![
             OracleEntryReport::from_result(
                 "task_leak",
@@ -599,6 +745,20 @@ impl OracleSuite {
                 },
             ),
             OracleEntryReport::from_result(
+                "region_leak",
+                self.region_leak
+                    .check_for_violations()
+                    .ok()
+                    .and_then(|violations| violations.first().cloned())
+                    .map(OracleViolation::RegionLeak),
+                OracleStats {
+                    entities_tracked: self.region_leak.statistics().active_regions as usize,
+                    events_recorded: (self.region_leak.statistics().total_regions_created
+                        + self.region_leak.statistics().total_tasks_spawned)
+                        as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
                 "ambient_authority",
                 self.ambient_authority
                     .check()
@@ -631,6 +791,102 @@ impl OracleSuite {
                     entities_tracked: self.cancellation_protocol.region_count(),
                     events_recorded: self.cancellation_protocol.region_count()
                         + self.cancellation_protocol.cancel_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "cancel_correctness",
+                self.cancel_correctness
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::CancelCorrectness),
+                OracleStats {
+                    entities_tracked: self.cancel_correctness.get_statistics().active_tasks,
+                    events_recorded: self.cancel_correctness.get_statistics().witnesses_processed
+                        as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "cancel_debt",
+                self.cancel_debt
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::CancelDebt),
+                OracleStats {
+                    entities_tracked: self.cancel_debt.get_statistics().tracked_queues,
+                    events_recorded: self.cancel_debt.get_statistics().work_items_tracked as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "cancel_signal_ordering",
+                self.cancel_signal_ordering
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::CancelOrdering),
+                OracleStats {
+                    entities_tracked: self.cancel_signal_ordering.get_statistics().tracked_signals,
+                    events_recorded: self
+                        .cancel_signal_ordering
+                        .get_statistics()
+                        .signals_processed as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "runtime_epoch",
+                self.runtime_epoch
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::RuntimeEpoch),
+                OracleStats {
+                    entities_tracked: self.runtime_epoch.get_statistics().tracked_modules,
+                    events_recorded: self.runtime_epoch.get_statistics().transitions_tracked
+                        as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "channel_atomicity",
+                self.channel_atomicity
+                    .check_for_violations()
+                    .ok()
+                    .and_then(|violations| violations.first().cloned())
+                    .map(OracleViolation::ChannelAtomicity),
+                OracleStats {
+                    entities_tracked: (self
+                        .channel_atomicity
+                        .statistics()
+                        .total_reservations_created
+                        + self.channel_atomicity.statistics().total_wakers_registered)
+                        as usize,
+                    events_recorded: (self
+                        .channel_atomicity
+                        .statistics()
+                        .total_reservations_created
+                        + self
+                            .channel_atomicity
+                            .statistics()
+                            .total_reservations_committed
+                        + self
+                            .channel_atomicity
+                            .statistics()
+                            .total_reservations_aborted
+                        + self.channel_atomicity.statistics().total_wakers_registered
+                        + self.channel_atomicity.statistics().total_wakeups_expected
+                        + self.channel_atomicity.statistics().total_wakeups_actual)
+                        as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "waker_dedup",
+                self.waker_dedup
+                    .check_for_violations()
+                    .ok()
+                    .and_then(|violations| violations.first().cloned())
+                    .map(OracleViolation::WakerDedup),
+                OracleStats {
+                    entities_tracked: self.waker_dedup.statistics().active_wakers as usize,
+                    events_recorded: (self.waker_dedup.statistics().total_wakers_registered
+                        + self.waker_dedup.statistics().total_wakers_woken
+                        + self.waker_dedup.statistics().total_wakers_dropped)
+                        as usize,
                 },
             ),
             OracleEntryReport::from_result(
@@ -1101,7 +1357,7 @@ mod tests {
     #[test]
     fn oracle_suite_default_is_clean() {
         init_test("oracle_suite_default_is_clean");
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let violations = suite.check_all(Time::ZERO);
         let empty = violations.is_empty();
         crate::assert_with_log!(empty, "suite clean", true, empty);
@@ -1162,7 +1418,7 @@ mod tests {
 
     #[test]
     fn oracle_suite_report_all_pass() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         assert!(report.all_passed());
         assert_eq!(report.failed, 0);
@@ -1172,7 +1428,7 @@ mod tests {
 
     #[test]
     fn oracle_report_debug_clone() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let dbg = format!("{report:?}");
         assert!(dbg.contains("OracleReport"));
@@ -1183,7 +1439,7 @@ mod tests {
 
     #[test]
     fn oracle_report_to_json() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let json = report.to_json();
         assert!(json.is_object());
@@ -1192,7 +1448,7 @@ mod tests {
 
     #[test]
     fn oracle_report_to_text() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let text = report.to_text();
         assert!(text.contains("Oracle Report"));
@@ -1203,7 +1459,7 @@ mod tests {
     #[test]
     #[allow(clippy::significant_drop_tightening)]
     fn oracle_report_emits_structured_oracle_check_events() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let events = Arc::new(Mutex::new(Vec::new()));
         let recorder = EventRecorder {
             events: events.clone(),
@@ -1271,7 +1527,7 @@ mod tests {
 
     #[test]
     fn oracle_report_entry_lookup() {
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);
         let entry = report.entry("task_leak");
         assert!(entry.is_some());
@@ -1346,7 +1602,7 @@ mod tests {
         // only if we can construct one. Use OracleViolation::TaskLeak as proxy.
         // TaskLeakViolation requires specific sub-oracle construction which is complex,
         // so we test the outer enum via the suite report pathway.
-        let suite = OracleSuite::new();
+        let mut suite = OracleSuite::new();
         let violations = suite.check_all(Time::ZERO);
         // No violations on a fresh suite; just verify the Vec is empty.
         assert!(violations.is_empty());

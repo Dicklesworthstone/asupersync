@@ -112,6 +112,7 @@ impl FaultChannelConfig {
 
     /// Returns `true` if any fault injection is enabled.
     #[must_use]
+    #[inline]
     pub fn is_enabled(&self) -> bool {
         self.reorder_probability > 0.0 || self.duplication_probability > 0.0
     }
@@ -556,6 +557,7 @@ impl<T: Clone> FaultSender<T> {
     }
 
     /// Returns a snapshot of the fault injection statistics.
+    #[inline]
     pub fn stats(&self) -> FaultChannelStats {
         FaultChannelStats {
             messages_sent: self.stat_messages_sent.load(Ordering::Relaxed),
@@ -571,6 +573,7 @@ impl<T: Clone> FaultSender<T> {
     }
 
     /// Returns a reference to the underlying sender.
+    #[inline]
     pub fn inner(&self) -> &Sender<T> {
         &self.inner
     }

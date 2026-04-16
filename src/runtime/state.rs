@@ -386,6 +386,12 @@ pub struct RuntimeState {
     finalizer_history: Vec<FinalizerHistoryEvent>,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
+    /// Epoch consistency tracker for runtime state transitions.
+    epoch_tracker: super::epoch_tracker::EpochConsistencyTracker,
+    /// State machine transition verifier for runtime entities.
+    state_verifier: Arc<super::state_verifier::StateTransitionVerifier>,
+    /// Cancellation debt accumulation monitor.
+    debt_monitor: Arc<crate::observability::CancellationDebtMonitor>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -426,6 +432,8 @@ impl std::fmt::Debug for RuntimeState {
             .field("async_finalizer_tasks", &self.async_finalizer_tasks.len())
             .field("finalizer_history_len", &self.finalizer_history.len())
             .field("next_finalizer_id", &self.next_finalizer_id)
+            .field("state_verifier", &"<StateTransitionVerifier>")
+            .field("debt_monitor", &"<CancellationDebtMonitor>")
             .finish()
     }
 }
@@ -472,6 +480,11 @@ impl RuntimeState {
             async_finalizer_tasks: HashMap::new(),
             finalizer_history: Vec::new(),
             next_finalizer_id: 0,
+            epoch_tracker: super::epoch_tracker::EpochConsistencyTracker::new(),
+            state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
+                super::state_verifier::StateVerifierConfig::default(),
+            )),
+            debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
         }
     }
 
@@ -581,6 +594,19 @@ impl RuntimeState {
         self.blocking_pool.clone()
     }
 
+    /// Gets a reference to the state transition verifier.
+    #[inline]
+    #[must_use]
+    pub fn state_verifier(&self) -> &Arc<super::state_verifier::StateTransitionVerifier> {
+        &self.state_verifier
+    }
+
+    /// Gets the state verifier statistics snapshot.
+    #[must_use]
+    pub fn state_verifier_stats(&self) -> super::state_verifier::StateVerifierStatsSnapshot {
+        self.state_verifier.stats()
+    }
+
     /// Sets the blocking pool handle for this runtime.
     pub fn set_blocking_pool(&mut self, handle: BlockingPoolHandle) {
         self.blocking_pool = Some(handle);
@@ -675,6 +701,13 @@ impl RuntimeState {
     /// Sets the metrics provider for this runtime.
     pub fn set_metrics_provider(&mut self, provider: Arc<dyn MetricsProvider>) {
         self.metrics = provider;
+    }
+
+    /// Returns the cancellation debt monitor for this runtime.
+    #[inline]
+    #[must_use]
+    pub fn debt_monitor(&self) -> Arc<crate::observability::CancellationDebtMonitor> {
+        self.debt_monitor.clone()
     }
 
     /// Returns a shared reference to a task record by ID.
@@ -886,6 +919,15 @@ impl RuntimeState {
         self.root_region = Some(id);
         self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, None));
         self.metrics.region_created(id, None);
+
+        // Notify epoch tracker of region creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::RegionTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         id
     }
 
@@ -902,6 +944,15 @@ impl RuntimeState {
 
         self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, Some(parent)));
         self.metrics.region_created(id, Some(parent));
+
+        // Notify epoch tracker of region creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::RegionTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         Ok(id)
     }
 
@@ -1075,6 +1126,14 @@ impl RuntimeState {
         // Store the wrapped future with task_id for poll tracing
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+
+        // Notify epoch tracker of task creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::TaskTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
 
         Ok((task_id, handle))
     }
@@ -1369,6 +1428,14 @@ impl RuntimeState {
         });
         self.metrics.obligation_created(region);
 
+        // Notify epoch tracker of obligation creation
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::ObligationTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         Ok(obligation_id)
     }
 
@@ -1409,6 +1476,14 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
+
+        // Notify epoch tracker of obligation commit
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::ObligationTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
@@ -1463,6 +1538,26 @@ impl RuntimeState {
             )
         });
         self.metrics.obligation_discharged(info.region);
+
+        // Track obligation settlement work in debt monitor
+        let cancel_reason = CancelReason::new(CancelKind::User);
+        self.debt_monitor.queue_work(
+            crate::observability::WorkType::ObligationSettlement,
+            format!("obligation_{}_{}", info.id, info.holder),
+            1, // Low priority for aborts
+            1, // Low cost estimate
+            &cancel_reason,
+            CancelKind::Shutdown,
+            Vec::new(),
+        );
+
+        // Notify epoch tracker of obligation abort
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::ObligationTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
@@ -2195,6 +2290,19 @@ impl RuntimeState {
             region.add_finalizer(Finalizer::Sync(Box::new(f)));
         }
         self.record_finalizer_registration(finalizer_id, region_id);
+
+        // Track finalizer work in debt monitor
+        let cancel_reason = CancelReason::user("sync_finalizer_registration");
+        self.debt_monitor.queue_work(
+            crate::observability::WorkType::RegionCleanup,
+            format!("sync_finalizer_{}_{}", finalizer_id, region_id),
+            5, // Medium priority for cleanup
+            2, // Medium cost estimate
+            &cancel_reason,
+            CancelKind::Shutdown,
+            Vec::new(),
+        );
+
         true
     }
 
@@ -2230,6 +2338,19 @@ impl RuntimeState {
             region.add_finalizer(Finalizer::Async(Box::pin(future)));
         }
         self.record_finalizer_registration(finalizer_id, region_id);
+
+        // Track async finalizer work in debt monitor
+        let cancel_reason = CancelReason::user("async_finalizer_registration");
+        self.debt_monitor.queue_work(
+            crate::observability::WorkType::RegionCleanup,
+            format!("async_finalizer_{}_{}", finalizer_id, region_id),
+            6, // Medium-high priority for async cleanup
+            3, // Higher cost estimate for async work
+            &cancel_reason,
+            CancelKind::Shutdown,
+            Vec::new(),
+        );
+
         true
     }
 
@@ -2418,6 +2539,14 @@ impl RuntimeState {
     /// self-calls would deadlock on non-reentrant mutexes).
     #[allow(clippy::too_many_lines)]
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
+        // Notify epoch tracker of region state advancement
+        self.epoch_tracker.notify_epoch_transition(
+            super::epoch_tracker::ModuleId::RegionTable,
+            crate::epoch::EpochId::GENESIS,
+            crate::epoch::EpochId::GENESIS.next(),
+            self.now,
+        );
+
         let mut current = Some(initial_region);
 
         while let Some(region_id) = current.take() {

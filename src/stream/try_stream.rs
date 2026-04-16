@@ -37,6 +37,7 @@ impl<E: std::error::Error + 'static> std::error::Error for TryStreamError<E> {
 }
 
 impl<E> From<E> for TryStreamError<E> {
+    #[inline]
     fn from(value: E) -> Self {
         Self::Inner(value)
     }
@@ -63,6 +64,7 @@ pub struct TryCollect<S, C> {
 
 impl<S, C> TryCollect<S, C> {
     /// Creates a new `TryCollect` future.
+    #[inline]
     pub(crate) fn new(stream: S, collection: C) -> Self {
         Self {
             stream,
@@ -81,6 +83,7 @@ where
 {
     type Output = Result<C, TryStreamError<E>>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
@@ -126,6 +129,7 @@ pub struct TryFold<S, F, Acc> {
 
 impl<S, F, Acc> TryFold<S, F, Acc> {
     /// Creates a new `TryFold` future.
+    #[inline]
     pub(crate) fn new(stream: S, init: Acc, f: F) -> Self {
         Self {
             stream,
@@ -145,6 +149,7 @@ where
 {
     type Output = Result<Acc, TryStreamError<E>>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
@@ -202,6 +207,7 @@ pub struct TryForEach<S, F> {
 
 impl<S, F> TryForEach<S, F> {
     /// Creates a new `TryForEach` future.
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,
@@ -220,6 +226,7 @@ where
 {
     type Output = Result<(), TryStreamError<E>>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));

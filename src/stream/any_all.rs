@@ -30,6 +30,7 @@ pub struct Any<S, P> {
 
 impl<S, P> Any<S, P> {
     /// Creates a new `Any` future.
+    #[inline]
     pub(crate) fn new(stream: S, predicate: P) -> Self {
         Self {
             stream,
@@ -46,6 +47,7 @@ where
 {
     type Output = bool;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
         assert!(this.result.is_none(), "Any polled after completion");
@@ -89,6 +91,7 @@ pub struct All<S, P> {
 
 impl<S, P> All<S, P> {
     /// Creates a new `All` future.
+    #[inline]
     pub(crate) fn new(stream: S, predicate: P) -> Self {
         Self {
             stream,
@@ -105,6 +108,7 @@ where
 {
     type Output = bool;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
         assert!(this.result.is_none(), "All polled after completion");

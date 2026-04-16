@@ -32,11 +32,13 @@ struct FallbackThread {
     join: std::thread::JoinHandle<()>,
 }
 
+#[inline]
 fn request_stop_fallback(fallback: &FallbackThread) {
     fallback.stop.store(true, Ordering::Release);
     fallback.thread.unpark();
 }
 
+#[inline]
 fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandle<()>> {
     let mut finished = Vec::new();
 
@@ -79,6 +81,7 @@ fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandl
     finished
 }
 
+#[inline]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -91,6 +94,7 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 ///
 /// For virtual time in tests/lab runtime, use a timer driver's `now()` method.
 #[must_use]
+#[inline]
 pub fn wall_now() -> Time {
     let start = START_TIME.get_or_init(Instant::now);
     let now = Instant::now();
@@ -122,17 +126,20 @@ struct ReadyWaker {
 }
 
 impl Wake for ReadyWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.ready.store(true, Ordering::Release);
         self.inner.wake_by_ref();
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.ready.store(true, Ordering::Release);
         self.inner.wake_by_ref();
     }
 }
 
+#[inline]
 fn readiness_waker(ready: Arc<AtomicBool>, inner: Waker) -> Waker {
     Waker::from(Arc::new(ReadyWaker { ready, inner }))
 }
@@ -210,6 +217,7 @@ impl Sleep {
     /// assert_eq!(sleep.deadline(), Time::from_secs(5));
     /// ```
     #[must_use]
+    #[inline]
     pub fn new(deadline: Time) -> Self {
         Self {
             deadline,
@@ -247,6 +255,7 @@ impl Sleep {
     /// assert_eq!(sleep.deadline(), Time::from_secs(15));
     /// ```
     #[must_use]
+    #[inline]
     pub fn after(now: Time, duration: Duration) -> Self {
         let deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         Self::new(deadline)
@@ -260,6 +269,7 @@ impl Sleep {
     ///
     /// * `deadline` - The deadline when this sleep completes
     /// * `time_getter` - Function that returns the current time
+    #[inline]
     #[must_use]
     pub fn with_time_getter(deadline: Time, time_getter: fn() -> Time) -> Self {
         Self {
@@ -284,6 +294,7 @@ impl Sleep {
     /// This preserves capability-correct timing when the creator needs the
     /// future to keep using the captured driver even if it is later polled
     /// outside that creator's ambient `Cx`.
+    #[inline]
     #[must_use]
     pub(crate) fn with_timer_driver(deadline: Time, timer_driver: TimerDriverHandle) -> Self {
         Self {
@@ -343,6 +354,7 @@ impl Sleep {
     ///
     /// This can be used to reuse a `Sleep` instance without allocating a new one.
     /// Any registered timer is cancelled and will be re-registered on next poll.
+    #[inline]
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
         self.polled
@@ -381,6 +393,7 @@ impl Sleep {
     /// Resets this sleep to complete after the given duration from `now`.
     ///
     /// Any registered timer is cancelled and will be re-registered on next poll.
+    #[inline]
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         self.polled
@@ -418,11 +431,13 @@ impl Sleep {
 
     /// Returns true if this sleep has been polled at least once.
     #[must_use]
+    #[inline]
     pub fn was_polled(&self) -> bool {
         self.polled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Gets the current time using the configured time getter or default.
+    #[inline]
     fn current_time(&self) -> Time {
         self.time_getter.map_or_else(wall_now, |getter| getter())
     }
@@ -749,6 +764,7 @@ impl Clone for Sleep {
 /// assert_eq!(sleep_future.deadline(), Time::from_nanos(10_100_000_000));
 /// ```
 #[must_use]
+#[inline]
 pub fn sleep(now: Time, duration: Duration) -> Sleep {
     Sleep::after(now, duration)
 }
@@ -769,6 +785,7 @@ pub fn sleep(now: Time, duration: Duration) -> Sleep {
 /// assert_eq!(sleep_future.deadline(), Time::from_secs(5));
 /// ```
 #[must_use]
+#[inline]
 pub fn sleep_until(deadline: Time) -> Sleep {
     Sleep::new(deadline)
 }

@@ -766,8 +766,8 @@ impl InjectionRunner {
     ) -> InstrumentedPollResult<F::Output> {
         use std::task::Waker;
 
-        let waker = Waker::noop().clone();
-        let mut cx = std::task::Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
         let mut pinned = Box::pin(future);
 
         loop {

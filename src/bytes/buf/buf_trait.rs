@@ -370,12 +370,14 @@ impl Buf for &[u8] {
 }
 
 impl Buf for std::io::Cursor<&[u8]> {
+    #[inline]
     fn remaining(&self) -> usize {
         let pos = self.position() as usize;
         let len = self.get_ref().len();
         len.saturating_sub(pos)
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         let pos = self.position() as usize;
         let inner = self.get_ref();
@@ -386,6 +388,7 @@ impl Buf for std::io::Cursor<&[u8]> {
         }
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         assert!(
             cnt <= self.remaining(),
@@ -398,12 +401,14 @@ impl Buf for std::io::Cursor<&[u8]> {
 }
 
 impl Buf for std::io::Cursor<Vec<u8>> {
+    #[inline]
     fn remaining(&self) -> usize {
         let pos = self.position() as usize;
         let len = self.get_ref().len();
         len.saturating_sub(pos)
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         let pos = self.position() as usize;
         let inner = self.get_ref();
@@ -414,6 +419,7 @@ impl Buf for std::io::Cursor<Vec<u8>> {
         }
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         assert!(
             cnt <= self.remaining(),

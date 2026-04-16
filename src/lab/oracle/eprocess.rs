@@ -1142,7 +1142,7 @@ mod tests {
 
     #[test]
     fn monitor_with_oracle_suite() {
-        let suite = crate::lab::oracle::OracleSuite::new();
+        let mut suite = crate::lab::oracle::OracleSuite::new();
         let report = suite.report(crate::types::Time::ZERO);
 
         let mut monitor = EProcessMonitor::all_invariants();

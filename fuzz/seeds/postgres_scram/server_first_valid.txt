@@ -1,0 +1,1 @@
+r=clientnonce123servernonce456,s=MTIzNDU2Nzg5MGFiY2RlZg==,i=4096

@@ -123,6 +123,8 @@ pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
 pub mod env_config;
+pub mod epoch_tracker;
+pub mod epoch_tracking;
 pub mod io_driver;
 pub mod io_op;
 /// Proof-carrying decision-plane kernel for runtime controllers.
@@ -136,6 +138,7 @@ pub mod sharded_state;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
 pub mod state;
+pub mod state_verifier;
 pub mod stored_task;
 pub mod task_handle;
 pub mod task_table;
@@ -166,6 +169,9 @@ pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,
 };
+pub use epoch_tracker::{
+    EpochConsistencyConfig, EpochConsistencyTracker, EpochConsistencyViolation, ModuleId,
+};
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use io_op::IoOp;
 pub use obligation_table::{
@@ -181,6 +187,10 @@ pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
+pub use state_verifier::{
+    ObligationStateTransitions, RegionStateTransitions, StateEntityType, StateTransitionVerifier,
+    StateVerifierConfig, StateVerifierStatsSnapshot, StateViolation,
+};
 pub use stored_task::StoredTask;
 pub use task_handle::{JoinError, TaskHandle};
 pub use task_table::TaskTable;

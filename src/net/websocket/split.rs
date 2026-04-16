@@ -123,7 +123,14 @@ impl<IO> Future for AcquireWritePermitFuture<'_, IO> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.lock();
-        if state.writer_active {
+        let must_wait = if state.writer_active {
+            true
+        } else if let Some(id) = self.waiter_id {
+            state.writer_waiters.first().is_some_and(|w| w.id != id)
+        } else {
+            !state.writer_waiters.is_empty()
+        };
+        if must_wait {
             if let Some(id) = self.waiter_id {
                 if let Some(existing) = state.writer_waiters.iter_mut().find(|w| w.id == id) {
                     if !existing.waker.will_wake(cx.waker()) {
@@ -1256,6 +1263,50 @@ mod tests {
                 counter_b.count(),
                 0,
                 "second waiter must NOT be woken when permit is released (no thundering herd)"
+            );
+        });
+    }
+
+    #[test]
+    fn writer_permit_queue_preserves_fifo_when_second_waiter_polls_first() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, _write) = ws.split();
+
+            let permit = acquire_write_permit(&read.shared).await;
+
+            let mut first_waiter = Box::pin(acquire_write_permit(&read.shared));
+            let mut second_waiter = Box::pin(acquire_write_permit(&read.shared));
+
+            let first_waker: Waker = Waker::from(Arc::new(NoopWake));
+            let second_waker: Waker = Waker::from(Arc::new(NoopWake));
+            let mut first_context = Context::from_waker(&first_waker);
+            let mut second_context = Context::from_waker(&second_waker);
+
+            assert!(matches!(
+                first_waiter.as_mut().poll(&mut first_context),
+                Poll::Pending
+            ));
+            assert!(matches!(
+                second_waiter.as_mut().poll(&mut second_context),
+                Poll::Pending
+            ));
+
+            drop(permit);
+
+            assert!(
+                matches!(
+                    second_waiter.as_mut().poll(&mut second_context),
+                    Poll::Pending
+                ),
+                "later waiters must not bypass the queued head when the permit becomes free"
+            );
+            assert!(
+                matches!(
+                    first_waiter.as_mut().poll(&mut first_context),
+                    Poll::Ready(_)
+                ),
+                "the head waiter must acquire the permit first"
             );
         });
     }

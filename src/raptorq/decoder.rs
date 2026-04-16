@@ -116,6 +116,7 @@ pub enum DecodeFailureClass {
 impl DecodeError {
     /// Classify this decode failure as recoverable or unrecoverable.
     #[must_use]
+    #[inline]
     pub const fn failure_class(&self) -> DecodeFailureClass {
         match self {
             Self::InsufficientSymbols { .. } | Self::SingularMatrix { .. } => {
@@ -130,12 +131,14 @@ impl DecodeError {
 
     /// True when this failure can be retried by supplying additional symbols.
     #[must_use]
+    #[inline]
     pub const fn is_recoverable(&self) -> bool {
         matches!(self.failure_class(), DecodeFailureClass::Recoverable)
     }
 
     /// True when this failure indicates malformed input or corruption.
     #[must_use]
+    #[inline]
     pub const fn is_unrecoverable(&self) -> bool {
         matches!(self.failure_class(), DecodeFailureClass::Unrecoverable)
     }
@@ -422,6 +425,7 @@ impl DenseFactorCache {
         result
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -461,11 +465,13 @@ impl Equation {
     }
 
     /// Returns the degree (number of nonzero terms).
+    #[inline]
     fn degree(&self) -> usize {
         self.terms.len()
     }
 
     /// Returns the coefficient for the given column, or zero.
+    #[inline]
     fn coef(&self, col: usize) -> Gf256 {
         self.terms
             .binary_search_by_key(&col, |(c, _)| *c)
@@ -1164,6 +1170,7 @@ impl InactivationDecoder {
 
     /// Returns the encoding parameters.
     #[must_use]
+    #[inline]
     pub const fn params(&self) -> &SystematicParams {
         &self.params
     }

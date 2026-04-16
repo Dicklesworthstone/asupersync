@@ -26,6 +26,7 @@ pub struct PoolConfig {
 impl PoolConfig {
     /// Returns a normalized config with `max_size >= initial_size`.
     #[must_use]
+    #[inline]
     pub fn normalized(mut self) -> Self {
         if self.max_size < self.initial_size {
             self.max_size = self.initial_size;
@@ -38,6 +39,7 @@ impl PoolConfig {
 }
 
 impl Default for PoolConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             symbol_size: 1024,
@@ -60,6 +62,7 @@ pub struct SymbolBuffer {
 impl SymbolBuffer {
     /// Creates a new buffer with the given symbol size.
     #[must_use]
+    #[inline]
     pub fn new(symbol_size: u16) -> Self {
         let len = symbol_size as usize;
         Self {
@@ -71,24 +74,28 @@ impl SymbolBuffer {
 
     /// Returns the buffer as a slice.
     #[must_use]
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
 
     /// Returns the buffer as a mutable slice.
     #[must_use]
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.data
     }
 
     /// Returns the buffer length in bytes.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
     /// Returns true if the buffer is empty.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -288,6 +295,7 @@ impl SymbolPool {
     }
 }
 
+#[inline]
 fn next_symbol_pool_id() -> u64 {
     static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_SYMBOL_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -310,6 +318,7 @@ pub struct ResourceLimits {
 }
 
 impl Default for ResourceLimits {
+    #[inline]
     fn default() -> Self {
         Self {
             max_symbol_memory: usize::MAX,
@@ -412,6 +421,7 @@ pub struct ResourceTracker {
 impl ResourceTracker {
     /// Creates a new tracker with the given limits.
     #[must_use]
+    #[inline]
     pub fn new(limits: ResourceLimits) -> Self {
         Self {
             inner: Arc::new(Mutex::new(ResourceTrackerInner {
@@ -425,12 +435,14 @@ impl ResourceTracker {
 
     /// Returns the current usage snapshot.
     #[must_use]
+    #[inline]
     pub fn usage(&self) -> ResourceUsage {
         self.inner.lock().current
     }
 
     /// Returns the configured limits.
     #[must_use]
+    #[inline]
     pub fn limits(&self) -> ResourceLimits {
         self.inner.lock().limits.clone()
     }
@@ -449,6 +461,7 @@ impl ResourceTracker {
 
     /// Returns whether a request can be satisfied.
     #[must_use]
+    #[inline]
     pub fn can_acquire(&self, request: &ResourceRequest) -> bool {
         let inner = self.inner.lock();
         let mut projected = inner.current;

@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_monotone_operations() {
+    fn all_seven_monotone_operations() {
         let expected = [
             "Reserve",
             "Send",
@@ -294,12 +294,12 @@ mod tests {
             "CancelRequest",
         ];
         let mono: Vec<&str> = coordination_free().iter().map(|c| c.operation).collect();
-        // Check that all expected monotone ops are present (order may vary)
+        // Verify exact membership rather than just the count.
         for exp in &expected {
-            if !mono.contains(exp) {
-                // CancelRequest may not be in expected list, that's fine
-                // Just verify count
-            }
+            assert!(
+                mono.contains(exp),
+                "missing expected monotone operation {exp}"
+            );
         }
         assert_eq!(mono.len(), 7);
     }

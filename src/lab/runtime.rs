@@ -1610,6 +1610,12 @@ impl LabRuntime {
                 self.steps
             );
         }
+
+        // Notify oracle of task poll
+        if self.config.has_cancellation_oracle() {
+            self.notify_cancellation_oracle_task_poll(task_id);
+        }
+
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
             stored.poll(&mut cx)
         } else {
@@ -1624,6 +1630,11 @@ impl LabRuntime {
 
         let cancel_ack = self.consume_cancel_ack(task_id);
 
+        // Notify oracle of cancel acknowledgment
+        if cancel_ack && self.config.has_cancellation_oracle() {
+            self.notify_cancellation_oracle_cancel_ack(task_id);
+        }
+
         // 5. Handle result
         match result {
             Poll::Ready(outcome) => {
@@ -1632,8 +1643,11 @@ impl LabRuntime {
                 self.scheduler.lock().forget_task(task_id);
 
                 // Update state to Completed if not already terminal
+                let mut oracle_transitions = Vec::new(); // Collect transitions for later oracle notification
+
                 if let Some(record) = self.state.task_mut(task_id) {
                     if !record.state.is_terminal() {
+                        let old_state = record.state.clone();
                         let record_outcome = match outcome {
                             crate::types::Outcome::Ok(()) => crate::types::Outcome::Ok(()),
                             crate::types::Outcome::Err(()) => crate::types::Outcome::Err(
@@ -1655,13 +1669,22 @@ impl LabRuntime {
                                     && matches!(record.state, TaskState::CancelRequested { .. }));
                                 if should_cancel {
                                     if matches!(record.state, TaskState::CancelRequested { .. }) {
+                                        let state_before = record.state.clone();
                                         let _ = record.acknowledge_cancel();
+                                        oracle_transitions
+                                            .push((state_before, record.state.clone()));
                                     }
                                     if matches!(record.state, TaskState::Cancelling { .. }) {
+                                        let state_before = record.state.clone();
                                         record.cleanup_done();
+                                        oracle_transitions
+                                            .push((state_before, record.state.clone()));
                                     }
                                     if matches!(record.state, TaskState::Finalizing { .. }) {
+                                        let state_before = record.state.clone();
                                         record.finalize_done();
+                                        oracle_transitions
+                                            .push((state_before, record.state.clone()));
                                     }
                                     matches!(
                                         record.state,
@@ -1675,7 +1698,19 @@ impl LabRuntime {
                             };
                         if !completed_via_cancel {
                             record.complete(record_outcome);
+                            oracle_transitions.push((old_state, record.state.clone()));
                         }
+                    }
+                }
+
+                // Notify oracle of all state transitions after all mutations are complete
+                if self.config.has_cancellation_oracle() {
+                    for (from_state, to_state) in oracle_transitions {
+                        self.notify_cancellation_oracle_task_transition(
+                            task_id,
+                            &from_state,
+                            &to_state,
+                        );
                     }
                 }
 
@@ -1946,11 +1981,32 @@ impl LabRuntime {
         // Record replay event
         self.replay_recorder.record_cancel_injection(task_id);
 
+        // Record the cancel request in the oracle
+        let reason = CancelReason::user("chaos-injected");
+        if self.config.has_cancellation_oracle() {
+            self.oracles.cancellation_protocol.on_cancel_request(
+                task_id,
+                reason.clone(),
+                self.virtual_time,
+            );
+        }
+
         // Mark the task as cancel-requested with chaos reason
         if let Some(record) = self.state.task_mut(task_id) {
             if !record.state.is_terminal() {
-                record
-                    .request_cancel_with_budget(CancelReason::user("chaos-injected"), Budget::ZERO);
+                let old_state = record.state.clone();
+                record.request_cancel_with_budget(reason.clone(), Budget::ZERO);
+
+                // Record the state transition in the oracle after mutation is complete
+                if self.config.has_cancellation_oracle() {
+                    let new_state = record.state.clone();
+                    self.oracles.cancellation_protocol.on_transition(
+                        task_id,
+                        &old_state,
+                        &new_state,
+                        self.virtual_time,
+                    );
+                }
             }
         }
 
@@ -1967,6 +2023,110 @@ impl LabRuntime {
                 },
             )
         });
+    }
+
+    /// Notifies the cancellation protocol oracle about runtime events.
+    pub fn notify_cancellation_oracle_task_create(&mut self, task_id: TaskId, region_id: RegionId) {
+        self.oracles
+            .cancellation_protocol
+            .on_task_create(task_id, region_id);
+    }
+
+    /// Notifies the cancellation protocol oracle about region creation.
+    pub fn notify_cancellation_oracle_region_create(
+        &mut self,
+        region_id: RegionId,
+        parent: Option<RegionId>,
+    ) {
+        self.oracles
+            .cancellation_protocol
+            .on_region_create(region_id, parent);
+    }
+
+    /// Notifies the cancellation protocol oracle about task state transitions.
+    pub fn notify_cancellation_oracle_task_transition(
+        &mut self,
+        task_id: TaskId,
+        from: &crate::record::task::TaskState,
+        to: &crate::record::task::TaskState,
+    ) {
+        self.oracles
+            .cancellation_protocol
+            .on_transition(task_id, from, to, self.virtual_time);
+    }
+
+    /// Notifies the cancellation protocol oracle about cancel requests.
+    pub fn notify_cancellation_oracle_cancel_request(
+        &mut self,
+        task_id: TaskId,
+        reason: crate::types::CancelReason,
+    ) {
+        self.oracles
+            .cancellation_protocol
+            .on_cancel_request(task_id, reason, self.virtual_time);
+    }
+
+    /// Notifies the cancellation protocol oracle about cancel acknowledgments.
+    pub fn notify_cancellation_oracle_cancel_ack(&mut self, task_id: TaskId) {
+        self.oracles
+            .cancellation_protocol
+            .on_cancel_ack(task_id, self.virtual_time);
+    }
+
+    /// Notifies the cancellation protocol oracle about task polling.
+    pub fn notify_cancellation_oracle_task_poll(&mut self, task_id: TaskId) {
+        self.oracles.cancellation_protocol.on_task_poll(task_id);
+    }
+
+    /// Notifies the cancellation protocol oracle about mask entry.
+    pub fn notify_cancellation_oracle_mask_enter(&mut self, task_id: TaskId) {
+        self.oracles
+            .cancellation_protocol
+            .on_mask_enter(task_id, self.virtual_time);
+    }
+
+    /// Notifies the cancellation protocol oracle about mask exit.
+    pub fn notify_cancellation_oracle_mask_exit(&mut self, task_id: TaskId) {
+        self.oracles
+            .cancellation_protocol
+            .on_mask_exit(task_id, self.virtual_time);
+    }
+
+    /// Notifies the cancellation protocol oracle about region cancellation.
+    pub fn notify_cancellation_oracle_region_cancel(
+        &mut self,
+        region_id: RegionId,
+        reason: crate::types::CancelReason,
+    ) {
+        self.oracles
+            .cancellation_protocol
+            .on_region_cancel(region_id, reason, self.virtual_time);
+    }
+
+    /// Checks the cancellation protocol oracle for violations and optionally enforces them.
+    pub fn check_cancellation_protocol(
+        &mut self,
+    ) -> Result<(), crate::lab::oracle::CancellationProtocolViolation> {
+        if !self.config.has_cancellation_oracle() {
+            return Ok(());
+        }
+
+        let result = self.oracles.cancellation_protocol.check();
+
+        if let Err(ref violation) = result {
+            if self.config.panic_on_cancellation_violation {
+                // Configurable enforcement: panic in enforce mode
+                panic!("Cancellation protocol violation detected: {}", violation);
+            } else {
+                // Warn mode: log the violation
+                crate::tracing_compat::warn!(
+                    violation = %violation,
+                    "Cancellation protocol violation detected"
+                );
+            }
+        }
+
+        result
     }
 
     /// Injects budget exhaustion for a task.
@@ -2036,6 +2196,13 @@ impl LabRuntime {
     #[must_use]
     pub fn check_invariants(&mut self) -> Vec<InvariantViolation> {
         let mut violations = Vec::new();
+
+        // Check cancellation protocol oracle
+        if let Err(violation) = self.check_cancellation_protocol() {
+            violations.push(InvariantViolation::CancellationProtocol {
+                violation: violation.to_string(),
+            });
+        }
 
         // Check for obligation leaks
         let leaks = self.obligation_leaks();
@@ -2520,6 +2687,11 @@ pub enum InvariantViolation {
         /// Held obligations.
         held: Vec<ObligationId>,
     },
+    /// Cancellation protocol violation detected.
+    CancellationProtocol {
+        /// The violation description.
+        violation: String,
+    },
 }
 
 /// Diagnostic details for a leaked obligation.
@@ -2563,6 +2735,9 @@ impl std::fmt::Display for InvariantViolation {
                 f,
                 "futurelock: {task} in {region} idle={idle_steps} held={held:?}"
             ),
+            Self::CancellationProtocol { violation } => {
+                write!(f, "cancellation protocol violation: {violation}")
+            }
         }
     }
 }

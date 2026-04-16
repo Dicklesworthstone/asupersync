@@ -29,6 +29,7 @@ pub struct Chunks<S: Stream> {
 
 impl<S: Stream> Chunks<S> {
     /// Creates a new `Chunks` stream.
+    #[inline]
     pub(crate) fn new(stream: S, cap: usize) -> Self {
         assert!(cap > 0, "chunk size must be non-zero");
         Self {
@@ -39,16 +40,19 @@ impl<S: Stream> Chunks<S> {
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -60,6 +64,7 @@ where
 {
     type Item = Vec<S::Item>;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         let mut drained_this_poll = 0usize;
@@ -87,6 +92,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let buffered = self.items.len();
         let (lower, upper) = self.stream.size_hint();
@@ -112,6 +118,7 @@ pub struct ReadyChunks<S: Stream> {
 
 impl<S: Stream> ReadyChunks<S> {
     /// Creates a new `ReadyChunks` stream.
+    #[inline]
     pub(crate) fn new(stream: S, cap: usize) -> Self {
         assert!(cap > 0, "chunk size must be non-zero");
         Self {
@@ -122,16 +129,19 @@ impl<S: Stream> ReadyChunks<S> {
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -143,6 +153,7 @@ where
 {
     type Item = Vec<S::Item>;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         // Reuse the buffer across polls; ensure capacity after a previous take.
@@ -182,6 +193,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let buffered = self.items.len();
         let (lower_items, upper_items) = self.stream.size_hint();

@@ -322,8 +322,8 @@ where
             // Drive it to completion synchronously using a noop waker.
             // This is Phase 0 behavior; full implementation would use the
             // runtime's cancel mask to run release asynchronously.
-            let waker = Waker::noop().clone();
-            let mut cx = Context::from_waker(&waker);
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
 
             // Poll until complete (bounded iteration to prevent infinite loops)
             // Most release futures complete quickly or immediately.

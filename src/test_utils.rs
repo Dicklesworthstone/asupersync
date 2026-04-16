@@ -102,6 +102,22 @@ pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
     LabRuntime::new(LabConfig::new(ctx.seed))
 }
 
+/// Run async test code with a lab runtime.
+///
+/// Creates a default lab runtime and runs the provided closure using the regular runtime.
+/// This is commonly used for channel stress tests and other lab-based testing.
+pub fn lab_with_config<F, Fut, R>(_f: F) -> R
+where
+    F: FnOnce(LabRuntime) -> Fut,
+    Fut: Future<Output = R>,
+{
+    init_test_logging();
+    let _lab = test_lab();
+    // FIXME: LabRuntime should have a block_on method or similar
+    // For now, use a simple pattern - this needs to be properly implemented
+    todo!("LabRuntime block_on method needs to be implemented")
+}
+
 /// Create a [`TestContext`] for a unit test with the default seed.
 #[must_use]
 pub fn test_context(test_id: &str) -> TestContext {

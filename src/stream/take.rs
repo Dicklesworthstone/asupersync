@@ -17,12 +17,31 @@ pub struct Take<S> {
 }
 
 impl<S> Take<S> {
+    #[inline]
     pub(crate) fn new(stream: S, remaining: usize) -> Self {
         Self {
             stream,
             remaining,
             done: false,
         }
+    }
+
+    /// Returns a reference to the underlying stream.
+    #[inline]
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Consumes the combinator, returning the underlying stream.
+    #[inline]
+    pub fn into_inner(self) -> S {
+        self.stream
     }
 }
 
@@ -55,6 +74,7 @@ impl<S: Stream> Stream for Take<S> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.done || self.remaining == 0 {
             return (0, Some(0));
@@ -80,12 +100,31 @@ pub struct TakeWhile<S, F> {
 }
 
 impl<S, F> TakeWhile<S, F> {
+    #[inline]
     pub(crate) fn new(stream: S, predicate: F) -> Self {
         Self {
             stream,
             predicate,
             done: false,
         }
+    }
+
+    /// Returns a reference to the underlying stream.
+    #[inline]
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Consumes the combinator, returning the underlying stream.
+    #[inline]
+    pub fn into_inner(self) -> S {
+        self.stream
     }
 }
 
@@ -121,6 +160,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.done {
             return (0, Some(0));

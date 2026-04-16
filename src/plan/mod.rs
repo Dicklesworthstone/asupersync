@@ -14,12 +14,14 @@ pub struct PlanId(usize);
 
 impl PlanId {
     /// Creates a new plan id from a raw index.
+    #[inline]
     #[must_use]
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
 
     /// Returns the underlying index.
+    #[inline]
     #[must_use]
     pub const fn index(self) -> usize {
         self.0
@@ -96,6 +98,7 @@ pub struct PlanDag {
 
 impl PlanDag {
     /// Creates an empty plan DAG.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -129,12 +132,14 @@ impl PlanDag {
     }
 
     /// Returns the root node, if set.
+    #[inline]
     #[must_use]
     pub const fn root(&self) -> Option<PlanId> {
         self.root
     }
 
     /// Returns a reference to a node by id.
+    #[inline]
     #[must_use]
     pub fn node(&self, id: PlanId) -> Option<&PlanNode> {
         self.nodes.get(id.index())
@@ -147,6 +152,7 @@ impl PlanDag {
     }
 
     /// Returns the number of nodes in this DAG.
+    #[inline]
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -220,12 +226,14 @@ pub struct EClassId(usize);
 
 impl EClassId {
     /// Creates a new class id from a raw index.
+    #[inline]
     #[must_use]
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
 
     /// Returns the underlying index.
+    #[inline]
     #[must_use]
     pub const fn index(self) -> usize {
         self.0
@@ -273,6 +281,7 @@ pub struct EClass {
 
 impl EClass {
     /// Returns the class id.
+    #[inline]
     #[must_use]
     pub const fn id(&self) -> EClassId {
         self.id
@@ -307,6 +316,7 @@ fn arena_index_from_len(len: usize) -> u32 {
 
 impl EGraph {
     /// Creates an empty e-graph.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::default()

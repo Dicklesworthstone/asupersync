@@ -55,6 +55,7 @@ pub trait Cancel: Future {
     fn is_cancelled(&self) -> bool;
 
     /// Returns the cancellation reason, if cancellation was requested.
+    #[inline]
     fn cancel_reason(&self) -> Option<&CancelReason> {
         None
     }
@@ -139,6 +140,7 @@ pub struct Race<A, B> {
 
 impl<A, B> Race<A, B> {
     /// Creates a new race combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -149,6 +151,7 @@ impl<A, B> Race<A, B> {
 }
 
 impl<A, B> Clone for Race<A, B> {
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -157,6 +160,7 @@ impl<A, B> Clone for Race<A, B> {
 impl<A, B> Copy for Race<A, B> {}
 
 impl<A, B> Default for Race<A, B> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -200,6 +204,7 @@ pub struct RaceAll<T> {
 
 impl<T> RaceAll<T> {
     /// Creates a new N-way race combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self { _t: PhantomData }
@@ -207,12 +212,14 @@ impl<T> RaceAll<T> {
 }
 
 impl<T> Default for RaceAll<T> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<T> Clone for RaceAll<T> {
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -460,6 +467,7 @@ pub type Race2Result<T, E> = (Outcome<T, E>, RaceWinner, Outcome<T, E>);
 /// assert!(winner.is_first());
 /// assert!(loser_outcome.is_cancelled());
 /// ```
+#[inline]
 pub fn race2_outcomes<T, E>(
     winner: RaceWinner,
     o1: Outcome<T, E>,
@@ -489,6 +497,7 @@ pub fn race2_outcomes<T, E>(
 /// let result = race2_to_result(RaceWinner::First, o1, o2);
 /// assert_eq!(result.unwrap(), 42);
 /// ```
+#[inline]
 pub fn race2_to_result<T, E>(
     winner: RaceWinner,
     o1: Outcome<T, E>,
@@ -534,6 +543,7 @@ pub struct RaceAllResult<T, E> {
 
 impl<T, E> RaceAllResult<T, E> {
     /// Creates a new race-all result.
+    #[inline]
     #[must_use]
     pub fn new(
         winner_outcome: Outcome<T, E>,
@@ -566,6 +576,7 @@ impl<T, E> RaceAllResult<T, E> {
 ///
 /// # Panics
 /// Panics if `winner_index` is out of bounds.
+#[inline]
 #[must_use]
 pub fn race_all_outcomes<T, E>(
     winner_index: usize,
@@ -614,6 +625,7 @@ pub fn race_all_outcomes<T, E>(
 /// let value = race_all_to_result(result);
 /// assert_eq!(value.unwrap(), 42);
 /// ```
+#[inline]
 pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAllError<E>> {
     if let Outcome::Panicked(p) = result.winner_outcome {
         return Err(RaceAllError::Panicked {
@@ -678,6 +690,7 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
 /// let result = make_race_all_result(0, outcomes);
 /// assert_eq!(result.unwrap(), 42);
 /// ```
+#[inline]
 pub fn make_race_all_result<T, E>(
     winner_index: usize,
     outcomes: Vec<Outcome<T, E>>,

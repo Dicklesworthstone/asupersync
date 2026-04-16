@@ -58,6 +58,7 @@ impl Barrier {
     ///
     /// # Panics
     /// Panics if `parties == 0`.
+    #[inline]
     #[must_use]
     pub fn new(parties: usize) -> Self {
         assert!(parties > 0, "barrier requires at least 1 party");
@@ -73,6 +74,7 @@ impl Barrier {
     }
 
     /// Returns the number of parties required to trip the barrier.
+    #[inline]
     #[must_use]
     pub fn parties(&self) -> usize {
         self.parties
@@ -83,6 +85,7 @@ impl Barrier {
     /// If cancelled while waiting, returns `BarrierWaitError::Cancelled` and
     /// decrements the arrival count so the barrier remains consistent for
     /// other waiters.
+    #[inline]
     pub fn wait<'a>(&'a self, cx: &'a Cx) -> BarrierWaitFuture<'a> {
         BarrierWaitFuture {
             barrier: self,
@@ -291,6 +294,7 @@ pub struct BarrierWaitResult {
 
 impl BarrierWaitResult {
     /// Returns true for exactly one party (the leader) each generation.
+    #[inline]
     #[must_use]
     pub fn is_leader(&self) -> bool {
         self.is_leader

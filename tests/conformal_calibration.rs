@@ -34,7 +34,7 @@ fn single_task_report(seed: u64) -> OracleReport {
 
 /// Generate a clean oracle report from a fresh OracleSuite.
 fn clean_oracle_report(nanos: u64) -> OracleReport {
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     suite.report(Time::from_nanos(nanos))
 }
 

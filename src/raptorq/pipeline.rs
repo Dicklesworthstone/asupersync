@@ -178,15 +178,18 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
 
     /// Returns a reference to the config.
     #[must_use]
+    #[inline]
     pub const fn config(&self) -> &RaptorQConfig {
         &self.config
     }
 
     /// Returns a mutable reference to the transport.
+    #[inline]
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
     }
 
+    #[inline]
     fn sign(&self, symbol: crate::types::Symbol) -> AuthenticatedSymbol {
         match &self.security {
             Some(ctx) => ctx.sign_symbol(&symbol),
@@ -311,11 +314,13 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 
     /// Returns a reference to the config.
     #[must_use]
+    #[inline]
     pub const fn config(&self) -> &RaptorQConfig {
         &self.config
     }
 
     /// Returns a mutable reference to the source stream.
+    #[inline]
     pub fn source_mut(&mut self) -> &mut S {
         &mut self.source
     }
@@ -381,6 +386,7 @@ fn compute_total_repair_count(
 /// The lower bound is capped to actual per-object demand so small sends avoid
 /// large pre-allocation bursts, while the upper bound preserves enough headroom
 /// for full source+repair coverage.
+#[inline]
 fn sender_pool_bounds(
     configured_pool_size: usize,
     source_symbols: usize,
@@ -393,6 +399,7 @@ fn sender_pool_bounds(
     )
 }
 
+#[inline]
 fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }

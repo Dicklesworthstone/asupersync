@@ -13,22 +13,36 @@ pub mod global_injector;
 pub mod global_queue;
 pub mod intrusive;
 pub mod intrusive_heap;
+pub mod invariant_monitor;
 pub mod local_queue;
+#[cfg(test)]
+pub mod metamorphic_tests;
 pub mod priority;
+pub mod priority_inversion_oracle;
 pub mod stealing;
 pub mod three_lane;
 pub mod worker;
+pub mod work_stealing_checker;
 
 pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
 pub use intrusive::{IntrusiveRing, IntrusiveStack, QUEUE_TAG_CANCEL, QUEUE_TAG_READY};
 pub use intrusive_heap::IntrusivePriorityHeap;
+pub use invariant_monitor::{
+    InvariantCategory, InvariantConfig, InvariantStats, InvariantViolation, QueueSnapshot,
+    SchedulerInvariant, SchedulerInvariantMonitor, WorkerLoadSnapshot,
+};
 pub use local_queue::LocalQueue;
 pub use priority::{
     DispatchLane, ScheduleCertificate, Scheduler as PriorityScheduler, SchedulerMode,
 };
+pub use priority_inversion_oracle::{
+    Priority, PriorityInversion, PriorityInversionOracle, InversionType, InversionSeverity,
+    InversionImpact, InversionStats, InversionOracleConfig, ResourceId, InversionId,
+};
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use worker::{Parker, Worker};
+pub use work_stealing_checker::{OwnershipState, StealingStats, ViolationType, WorkStealingChecker};
 
 use crate::types::TaskId;
 

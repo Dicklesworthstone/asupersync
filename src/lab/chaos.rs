@@ -206,6 +206,7 @@ impl ChaosConfig {
     /// - I/O Error: 2%
     /// - Wakeup Storm: 1%
     /// - Budget Exhaust: 0.5%
+    #[inline]
     #[must_use]
     pub fn light() -> Self {
         Self {
@@ -234,6 +235,7 @@ impl ChaosConfig {
     /// - I/O Error: 15%
     /// - Wakeup Storm: 5%
     /// - Budget Exhaust: 5%
+    #[inline]
     #[must_use]
     pub fn heavy() -> Self {
         Self {
@@ -262,6 +264,7 @@ impl ChaosConfig {
     // ───────────────────────────────────────────────────────────────────────────
 
     /// Sets the seed for deterministic chaos.
+    #[inline]
     #[must_use]
     pub const fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
@@ -273,6 +276,7 @@ impl ChaosConfig {
     /// # Panics
     ///
     /// Panics if `probability` is not in \[0.0, 1.0\].
+    #[inline]
     #[must_use]
     pub fn with_cancel_probability(mut self, probability: f64) -> Self {
         assert!(
@@ -288,6 +292,7 @@ impl ChaosConfig {
     /// # Panics
     ///
     /// Panics if `probability` is not in \[0.0, 1.0\].
+    #[inline]
     #[must_use]
     pub fn with_delay_probability(mut self, probability: f64) -> Self {
         assert!(
@@ -299,6 +304,7 @@ impl ChaosConfig {
     }
 
     /// Sets the range of delays when delay is injected.
+    #[inline]
     #[must_use]
     pub fn with_delay_range(mut self, range: Range<Duration>) -> Self {
         self.delay_range = range;
@@ -310,6 +316,7 @@ impl ChaosConfig {
     /// # Panics
     ///
     /// Panics if `probability` is not in \[0.0, 1.0\].
+    #[inline]
     #[must_use]
     pub fn with_io_error_probability(mut self, probability: f64) -> Self {
         assert!(
@@ -321,6 +328,7 @@ impl ChaosConfig {
     }
 
     /// Sets the error kinds to inject for I/O failures.
+    #[inline]
     #[must_use]
     pub fn with_io_error_kinds(mut self, kinds: Vec<io::ErrorKind>) -> Self {
         self.io_error_kinds = kinds;
@@ -332,6 +340,7 @@ impl ChaosConfig {
     /// # Panics
     ///
     /// Panics if `probability` is not in \[0.0, 1.0\].
+    #[inline]
     #[must_use]
     pub fn with_wakeup_storm_probability(mut self, probability: f64) -> Self {
         assert!(
@@ -343,6 +352,7 @@ impl ChaosConfig {
     }
 
     /// Sets the range of wakeup counts in a storm.
+    #[inline]
     #[must_use]
     pub fn with_wakeup_storm_count(mut self, range: Range<usize>) -> Self {
         self.wakeup_storm_count = range;
@@ -354,6 +364,7 @@ impl ChaosConfig {
     /// # Panics
     ///
     /// Panics if `probability` is not in \[0.0, 1.0\].
+    #[inline]
     #[must_use]
     pub fn with_budget_exhaust_probability(mut self, probability: f64) -> Self {
         assert!(
@@ -369,6 +380,7 @@ impl ChaosConfig {
     // ───────────────────────────────────────────────────────────────────────────
 
     /// Returns true if any chaos is enabled.
+    #[inline]
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.cancel_probability > 0.0

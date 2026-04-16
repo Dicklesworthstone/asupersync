@@ -45,6 +45,7 @@ pub const FINALIZER_TIME_BUDGET_NANOS: u64 = 5_000_000_000;
 
 /// Returns the default budget for finalizer execution.
 #[must_use]
+#[inline]
 pub fn finalizer_budget() -> Budget {
     Budget::new().with_poll_quota(FINALIZER_POLL_BUDGET)
     // Time budget would be set relative to current time when executed
@@ -66,12 +67,14 @@ pub enum FinalizerEscalation {
 
 impl FinalizerEscalation {
     /// Returns true if this policy allows continuing after budget exhaustion.
+    #[inline]
     #[must_use]
     pub const fn allows_continuation(self) -> bool {
         matches!(self, Self::BoundedLog)
     }
 
     /// Returns true if this policy requires waiting indefinitely.
+    #[inline]
     #[must_use]
     pub const fn is_soft(self) -> bool {
         matches!(self, Self::Soft)
@@ -94,12 +97,14 @@ pub struct FinalizerStack {
 impl FinalizerStack {
     /// Creates a new empty finalizer stack.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates a new finalizer stack with the specified escalation policy.
     #[must_use]
+    #[inline]
     pub fn with_escalation(escalation: FinalizerEscalation) -> Self {
         Self {
             finalizers: Vec::new(),
@@ -109,28 +114,33 @@ impl FinalizerStack {
 
     /// Returns the escalation policy.
     #[must_use]
+    #[inline]
     pub const fn escalation(&self) -> FinalizerEscalation {
         self.escalation
     }
 
     /// Pushes a finalizer onto the stack.
+    #[inline]
     pub fn push(&mut self, finalizer: Finalizer) {
         self.finalizers.push(finalizer);
     }
 
     /// Pops a finalizer from the stack (LIFO order).
+    #[inline]
     pub fn pop(&mut self) -> Option<Finalizer> {
         self.finalizers.pop()
     }
 
     /// Returns the number of pending finalizers.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.finalizers.len()
     }
 
     /// Returns true if there are no pending finalizers.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.finalizers.is_empty()
     }

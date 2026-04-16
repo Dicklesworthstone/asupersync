@@ -78,6 +78,7 @@ pub enum RegressionVerdict {
 impl RegressionVerdict {
     /// Label for structured logging.
     #[must_use]
+    #[inline]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Calibrating => "calibrating",
@@ -164,6 +165,7 @@ pub struct RegressionMonitor {
 impl RegressionMonitor {
     /// Create a new regression monitor with default configuration.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         let config = HealthThresholdConfig::new(CONFORMAL_ALPHA, ThresholdMode::Upper)
             .min_samples(MIN_CALIBRATION_SAMPLES);

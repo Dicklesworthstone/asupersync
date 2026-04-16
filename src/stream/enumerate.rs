@@ -17,12 +17,31 @@ pub struct Enumerate<S> {
 }
 
 impl<S> Enumerate<S> {
+    #[inline]
     pub(crate) fn new(stream: S) -> Self {
         Self {
             stream,
             count: 0,
             done: false,
         }
+    }
+
+    /// Returns a reference to the underlying stream.
+    #[inline]
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Consumes the combinator, returning the underlying stream.
+    #[inline]
+    pub fn into_inner(self) -> S {
+        self.stream
     }
 }
 
@@ -50,6 +69,7 @@ impl<S: Stream> Stream for Enumerate<S> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.done {
             (0, Some(0))

@@ -323,7 +323,7 @@ impl LeaseModel {
     /// Remaining time until expiry, or zero.
     #[must_use]
     pub fn remaining(&self, now: Time) -> Duration {
-        if now >= self.expires_at {
+        if self.released || now >= self.expires_at {
             Duration::ZERO
         } else {
             Duration::from_nanos(self.expires_at.duration_since(now))
@@ -505,6 +505,7 @@ mod tests {
     fn lease_terminal_irreversibility_released() {
         let mut lease = LeaseModel::new(t(0), dur(1000));
         assert!(lease.release(t(100)));
+        assert_eq!(lease.remaining(t(100)), Duration::ZERO);
 
         // Cannot renew after release
         assert!(!lease.renew(dur(1000), t(200)));

@@ -46,6 +46,7 @@ pub enum AcquireError {
 }
 
 impl std::fmt::Display for AcquireError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "semaphore closed"),
@@ -64,6 +65,7 @@ impl std::error::Error for AcquireError {}
 pub struct TryAcquireError;
 
 impl std::fmt::Display for TryAcquireError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "no semaphore permits available")
     }
@@ -102,10 +104,12 @@ struct Waiter {
     waker: Waker,
 }
 
+#[inline]
 fn front_waiter_waker(state: &SemaphoreState) -> Option<Waker> {
     state.waiters.front().map(|waiter| waiter.waker.clone())
 }
 
+#[inline]
 fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64) -> Option<Waker> {
     if state
         .waiters
@@ -132,6 +136,7 @@ fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64)
 
 impl Semaphore {
     /// Creates a new semaphore with the given number of permits.
+    #[inline]
     #[must_use]
     pub fn new(permits: usize) -> Self {
         Self {
@@ -171,6 +176,7 @@ impl Semaphore {
     }
 
     /// Closes the semaphore.
+    #[inline]
     pub fn close(&self) {
         let taken = {
             let mut state = self.state.lock();
@@ -187,6 +193,7 @@ impl Semaphore {
     }
 
     /// Acquires the given number of permits asynchronously.
+    #[inline]
     pub fn acquire<'a, 'b>(&'a self, cx: &'b Cx, count: usize) -> AcquireFuture<'a, 'b> {
         assert!(count > 0, "cannot acquire 0 permits");
         AcquireFuture {
@@ -230,6 +237,7 @@ impl Semaphore {
     /// Adds permits back to the semaphore.
     ///
     /// Saturates at `usize::MAX` if adding would overflow.
+    #[inline]
     pub fn add_permits(&self, count: usize) {
         if count == 0 {
             return;
@@ -441,6 +449,7 @@ impl OwnedSemaphorePermit {
     }
 
     /// Tries to acquire an owned permit without waiting.
+    #[inline]
     pub fn try_acquire(
         semaphore: std::sync::Arc<Semaphore>,
         count: usize,
@@ -457,6 +466,7 @@ impl OwnedSemaphorePermit {
     ///
     /// This avoids an `Arc::clone` + refcount round-trip when the semaphore
     /// has no available permits (the common contended case).
+    #[inline]
     pub fn try_acquire_arc(
         semaphore: &std::sync::Arc<Semaphore>,
         count: usize,
@@ -557,6 +567,7 @@ impl Drop for OwnedAcquireFuture {
 impl Future for OwnedAcquireFuture {
     type Output = Result<OwnedSemaphorePermit, AcquireError>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if this.completed {

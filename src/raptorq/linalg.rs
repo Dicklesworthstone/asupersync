@@ -1209,6 +1209,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "sparse row index out of range: 5 >= 5")]
+    fn sparse_row_get_rejects_out_of_range_indices() {
+        let row = SparseRow::new(vec![(1, Gf256::new(10)), (3, Gf256::new(30))], 5);
+        let _ = row.get(5);
+    }
+
+    #[test]
     fn sparse_row_add() {
         let a = SparseRow::new(vec![(0, Gf256::new(1)), (2, Gf256::new(3))], 5);
         let b = SparseRow::new(vec![(1, Gf256::new(2)), (2, Gf256::new(3))], 5);
@@ -1594,6 +1601,20 @@ mod tests {
                 panic!("unexpected inconsistent system at row {row}")
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "row out of bounds")]
+    fn gaussian_set_row_rejects_out_of_range_row() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(2, &[1, 0], DenseRow::new(vec![1]));
+    }
+
+    #[test]
+    #[should_panic(expected = "coefficient length mismatch")]
+    fn gaussian_set_row_rejects_coefficient_length_mismatch() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[1], DenseRow::new(vec![1]));
     }
 
     #[test]

@@ -32,7 +32,7 @@ fn unified_report_clean_suite_all_pass() {
     init_test_logging();
     test_phase!("unified_report_clean_suite_all_pass");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
 
     assert!(report.all_passed(), "clean suite should pass all oracles");
@@ -54,7 +54,7 @@ fn unified_report_json_roundtrip() {
     init_test_logging();
     test_phase!("unified_report_json_roundtrip");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::from_nanos(42));
 
     // Serialize to JSON string
@@ -106,7 +106,7 @@ fn unified_report_text_contains_all_oracles() {
     init_test_logging();
     test_phase!("unified_report_text_contains_all_oracles");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
     let text = report.to_text();
 
@@ -149,7 +149,7 @@ fn unified_report_entry_lookup() {
     init_test_logging();
     test_phase!("unified_report_entry_lookup");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
 
     // All invariants should be findable.
@@ -216,7 +216,7 @@ fn unified_report_contains_fabric_oracles_when_enabled() {
     init_test_logging();
     test_phase!("unified_report_contains_fabric_oracles_when_enabled");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
 
     for invariant in [
@@ -387,7 +387,7 @@ fn evidence_ledger_clean_suite_all_against_violation() {
     init_test_logging();
     test_phase!("evidence_ledger_clean_suite_all_against_violation");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
     let ledger = EvidenceLedger::from_report(&report);
 
@@ -423,7 +423,7 @@ fn evidence_ledger_json_roundtrip() {
     init_test_logging();
     test_phase!("evidence_ledger_json_roundtrip");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::from_nanos(42));
     let ledger = EvidenceLedger::from_report(&report);
 
@@ -477,7 +477,7 @@ fn evidence_ledger_text_output() {
     init_test_logging();
     test_phase!("evidence_ledger_text_output");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
     let ledger = EvidenceLedger::from_report(&report);
     let text = ledger.to_text();
@@ -508,7 +508,7 @@ fn evidence_ledger_custom_detection_model() {
     init_test_logging();
     test_phase!("evidence_ledger_custom_detection_model");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
 
     let conservative = DetectionModel {
@@ -549,7 +549,7 @@ fn evidence_ledger_violations_by_strength() {
     init_test_logging();
     test_phase!("evidence_ledger_violations_by_strength");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
     let ledger = EvidenceLedger::from_report(&report);
 
@@ -574,7 +574,7 @@ fn evidence_ledger_evidence_lines_present() {
     init_test_logging();
     test_phase!("evidence_ledger_evidence_lines_present");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
     let ledger = EvidenceLedger::from_report(&report);
 
@@ -601,7 +601,7 @@ fn evidence_ledger_log_likelihood_totals() {
     init_test_logging();
     test_phase!("evidence_ledger_log_likelihood_totals");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
     let ledger = EvidenceLedger::from_report(&report);
 
@@ -624,7 +624,7 @@ fn eprocess_clean_suite_no_rejection() {
     init_test_logging();
     test_phase!("eprocess_clean_suite_no_rejection");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let mut monitor = EProcessMonitor::all_invariants();
 
     // Feed 50 clean reports.
@@ -683,7 +683,7 @@ fn eprocess_json_roundtrip() {
     init_test_logging();
     test_phase!("eprocess_json_roundtrip");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let mut monitor = EProcessMonitor::standard();
     let report = suite.report(Time::ZERO);
     monitor.observe_report(&report);
@@ -729,7 +729,7 @@ fn eprocess_text_output() {
     init_test_logging();
     test_phase!("eprocess_text_output");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let mut monitor = EProcessMonitor::standard();
     monitor.observe_report(&suite.report(Time::ZERO));
 
@@ -747,7 +747,7 @@ fn eprocess_deterministic() {
     init_test_logging();
     test_phase!("eprocess_deterministic");
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::from_nanos(100));
 
     let mut mon1 = EProcessMonitor::standard();
@@ -786,7 +786,7 @@ fn eprocess_early_stopping_valid_integration() {
         ..EProcessConfig::default()
     };
 
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
     let mut false_rejections: u32 = 0;
 

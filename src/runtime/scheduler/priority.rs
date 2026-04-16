@@ -1037,6 +1037,15 @@ impl Scheduler {
         !self.ready_lane.is_empty()
     }
 
+    /// Returns the current ready-lane head without removing it.
+    #[inline]
+    #[must_use]
+    pub fn peek_ready_task(&self) -> Option<(TaskId, u8)> {
+        self.ready_lane
+            .peek()
+            .map(|entry| (entry.task, entry.priority))
+    }
+
     /// Clears all scheduled tasks.
     pub fn clear(&mut self) {
         self.cancel_lane.clear();

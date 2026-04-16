@@ -4,6 +4,7 @@ use crate::cx::Scope;
 use crate::types::{Policy, Time};
 use std::time::Duration;
 
+#[inline]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -12,6 +13,7 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 ///
 /// If the scope already has a tighter deadline, it is preserved.
 #[must_use]
+#[inline]
 pub fn with_deadline<'a, P: Policy>(scope: &Scope<'a, P>, deadline: Time) -> Scope<'a, P> {
     let current_budget = scope.budget();
     // Budget::with_deadline replaces it. We want min.
@@ -26,6 +28,7 @@ pub fn with_deadline<'a, P: Policy>(scope: &Scope<'a, P>, deadline: Time) -> Sco
 
 /// Updates a scope with a timeout relative to a start time.
 #[must_use]
+#[inline]
 pub fn with_timeout<'a, P: Policy>(
     scope: &Scope<'a, P>,
     duration: Duration,

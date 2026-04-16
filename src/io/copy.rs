@@ -37,6 +37,7 @@ const DEFAULT_BUF_SIZE: usize = 8192;
 /// assert_eq!(n, 11);
 /// assert_eq!(writer, b"hello world");
 /// ```
+#[inline]
 pub fn copy<'a, R, W>(reader: &'a mut R, writer: &'a mut W) -> Copy<'a, R, W>
 where
     R: AsyncRead + Unpin + ?Sized,
@@ -222,6 +223,7 @@ where
 /// # Cancel Safety
 ///
 /// This future is cancel-safe. Bytes already written remain committed.
+#[inline]
 pub fn copy_buf<'a, R, W>(reader: &'a mut R, writer: &'a mut W) -> CopyBuf<'a, R, W>
 where
     R: AsyncBufRead + Unpin + ?Sized,
@@ -360,6 +362,7 @@ where
 ///     println!("Copied {} bytes", total);
 /// }).await?;
 /// ```
+#[inline]
 pub fn copy_with_progress<'a, R, W, F>(
     reader: &'a mut R,
     writer: &'a mut W,
@@ -526,6 +529,7 @@ where
 /// let (a_to_b, b_to_a) = copy_bidirectional(&mut stream_a, &mut stream_b).await?;
 /// println!("A->B: {} bytes, B->A: {} bytes", a_to_b, b_to_a);
 /// ```
+#[inline]
 pub fn copy_bidirectional<'a, A, B>(a: &'a mut A, b: &'a mut B) -> CopyBidirectional<'a, A, B>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,

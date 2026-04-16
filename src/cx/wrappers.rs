@@ -71,12 +71,14 @@ impl WebContext {
 
     /// Access the narrowed capability context.
     #[must_use]
+    #[inline]
     pub fn cx(&self) -> &Cx<WebCaps> {
         &self.cx
     }
 
     /// The request ID for tracing.
     #[must_use]
+    #[inline]
     pub fn request_id(&self) -> u64 {
         self.request_id
     }
@@ -104,12 +106,14 @@ impl GrpcContext {
 
     /// Access the narrowed capability context.
     #[must_use]
+    #[inline]
     pub fn cx(&self) -> &Cx<GrpcCaps> {
         &self.cx
     }
 
     /// The gRPC method name.
     #[must_use]
+    #[inline]
     pub fn method(&self) -> &str {
         &self.method
     }
@@ -137,12 +141,14 @@ impl BackgroundContext {
 
     /// Access the narrowed capability context.
     #[must_use]
+    #[inline]
     pub fn cx(&self) -> &Cx<BackgroundCaps> {
         &self.cx
     }
 
     /// The task name for tracing.
     #[must_use]
+    #[inline]
     pub fn task_name(&self) -> &str {
         &self.task_name
     }
@@ -171,6 +177,7 @@ impl BackgroundContext {
 /// let web_cx: Arc<Cx<WebCaps>> = narrow(&full_cx);
 /// ```
 #[must_use]
+#[inline]
 pub fn narrow<From, To: crate::cx::cap::SubsetOf<From>>(cx: &Arc<Cx<From>>) -> Arc<Cx<To>> {
     Arc::new(cx.as_ref().retype::<To>())
 }

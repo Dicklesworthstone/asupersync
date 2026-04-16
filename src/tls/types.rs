@@ -24,6 +24,7 @@ pub struct Certificate {
 
 impl Certificate {
     /// Create a certificate from DER-encoded bytes.
+    #[inline]
     #[cfg(feature = "tls")]
     pub fn from_der(der: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -32,6 +33,7 @@ impl Certificate {
     }
 
     /// Create a certificate from DER-encoded bytes (fallback when TLS is disabled).
+    #[inline]
     #[cfg(not(feature = "tls"))]
     pub fn from_der(der: impl Into<Vec<u8>>) -> Self {
         Self { _data: der.into() }
@@ -68,18 +70,21 @@ impl Certificate {
     }
 
     /// Get the raw DER bytes.
+    #[inline]
     #[cfg(feature = "tls")]
     pub fn as_der(&self) -> &[u8] {
         self.inner.as_ref()
     }
 
     /// Get the raw DER bytes (fallback when TLS is disabled).
+    #[inline]
     #[cfg(not(feature = "tls"))]
     pub fn as_der(&self) -> &[u8] {
         &self._data
     }
 
     /// Get the inner rustls certificate.
+    #[inline]
     #[cfg(feature = "tls")]
     pub(crate) fn into_inner(self) -> CertificateDer<'static> {
         self.inner
@@ -94,6 +99,7 @@ pub struct CertificateChain {
 
 impl CertificateChain {
     /// Create an empty certificate chain.
+    #[inline]
     pub fn new() -> Self {
         Self { certs: Vec::new() }
     }

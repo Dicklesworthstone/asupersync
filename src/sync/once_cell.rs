@@ -124,6 +124,7 @@ pub struct OnceCell<T> {
 
 impl<T> OnceCell<T> {
     /// Creates a new uninitialized `OnceCell`.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -138,6 +139,7 @@ impl<T> OnceCell<T> {
     }
 
     /// Creates a new `OnceCell` with the given value.
+    #[inline]
     #[must_use]
     pub fn with_value(value: T) -> Self {
         let cell = Self::new();
@@ -171,6 +173,7 @@ impl<T> OnceCell<T> {
     /// Returns `Err(value)` if the cell is already initialized or if another
     /// thread/task is currently initializing the cell. This ensures the method
     /// never blocks the OS thread, avoiding deadlocks in async contexts.
+    #[inline]
     pub fn set(&self, value: T) -> Result<(), T> {
         loop {
             match self.state.compare_exchange_weak(
@@ -197,6 +200,7 @@ impl<T> OnceCell<T> {
     /// If the cell is uninitialized, `f` is called to create the value.
     /// If multiple threads call this concurrently, only one will run the
     /// initialization function; others will block waiting for the result.
+    #[inline]
     pub fn get_or_init_blocking<F>(&self, f: F) -> &T
     where
         F: FnOnce() -> T,
@@ -258,6 +262,7 @@ impl<T> OnceCell<T> {
     ///
     /// If the initialization future is cancelled, the cell remains
     /// uninitialized and a future caller can try again.
+    #[inline]
     #[allow(clippy::future_not_send)]
     pub async fn get_or_init<F, Fut>(&self, f: F) -> &T
     where
@@ -329,6 +334,7 @@ impl<T> OnceCell<T> {
     ///
     /// If the initialization future is cancelled or returns an error,
     /// the cell remains uninitialized and a future caller can try again.
+    #[inline]
     #[allow(clippy::future_not_send)]
     pub async fn get_or_try_init<F, Fut, E>(&self, f: F) -> Result<&T, E>
     where
@@ -403,6 +409,7 @@ impl<T> OnceCell<T> {
     /// Takes the value out of the cell, leaving it uninitialized.
     ///
     /// Returns `None` if the cell is not initialized.
+    #[inline]
     pub fn take(&mut self) -> Option<T> {
         if self.is_initialized() {
             self.state.store(UNINIT, Ordering::Release);
@@ -415,6 +422,7 @@ impl<T> OnceCell<T> {
     /// Consumes the cell, returning the contained value.
     ///
     /// Returns `None` if the cell is not initialized.
+    #[inline]
     pub fn into_inner(self) -> Option<T> {
         self.value.into_inner()
     }

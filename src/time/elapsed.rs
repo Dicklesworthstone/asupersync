@@ -30,18 +30,21 @@ pub struct Elapsed {
 
 impl Elapsed {
     /// Creates a new `Elapsed` error with the given deadline.
+    #[inline]
     #[must_use]
     pub const fn new(deadline: Time) -> Self {
         Self { deadline }
     }
 
     /// Returns the deadline that was exceeded.
+    #[inline]
     #[must_use]
     pub const fn deadline(&self) -> Time {
         self.deadline
     }
 
     /// Returns the deadline as nanoseconds since the epoch.
+    #[inline]
     #[must_use]
     pub const fn deadline_nanos(&self) -> u64 {
         self.deadline.as_nanos()

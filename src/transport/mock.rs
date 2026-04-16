@@ -69,12 +69,14 @@ impl Default for SimTransportConfig {
 
 impl SimTransportConfig {
     /// Create config for reliable, zero-latency transport (unit tests).
+    #[inline]
     #[must_use]
     pub fn reliable() -> Self {
         Self::default()
     }
 
     /// Create config simulating a lossy network.
+    #[inline]
     #[must_use]
     pub fn lossy(loss_rate: f64) -> Self {
         Self {
@@ -84,6 +86,7 @@ impl SimTransportConfig {
     }
 
     /// Create config simulating network latency.
+    #[inline]
     #[must_use]
     pub fn with_latency(base: Duration, jitter: Duration) -> Self {
         Self {
@@ -94,6 +97,7 @@ impl SimTransportConfig {
     }
 
     /// Create deterministic config for reproducible tests.
+    #[inline]
     #[must_use]
     pub fn deterministic(seed: u64) -> Self {
         Self {
@@ -103,6 +107,7 @@ impl SimTransportConfig {
     }
 
     /// Override the time source used for simulated latency.
+    #[inline]
     #[must_use]
     pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
         self.time_getter = time_getter;

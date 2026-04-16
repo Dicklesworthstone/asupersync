@@ -48,6 +48,7 @@ impl TaskSource {
         }
     }
 
+    #[inline]
     fn same_underlying_tasks(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::RuntimeState(lhs), Self::RuntimeState(rhs)) => Arc::ptr_eq(lhs, rhs),
@@ -70,6 +71,7 @@ pub struct LocalQueue {
 
 impl LocalQueue {
     /// Creates a new local queue.
+    #[inline]
     #[must_use]
     pub fn new(state: Arc<ContendedMutex<RuntimeState>>) -> Self {
         Self::new_with_source(TaskSource::RuntimeState(state))
@@ -79,11 +81,13 @@ impl LocalQueue {
     ///
     /// This is used by sharded runtime experiments where scheduler hot paths
     /// lock only the task shard.
+    #[inline]
     #[must_use]
     pub fn new_with_task_table(tasks: Arc<ContendedMutex<TaskTable>>) -> Self {
         Self::new_with_source(TaskSource::TaskTable(tasks))
     }
 
+    #[inline]
     fn new_with_source(tasks: TaskSource) -> Self {
         Self {
             tasks,
@@ -209,6 +213,7 @@ impl LocalQueue {
     }
 
     /// Creates a stealer for this queue.
+    #[inline]
     #[must_use]
     pub fn stealer(&self) -> Stealer {
         Stealer {

@@ -82,12 +82,14 @@ impl<T> DerefMut for CachePadded<T> {
 }
 
 impl<T: Default> Default for CachePadded<T> {
+    #[inline]
     fn default() -> Self {
         Self::new(T::default())
     }
 }
 
 impl<T: PartialEq> PartialEq for CachePadded<T> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
     }

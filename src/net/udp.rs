@@ -364,51 +364,61 @@ impl UdpSocket {
     }
 
     /// Returns the local address of this socket.
+    #[inline]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
     }
 
     /// Returns the peer address, if connected.
+    #[inline]
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         self.inner.peer_addr()
     }
 
     /// Sets the broadcast option.
+    #[inline]
     pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
         self.inner.set_broadcast(on)
     }
 
     /// Sets the multicast loopback option for IPv4.
+    #[inline]
     pub fn set_multicast_loop_v4(&self, on: bool) -> io::Result<()> {
         self.inner.set_multicast_loop_v4(on)
     }
 
     /// Join an IPv4 multicast group.
+    #[inline]
     pub fn join_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
         self.inner.join_multicast_v4(&multiaddr, &interface)
     }
 
     /// Leave an IPv4 multicast group.
+    #[inline]
     pub fn leave_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
         self.inner.leave_multicast_v4(&multiaddr, &interface)
     }
 
     /// Set the time-to-live for this socket.
+    #[inline]
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
         self.inner.set_ttl(ttl)
     }
 
     /// Join an IPv6 multicast group.
+    #[inline]
     pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
         self.inner.join_multicast_v6(multiaddr, interface)
     }
 
     /// Leave an IPv6 multicast group.
+    #[inline]
     pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
         self.inner.leave_multicast_v6(multiaddr, interface)
     }
 
     /// Set the IPv4 multicast TTL.
+    #[inline]
     pub fn set_multicast_ttl_v4(&self, ttl: u32) -> io::Result<()> {
         self.inner.set_multicast_ttl_v4(ttl)
     }

@@ -68,6 +68,7 @@ pub struct FailFast;
 impl Policy for FailFast {
     type Error = crate::error::Error;
 
+    #[inline]
     fn on_child_outcome<T>(
         &self,
         _child: TaskId,
@@ -81,6 +82,7 @@ impl Policy for FailFast {
         }
     }
 
+    #[inline]
     fn aggregate_outcomes<T>(
         &self,
         outcomes: &[Outcome<T, Self::Error>],
@@ -131,6 +133,7 @@ pub struct CollectAll;
 impl Policy for CollectAll {
     type Error = crate::error::Error;
 
+    #[inline]
     fn on_child_outcome<T>(
         &self,
         _child: TaskId,
@@ -139,6 +142,7 @@ impl Policy for CollectAll {
         PolicyAction::Continue
     }
 
+    #[inline]
     fn aggregate_outcomes<T>(
         &self,
         outcomes: &[Outcome<T, Self::Error>],
@@ -175,6 +179,7 @@ impl Policy for CollectAll {
 }
 
 impl fmt::Display for PolicyAction {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Continue => write!(f, "continue"),
@@ -188,6 +193,7 @@ impl fmt::Display for PolicyAction {
 mod tests {
     use super::*;
 
+    #[inline]
     fn test_task_id() -> TaskId {
         TaskId::from_arena(crate::util::ArenaIndex::new(0, 0))
     }

@@ -27,6 +27,7 @@ pub struct Scan<S, St, F> {
 
 impl<S, St, F> Scan<S, St, F> {
     /// Creates a new `Scan` stream.
+    #[inline]
     pub(crate) fn new(stream: S, initial_state: St, f: F) -> Self {
         Self {
             stream,
@@ -36,16 +37,19 @@ impl<S, St, F> Scan<S, St, F> {
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }

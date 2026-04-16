@@ -44,12 +44,14 @@ impl AuthKey {
     }
 
     /// Creates a new key from raw bytes.
+    #[inline]
     #[must_use]
     pub const fn from_bytes(bytes: [u8; AUTH_KEY_SIZE]) -> Self {
         Self { bytes }
     }
 
     /// Returns the raw bytes of the key.
+    #[inline]
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; AUTH_KEY_SIZE] {
         &self.bytes

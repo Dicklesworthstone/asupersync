@@ -36,12 +36,14 @@ pub struct SymbolAssigner {
 
 impl SymbolAssigner {
     /// Creates a new assigner with the given strategy.
+    #[inline]
     #[must_use]
     pub const fn new(strategy: AssignmentStrategy) -> Self {
         Self { strategy }
     }
 
     /// Returns the assignment strategy.
+    #[inline]
     #[must_use]
     pub const fn strategy(&self) -> AssignmentStrategy {
         self.strategy

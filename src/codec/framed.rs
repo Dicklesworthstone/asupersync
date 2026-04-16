@@ -46,6 +46,7 @@ pub struct Framed<T, U> {
 
 impl<T, U> Framed<T, U> {
     /// Creates a new `Framed` with default buffer capacity.
+    #[inline]
     pub fn new(inner: T, codec: U) -> Self {
         Self::with_capacity(inner, codec, DEFAULT_CAPACITY)
     }
@@ -63,6 +64,7 @@ impl<T, U> Framed<T, U> {
     }
 
     /// Returns a reference to the underlying transport.
+    #[inline]
     #[must_use]
     pub fn get_ref(&self) -> &T {
         &self.inner
@@ -74,6 +76,7 @@ impl<T, U> Framed<T, U> {
     }
 
     /// Returns a reference to the codec.
+    #[inline]
     #[must_use]
     pub fn codec(&self) -> &U {
         &self.codec
@@ -85,18 +88,21 @@ impl<T, U> Framed<T, U> {
     }
 
     /// Returns a reference to the read buffer.
+    #[inline]
     #[must_use]
     pub fn read_buffer(&self) -> &BytesMut {
         &self.read_buf
     }
 
     /// Returns a reference to the write buffer.
+    #[inline]
     #[must_use]
     pub fn write_buffer(&self) -> &BytesMut {
         &self.write_buf
     }
 
     /// Consumes `self` and returns the transport and codec.
+    #[inline]
     pub fn into_inner(self) -> T {
         self.inner
     }

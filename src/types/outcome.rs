@@ -110,6 +110,7 @@ pub struct PanicPayload {
 
 impl PanicPayload {
     /// Creates a new panic payload with the given message.
+    #[inline]
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -118,6 +119,7 @@ impl PanicPayload {
     }
 
     /// Returns the panic message.
+    #[inline]
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
@@ -125,6 +127,7 @@ impl PanicPayload {
 }
 
 impl fmt::Display for PanicPayload {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "panic: {}", self.message)
     }
@@ -177,6 +180,7 @@ impl Severity {
     /// Creates a Severity from a numeric value.
     ///
     /// Returns `None` if the value is out of range (> 3).
+    #[inline]
     #[must_use]
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -190,6 +194,7 @@ impl Severity {
 }
 
 impl fmt::Display for Severity {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ok => write!(f, "ok"),
@@ -221,6 +226,7 @@ where
     T: PartialEq,
     E: PartialEq,
 {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Ok(a), Self::Ok(b)) => a == b,
@@ -530,6 +536,7 @@ impl<T, E> Outcome<T, E> {
     /// let result: Result<i32, &str> = cancelled.ok_or_else(|| "was cancelled");
     /// assert_eq!(result, Err("was cancelled"));
     /// ```
+    #[inline]
     pub fn ok_or_else<F2, G: FnOnce() -> F2>(self, f: G) -> Result<T, F2> {
         match self {
             Self::Ok(v) => Ok(v),
@@ -573,6 +580,7 @@ impl<T, E> Outcome<T, E> {
     /// reason has strictly higher severity and therefore strengthens the result.
     /// This is intentional: join is associative on severity, but not fully
     /// value-commutative. See `law.join.assoc` (#42).
+    #[inline]
     #[must_use]
     pub fn join(self, other: Self) -> Self {
         match (self, other) {
@@ -601,6 +609,7 @@ impl<T, E> Outcome<T, E> {
     /// # Panics
     ///
     /// Panics if the outcome is not `Ok`.
+    #[inline]
     #[track_caller]
     pub fn unwrap(self) -> T
     where
@@ -636,6 +645,7 @@ impl<T, E> Outcome<T, E> {
 }
 
 impl<T, E> From<Result<T, E>> for Outcome<T, E> {
+    #[inline]
     fn from(result: Result<T, E>) -> Self {
         match result {
             Ok(v) => Self::Ok(v),
@@ -673,6 +683,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for OutcomeError<E> {}
 ///
 /// When both outcomes are `Cancelled`, a strictly stronger [`CancelReason`] is
 /// kept. Equal-severity cancellation ties remain left-biased.
+#[inline]
 pub fn join_outcomes<T, E>(a: Outcome<T, E>, b: Outcome<T, E>) -> Outcome<T, E> {
     a.join(b)
 }

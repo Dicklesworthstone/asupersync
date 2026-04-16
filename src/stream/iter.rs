@@ -17,6 +17,7 @@ pub struct Iter<I> {
 
 impl<I> Iter<I> {
     /// Creates a new `Iter` stream from an iterator.
+    #[inline]
     pub(crate) fn new(iter: I) -> Self {
         Self { iter }
     }
@@ -52,6 +53,7 @@ impl<I: Iterator> Stream for Iter<I> {
 /// let stream = iter(vec![1, 2, 3]);
 /// // stream.next().await returns Some(1), Some(2), Some(3), None
 /// ```
+#[inline]
 pub fn iter<I>(i: I) -> Iter<I::IntoIter>
 where
     I: IntoIterator,

@@ -36,8 +36,13 @@
 //! ```
 
 pub mod analyzer_plugin;
+pub mod cancellation_analyzer;
+pub mod cancellation_debt_monitor;
+pub mod cancellation_tracer;
+pub mod cancellation_visualizer;
 pub mod collector;
 pub mod context;
+pub mod debt_runtime_integration;
 pub mod diagnostics;
 pub mod entry;
 pub mod level;
@@ -45,8 +50,11 @@ pub mod metrics;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
+pub mod otel_structured_concurrency;
 pub mod resource_accounting;
+pub mod runtime_integration;
 pub mod spectral_health;
+pub mod structured_cancellation_analyzer;
 pub mod task_inspector;
 
 pub use analyzer_plugin::{
@@ -57,8 +65,29 @@ pub use analyzer_plugin::{
     PluginExecutionState, PluginLifecycleEvent, PluginLifecyclePhase, PluginRegistrationError,
     SchemaDecision, SchemaNegotiation, negotiate_schema_version, run_analyzer_plugin_pack_smoke,
 };
+pub use cancellation_analyzer::{
+    AnalyzerConfig as CancellationAnalyzerConfig, BottleneckAnalysis, CancellationAnalyzer,
+    CleanupEfficiency, CleanupTimingAnalysis, DistributionStats, EntityPerformance,
+    ImplementationComplexity, OptimizationRecommendation, PerformanceAnalysis,
+    PerformanceRegression, RecommendationPriority, ThroughputMetrics, TrendAnalysis,
+    TrendDirection,
+};
+pub use cancellation_debt_monitor::{
+    CancellationDebtConfig, CancellationDebtMonitor, DebtAlert, DebtAlertLevel, DebtSnapshot,
+    PendingWork, WorkType,
+};
+pub use cancellation_tracer::{
+    CancellationAnalysis, CancellationTrace, CancellationTraceStep, CancellationTracer,
+    CancellationTracerConfig, CancellationTracerStats, CancellationTracerStatsSnapshot, EntityType,
+    PropagationAnomaly, TraceId, analyze_cancellation_patterns,
+};
+pub use cancellation_visualizer::{
+    AnomalyInfo, AnomalySeverity, BottleneckInfo, CancellationDashboard, CancellationTreeNode,
+    CancellationVisualizer, ThroughputStats, TimingFormat, VisualizerConfig,
+};
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
+pub use debt_runtime_integration::{DebtHealthReport, DebtRuntimeIntegration};
 pub use diagnostics::{
     BlockReason, CancelReasonInfo, CancellationExplanation, CancellationStep, DeadlockCycle,
     DeadlockSeverity, Diagnostics, DirectionalDeadlockReport, ObligationLeak, Reason,
@@ -80,8 +109,15 @@ pub use otel::{
     CardinalityOverflow, ExportError, InMemoryExporter, MetricsConfig, MetricsExporter,
     MetricsSnapshot, MultiExporter, NullExporter, OtelMetrics, SamplingConfig, StdoutExporter,
 };
+pub use otel_structured_concurrency::{
+    EntityId, SpanType, OtelStructuredConcurrencyConfig, SpanStorage,
+};
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
+};
+pub use structured_cancellation_analyzer::{
+    AlertSeverity, AlertType, CancellationAlert, LabRuntimeIntegration, RealTimeStats,
+    StructuredCancellationAnalyzer, StructuredCancellationConfig,
 };
 pub use task_inspector::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire,

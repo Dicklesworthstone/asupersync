@@ -20,6 +20,7 @@ pub struct Then<S, Fut, F> {
 }
 
 impl<S, Fut, F> Then<S, Fut, F> {
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,
@@ -27,6 +28,24 @@ impl<S, Fut, F> Then<S, Fut, F> {
             pending: None,
             done: false,
         }
+    }
+
+    /// Returns a reference to the underlying stream.
+    #[inline]
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Consumes the combinator, returning the underlying stream.
+    #[inline]
+    pub fn into_inner(self) -> S {
+        self.stream
     }
 }
 
@@ -70,6 +89,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.done {
             return (0, Some(0));

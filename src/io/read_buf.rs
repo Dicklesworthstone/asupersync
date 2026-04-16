@@ -13,6 +13,7 @@ pub struct ReadBuf<'a> {
 impl<'a> ReadBuf<'a> {
     /// Creates a new `ReadBuf` wrapping the given buffer.
     #[must_use]
+    #[inline]
     pub fn new(buf: &'a mut [u8]) -> Self {
         let initialized = buf.len();
         Self {
@@ -24,23 +25,27 @@ impl<'a> ReadBuf<'a> {
 
     /// Returns the filled portion of the buffer.
     #[must_use]
+    #[inline]
     pub fn filled(&self) -> &[u8] {
         &self.buf[..self.filled]
     }
 
     /// Returns the filled portion of the buffer as mutable.
     #[must_use]
+    #[inline]
     pub fn filled_mut(&mut self) -> &mut [u8] {
         &mut self.buf[..self.filled]
     }
 
     /// Returns the unfilled portion of the buffer.
     #[must_use]
+    #[inline]
     pub fn unfilled(&mut self) -> &mut [u8] {
         &mut self.buf[self.filled..self.initialized]
     }
 
     /// Copies a slice into the unfilled portion.
+    #[inline]
     pub fn put_slice(&mut self, src: &[u8]) {
         assert!(src.len() <= self.remaining(), "ReadBuf overflow");
         let dst = &mut self.unfilled()[..src.len()];
@@ -49,6 +54,7 @@ impl<'a> ReadBuf<'a> {
     }
 
     /// Advances the filled cursor by `n` bytes.
+    #[inline]
     pub fn advance(&mut self, n: usize) {
         assert!(n <= self.remaining(), "ReadBuf overflow");
         self.filled += n;
@@ -56,6 +62,7 @@ impl<'a> ReadBuf<'a> {
 
     /// Returns remaining capacity.
     #[must_use]
+    #[inline]
     pub fn remaining(&self) -> usize {
         self.initialized.saturating_sub(self.filled)
     }

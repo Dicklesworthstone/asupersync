@@ -23,6 +23,7 @@ impl LocalTaskStore {
         }
     }
 
+    #[inline]
     fn insert(&mut self, task_id: TaskId, task: LocalStoredTask) -> Option<LocalStoredTask> {
         let slot = task_id.arena_index().index() as usize;
         if slot >= self.slots.len() {
@@ -43,6 +44,7 @@ impl LocalTaskStore {
         prev
     }
 
+    #[inline]
     fn remove(&mut self, task_id: TaskId) -> Option<LocalStoredTask> {
         let slot = task_id.arena_index().index() as usize;
         let slot_ref = self.slots.get_mut(slot)?;
@@ -55,6 +57,7 @@ impl LocalTaskStore {
         }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.len
     }
@@ -69,6 +72,7 @@ thread_local! {
 ///
 /// If a task with the same ID already exists, it is replaced and a warning is emitted.
 /// Reusing the same arena slot with a different generation fails closed.
+#[inline]
 pub fn store_local_task(task_id: TaskId, mut task: LocalStoredTask) {
     task.set_task_id(task_id);
     LOCAL_TASKS.with(|tasks| {

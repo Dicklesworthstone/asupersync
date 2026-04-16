@@ -133,12 +133,14 @@ impl CompiledApp {
 
     /// Application name.
     #[must_use]
+    #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// The compiled supervisor for the app's root supervisor.
     #[must_use]
+    #[inline]
     pub fn compiled_supervisor(&self) -> &CompiledSupervisor {
         &self.compiled_supervisor
     }
@@ -382,18 +384,21 @@ impl AppHandle {
 
     /// Application name.
     #[must_use]
+    #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// The root region owned by this application.
     #[must_use]
+    #[inline]
     pub fn root_region(&self) -> RegionId {
         self.root_region
     }
 
     /// The supervisor handle for the app's root supervisor.
     #[must_use]
+    #[inline]
     pub fn supervisor(&self) -> &SupervisorHandle {
         &self.supervisor
     }

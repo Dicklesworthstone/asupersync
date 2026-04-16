@@ -265,12 +265,14 @@ impl RobustSoliton {
 
     /// Number of input symbols (K).
     #[must_use]
+    #[inline]
     pub fn k(&self) -> usize {
         self.k
     }
 
     /// Maximum possible degree (equals K).
     #[must_use]
+    #[inline]
     pub fn max_degree(&self) -> usize {
         self.k
     }
@@ -933,18 +935,21 @@ impl SystematicEncoder {
     ///
     /// Panics if `i >= L`.
     #[must_use]
+    #[inline]
     pub fn intermediate_symbol(&self, i: usize) -> &[u8] {
         &self.intermediate[i]
     }
 
     /// Returns the current encoding statistics.
     #[must_use]
+    #[inline]
     pub fn stats(&self) -> &EncodingStats {
         &self.stats
     }
 
     /// Returns the seed used for encoding.
     #[must_use]
+    #[inline]
     pub const fn seed(&self) -> u64 {
         self.seed
     }

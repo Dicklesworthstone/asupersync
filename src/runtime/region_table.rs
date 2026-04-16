@@ -60,6 +60,7 @@ pub struct RegionTable {
 impl RegionTable {
     /// Creates an empty region table.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self {
             regions: Arena::new(),
@@ -84,6 +85,7 @@ impl RegionTable {
     }
 
     /// Inserts a new region record into the arena.
+    #[inline]
     pub fn insert(&mut self, mut record: RegionRecord) -> ArenaIndex {
         self.regions.insert_with(|idx| {
             record.id = RegionId::from_arena(idx);
@@ -94,6 +96,7 @@ impl RegionTable {
     /// Inserts a new region record produced by `f` into the arena.
     ///
     /// The closure receives the assigned `ArenaIndex`.
+    #[inline]
     pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
     where
         F: FnOnce(ArenaIndex) -> RegionRecord,
@@ -138,6 +141,7 @@ impl RegionTable {
     ///
     /// Callers are responsible for emitting trace events and setting
     /// `root_region` on RuntimeState.
+    #[inline]
     pub fn create_root(&mut self, budget: Budget, now: Time) -> RegionId {
         let idx = self.regions.insert_with(|idx| {
             RegionRecord::new_with_time(RegionId::from_arena(idx), None, budget, now)
@@ -205,6 +209,7 @@ impl RegionTable {
     ///
     /// Returns `false` if the region does not exist.
     #[must_use]
+    #[inline]
     pub fn set_limits(&self, region: RegionId, limits: RegionLimits) -> bool {
         let Some(record) = self.regions.get(region.arena_index()) else {
             return false;

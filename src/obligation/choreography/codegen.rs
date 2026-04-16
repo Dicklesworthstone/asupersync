@@ -472,6 +472,16 @@ fn render_session_type(local: &LocalType) -> String {
     }
 }
 
+fn entry_channel_role(local: &LocalType) -> &'static str {
+    match local {
+        LocalType::Send { .. } | LocalType::InternalChoice { .. } => "Initiator",
+        LocalType::Recv { .. } | LocalType::ExternalChoice { .. } => "Responder",
+        LocalType::Rec { body, .. } => entry_channel_role(body),
+        LocalType::Compensate { forward, .. } => entry_channel_role(forward),
+        LocalType::RecVar { .. } | LocalType::End => "Initiator",
+    }
+}
+
 // ============================================================================
 // Handler code generation
 // ============================================================================
@@ -525,6 +535,7 @@ fn render_handler(
 
     // Session type alias
     let session_ty = render_session_type(local);
+    let entry_role = entry_channel_role(local);
     writeln!(code, "/// Session type for {participant} in {protocol}.").ok();
     writeln!(code, "pub type {participant}_Session = {session_ty};").ok();
     writeln!(code).ok();
@@ -536,7 +547,7 @@ fn render_handler(
     )
     .ok();
     writeln!(code, "pub async fn {fn_name}(").ok();
-    writeln!(code, "    chan: Chan<Initiator, {participant}_Session>,").ok();
+    writeln!(code, "    chan: Chan<{entry_role}, {participant}_Session>,").ok();
     writeln!(code, ") {{").ok();
 
     render_handler_body(local, &mut code, 1);
@@ -858,6 +869,18 @@ mod tests {
         assert!(code.contains("chan.send("));
         assert!(code.contains("chan.select_left()"));
         assert!(code.contains("chan.close()"));
+    }
+
+    #[test]
+    fn generated_handler_uses_responder_channel_for_receiver_projection() {
+        let protocol = example_two_phase_commit();
+        let output = compiler()
+            .compile(&protocol, "worker")
+            .expect("compilation failed");
+        let code = output.render();
+
+        assert!(code.contains("chan: Chan<Responder, worker_Session>"));
+        assert!(!code.contains("chan: Chan<Initiator, worker_Session>"));
     }
 
     #[test]

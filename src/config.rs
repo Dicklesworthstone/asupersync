@@ -124,6 +124,7 @@ pub struct ServerConfig {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Default for ServerConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             bind_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
@@ -139,6 +140,7 @@ impl Default for ServerConfig {
 #[cfg(not(target_arch = "wasm32"))]
 impl ServerConfig {
     /// Create a server config from a deployment profile.
+    #[inline]
     #[must_use]
     pub fn from_profile(profile: ServerProfile) -> Self {
         match profile {
@@ -179,6 +181,7 @@ impl ServerConfig {
     }
 
     /// Set the bind address.
+    #[inline]
     #[must_use]
     pub fn bind_addr(mut self, addr: SocketAddr) -> Self {
         self.bind_addr = addr;
@@ -186,6 +189,7 @@ impl ServerConfig {
     }
 
     /// Set the HTTP configuration.
+    #[inline]
     #[must_use]
     pub fn http(mut self, config: Http1Config) -> Self {
         self.http = config;
@@ -193,6 +197,7 @@ impl ServerConfig {
     }
 
     /// Set the listener configuration.
+    #[inline]
     #[must_use]
     pub fn listener(mut self, config: Http1ListenerConfig) -> Self {
         self.listener = config;
@@ -200,6 +205,7 @@ impl ServerConfig {
     }
 
     /// Set the connection pool configuration.
+    #[inline]
     #[must_use]
     pub fn pool(mut self, config: PoolConfig) -> Self {
         self.pool = config;
@@ -207,6 +213,7 @@ impl ServerConfig {
     }
 
     /// Set the shutdown timeout.
+    #[inline]
     #[must_use]
     pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
@@ -214,6 +221,7 @@ impl ServerConfig {
     }
 
     /// Set the worker thread count.
+    #[inline]
     #[must_use]
     pub fn worker_threads(mut self, threads: Option<usize>) -> Self {
         self.worker_threads = threads;
@@ -267,6 +275,7 @@ pub struct EncodingConfig {
 }
 
 impl Default for EncodingConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             repair_overhead: 1.05,
@@ -298,6 +307,7 @@ pub struct TransportConfig {
 }
 
 impl Default for TransportConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             max_paths: 4,
@@ -313,6 +323,7 @@ impl Default for TransportConfig {
 
 impl TransportConfig {
     /// Produces an aggregator configuration with deterministic conservative fallbacks.
+    #[inline]
     #[must_use]
     pub fn aggregator_config(&self) -> AggregatorConfig {
         let path_policy = match self.path_strategy {
@@ -348,6 +359,7 @@ pub struct BackoffConfig {
 }
 
 impl Default for BackoffConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             initial_delay: Duration::from_millis(100),
@@ -367,6 +379,7 @@ pub struct AdaptiveConfig {
 }
 
 impl Default for AdaptiveConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             min_samples: 16,

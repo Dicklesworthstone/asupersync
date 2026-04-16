@@ -47,6 +47,7 @@ pub enum LockError {
 }
 
 impl std::fmt::Display for LockError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Poisoned => write!(f, "mutex poisoned"),
@@ -68,6 +69,7 @@ pub enum TryLockError {
 }
 
 impl std::fmt::Display for TryLockError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Locked => write!(f, "mutex is locked"),
@@ -111,6 +113,7 @@ struct Waiter {
 
 impl<T> Mutex<T> {
     /// Creates a new mutex in an unlocked state.
+    #[inline]
     #[must_use]
     pub fn new(value: T) -> Self {
         Self {
@@ -139,12 +142,14 @@ impl<T> Mutex<T> {
     }
 
     /// Returns the number of tasks currently waiting for the lock.
+    #[inline]
     #[must_use]
     pub fn waiters(&self) -> usize {
         self.state.lock().waiters.len()
     }
 
     /// Acquires the mutex asynchronously.
+    #[inline]
     pub fn lock<'a, 'b>(&'a self, cx: &'b Cx) -> LockFuture<'a, 'b, T> {
         LockFuture {
             mutex: self,
@@ -155,6 +160,7 @@ impl<T> Mutex<T> {
     }
 
     /// Tries to acquire the mutex without waiting.
+    #[inline]
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
@@ -171,17 +177,20 @@ impl<T> Mutex<T> {
     }
 
     /// Returns a mutable reference to the underlying data.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         assert!(!self.is_poisoned(), "mutex is poisoned");
         self.data.get_mut()
     }
 
     /// Consumes the mutex, returning the underlying data.
+    #[inline]
     pub fn into_inner(self) -> T {
         assert!(!self.is_poisoned(), "mutex is poisoned");
         self.data.into_inner()
     }
 
+    #[inline]
     fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
     }
@@ -204,6 +213,7 @@ impl<T> Mutex<T> {
 }
 
 impl<T: Default> Default for Mutex<T> {
+    #[inline]
     fn default() -> Self {
         Self::new(T::default())
     }
@@ -218,6 +228,7 @@ pub struct LockFuture<'a, 'b, T> {
 }
 
 impl<T> LockFuture<'_, '_, T> {
+    #[inline]
     fn cleanup_waiter(&mut self) {
         if let Some(waiter_id) = self.waiter_id.take() {
             let waker_to_wake = {
@@ -397,6 +408,7 @@ impl<T> OwnedMutexGuard<T> {
     }
 
     /// Tries to acquire the mutex without waiting.
+    #[inline]
     pub fn try_lock(mutex: Arc<Mutex<T>>) -> Result<Self, TryLockError> {
         {
             let mut state = mutex.state.lock();

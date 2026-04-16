@@ -73,6 +73,9 @@ config-file = ["dep:toml"]
 # Enable lock contention metrics for ContendedMutex (wait/hold time tracking).
 # Zero cost when disabled. Used for sharding before/after comparison.
 lock-metrics = []
+# Enable real-time obligation leak detection with stack traces and region boundary checks.
+# Zero cost when disabled. Adds comprehensive tracking and attribution for debugging obligation leaks.
+obligation-leak-detection = []
 # Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls
@@ -105,6 +108,8 @@ compression = ["dep:flate2", "dep:brotli"]
 simd-intrinsics = []
 # Enable Loom concurrency tests for scheduler verification.
 loom-tests = ["dep:loom"]
+# Enable Cancel-Correctness Property Oracle for cancellation protocol verification.
+cancel-correctness-oracle = []
 
 [lib]
 path = "src/lib.rs"
@@ -257,11 +262,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "testing"] }
 lz4_flex = "0.12"
 toml = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.14"
 rayon = "1.11"
 serde_yaml = "0.9"
 flate2 = "1.1"
+# Golden snapshot testing for encoded blocks and artifacts
+insta = { version = "1.40", features = ["json"] }
 
 [[bench]]
 name = "phase0_baseline"

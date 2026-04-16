@@ -24,6 +24,7 @@ pub struct Skip<S> {
 }
 
 impl<S> Skip<S> {
+    #[inline]
     pub(crate) fn new(stream: S, remaining: usize) -> Self {
         Self {
             stream,
@@ -73,6 +74,7 @@ impl<S: Stream> Stream for Skip<S> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.exhausted {
             return (0, Some(0));
@@ -97,6 +99,7 @@ pub struct SkipWhile<S, F> {
 }
 
 impl<S, F> SkipWhile<S, F> {
+    #[inline]
     pub(crate) fn new(stream: S, predicate: F) -> Self {
         Self {
             stream,
@@ -156,6 +159,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.exhausted {
             return (0, Some(0));

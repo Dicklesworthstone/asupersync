@@ -72,6 +72,7 @@ pub struct TaskHandle<T> {
 
 impl<T> TaskHandle<T> {
     /// Creates a new TaskHandle (internal use).
+    #[inline]
     pub(crate) fn new(
         task_id: TaskId,
         receiver: oneshot::Receiver<Result<T, JoinError>>,
@@ -153,6 +154,7 @@ impl<T> TaskHandle<T> {
     /// should be used if the join future is dropped before completion. This is
     /// useful for combinators like `race` that want to attribute cancellation
     /// to "losing the race".
+    #[inline]
     #[must_use]
     pub fn join_with_drop_reason<'a>(
         &'a mut self,
@@ -206,6 +208,7 @@ impl<T> TaskHandle<T> {
     ///
     /// This is a request - the task may not stop immediately. The task
     /// will observe the cancellation at its next checkpoint.
+    #[inline]
     pub fn abort(&self) {
         self.abort_with_reason(CancelReason::user("abort"));
     }
@@ -214,6 +217,7 @@ impl<T> TaskHandle<T> {
     ///
     /// If a reason is already present, this request strengthens it using
     /// [`CancelReason::strengthen`], preserving deterministic attribution.
+    #[inline]
     pub fn abort_with_reason(&self, reason: CancelReason) {
         if let Some(inner) = self.inner.upgrade() {
             let cancel_waker = {
@@ -234,6 +238,7 @@ impl<T> TaskHandle<T> {
         }
     }
 
+    #[inline]
     fn closed_reason(&self) -> CancelReason {
         self.inner
             .upgrade()
@@ -255,6 +260,7 @@ pub struct JoinFuture<'a, T> {
 }
 
 impl<T> JoinFuture<'_, T> {
+    #[inline]
     fn closed_reason(&self) -> CancelReason {
         self.cx_inner
             .upgrade()
@@ -283,6 +289,7 @@ impl<T> JoinFuture<'_, T> {
     }
 
     /// Prevents drop-triggered abort for internal combinator control flow.
+    #[inline]
     pub(crate) fn defuse_drop_abort(&mut self) {
         self.drop_abort_defused = true;
     }

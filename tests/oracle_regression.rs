@@ -39,7 +39,7 @@ fn run_meta_suite(seed: u64) -> asupersync::lab::meta::MetaReport {
 
 /// Generate a clean oracle report at the given time.
 fn clean_report(nanos: u64) -> OracleReport {
-    let suite = OracleSuite::new();
+    let mut suite = OracleSuite::new();
     suite.report(Time::from_nanos(nanos))
 }
 

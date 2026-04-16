@@ -70,12 +70,14 @@ impl Console {
 
     /// Returns the detected terminal capabilities.
     #[must_use]
+    #[inline]
     pub fn capabilities(&self) -> &Capabilities {
         &self.caps
     }
 
     /// Returns the current color mode.
     #[must_use]
+    #[inline]
     pub fn color_mode(&self) -> ColorMode {
         self.color_mode
     }
@@ -520,12 +522,14 @@ impl Text {
 
     /// Access the raw content.
     #[must_use]
+    #[inline]
     pub fn content(&self) -> &str {
         &self.content
     }
 
     /// Access the style.
     #[must_use]
+    #[inline]
     pub fn style(&self) -> &Style {
         &self.style
     }

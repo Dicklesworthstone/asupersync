@@ -68,6 +68,7 @@ where
     R1: AsyncRead + Unpin,
     R2: AsyncRead + Unpin,
 {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -125,6 +126,7 @@ impl<R> AsyncRead for Take<R>
 where
     R: AsyncRead + Unpin,
 {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -162,6 +164,7 @@ where
 }
 
 impl AsyncRead for &[u8] {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -184,6 +187,7 @@ impl<T> AsyncRead for std::io::Cursor<T>
 where
     T: AsRef<[u8]> + Unpin,
 {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -202,6 +206,7 @@ impl<R> AsyncRead for &mut R
 where
     R: AsyncRead + Unpin + ?Sized,
 {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -216,6 +221,7 @@ impl<R> AsyncRead for Box<R>
 where
     R: AsyncRead + Unpin + ?Sized,
 {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -231,6 +237,7 @@ where
     P: DerefMut<Target = R> + Unpin,
     R: AsyncRead + ?Sized,
 {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -257,6 +264,7 @@ impl<R> AsyncReadVectored for &mut R
 where
     R: AsyncReadVectored + Unpin + ?Sized,
 {
+    #[inline]
     fn poll_read_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -271,6 +279,7 @@ impl<R> AsyncReadVectored for Box<R>
 where
     R: AsyncReadVectored + Unpin + ?Sized,
 {
+    #[inline]
     fn poll_read_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -286,6 +295,7 @@ where
     P: DerefMut<Target = R> + Unpin,
     R: AsyncReadVectored + ?Sized,
 {
+    #[inline]
     fn poll_read_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

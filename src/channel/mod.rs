@@ -52,6 +52,18 @@ pub mod watch;
 #[path = "deadlock_test.rs"]
 mod deadlock_test;
 
+#[cfg(test)]
+#[path = "atomicity_test.rs"]
+mod atomicity_test;
+
+#[cfg(test)]
+#[path = "stress_test.rs"]
+mod stress_test;
+
+#[cfg(test)]
+#[path = "verification_suite.rs"]
+mod verification_suite;
+
 // Re-export commonly used types from mpsc (the default channel)
 pub use mpsc::{Receiver, SendPermit, Sender, channel};
 pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};

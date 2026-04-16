@@ -82,6 +82,7 @@ pub struct Arena<T> {
 }
 
 impl<T> Default for Arena<T> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -90,6 +91,7 @@ impl<T> Default for Arena<T> {
 impl<T> Arena<T> {
     /// Creates a new empty arena.
     #[must_use]
+    #[inline]
     pub const fn new() -> Self {
         Self {
             slots: Vec::new(),
@@ -100,6 +102,7 @@ impl<T> Arena<T> {
 
     /// Creates a new arena with the specified capacity.
     #[must_use]
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             slots: Vec::with_capacity(capacity),
@@ -165,6 +168,7 @@ impl<T> Arena<T> {
     ///
     /// The closure receives the assigned `ArenaIndex`, allowing callers to
     /// construct records that embed their final ID without placeholder updates.
+    #[inline]
     pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
     where
         F: FnOnce(ArenaIndex) -> T,
@@ -207,6 +211,7 @@ impl<T> Arena<T> {
     /// Removes the value at the given index and returns it.
     ///
     /// Returns `None` if the index is invalid or the slot is vacant.
+    #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<T> {
         let slot = self.slots.get_mut(index.index as usize)?;
 
@@ -371,6 +376,7 @@ impl<T> Arena<T> {
     }
 
     /// Returns true if the index is valid and points to an occupied slot.
+    #[inline]
     #[must_use]
     pub fn contains(&self, index: ArenaIndex) -> bool {
         self.get(index).is_some()
@@ -449,6 +455,7 @@ impl<T> Iterator for DrainValues<'_, T> {
         None
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, Some(self.arena.len))
     }

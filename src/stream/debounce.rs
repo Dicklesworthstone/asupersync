@@ -71,11 +71,13 @@ impl<S: Stream + std::fmt::Debug> std::fmt::Debug for Debounce<S> {
 
 impl<S: Stream> Debounce<S> {
     /// Creates a new `Debounce` stream.
+    #[inline]
     pub(crate) fn new(stream: S, period: Duration) -> Self {
         Self::with_time_getter(stream, period, wall_clock_now)
     }
 
     /// Creates a new `Debounce` stream with a custom time source.
+    #[inline]
     pub fn with_time_getter(stream: S, period: Duration, time_getter: fn() -> Time) -> Self {
         Self {
             stream,
@@ -88,21 +90,25 @@ impl<S: Stream> Debounce<S> {
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
 
     /// Returns the configured time source.
+    #[inline]
     pub const fn time_getter(&self) -> fn() -> Time {
         self.time_getter
     }
@@ -111,6 +117,7 @@ impl<S: Stream> Debounce<S> {
 impl<S: Stream> Stream for Debounce<S> {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
 

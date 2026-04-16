@@ -63,6 +63,7 @@ pub struct Join<A, B> {
 
 impl<A, B> Join<A, B> {
     /// Creates a new join combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -73,6 +74,7 @@ impl<A, B> Join<A, B> {
 }
 
 impl<A, B> Default for Join<A, B> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -114,6 +116,7 @@ pub struct JoinAll<T> {
 
 impl<T> JoinAll<T> {
     /// Creates a new N-way join combinator (internal use).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self { _t: PhantomData }

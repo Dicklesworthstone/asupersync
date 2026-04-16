@@ -32,6 +32,7 @@ pub struct PoolConfig {
 impl PoolConfig {
     /// Creates a new pool configuration.
     #[must_use]
+    #[inline]
     pub const fn new(
         symbol_size: u16,
         initial_size: usize,
@@ -91,6 +92,7 @@ pub struct SymbolBuffer {
 impl SymbolBuffer {
     /// Creates a new zero-initialized buffer of the given size.
     #[must_use]
+    #[inline]
     pub fn new(symbol_size: u16) -> Self {
         let size = usize::from(symbol_size);
         Self {
@@ -102,23 +104,27 @@ impl SymbolBuffer {
 
     /// Returns the length of the buffer in bytes.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
     /// Returns true if the buffer is empty.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
     /// Returns a shared view of the buffer.
     #[must_use]
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
 
     /// Returns a mutable view of the buffer.
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.data
     }
@@ -179,6 +185,7 @@ pub struct SymbolPool {
 impl SymbolPool {
     /// Creates a new symbol pool using the provided configuration.
     #[must_use]
+    #[inline]
     pub fn new(mut config: PoolConfig) -> Self {
         if config.max_size < config.initial_size {
             config.max_size = config.initial_size;
@@ -200,18 +207,21 @@ impl SymbolPool {
 
     /// Returns the current pool configuration.
     #[must_use]
+    #[inline]
     pub fn config(&self) -> &PoolConfig {
         &self.config
     }
 
     /// Returns pool usage statistics.
     #[must_use]
+    #[inline]
     pub fn stats(&self) -> &PoolStats {
         &self.stats
     }
 
     /// Returns the number of buffers currently available in the free list.
     #[must_use]
+    #[inline]
     pub fn free_count(&self) -> usize {
         self.free_list.len()
     }
@@ -338,6 +348,7 @@ impl SymbolPool {
     }
 }
 
+#[inline]
 fn next_symbol_pool_id() -> u64 {
     static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_SYMBOL_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -376,6 +387,7 @@ pub struct ResourceLimits {
 impl ResourceLimits {
     /// Returns true if all limits are zero.
     #[must_use]
+    #[inline]
     pub const fn is_zero(&self) -> bool {
         self.max_symbol_memory == 0
             && self.max_encoding_ops == 0
@@ -410,6 +422,7 @@ pub struct ResourceRequest {
 impl ResourceRequest {
     /// Creates a new resource request.
     #[must_use]
+    #[inline]
     pub const fn new(
         symbol_memory: usize,
         encoding_ops: usize,
@@ -426,6 +439,7 @@ impl ResourceRequest {
 
     /// Returns the requested symbol memory in bytes.
     #[must_use]
+    #[inline]
     pub const fn symbol_memory(&self) -> usize {
         self.symbol_memory
     }
@@ -481,6 +495,7 @@ pub struct ResourceTracker {
 impl ResourceTracker {
     /// Creates a new tracker with the given limits.
     #[must_use]
+    #[inline]
     pub fn new(limits: ResourceLimits) -> Self {
         Self {
             limits,
@@ -491,24 +506,28 @@ impl ResourceTracker {
 
     /// Creates a shared tracker wrapped in `Arc<parking_lot::Mutex<_>>`.
     #[must_use]
+    #[inline]
     pub fn shared(limits: ResourceLimits) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::new(limits)))
     }
 
     /// Returns the current resource usage.
     #[must_use]
+    #[inline]
     pub fn usage(&self) -> &ResourceUsage {
         &self.current
     }
 
     /// Returns the configured limits.
     #[must_use]
+    #[inline]
     pub fn limits(&self) -> &ResourceLimits {
         &self.limits
     }
 
     /// Checks if a request can be satisfied.
     #[must_use]
+    #[inline]
     pub fn can_acquire(&self, request: &ResourceRequest) -> bool {
         self.check_limits(request).is_ok()
     }
@@ -521,6 +540,7 @@ impl ResourceTracker {
 
     /// Computes the current pressure (0.0 to 1.0).
     #[must_use]
+    #[inline]
     pub fn pressure(&self) -> f64 {
         let mut max_ratio: f64 = 0.0;
         // Per-object limits are checked per request in `check_limits`; they
@@ -730,10 +750,12 @@ impl Drop for ResourceGuard {
     }
 }
 
+#[inline]
 fn exceeds(limit: usize, requested: usize) -> bool {
     limit == 0 && requested > 0 || (limit > 0 && requested > limit)
 }
 
+#[inline]
 fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool {
     if limit == 0 {
         return requested > 0;
@@ -742,6 +764,7 @@ fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool 
 }
 
 #[allow(clippy::cast_precision_loss)]
+#[inline]
 fn ratio(usage: usize, limit: usize) -> f64 {
     if limit == 0 {
         if usage == 0 { 0.0 } else { 1.0 }

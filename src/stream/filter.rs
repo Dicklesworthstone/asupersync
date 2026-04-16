@@ -28,6 +28,7 @@ pub struct Filter<S, P> {
 
 impl<S, P> Filter<S, P> {
     /// Creates a new `Filter` stream.
+    #[inline]
     pub(crate) fn new(stream: S, predicate: P) -> Self {
         Self {
             stream,
@@ -37,16 +38,19 @@ impl<S, P> Filter<S, P> {
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -87,6 +91,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.exhausted {
             return (0, Some(0));
@@ -112,6 +117,7 @@ pub struct FilterMap<S, F> {
 
 impl<S, F> FilterMap<S, F> {
     /// Creates a new `FilterMap` stream.
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,
@@ -121,16 +127,19 @@ impl<S, F> FilterMap<S, F> {
     }
 
     /// Returns a reference to the underlying stream.
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
 
     /// Returns a mutable reference to the underlying stream.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.stream
     }
 
     /// Consumes the combinator, returning the underlying stream.
+    #[inline]
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -171,6 +180,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.exhausted {
             return (0, Some(0));

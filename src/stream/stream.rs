@@ -49,6 +49,7 @@ pub trait Stream {
     ///
     /// The default implementation returns `(0, None)` which is correct for any
     /// stream.
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, None)
     }
@@ -118,6 +119,7 @@ mod tests {
         fn wake(self: Arc<Self>) {}
     }
 
+    #[inline]
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
     }
@@ -128,6 +130,7 @@ mod tests {
     }
 
     impl TestStream {
+        #[inline]
         fn new(items: Vec<i32>) -> Self {
             Self { items, index: 0 }
         }
@@ -152,6 +155,7 @@ mod tests {
         }
     }
 
+    #[inline]
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);

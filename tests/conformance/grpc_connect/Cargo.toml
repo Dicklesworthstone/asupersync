@@ -1,0 +1,32 @@
+[package]
+name = "grpc-conformance-suite"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+# This is an independent workspace
+
+[dependencies]
+asupersync = { path = "../../../" }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bytes = "1.0"
+http = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+clap = { version = "4.0", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bin]]
+name = "grpc-connect-server"
+path = "src/bin/connect_server.rs"
+
+[[bin]]
+name = "conformance-runner"
+path = "src/bin/conformance_runner.rs"

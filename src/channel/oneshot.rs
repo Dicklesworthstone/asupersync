@@ -60,6 +60,7 @@ pub enum SendError<T> {
 }
 
 impl<T> std::fmt::Display for SendError<T> {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disconnected(_) => write!(f, "sending on a closed oneshot channel"),
@@ -81,6 +82,7 @@ pub enum RecvError {
 }
 
 impl std::fmt::Display for RecvError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "receiving on a closed oneshot channel"),
@@ -102,6 +104,7 @@ pub enum TryRecvError {
 }
 
 impl std::fmt::Display for TryRecvError {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "oneshot channel is empty"),
@@ -135,6 +138,7 @@ struct OneShotInner<T> {
 }
 
 impl<T> OneShotInner<T> {
+    #[inline]
     fn new() -> Self {
         Self {
             value: None,
@@ -148,22 +152,26 @@ impl<T> OneShotInner<T> {
     }
 
     /// Returns true if the channel is closed (sender gone and no value).
+    #[inline]
     fn is_closed(&self) -> bool {
         self.sender_consumed && !self.permit_outstanding && self.value.is_none()
     }
 
     /// Returns true if a value is ready to receive.
+    #[inline]
     fn is_ready(&self) -> bool {
         self.value.is_some()
     }
 
     /// Clears the registered waker and its waiter identity.
+    #[inline]
     fn clear_waker(&mut self) {
         self.waker = None;
         self.waker_id = None;
     }
 
     /// Takes the registered waker and clears its waiter identity.
+    #[inline]
     fn take_waker(&mut self) -> Option<Waker> {
         self.waker_id = None;
         self.waker.take()
@@ -182,6 +190,7 @@ impl<T> OneShotInner<T> {
 /// tx.send(&cx, 42);
 /// let value = rx.recv(&cx).await?;
 /// ```
+#[inline]
 #[must_use]
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Mutex::new(OneShotInner::new()));
@@ -220,6 +229,7 @@ impl<T> Sender<T> {
     /// the sender is still available. After returning, the permit
     /// owns the obligation.
     #[must_use]
+    #[inline]
     pub fn reserve(self, cx: &Cx) -> SendPermit<T> {
         cx.trace("oneshot::reserve creating permit");
 
@@ -337,6 +347,7 @@ impl<T> SendPermit<T> {
     ///
     /// This consumes the permit without sending a value. The receiver
     /// will see a `Closed` error when attempting to receive.
+    #[inline]
     pub fn abort(mut self) {
         let waker = {
             let mut inner = self.inner.lock();
@@ -383,6 +394,7 @@ pub(crate) struct RecvUninterruptibleFuture<'a, T> {
 
 impl<T> RecvUninterruptibleFuture<'_, T> {
     #[must_use]
+    #[inline]
     pub(crate) fn receiver_finished(&self) -> bool {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }
@@ -487,6 +499,7 @@ pub struct RecvFuture<'a, T> {
 impl<T> RecvFuture<'_, T> {
     #[must_use]
     #[allow(dead_code)] // Public API — may be used by future callers
+    #[inline]
     pub(crate) fn receiver_finished(&self) -> bool {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }
@@ -635,6 +648,7 @@ impl<T> Receiver<T> {
     /// Used internally by `TaskHandle::join` which must wait for task termination
     /// to uphold structural guarantees, even if the caller's context is cancelled.
     #[must_use]
+    #[inline]
     pub(crate) fn recv_uninterruptible(&mut self) -> RecvUninterruptibleFuture<'_, T> {
         RecvUninterruptibleFuture {
             receiver: self,

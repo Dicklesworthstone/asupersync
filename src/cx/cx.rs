@@ -427,12 +427,14 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a cloned handle to the I/O driver, if present.
+    #[inline]
     #[must_use]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.handles.io_driver.clone()
     }
 
     /// Returns a cloned handle to the blocking pool, if present.
+    #[inline]
     #[must_use]
     pub(crate) fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
         self.handles.blocking_pool.clone()
@@ -510,6 +512,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// Returns `None` if no pressure handle was attached to this context.
     #[must_use]
+    #[inline]
     pub fn pressure(&self) -> Option<&SystemPressure> {
         self.handles.pressure.as_deref()
     }
@@ -518,6 +521,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// This is `pub(crate)` so internal wiring (e.g. spawning child tasks) can
     /// inherit remote capability without requiring `Caps: HasRemote` bounds.
+    #[inline]
     #[must_use]
     pub(crate) fn remote_cap_handle(&self) -> Option<Arc<RemoteCap>> {
         self.handles.remote_cap.clone()
@@ -534,12 +538,14 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns the registry capability handle, if attached.
+    #[inline]
     #[must_use]
     pub fn registry_handle(&self) -> Option<RegistryHandle> {
         self.handles.registry.clone()
     }
 
     /// Returns true if a registry handle is attached.
+    #[inline]
     #[must_use]
     pub fn has_registry(&self) -> bool {
         self.handles.registry.is_some()
@@ -623,6 +629,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a cloned handle to the evidence sink, if attached.
+    #[inline]
     #[must_use]
     pub(crate) fn evidence_sink_handle(&self) -> Option<Arc<dyn EvidenceSink>> {
         self.handles.evidence_sink.clone()
@@ -662,12 +669,14 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a reference to the attached Macaroon token, if any.
+    #[inline]
     #[must_use]
     pub fn macaroon(&self) -> Option<&MacaroonToken> {
         self.handles.macaroon.as_deref()
     }
 
     /// Returns a cloned `Arc` handle to the macaroon, if any.
+    #[inline]
     #[must_use]
     #[allow(dead_code)] // Macaroon integration API
     pub(crate) fn macaroon_handle(&self) -> Option<Arc<MacaroonToken>> {
@@ -888,24 +897,28 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns the current logical time without ticking.
+    #[inline]
     #[must_use]
     pub fn logical_now(&self) -> LogicalTime {
         self.handles.logical_clock.now()
     }
 
     /// Returns a clone of the task's logical clock handle.
+    #[inline]
     #[must_use]
     pub(crate) fn logical_clock_handle(&self) -> LogicalClockHandle {
         self.handles.logical_clock.clone()
     }
 
     /// Records a local logical event and returns the updated time.
+    #[inline]
     #[must_use]
     pub fn logical_tick(&self) -> LogicalTime {
         self.handles.logical_clock.tick()
     }
 
     /// Merges a received logical time and returns the updated time.
+    #[inline]
     #[must_use]
     pub fn logical_receive(&self, sender_time: &LogicalTime) -> LogicalTime {
         self.handles.logical_clock.receive(sender_time)
@@ -925,6 +938,7 @@ impl<Caps> Cx<Caps> {
     ///     let handle = timer.register(deadline, waker);
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn timer_driver(&self) -> Option<TimerDriverHandle>
     where
@@ -937,6 +951,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// When true, time operations can use the runtime's timer wheel.
     /// When false, time operations fall back to OS-level timing.
+    #[inline]
     #[must_use]
     pub fn has_timer(&self) -> bool
     where
@@ -969,6 +984,7 @@ impl<Caps> Cx<Caps> {
     ///     Ok(vec![])
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn io(&self) -> Option<&dyn crate::io::IoCap>
     where
@@ -980,6 +996,7 @@ impl<Caps> Cx<Caps> {
     /// Returns true if I/O capability is available.
     ///
     /// Convenience method to check if I/O operations can be performed.
+    #[inline]
     #[must_use]
     pub fn has_io(&self) -> bool
     where
@@ -993,6 +1010,7 @@ impl<Caps> Cx<Caps> {
     /// This is the browser-facing network authority surface. When present,
     /// requests must pass explicit origin/method/credential policy checks
     /// before any host fetch operation is attempted.
+    #[inline]
     #[must_use]
     pub fn fetch_cap(&self) -> Option<&dyn crate::io::FetchIoCap>
     where
@@ -1002,6 +1020,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns true if a fetch adapter capability is available.
+    #[inline]
     #[must_use]
     pub fn has_fetch_cap(&self) -> bool
     where
@@ -1022,6 +1041,7 @@ impl<Caps> Cx<Caps> {
     /// - Production runtime configures remote capability with transport config
     /// - Lab runtime can configure it for deterministic distributed testing
     /// - Code that needs remote spawning must check for this capability
+    #[inline]
     #[must_use]
     pub fn remote(&self) -> Option<&RemoteCap>
     where
@@ -1033,6 +1053,7 @@ impl<Caps> Cx<Caps> {
     /// Returns true if the remote capability is available.
     ///
     /// Convenience method to check if remote task operations can be performed.
+    #[inline]
     #[must_use]
     pub fn has_remote(&self) -> bool
     where
@@ -1120,6 +1141,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// Task types are optional metadata used by adaptive deadline monitoring
     /// and metrics to group similar work.
+    #[inline]
     #[must_use]
     pub fn task_type(&self) -> Option<String> {
         self.inner.read().task_type.clone()
@@ -1385,6 +1407,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Internal: returns current time for checkpointing.
+    #[inline]
     fn current_checkpoint_time(&self) -> Time {
         self.handles
             .timer_driver
@@ -1655,6 +1678,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns the current request correlation ID, if set.
+    #[inline]
     #[must_use]
     pub fn request_id(&self) -> Option<String> {
         self.diagnostic_context()
@@ -1702,6 +1726,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns the current log collector, if attached.
+    #[inline]
     #[must_use]
     pub fn log_collector(&self) -> Option<LogCollector> {
         self.observability.read().collector.clone()
@@ -1714,6 +1739,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns the current trace buffer handle, if attached.
+    #[inline]
     #[must_use]
     pub fn trace_buffer(&self) -> Option<TraceBufferHandle> {
         self.observability.read().trace.clone()
@@ -1726,6 +1752,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns the entropy source for this context.
+    #[inline]
     #[must_use]
     pub fn entropy(&self) -> &dyn EntropySource
     where
@@ -1740,6 +1767,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a cloned entropy handle for capability-aware subsystems.
+    #[inline]
     #[must_use]
     pub(crate) fn entropy_handle(&self) -> Arc<dyn EntropySource>
     where
@@ -2016,6 +2044,7 @@ impl<Caps> Cx<Caps> {
     ///     println!("Cancelled: {:?}", reason.kind);
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn cancel_reason(&self) -> Option<CancelReason> {
         let inner = self.inner.read();

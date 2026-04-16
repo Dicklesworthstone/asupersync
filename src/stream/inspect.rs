@@ -14,12 +14,31 @@ pub struct Inspect<S, F> {
 }
 
 impl<S, F> Inspect<S, F> {
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,
             f,
             exhausted: false,
         }
+    }
+
+    /// Returns a reference to the underlying stream.
+    #[inline]
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Consumes the combinator, returning the underlying stream.
+    #[inline]
+    pub fn into_inner(self) -> S {
+        self.stream
     }
 }
 
@@ -45,6 +64,7 @@ where
         next
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.exhausted {
             (0, Some(0))

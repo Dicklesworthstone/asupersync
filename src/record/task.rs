@@ -99,6 +99,7 @@ impl TaskPhase {
     ///   err/panic during cleanup/finalization.
     /// - `Running → Completed` allows normal completion (Ok/Err/Panic).
     /// - `Completed` is terminal; no further transitions are valid.
+    #[inline]
     #[must_use]
     pub const fn is_valid_transition(self, next: Self) -> bool {
         matches!(
@@ -125,6 +126,7 @@ pub struct TaskPhaseCell {
 
 impl TaskPhaseCell {
     /// Creates a new cell initialized to the given phase.
+    #[inline]
     #[must_use]
     pub fn new(phase: TaskPhase) -> Self {
         Self {
@@ -133,6 +135,7 @@ impl TaskPhaseCell {
     }
 
     /// Loads the current phase.
+    #[inline]
     #[must_use]
     pub fn load(&self) -> TaskPhase {
         match self.inner.load(Ordering::Acquire) {

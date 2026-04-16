@@ -34,6 +34,7 @@ pub struct TaskTable {
 impl TaskTable {
     /// Creates a new empty task table.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self {
             tasks: Arena::new(),
@@ -56,6 +57,7 @@ impl TaskTable {
     }
 
     /// Inserts a task record into the arena (arena-index based).
+    #[inline]
     pub fn insert(&mut self, mut record: TaskRecord) -> ArenaIndex {
         self.tasks.insert_with(|idx| {
             // Canonicalize record.id to its arena slot to keep table invariants intact.
@@ -65,6 +67,7 @@ impl TaskTable {
     }
 
     /// Removes a task record by arena index.
+    #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
         let record = self.tasks.remove(index)?;
         let slot = index.index() as usize;
@@ -81,12 +84,14 @@ impl TaskTable {
 
     /// Returns the number of task records in the arena.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.tasks.len()
     }
 
     /// Returns `true` if the task arena is empty.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
@@ -107,6 +112,7 @@ impl TaskTable {
     /// Inserts a new task record into the arena.
     ///
     /// Returns the assigned arena index.
+    #[inline]
     pub fn insert_task(&mut self, record: TaskRecord) -> ArenaIndex {
         self.insert(record)
     }
@@ -114,6 +120,7 @@ impl TaskTable {
     /// Inserts a new task record produced by `f` into the arena.
     ///
     /// The closure receives the assigned `ArenaIndex`.
+    #[inline]
     pub fn insert_task_with<F>(&mut self, f: F) -> ArenaIndex
     where
         F: FnOnce(ArenaIndex) -> TaskRecord,
@@ -129,6 +136,7 @@ impl TaskTable {
     /// Removes a task record from the arena.
     ///
     /// Returns the removed record if it existed.
+    #[inline]
     pub fn remove_task(&mut self, task_id: TaskId) -> Option<TaskRecord> {
         let record = self.tasks.remove(task_id.arena_index())?;
         let slot = task_id.arena_index().index() as usize;
@@ -139,6 +147,7 @@ impl TaskTable {
     }
 
     /// Stores a spawned task's future for later polling.
+    #[inline]
     pub fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask) {
         // Keep table invariants strict: every stored future must correspond to
         // an existing live task record.
@@ -155,6 +164,7 @@ impl TaskTable {
     }
 
     /// Returns a mutable reference to a stored future.
+    #[inline]
     pub fn get_stored_future(&mut self, task_id: TaskId) -> Option<&mut StoredTask> {
         self.tasks.get(task_id.arena_index())?;
         let slot = task_id.arena_index().index() as usize;
@@ -177,12 +187,14 @@ impl TaskTable {
 
     /// Returns the number of live tasks (tasks in the arena).
     #[must_use]
+    #[inline]
     pub fn live_task_count(&self) -> usize {
         self.tasks.len()
     }
 
     /// Returns the number of stored futures.
     #[must_use]
+    #[inline]
     pub fn stored_future_count(&self) -> usize {
         self.stored_future_len
     }
@@ -206,6 +218,7 @@ impl TaskTable {
 }
 
 impl Default for TaskTable {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -216,6 +229,7 @@ mod tests {
     use super::*;
     use crate::types::{Budget, RegionId};
 
+    #[inline]
     fn make_task_record(owner: RegionId) -> TaskRecord {
         // Use placeholder TaskId (0,0) - will be updated after insertion
         let placeholder = TaskId::from_arena(ArenaIndex::new(0, 0));
