@@ -235,7 +235,8 @@ proptest! {
         frame.encode(&mut encoded);
 
         // Parse the encoded frame back
-        let mut decode_buf = encoded.clone();
+        let mut decode_buf = BytesMut::with_capacity(encoded.len());
+        decode_buf.extend_from_slice(&encoded);
         let header = match FrameHeader::parse(&mut decode_buf) {
             Ok(h) => h,
             Err(e) => {
@@ -326,7 +327,7 @@ proptest! {
         let mut padded_payload = BytesMut::new();
         padded_payload.put_u8(pad_length);  // Padding length
         padded_payload.extend_from_slice(&data);  // Data
-        padded_payload.extend(vec![0u8; pad_length as usize]);  // Padding
+        padded_payload.extend_from_slice(&vec![0u8; pad_length as usize]);  // Padding
 
         let padded_header = FrameHeader {
             length: frame_length(padded_payload.len()),
@@ -348,7 +349,6 @@ proptest! {
         prop_assert_eq!(original.end_stream, padded_frame.end_stream, "Flags should be preserved");
         prop_assert_eq!(original.stream_id, padded_frame.stream_id, "Stream ID should be preserved");
 
-        Ok(())
     }
 }
 
@@ -376,7 +376,7 @@ proptest! {
         let mut padded_payload = BytesMut::new();
         padded_payload.put_u8(pad_length);  // Padding length
         padded_payload.extend_from_slice(&header_block);  // Header block
-        padded_payload.extend(vec![0u8; pad_length as usize]);  // Padding
+        padded_payload.extend_from_slice(&vec![0u8; pad_length as usize]);  // Padding
 
         let padded_header = FrameHeader {
             length: frame_length(padded_payload.len()),
@@ -401,7 +401,6 @@ proptest! {
         prop_assert_eq!(original.end_headers, padded_frame.end_headers, "END_HEADERS flag should be preserved");
         prop_assert_eq!(original.stream_id, padded_frame.stream_id, "Stream ID should be preserved");
 
-        Ok(())
     }
 }
 
@@ -466,7 +465,6 @@ proptest! {
         prop_assert_eq!(complete_frame.stream_id, continuation_frame.stream_id, "Stream ID should match");
         prop_assert_eq!(complete_frame.end_stream, headers_frame.end_stream, "END_STREAM should be preserved");
 
-        Ok(())
     }
 }
 
@@ -544,7 +542,6 @@ proptest! {
             );
         }
 
-        Ok(())
     }
 }
 
@@ -607,7 +604,6 @@ proptest! {
             "Parsed combined frame should equal sum of parsed individual frames"
         );
 
-        Ok(())
     }
 }
 
@@ -660,7 +656,6 @@ proptest! {
             "Combined settings frame should contain all individual settings"
         );
 
-        Ok(())
     }
 }
 
@@ -711,7 +706,6 @@ proptest! {
             let _parsed = parse_frame(&header, payload).unwrap();
         }
 
-        Ok(())
     }
 }
 
@@ -777,7 +771,6 @@ proptest! {
             }
         }
 
-        Ok(())
     }
 }
 
@@ -850,7 +843,8 @@ proptest! {
 
         prop_assert_eq!(
             overhead1, overhead2,
-            "Frame overhead should be consistent for same frame type (overhead1: {overhead1}, overhead2: {overhead2})"
+            "Frame overhead should be consistent for same frame type (overhead1: {}, overhead2: {})",
+            overhead1, overhead2
         );
 
         // Encoded size ratio should equal content size ratio (plus constant overhead)
@@ -860,7 +854,6 @@ proptest! {
             "Encoded size ratio should approximately match content size ratio (content: {content_ratio:.3}, encoded: {encoded_ratio:.3}, diff: {expected_ratio_difference:.3})"
         );
 
-        Ok(())
     }
 }
 

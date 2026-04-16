@@ -618,7 +618,7 @@ mod tests {
     fn test_direct_priority_inversion_detection() {
         let oracle = PriorityInversionOracle::with_defaults();
         let high_task = TaskId::testing_default();
-        let low_task = TaskId(100);
+        let low_task = TaskId::new_for_test(100, 1);
         let resource = ResourceId(1);
 
         // Spawn tasks
@@ -642,7 +642,7 @@ mod tests {
     fn test_inversion_resolution() {
         let oracle = PriorityInversionOracle::with_defaults();
         let high_task = TaskId::testing_default();
-        let low_task = TaskId(100);
+        let low_task = TaskId::new_for_test(100, 1);
         let resource = ResourceId(1);
 
         // Create inversion
@@ -667,7 +667,7 @@ mod tests {
     fn test_no_inversion_when_priorities_equal() {
         let oracle = PriorityInversionOracle::with_defaults();
         let task1 = TaskId::testing_default();
-        let task2 = TaskId(100);
+        let task2 = TaskId::new_for_test(100, 1);
         let resource = ResourceId(1);
 
         oracle.on_task_spawn(task1, Priority::Normal);
@@ -692,7 +692,7 @@ mod tests {
     fn test_oracle_reset() {
         let oracle = PriorityInversionOracle::with_defaults();
         let high_task = TaskId::testing_default();
-        let low_task = TaskId(100);
+        let low_task = TaskId::new_for_test(100, 1);
         let resource = ResourceId(1);
 
         // Create some activity

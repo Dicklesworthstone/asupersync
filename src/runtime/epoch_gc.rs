@@ -68,7 +68,7 @@ impl EpochCounter {
     pub fn new(advance_interval: Duration) -> Self {
         Self {
             global: AtomicU64::new(1), // Start at 1 so epoch 0 can be special
-            last_advance: ContendedMutex::new(Instant::now()),
+            last_advance: ContendedMutex::new("epoch_gc.last_advance", Instant::now()),
             advance_interval,
         }
     }
@@ -83,7 +83,10 @@ impl EpochCounter {
     /// Returns the new epoch value if advanced, or None if no advance occurred.
     pub fn try_advance(&self) -> Option<u64> {
         let now = Instant::now();
-        let mut last_advance = self.last_advance.lock();
+        let mut last_advance = self
+            .last_advance
+            .lock()
+            .expect("epoch_gc last_advance mutex poisoned");
 
         if now.duration_since(*last_advance) >= self.advance_interval {
             let new_epoch = self.global.fetch_add(1, Ordering::AcqRel) + 1;
@@ -95,9 +98,12 @@ impl EpochCounter {
     }
 
     /// Force advance the global epoch (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn force_advance(&self) -> u64 {
-        let mut last_advance = self.last_advance.lock();
+        let mut last_advance = self
+            .last_advance
+            .lock()
+            .expect("epoch_gc last_advance mutex poisoned");
         let new_epoch = self.global.fetch_add(1, Ordering::AcqRel) + 1;
         *last_advance = Instant::now();
         new_epoch
@@ -113,6 +119,7 @@ impl EpochCounter {
 /// Each thread maintains its local epoch to indicate which epoch it's
 /// currently operating in. This enables safe point detection.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct LocalEpoch {
     /// Current local epoch for this thread.
     local: AtomicU64,
@@ -204,7 +211,7 @@ impl CleanupWork {
             CleanupWork::Obligation { id, .. } => format!("obligation:{}", id),
             CleanupWork::WakerCleanup { waker_id, source } => format!("waker:{}:{}", source, waker_id),
             CleanupWork::RegionCleanup { region_id, task_ids } => {
-                format!("region:{}:tasks:{}", region_id.as_u64(), task_ids.len())
+                format!("region:{}:tasks:{}", region_id, task_ids.len())
             }
             CleanupWork::TimerCleanup { timer_id, timer_type } => {
                 format!("timer:{}:{}", timer_type, timer_id)
@@ -238,6 +245,7 @@ impl CleanupWork {
 
 /// Work item with epoch tracking for deferred cleanup.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct EpochWork {
     /// The epoch this work was created in.
     epoch: u64,
@@ -347,15 +355,47 @@ impl CleanupStats {
     }
 }
 
+impl Default for DeferredCleanupQueue {
+    fn default() -> Self {
+        Self::with_config(CleanupConfig::default())
+    }
+}
+
 impl DeferredCleanupQueue {
+    /// Create a new deferred cleanup queue with default configuration.
+    pub fn new() -> Self {
+        Self::with_config(CleanupConfig::default())
+    }
+
     /// Create a new deferred cleanup queue with the given configuration.
-    pub fn new(config: CleanupConfig) -> Self {
+    pub fn with_config(config: CleanupConfig) -> Self {
         Self {
             queue: SegQueue::new(),
             size: AtomicUsize::new(0),
             config,
             stats: CleanupStats::default(),
         }
+    }
+
+    /// Drain all queued work items whose epoch is strictly less than
+    /// `safe_epoch` without executing them. Intended for tests that want to
+    /// inspect what would be cleaned up.
+    pub fn collect_expired(&self, safe_epoch: u64) -> Vec<CleanupWork> {
+        let mut drained = Vec::new();
+        let mut held_back = Vec::new();
+        while let Some(epoch_work) = self.queue.pop() {
+            self.size.fetch_sub(1, Ordering::Relaxed);
+            if epoch_work.epoch < safe_epoch {
+                drained.push(epoch_work.work);
+            } else {
+                held_back.push(epoch_work);
+            }
+        }
+        for epoch_work in held_back {
+            self.size.fetch_add(1, Ordering::Relaxed);
+            self.queue.push(epoch_work);
+        }
+        drained
     }
 
     /// Enqueue cleanup work to be processed later.
@@ -723,7 +763,7 @@ impl EpochGC {
     pub fn with_config(config: CleanupConfig) -> Self {
         Self {
             epoch_counter: Arc::new(EpochCounter::default()),
-            cleanup_queue: Arc::new(DeferredCleanupQueue::new(config)),
+            cleanup_queue: Arc::new(DeferredCleanupQueue::with_config(config)),
             enabled: AtomicUsize::new(1), // Start enabled
         }
     }
@@ -890,7 +930,7 @@ mod tests {
             max_batch_size: 5,
             ..CleanupConfig::default()
         };
-        let queue = DeferredCleanupQueue::new(config);
+        let queue = DeferredCleanupQueue::with_config(config);
 
         // Enqueue some work
         let work1 = CleanupWork::Obligation {
@@ -921,7 +961,7 @@ mod tests {
     #[test]
     fn cleanup_queue_respects_epoch_safety() {
         let config = CleanupConfig::default();
-        let queue = DeferredCleanupQueue::new(config);
+        let queue = DeferredCleanupQueue::with_config(config);
 
         // Enqueue work from different epochs
         let work1 = CleanupWork::Obligation { id: 1, metadata: vec![] };
@@ -955,7 +995,7 @@ mod tests {
             max_queue_size: 2,
             ..CleanupConfig::default()
         };
-        let queue = DeferredCleanupQueue::new(config);
+        let queue = DeferredCleanupQueue::with_config(config);
 
         let work = CleanupWork::Obligation { id: 1, metadata: vec![] };
 
@@ -1006,7 +1046,7 @@ mod tests {
     #[test]
     fn cleanup_stats_calculations() {
         let config = CleanupConfig::default();
-        let queue = DeferredCleanupQueue::new(config);
+        let queue = DeferredCleanupQueue::with_config(config);
 
         // Enqueue and process some work
         for i in 0..10 {
@@ -1030,7 +1070,7 @@ mod tests {
             max_batch_size: 1000,
             ..CleanupConfig::default()
         };
-        let queue = Arc::new(DeferredCleanupQueue::new(config));
+        let queue = Arc::new(DeferredCleanupQueue::with_config(config));
         let epoch_gc = Arc::new(EpochGC::with_config(CleanupConfig {
             max_queue_size: 100_000,
             max_batch_size: 1000,
@@ -1118,8 +1158,8 @@ mod tests {
             // Add work items
             for i in 0..100 {
                 let work = CleanupWork::RegionCleanup {
-                    region_id: RegionId::new(iteration * 100 + i),
-                    task_ids: vec![TaskId::new(i); 10], // 10 tasks per region
+                    region_id: RegionId::new_for_test(iteration * 100 + i, 1),
+                    task_ids: vec![TaskId::new_for_test(i, 1); 10], // 10 tasks per region
                 };
                 let _ = epoch_gc.defer_cleanup(work);
             }
@@ -1277,7 +1317,7 @@ mod tests {
             max_queue_size: 100,
             ..CleanupConfig::default()
         };
-        let queue = DeferredCleanupQueue::new(config);
+        let queue = DeferredCleanupQueue::with_config(config);
 
         let work = CleanupWork::Obligation { id: 1, metadata: vec![0; 1000] };
 

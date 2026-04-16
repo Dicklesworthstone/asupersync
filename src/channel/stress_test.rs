@@ -4,6 +4,8 @@
 //! under extreme concurrent load with cancellation injection to verify atomicity
 //! guarantees hold under all conditions.
 
+#![allow(dead_code)]
+
 use super::atomicity_test::{
     AtomicityOracle, AtomicityTestConfig, CancellationInjector, consumer_task, producer_task,
 };

@@ -29,6 +29,7 @@ impl FrameGoldenTester {
     }
 
     /// Parse hex string to bytes manually.
+    #[allow(dead_code)] // Retained for future golden-diff round-trips.
     fn from_hex(hex: &str) -> Vec<u8> {
         (0..hex.len())
             .step_by(2)

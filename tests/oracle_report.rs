@@ -85,8 +85,8 @@ fn unified_report_deterministic_across_runs() {
     test_phase!("unified_report_deterministic_across_runs");
 
     // Two identical suites should produce identical reports.
-    let suite1 = OracleSuite::new();
-    let suite2 = OracleSuite::new();
+    let mut suite1 = OracleSuite::new();
+    let mut suite2 = OracleSuite::new();
 
     let report1 = suite1.report(Time::from_nanos(100));
     let report2 = suite2.report(Time::from_nanos(100));
@@ -455,8 +455,8 @@ fn evidence_ledger_deterministic() {
     init_test_logging();
     test_phase!("evidence_ledger_deterministic");
 
-    let suite1 = OracleSuite::new();
-    let suite2 = OracleSuite::new();
+    let mut suite1 = OracleSuite::new();
+    let mut suite2 = OracleSuite::new();
     let t = Time::from_nanos(100);
 
     let ledger1 = EvidenceLedger::from_report(&suite1.report(t));

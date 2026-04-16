@@ -667,7 +667,7 @@ impl CancelCorrectnessFuzzer {
 
         let budget = Budget::INFINITE;
         let task = TaskId::testing_default();
-        let cx = Cx::new(region, task, budget);
+        let cx: Cx = Cx::new(region, task, budget);
 
         // Create two controllable futures for join test
         let fut1 = ControllableFuture::new(1);

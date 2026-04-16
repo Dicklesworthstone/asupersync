@@ -679,8 +679,8 @@ impl RuntimeEpochGCIntegration {
     }
 
     /// Get epoch GC statistics.
-    pub fn stats(&self) -> Option<crate::runtime::epoch_gc::CleanupStats> {
-        self.epoch_gc.as_ref().map(|gc| gc.stats().clone())
+    pub fn stats(&self) -> Option<&crate::runtime::epoch_gc::CleanupStats> {
+        self.epoch_gc.as_ref().map(|gc| gc.stats())
     }
 
     /// Check if epoch GC is enabled.

@@ -3248,6 +3248,23 @@ impl ThreeLaneWorker {
         local.pop_timed_only_with_hint(rng_hint, now)
     }
 
+    /// Test-only accessor: returns the approximate number of ready tasks
+    /// visible to this worker across its local queue, fast queue, and the
+    /// shared global queue. Intended for invariant checks in metamorphic
+    /// tests; not suitable for runtime decisions because the global count is
+    /// shared across workers and can race with other workers' pops.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn ready_count(&self) -> usize {
+        let local_ready = self
+            .local_ready
+            .try_lock()
+            .map(|q| q.len())
+            .unwrap_or(0);
+        let fast = self.fast_queue.len();
+        let global = self.global.ready_count();
+        local_ready + fast + global
+    }
+
     /// Tries to get ready work from fast queue, global, or local queues.
     #[allow(dead_code)] // Scheduler dispatch integration path
     pub(crate) fn try_ready_work(&mut self) -> Option<TaskId> {

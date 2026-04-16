@@ -578,8 +578,8 @@ mod tests {
 
     #[test]
     fn entity_id_variants() {
-        let region_id = RegionId::new(1);
-        let task_id = TaskId::new(2);
+        let region_id = RegionId::new_for_test(1, 1);
+        let task_id = TaskId::new_for_test(2, 1);
 
         let region_entity = EntityId::Region(region_id);
         let task_entity = EntityId::Task(task_id);

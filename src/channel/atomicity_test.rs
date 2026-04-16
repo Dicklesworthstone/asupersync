@@ -4,6 +4,8 @@
 //! reserve/commit operations across all channel types under concurrent stress
 //! and cancellation injection.
 
+#![allow(dead_code)]
+
 use crate::channel::mpsc::{self, RecvError, SendError};
 use crate::cx::Cx;
 use crate::time::sleep;

@@ -78,6 +78,7 @@ fn oracle_violation_tag(violation: &OracleViolation) -> &'static str {
         OracleViolation::RegistryLease(_) => "RegistryLease",
         OracleViolation::DownOrder(_) => "DownOrder",
         OracleViolation::SupervisorQuiescence(_) => "SupervisorQuiescence",
+        OracleViolation::PriorityInversion(_) => "PriorityInversion",
         #[cfg(feature = "messaging-fabric")]
         OracleViolation::FabricPublish(_) => "FabricPublish",
         #[cfg(feature = "messaging-fabric")]

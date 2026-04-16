@@ -270,6 +270,8 @@ serde_yaml = "0.9"
 flate2 = "1.1"
 # Golden snapshot testing for encoded blocks and artifacts
 insta = { version = "1.40", features = ["json"] }
+# Lightweight deterministic RNG for randomized test harnesses
+fastrand = "2.3"
 
 [[bench]]
 name = "phase0_baseline"

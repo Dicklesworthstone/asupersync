@@ -4,6 +4,8 @@
 //! across all channel types under various stress conditions, cancellation
 //! scenarios, and edge cases.
 
+#![allow(dead_code)]
+
 use super::atomicity_test::{AtomicityOracle, AtomicityTestConfig};
 use super::stress_test::{StressTestConfig, mpsc_stress_test};
 use crate::channel::{broadcast, mpsc, oneshot, watch};

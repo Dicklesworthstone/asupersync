@@ -4,7 +4,7 @@
 //! to validate substantial performance wins over baseline scalar implementation.
 
 use asupersync::raptorq::gf256::{
-    Gf256, Gf256Kernel, active_kernel, dual_addmul_kernel_decision_detail, dual_policy_snapshot,
+    Gf256, Gf256Kernel, active_kernel, dual_addmul_kernel_decision_detail, dual_kernel_policy_snapshot,
     gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -163,7 +163,7 @@ fn bench_dispatch_overhead(c: &mut Criterion) {
     // Test policy snapshot
     group.bench_function("policy_snapshot", |b| {
         b.iter(|| {
-            let snapshot = dual_policy_snapshot();
+            let snapshot = dual_kernel_policy_snapshot();
             hint_black_box(&snapshot);
         });
     });
@@ -259,7 +259,7 @@ fn print_bench_info() {
     println!("=== GF(256) Kernel Benchmark Environment ===");
     println!("Active kernel: {:?}", active_kernel());
 
-    let snapshot = dual_policy_snapshot();
+    let snapshot = dual_kernel_policy_snapshot();
     println!("Profile pack: {:?}", snapshot.profile_pack);
     println!("Architecture class: {:?}", snapshot.architecture_class);
     println!("Tuning corpus: {}", snapshot.tuning_corpus_id);
@@ -291,11 +291,6 @@ criterion_group! {
         bench_kernel_comparison,
         bench_alignment_sensitivity,
         bench_scalar_sensitivity
-}
-
-fn main() {
-    print_bench_info();
-    gf256_benches();
 }
 
 criterion_main!(gf256_benches);

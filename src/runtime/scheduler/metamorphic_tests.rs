@@ -19,7 +19,10 @@ use proptest::prelude::*;
 
 /// Create a test scheduler with the given number of workers.
 fn create_test_scheduler(worker_count: usize) -> ThreeLaneScheduler {
-    let state = Arc::new(ContendedMutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new(
+        "metamorphic.runtime_state",
+        RuntimeState::new(),
+    ));
     ThreeLaneScheduler::new(worker_count, &state)
 }
 
@@ -28,8 +31,8 @@ fn generate_task_ids(count: usize, seed: u64) -> Vec<TaskId> {
     let mut rng = DetRng::new(seed);
     let mut tasks = Vec::new();
     for i in 0..count {
-        let region_id = RegionId::new_for_test(i as u64, rng.next_u32() as u64);
-        let task_id = TaskId::new_for_test(i as u64, rng.next_u32() as u64);
+        let _region_id = RegionId::new_for_test(i as u32, rng.next_u32());
+        let task_id = TaskId::new_for_test(i as u32, rng.next_u32());
         tasks.push(task_id);
     }
     tasks

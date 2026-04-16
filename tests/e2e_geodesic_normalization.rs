@@ -101,6 +101,7 @@ fn oracle_violation_tag(v: &OracleViolation) -> String {
         OracleViolation::RegistryLease(_) => "RegistryLease".into(),
         OracleViolation::DownOrder(_) => "DownOrder".into(),
         OracleViolation::SupervisorQuiescence(_) => "SupervisorQuiescence".into(),
+        OracleViolation::PriorityInversion(_) => "PriorityInversion".into(),
         #[cfg(feature = "messaging-fabric")]
         OracleViolation::FabricPublish(_) => "FabricPublish".into(),
         #[cfg(feature = "messaging-fabric")]

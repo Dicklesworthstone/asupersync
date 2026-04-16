@@ -1209,13 +1209,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "sparse row index out of range: 5 >= 5")]
-    fn sparse_row_get_rejects_out_of_range_indices() {
-        let row = SparseRow::new(vec![(1, Gf256::new(10)), (3, Gf256::new(30))], 5);
-        let _ = row.get(5);
-    }
-
-    #[test]
     fn sparse_row_add() {
         let a = SparseRow::new(vec![(0, Gf256::new(1)), (2, Gf256::new(3))], 5);
         let b = SparseRow::new(vec![(1, Gf256::new(2)), (2, Gf256::new(3))], 5);

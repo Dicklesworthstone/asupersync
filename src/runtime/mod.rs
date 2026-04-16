@@ -123,6 +123,8 @@ pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
 pub mod env_config;
+pub mod epoch_gc;
+pub mod epoch_gc_integration;
 pub mod epoch_tracker;
 pub mod epoch_tracking;
 pub mod io_driver;

@@ -212,6 +212,15 @@ impl LocalQueue {
         stack.is_empty()
     }
 
+    /// Returns the current length of the local queue.
+    /// Takes a short-lived lock; intended for observability and tests.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        let stack = self.inner.lock();
+        stack.len()
+    }
+
     /// Creates a stealer for this queue.
     #[inline]
     #[must_use]

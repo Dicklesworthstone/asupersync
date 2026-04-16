@@ -32,10 +32,11 @@ fn oracle_suite_includes_actor_oracles() {
 fn lab_runtime_oracles_clean_by_default() {
     init_actor_test("lab_runtime_oracles_clean_by_default");
 
-    let runtime = LabRuntime::new(LabConfig::new(42));
+    let mut runtime = LabRuntime::new(LabConfig::new(42));
 
     // Fresh runtime should have no violations
-    let violations = runtime.oracles.check_all(runtime.now());
+    let now = runtime.now();
+    let violations = runtime.oracles.check_all(now);
     let violation_count = violations.len();
 
     assert_with_log!(

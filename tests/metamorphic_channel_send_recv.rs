@@ -33,8 +33,8 @@
 
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
-use asupersync::lab::LabRuntime;
 use asupersync::types::{Budget, Time};
+use futures_lite::future::block_on;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use proptest::prelude::*;
@@ -111,13 +111,9 @@ fn test_cx() -> Cx {
 // ============================================================================
 
 /// Tests that different orders of reserve/commit operations yield equivalent states.
-#[tokio::test]
-async fn mr1_reserve_commit_commutativity() {
-    // Create deterministic runtime for consistent behavior
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
-
-    runtime.block_on(async {
+#[test]
+fn mr1_reserve_commit_commutativity() {
+    block_on(async {
         let (tx1, mut rx) = test_channel(4);
         let tx2 = tx1.clone();
         let cx = test_cx();
@@ -163,7 +159,7 @@ async fn mr1_reserve_commit_commutativity() {
             "MR1 violated: reserve/commit commutativity failed\n\
              Scenario A: {:?}\n\
              Scenario B: {:?}", scenario_a, scenario_b);
-    }).await;
+    });
 }
 
 // ============================================================================
@@ -171,12 +167,9 @@ async fn mr1_reserve_commit_commutativity() {
 // ============================================================================
 
 /// Tests FIFO preservation: what gets sent gets received in order.
-#[tokio::test]
-async fn mr2_send_recv_duality() {
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
-
-    runtime.block_on(async {
+#[test]
+fn mr2_send_recv_duality() {
+    block_on(async {
         let (tx, mut rx) = test_channel(10);
         let cx = test_cx();
 
@@ -204,7 +197,7 @@ async fn mr2_send_recv_duality() {
             "MR2 violated: send/recv duality failed\n\
              Sent: {:?}\n\
              Received: {:?}", original_messages, received_messages);
-    }).await;
+    });
 }
 
 // ============================================================================
@@ -212,12 +205,9 @@ async fn mr2_send_recv_duality() {
 // ============================================================================
 
 /// Tests that channel capacity accounting remains consistent.
-#[tokio::test]
-async fn mr3_capacity_conservation() {
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
-
-    runtime.block_on(async {
+#[test]
+fn mr3_capacity_conservation() {
+    block_on(async {
         let capacity = 3;
         let (tx, mut rx) = test_channel(capacity);
         let cx = test_cx();
@@ -249,7 +239,7 @@ async fn mr3_capacity_conservation() {
         permit2.send(TestMessage::new(2));
         permit3.send(TestMessage::new(3));
         permit4.unwrap().send(TestMessage::new(4));
-    }).await;
+    });
 }
 
 // ============================================================================
@@ -257,12 +247,9 @@ async fn mr3_capacity_conservation() {
 // ============================================================================
 
 /// Tests that cancellation preserves channel state.
-#[tokio::test]
-async fn mr4_cancel_safety_invariant() {
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
-
-    runtime.block_on(async {
+#[test]
+fn mr4_cancel_safety_invariant() {
+    block_on(async {
         let (tx, mut rx) = test_channel(2);
         let cx = test_cx();
 
@@ -288,7 +275,7 @@ async fn mr4_cancel_safety_invariant() {
         // Should receive second message
         let received2 = rx.recv(&cx).await.unwrap();
         assert_eq!(received2.id, 2, "MR4 violated: post-cancel operations failed");
-    }).await;
+    });
 }
 
 // ============================================================================
@@ -296,12 +283,9 @@ async fn mr4_cancel_safety_invariant() {
 // ============================================================================
 
 /// Tests that batched sends are equivalent to individual sends.
-#[tokio::test]
-async fn mr5_batch_send_equivalence() {
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
-
-    runtime.block_on(async {
+#[test]
+fn mr5_batch_send_equivalence() {
+    block_on(async {
         let messages = vec![
             TestMessage::new(10),
             TestMessage::new(20),
@@ -350,7 +334,7 @@ async fn mr5_batch_send_equivalence() {
         // Both should match original message order
         assert_eq!(messages, received_a, "MR5 violated: individual send order wrong");
         assert_eq!(messages, received_b, "MR5 violated: batch send order wrong");
-    }).await;
+    });
 }
 
 // ============================================================================
@@ -358,12 +342,9 @@ async fn mr5_batch_send_equivalence() {
 // ============================================================================
 
 /// Tests that reserve pool operations are commutative.
-#[tokio::test]
-async fn mr6_reserve_pool_commutativity() {
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
-
-    runtime.block_on(async {
+#[test]
+fn mr6_reserve_pool_commutativity() {
+    block_on(async {
         let (tx1, mut rx) = test_channel(4);
         let tx2 = tx1.clone();
         let cx = test_cx();
@@ -405,7 +386,7 @@ async fn mr6_reserve_pool_commutativity() {
             "MR6 violated: reserve pool commutativity failed\n\
              Scenario A: {:?}\n\
              Scenario B: {:?}", scenario_a, scenario_b);
-    }).await;
+    });
 }
 
 // ============================================================================
@@ -423,31 +404,31 @@ fn property_channel_metamorphic_relations() {
         // Note: This is a simplified version - full property-based testing
         // would require more sophisticated generators and async test harness
 
-        let mut runtime = LabRuntime::new(seed);
-        runtime.block_on(async {
+        let _seed = seed;
+        let (messages, received) = block_on(async {
             let (tx, mut rx) = test_channel(capacity);
             let cx = test_cx();
 
-        // Generate deterministic test messages
-        let mut messages = Vec::new();
-        for i in 0..message_count {
-            messages.push(TestMessage::new((seed as u32).wrapping_add(i as u32)));
-        }
+            // Generate deterministic test messages
+            let mut messages = Vec::new();
+            for i in 0..message_count {
+                messages.push(TestMessage::new((seed as u32).wrapping_add(i as u32)));
+            }
 
-        // Send all messages
-        for msg in &messages {
-            tx.send(&cx, msg.clone()).await.unwrap();
-        }
+            // Send all messages
+            for msg in &messages {
+                tx.send(&cx, msg.clone()).await.unwrap();
+            }
 
-        // Receive all messages
-        let mut received = Vec::new();
-        for _ in 0..message_count {
-            received.push(rx.recv(&cx).await.unwrap());
-        }
-
-            // Property: Send sequence equals receive sequence
-            prop_assert_eq!(messages, received, "Property violated: send/recv sequence mismatch");
+            // Receive all messages
+            let mut received = Vec::new();
+            for _ in 0..message_count {
+                received.push(rx.recv(&cx).await.unwrap());
+            }
+            (messages, received)
         });
+        // Property: Send sequence equals receive sequence
+        prop_assert_eq!(messages, received, "Property violated: send/recv sequence mismatch");
     });
 }
 
@@ -458,12 +439,7 @@ fn property_channel_metamorphic_relations() {
 /// Integration test using lab runtime for deterministic scheduling.
 #[test]
 fn integration_deterministic_channel_operations() {
-    let mut runtime = LabRuntime::new(0xCAFE_BABE);
-    runtime.block_on(async {
-    let runtime = LabRuntime::new();
-    let _guard = runtime.enter();
-
-    runtime.block_on(async {
+    block_on(async {
         let (tx, mut rx) = test_channel(3);
         let cx = test_cx();
 
@@ -486,7 +462,6 @@ fn integration_deterministic_channel_operations() {
         assert_eq!(msg2.id, 84, "Deterministic scheduling failed");
     });
 }
-}
 
 // ============================================================================
 // Stress Tests for Metamorphic Relations
@@ -495,10 +470,7 @@ fn integration_deterministic_channel_operations() {
 /// Stress test with many concurrent operations.
 #[test]
 fn stress_test_metamorphic_relations() {
-    let mut runtime = LabRuntime::new(0xDEAD_BEEF);
-    runtime.block_on(async {
-
-    runtime.block_on(async {
+    block_on(async {
         let (tx, mut rx) = test_channel(100);
         let cx = test_cx();
 
@@ -520,5 +492,4 @@ fn stress_test_metamorphic_relations() {
         assert_eq!(sent_messages, received_messages,
             "Stress test failed: FIFO order violated with {} messages", sent_messages.len());
     });
-}
 }

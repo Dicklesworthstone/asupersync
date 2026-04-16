@@ -958,7 +958,7 @@ mod tests {
         engine.add_policy(policy);
 
         // Test region shedding decisions
-        let region_id = RegionId::ephemeral();
+        let region_id = RegionId::new_ephemeral();
         engine.set_region_priority(region_id, RegionPriority::Low);
 
         pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Heavy);
