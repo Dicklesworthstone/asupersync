@@ -5,8 +5,10 @@
 //! durable metadata path first: which reference implementation was used, which
 //! command generated a fixture, and which artifacts belong to each test case.
 
+pub mod fixture_loader;
 pub mod provenance;
 
+pub use fixture_loader::{DifferentialFixtureLoader, FixtureCaseView};
 pub use provenance::{
     CatalogSummary, DifferentialFixtureCatalog, DifferentialFixtureError, FixtureArtifact,
     FixtureProvenanceRecord, ReferenceImplementation, ReferenceLanguage,

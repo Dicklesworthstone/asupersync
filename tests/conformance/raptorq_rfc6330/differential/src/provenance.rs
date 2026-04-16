@@ -170,6 +170,15 @@ pub enum DifferentialFixtureError {
 
     #[error("failed to deserialize differential fixture catalog: {0}")]
     Deserialize(serde_json::Error),
+
+    #[error("differential fixture catalog contains duplicate case id `{case_id}`")]
+    DuplicateCaseId { case_id: String },
+
+    #[error("differential fixture case `{case_id}` uses absolute artifact path `{path}`")]
+    AbsoluteArtifactPath { case_id: String, path: PathBuf },
+
+    #[error("differential fixture catalog is missing case id `{case_id}`")]
+    MissingCaseId { case_id: String },
 }
 
 #[cfg(test)]
