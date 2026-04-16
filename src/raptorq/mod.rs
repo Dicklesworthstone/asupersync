@@ -41,3 +41,6 @@ pub mod test_log_schema;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod metamorphic_tests;
