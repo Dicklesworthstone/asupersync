@@ -72,6 +72,7 @@ pub struct TaskHandle<T> {
 
 impl<T> TaskHandle<T> {
     /// Creates a new TaskHandle (internal use).
+    #[inline]
     pub(crate) fn new(
         task_id: TaskId,
         receiver: oneshot::Receiver<Result<T, JoinError>>,
@@ -259,6 +260,7 @@ pub struct JoinFuture<'a, T> {
 }
 
 impl<T> JoinFuture<'_, T> {
+    #[inline]
     fn closed_reason(&self) -> CancelReason {
         self.cx_inner
             .upgrade()
