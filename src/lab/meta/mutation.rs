@@ -29,6 +29,8 @@ pub const INVARIANT_DEADLINE_MONOTONE: &str = "deadline_monotone";
 pub const INVARIANT_CANCELLATION_PROTOCOL: &str = "cancellation_protocol";
 /// Invariant name for the cancel-correctness oracle.
 pub const INVARIANT_CANCEL_CORRECTNESS: &str = "cancel_correctness";
+/// Invariant name for the cancel signal ordering oracle.
+pub const INVARIANT_CANCEL_ORDERING: &str = "cancel_signal_ordering";
 /// Invariant name for the channel atomicity oracle.
 pub const INVARIANT_CHANNEL_ATOMICITY: &str = "channel_atomicity";
 /// Invariant name for the waker deduplication oracle.
@@ -846,6 +848,7 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::DeadlineMonotone(_) => INVARIANT_DEADLINE_MONOTONE,
         OracleViolation::CancellationProtocol(_) => INVARIANT_CANCELLATION_PROTOCOL,
         OracleViolation::CancelCorrectness(_) => INVARIANT_CANCEL_CORRECTNESS,
+        OracleViolation::CancelOrdering(_) => INVARIANT_CANCEL_ORDERING,
         OracleViolation::ChannelAtomicity(_) => INVARIANT_CHANNEL_ATOMICITY,
         OracleViolation::WakerDedup(_) => INVARIANT_WAKER_DEDUP,
         OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,

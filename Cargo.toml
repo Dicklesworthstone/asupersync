@@ -108,6 +108,8 @@ compression = ["dep:flate2", "dep:brotli"]
 simd-intrinsics = []
 # Enable Loom concurrency tests for scheduler verification.
 loom-tests = ["dep:loom"]
+# Enable Cancel-Correctness Property Oracle for cancellation protocol verification.
+cancel-correctness-oracle = []
 
 [lib]
 path = "src/lib.rs"

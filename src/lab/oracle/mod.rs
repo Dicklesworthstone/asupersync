@@ -37,6 +37,7 @@
 pub mod actor;
 pub mod ambient_authority;
 pub mod cancel_correctness;
+pub mod cancel_signal_ordering;
 pub mod cancellation_protocol;
 pub mod channel_atomicity;
 pub mod deadline_monotone;
@@ -66,6 +67,10 @@ pub use ambient_authority::{
 pub use cancel_correctness::{
     CancelCorrectnessConfig, CancelCorrectnessOracle, CancelCorrectnessStatistics,
     CancelCorrectnessViolation,
+};
+pub use cancel_signal_ordering::{
+    CancelOrderingConfig, CancelOrderingOracle, CancelOrderingStatistics,
+    CancelOrderingViolation,
 };
 pub use cancellation_protocol::{
     CancellationProtocolOracle, CancellationProtocolViolation, TaskStateKind,
@@ -148,6 +153,8 @@ pub enum OracleViolation {
     CancellationProtocol(CancellationProtocolViolation),
     /// Cancel-correctness property violated.
     CancelCorrectness(CancelCorrectnessViolation),
+    /// Cancel signal ordering violated.
+    CancelOrdering(CancelOrderingViolation),
     /// Channel atomicity violation (reservation lifecycle, waker consistency, etc.).
     ChannelAtomicity(ChannelAtomicityViolation),
     /// Waker deduplication violation (lost/spurious wakeups, state inconsistency).
@@ -196,6 +203,7 @@ impl std::fmt::Display for OracleViolation {
             Self::DeadlineMonotone(v) => write!(f, "Deadline monotonicity violation: {v}"),
             Self::CancellationProtocol(v) => write!(f, "Cancellation protocol violation: {v}"),
             Self::CancelCorrectness(v) => write!(f, "Cancel-correctness violation: {v}"),
+            Self::CancelOrdering(v) => write!(f, "Cancel ordering violation: {v}"),
             Self::ChannelAtomicity(v) => write!(f, "Channel atomicity violation: {v}"),
             Self::WakerDedup(v) => write!(f, "Waker deduplication violation: {v}"),
             Self::ActorLeak(v) => write!(f, "Actor leak: {v}"),
@@ -245,6 +253,8 @@ pub struct OracleSuite {
     pub cancellation_protocol: CancellationProtocolOracle,
     /// Cancel-correctness property oracle.
     pub cancel_correctness: CancelCorrectnessOracle,
+    /// Cancel signal ordering oracle.
+    pub cancel_signal_ordering: CancelOrderingOracle,
     /// Channel atomicity oracle.
     pub channel_atomicity: ChannelAtomicityOracle,
     /// Waker deduplication oracle.
@@ -338,6 +348,7 @@ impl OracleSuite {
         self.deadline_monotone.reset();
         self.cancellation_protocol.snapshot_from_state(state, now);
         self.cancel_correctness.reset();
+        self.cancel_signal_ordering.reset();
 
         for event in state.finalizer_history() {
             match *event {
@@ -499,6 +510,10 @@ impl OracleSuite {
             violations.push(OracleViolation::CancelCorrectness(v));
         }
 
+        if let Err(v) = self.cancel_signal_ordering.check(now) {
+            violations.push(OracleViolation::CancelOrdering(v));
+        }
+
         let channel_atomicity_violations = self.channel_atomicity.check_for_violations();
         match channel_atomicity_violations {
             Ok(violations_vec) => {
@@ -593,6 +608,7 @@ impl OracleSuite {
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
         self.cancel_correctness.reset();
+        self.cancel_signal_ordering.reset();
         self.channel_atomicity.reset();
         self.waker_dedup.reset();
         self.actor_leak.reset();
@@ -746,6 +762,17 @@ impl OracleSuite {
                 OracleStats {
                     entities_tracked: self.cancel_correctness.get_statistics().active_tasks,
                     events_recorded: self.cancel_correctness.get_statistics().witnesses_processed as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "cancel_signal_ordering",
+                self.cancel_signal_ordering
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::CancelOrdering),
+                OracleStats {
+                    entities_tracked: self.cancel_signal_ordering.get_statistics().tracked_signals,
+                    events_recorded: self.cancel_signal_ordering.get_statistics().signals_processed as usize,
                 },
             ),
             OracleEntryReport::from_result(
