@@ -260,6 +260,7 @@ impl Default for EpochConsistencyConfig {
 
 impl EpochConsistencyConfig {
     /// Creates a relaxed configuration suitable for production.
+    #[inline]
     #[must_use]
     pub fn relaxed() -> Self {
         Self {
@@ -271,6 +272,7 @@ impl EpochConsistencyConfig {
     }
 
     /// Creates a strict configuration suitable for testing.
+    #[inline]
     #[must_use]
     pub fn strict() -> Self {
         Self {
@@ -282,6 +284,7 @@ impl EpochConsistencyConfig {
     }
 
     /// Creates a disabled configuration (no checking).
+    #[inline]
     #[must_use]
     pub fn disabled() -> Self {
         Self {
@@ -312,6 +315,7 @@ pub struct EpochConsistencyTracker {
 
 impl EpochConsistencyTracker {
     /// Creates a new epoch consistency tracker with default configuration.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::with_config(EpochConsistencyConfig::default())
@@ -688,12 +692,14 @@ impl EpochConsistencyTracker {
     }
 
     /// Returns all detected violations.
+    #[inline]
     #[must_use]
     pub fn all_violations(&self) -> Vec<EpochConsistencyViolation> {
         self.violations.read().clone()
     }
 
     /// Returns the number of violations detected.
+    #[inline]
     #[must_use]
     pub fn violation_count(&self) -> usize {
         self.violations.read().len()
