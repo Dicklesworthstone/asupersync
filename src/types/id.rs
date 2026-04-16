@@ -374,7 +374,8 @@ impl Time {
 
     /// Returns the duration between two times in nanoseconds.
     ///
-    /// Returns 0 if `self` is before `earlier`.
+    /// Returns 0 if `self` is before `earlier` (time travel protection).
+    /// This method uses saturating arithmetic to prevent overflow.
     #[inline]
     #[must_use]
     pub const fn duration_since(self, earlier: Self) -> u64 {
