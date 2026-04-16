@@ -101,6 +101,7 @@ where
 {
     type Item = <S::Item as Future>::Output;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
@@ -177,6 +178,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.stream.size_hint();
         let in_flight = self.in_flight.len();
@@ -281,6 +283,7 @@ where
 {
     type Item = <S::Item as Future>::Output;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
@@ -325,6 +328,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.stream.size_hint();
         let in_flight = self.in_flight.len();
