@@ -75,6 +75,7 @@ struct WaiterEntry {
 }
 
 impl WaiterSlab {
+    #[inline]
     fn new() -> Self {
         Self {
             entries: Vec::new(),

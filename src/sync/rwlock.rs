@@ -188,6 +188,7 @@ unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
     /// Creates a new lock containing the given value.
+    #[inline]
     #[must_use]
     pub fn new(value: T) -> Self {
         Self {

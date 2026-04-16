@@ -102,10 +102,12 @@ struct Waiter {
     waker: Waker,
 }
 
+#[inline]
 fn front_waiter_waker(state: &SemaphoreState) -> Option<Waker> {
     state.waiters.front().map(|waiter| waiter.waker.clone())
 }
 
+#[inline]
 fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64) -> Option<Waker> {
     if state
         .waiters
