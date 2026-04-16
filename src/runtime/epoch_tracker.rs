@@ -342,7 +342,7 @@ impl EpochConsistencyTracker {
         }
 
         // Generate correlation ID for cross-module analysis
-        let correlation_id = self.global_transition_count.load(Ordering::Relaxed) + 1;
+        let _correlation_id = self.global_transition_count.load(Ordering::Relaxed) + 1;
         let transition_start = std::time::Instant::now();
 
         let mut records = self.module_records.write();
