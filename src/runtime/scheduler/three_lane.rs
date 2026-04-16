@@ -6590,6 +6590,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fast_queue_stolen_remainder_preserves_fifo_within_priority() {
+        // Equal-priority steals should keep the ready-lane FIFO order even
+        // after the thief receives the remainder through fast_queue.
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        scheduler.set_steal_batch_size(3);
+
+        for task in 1..=6 {
+            scheduler.workers[0]
+                .local
+                .lock()
+                .schedule(TaskId::new_for_test(task, 0), 50);
+        }
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[1];
+
+        let stolen = thief.try_steal();
+        assert_eq!(
+            stolen,
+            Some(TaskId::new_for_test(1, 0)),
+            "thief should execute the oldest equal-priority stolen task first"
+        );
+
+        assert_eq!(
+            thief.fast_queue.pop(),
+            Some(TaskId::new_for_test(2, 0)),
+            "fast_queue should preserve FIFO order for the second stolen task"
+        );
+        assert_eq!(
+            thief.fast_queue.pop(),
+            Some(TaskId::new_for_test(3, 0)),
+            "fast_queue should preserve FIFO order for the third stolen task"
+        );
+        assert!(
+            thief.fast_queue.is_empty(),
+            "all equal-priority stolen remainder tasks should be drained from fast_queue"
+        );
+
+        let mut victim = workers[0].local.lock();
+        assert_eq!(
+            victim.pop_ready_only(),
+            Some(TaskId::new_for_test(4, 0)),
+            "victim should retain the next FIFO ready task after stealing"
+        );
+        assert_eq!(
+            victim.pop_ready_only(),
+            Some(TaskId::new_for_test(5, 0)),
+            "victim should continue draining equal-priority tasks in FIFO order"
+        );
+        assert_eq!(
+            victim.pop_ready_only(),
+            Some(TaskId::new_for_test(6, 0)),
+            "victim should finish with the final unstolen equal-priority task"
+        );
+        assert!(
+            victim.is_empty(),
+            "victim scheduler should drain cleanly after equal-priority stealing"
+        );
+    }
+
     // ── Non-stealable local task tests (bd-1s3c0) ────────────────────────
 
     #[test]
