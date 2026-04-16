@@ -127,6 +127,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ChannelShared<T> {
 }
 
 impl<T> ChannelInner<T> {
+    #[inline]
     fn new(capacity: usize) -> Self {
         Self {
             queue: VecDeque::with_capacity(capacity),
@@ -138,11 +139,13 @@ impl<T> ChannelInner<T> {
     }
 
     /// Returns the number of used slots (queued + reserved).
+    #[inline]
     fn used_slots(&self) -> usize {
         self.queue.len() + self.reserved
     }
 
     /// Returns true if there's capacity for another reservation.
+    #[inline]
     fn has_capacity(&self, capacity: usize) -> bool {
         self.used_slots() < capacity
     }
@@ -153,6 +156,7 @@ impl<T> ChannelInner<T> {
     ///
     /// This does NOT remove the waiter from the queue. The waiter is responsible
     /// for removing itself upon successfully acquiring a permit.
+    #[inline]
     fn take_next_sender_waker(&self) -> Option<Waker> {
         self.send_wakers.front().map(|waiter| waiter.waker.clone())
     }
@@ -163,6 +167,7 @@ impl<T> ChannelInner<T> {
 /// # Panics
 ///
 /// Panics if `capacity` is 0.
+#[inline]
 #[must_use]
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "channel capacity must be non-zero");
@@ -200,6 +205,7 @@ impl<T> Sender<T> {
     }
 
     /// Convenience method: reserve and send in one step.
+    #[inline]
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
         let result = self.reserve(cx).await;
         match result {
@@ -259,6 +265,7 @@ impl<T> Sender<T> {
     ///
     /// This does not enqueue a message. It's intended for out-of-band protocols
     /// (like cancellation) that need to interrupt a blocked receiver.
+    #[inline]
     pub fn wake_receiver(&self) {
         let mut inner = self.shared.inner.lock();
         let waker = inner.recv_waker.take();
@@ -286,6 +293,7 @@ impl<T> Sender<T> {
     ///
     /// This is used by the `DropOldest` backpressure policy. The evicted
     /// message is returned so callers can trace or log the drop.
+    #[inline]
     pub fn send_evict_oldest(&self, value: T) -> Result<Option<T>, SendError<T>> {
         self.send_evict_oldest_where(value, |_| true)
     }

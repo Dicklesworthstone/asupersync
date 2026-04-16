@@ -77,9 +77,13 @@ pub enum CancelOrderingViolation {
         parent_region: RegionId,
         /// ID of the child region.
         child_region: RegionId,
+        /// Timestamp when the child was cancelled.
         child_cancel_time: Time,
+        /// Timestamp when the parent was cancelled.
         parent_cancel_time: Time,
+        /// Time gap between child and parent cancellation in nanoseconds.
         time_gap_ns: u64,
+        /// Optional stack trace captured at violation detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 

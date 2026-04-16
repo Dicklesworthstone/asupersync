@@ -246,6 +246,7 @@ impl ErrorKind {
 
     /// Returns true if this error is typically retryable.
     #[must_use]
+    #[inline]
     pub const fn is_retryable(&self) -> bool {
         matches!(self.recoverability(), Recoverability::Transient)
     }
@@ -255,6 +256,7 @@ impl ErrorKind {
     /// This provides more specific guidance than [`recoverability()`](Self::recoverability)
     /// about how to handle the error.
     #[must_use]
+    #[inline]
     pub const fn recovery_action(&self) -> RecoveryAction {
         match self {
             // Immediate retry - brief transient states
@@ -385,12 +387,14 @@ impl Default for BackoffHint {
 impl Recoverability {
     /// Returns true if this error is safe to retry.
     #[must_use]
+    #[inline]
     pub const fn should_retry(&self) -> bool {
         matches!(self, Self::Transient)
     }
 
     /// Returns true if this error should never be retried.
     #[must_use]
+    #[inline]
     pub const fn is_permanent(&self) -> bool {
         matches!(self, Self::Permanent)
     }
@@ -448,6 +452,7 @@ pub struct Error {
 impl Error {
     /// Creates a new error with the given kind.
     #[must_use]
+    #[inline]
     pub const fn new(kind: ErrorKind) -> Self {
         Self {
             kind,
@@ -464,18 +469,21 @@ impl Error {
 
     /// Returns the error kind.
     #[must_use]
+    #[inline]
     pub const fn kind(&self) -> ErrorKind {
         self.kind
     }
 
     /// Returns true if this error represents cancellation.
     #[must_use]
+    #[inline]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self.kind, ErrorKind::Cancelled)
     }
 
     /// Returns true if this error is a timeout/deadline condition.
     #[must_use]
+    #[inline]
     pub const fn is_timeout(&self) -> bool {
         matches!(
             self.kind,
@@ -512,66 +520,77 @@ impl Error {
 
     /// Returns the error category.
     #[must_use]
+    #[inline]
     pub const fn category(&self) -> ErrorCategory {
         self.kind.category()
     }
 
     /// Returns the recoverability classification.
     #[must_use]
+    #[inline]
     pub const fn recoverability(&self) -> Recoverability {
         self.kind.recoverability()
     }
 
     /// Returns true if this error is typically retryable.
     #[must_use]
+    #[inline]
     pub const fn is_retryable(&self) -> bool {
         self.kind.is_retryable()
     }
 
     /// Returns the recommended recovery action for this error.
     #[must_use]
+    #[inline]
     pub const fn recovery_action(&self) -> RecoveryAction {
         self.kind.recovery_action()
     }
 
     /// Returns the error message, if any.
     #[must_use]
+    #[inline]
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
     }
 
     /// Returns the error context.
     #[must_use]
+    #[inline]
     pub fn context(&self) -> &ErrorContext {
         &self.context
     }
 
     /// Returns true if this is an encoding-related error.
     #[must_use]
+    #[inline]
     pub const fn is_encoding_error(&self) -> bool {
         matches!(self.kind.category(), ErrorCategory::Encoding)
     }
 
     /// Returns true if this is a decoding-related error.
     #[must_use]
+    #[inline]
     pub const fn is_decoding_error(&self) -> bool {
         matches!(self.kind.category(), ErrorCategory::Decoding)
     }
 
     /// Returns true if this is a transport-related error.
     #[must_use]
+    #[inline]
     pub const fn is_transport_error(&self) -> bool {
         matches!(self.kind.category(), ErrorCategory::Transport)
     }
 
     /// Returns true if this is a distributed coordination error.
     #[must_use]
+    #[inline]
     pub const fn is_distributed_error(&self) -> bool {
         matches!(self.kind.category(), ErrorCategory::Distributed)
     }
 
     /// Returns true if this is a connection-related error.
     #[must_use]
+    #[inline]
     pub const fn is_connection_error(&self) -> bool {
         matches!(
             self.kind,
