@@ -115,6 +115,7 @@ use crate::util::DetRng;
 
 /// Configuration for the lab runtime.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct LabConfig {
     /// Random seed for deterministic scheduling.
     pub seed: u64,

@@ -330,6 +330,7 @@ impl Default for CancelCorrectnessOracle {
 
 impl CancelCorrectnessOracle {
     /// Creates a new cancel-correctness oracle with the given configuration.
+    #[must_use]
     pub fn new(config: CancelCorrectnessConfig) -> Self {
         Self {
             config,
@@ -342,6 +343,7 @@ impl CancelCorrectnessOracle {
     }
 
     /// Creates a new oracle with default configuration.
+    #[must_use]
     pub fn with_default_config() -> Self {
         Self::new(CancelCorrectnessConfig::default())
     }
@@ -355,15 +357,13 @@ impl CancelCorrectnessOracle {
 
         let mut task_states = self.task_states.write();
 
-        match task_states.get_mut(&witness.task_id) {
-            Some(existing_state) => {
-                // Validate transition
-                if let Err(_) = self.validate_transition(existing_state, &witness, now) {
-                    // Violation already recorded by validate_transition
-                }
-                existing_state.update_with_witness(witness, now);
+        if let Some(existing_state) = task_states.get_mut(&witness.task_id) {
+            // Validate transition
+            if self.validate_transition(existing_state, &witness, now).is_err() {
+                // Violation already recorded by validate_transition
             }
-            None => {
+            existing_state.update_with_witness(witness, now);
+        } else {
                 // First witness for this task
                 let state = TaskCancelState::new(witness, now);
                 task_states.insert(state.task_id, state);
@@ -544,7 +544,7 @@ impl CancelCorrectnessOracle {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
         if self.config.panic_on_violation {
-            panic!("Cancel-correctness violation detected: {}", violation);
+            panic!("Cancel-correctness violation detected: {violation}");
         }
 
         // Record violation for later inspection
