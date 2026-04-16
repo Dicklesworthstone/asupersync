@@ -292,10 +292,10 @@ impl DebtRuntimeIntegration {
     /// Calculate priority based on cancel kind.
     fn calculate_priority(&self, cancel_kind: CancelKind) -> u32 {
         match cancel_kind {
-            CancelKind::Emergency => 100,
+            CancelKind::Shutdown => 100,
             CancelKind::Timeout => 80,
+            CancelKind::Deadline => 75,
             CancelKind::User => 50,
-            CancelKind::Shutdown => 90,
             _ => 10,
         }
     }

@@ -4,9 +4,9 @@
 //! resource cleanup timing analysis, and performance optimization recommendations.
 
 use crate::observability::cancellation_tracer::{
-    CancellationTrace, CancellationTraceStep, EntityType, PropagationAnomaly, TraceId,
+    CancellationTrace, EntityType, PropagationAnomaly,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
@@ -549,8 +549,10 @@ impl CancellationAnalyzer {
                     PropagationAnomaly::IncorrectPropagationOrder { parent_entity, .. } => {
                         *entity_anomalies.entry(parent_entity.clone()).or_default() += 1;
                     }
-                    PropagationAnomaly::UnexpectedPropagation { entity_id, .. } => {
-                        *entity_anomalies.entry(entity_id.clone()).or_default() += 1;
+                    PropagationAnomaly::UnexpectedPropagation { affected_entities, .. } => {
+                        for entity_id in affected_entities {
+                            *entity_anomalies.entry(entity_id.clone()).or_default() += 1;
+                        }
                     }
                 }
             }
