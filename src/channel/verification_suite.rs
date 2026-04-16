@@ -8,12 +8,10 @@ use super::atomicity_test::{AtomicityOracle, AtomicityTestConfig};
 use super::stress_test::{StressTestConfig, mpsc_stress_test};
 use crate::channel::{broadcast, mpsc, oneshot, watch};
 use crate::test_utils::lab_with_config;
-use crate::time::{timeout};
+use crate::time::timeout;
 
-use std::sync::{
-    Arc,
-};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Comprehensive test suite configuration.
@@ -616,10 +614,11 @@ pub async fn run_quick_verification() -> VerificationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future;
 
     #[test]
     fn test_quick_verification_suite() {
-        let result = run_quick_verification().await;
+        let result = future::block_on(run_quick_verification());
 
         println!("Quick Verification Results:");
         println!("  Duration: {:?}", result.total_duration);
@@ -654,7 +653,7 @@ mod tests {
     #[test]
     #[ignore] // Long-running test
     fn test_full_verification_suite() {
-        let result = run_verification_suite().await;
+        let result = future::block_on(run_verification_suite());
 
         println!("Full Verification Results:");
         println!("  Duration: {:?}", result.total_duration);
