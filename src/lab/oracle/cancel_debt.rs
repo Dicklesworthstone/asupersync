@@ -218,7 +218,7 @@ struct CleanupWorkItem {
 }
 
 /// Type of cleanup work.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupWorkType {
     /// Finalizing cancelled tasks.
     TaskFinalization,
@@ -230,6 +230,36 @@ pub enum CleanupWorkType {
     ResourceDeallocation,
     /// Executing finalizer functions.
     FinalizerExecution,
+}
+
+/// Snapshot of a tracked cleanup work item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupWorkItemSnapshot {
+    /// Task associated with the cleanup item, if any.
+    pub task_id: Option<TaskId>,
+    /// Region associated with the cleanup item, if any.
+    pub region_id: Option<RegionId>,
+    /// Cleanup work type.
+    pub work_type: CleanupWorkType,
+    /// Stable work-type label.
+    pub work_type_name: &'static str,
+    /// Time when the cleanup work item was created.
+    pub created_at: Time,
+    /// Estimated memory footprint of the item.
+    pub estimated_size_bytes: usize,
+}
+
+/// Snapshot of a tracked cleanup queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueDebtSnapshot {
+    /// Queue identifier.
+    pub queue_type: String,
+    /// Number of pending work items.
+    pub pending_items: usize,
+    /// Estimated memory usage across pending work.
+    pub estimated_memory_usage: usize,
+    /// Work items currently pending in FIFO order.
+    pub work_items: Vec<CleanupWorkItemSnapshot>,
 }
 
 impl CleanupWorkType {
@@ -505,6 +535,33 @@ impl CancelDebtOracle {
                 )
             })
             .collect()
+    }
+
+    /// Get detailed queue state snapshots including pending work metadata.
+    pub fn get_queue_state_snapshots(&self) -> Vec<QueueDebtSnapshot> {
+        let states = self.queue_states.read();
+        let mut snapshots = states
+            .values()
+            .map(|state| QueueDebtSnapshot {
+                queue_type: state.queue_type.clone(),
+                pending_items: state.current_debt(),
+                estimated_memory_usage: state.estimated_memory_usage(),
+                work_items: state
+                    .pending_items
+                    .iter()
+                    .map(|item| CleanupWorkItemSnapshot {
+                        task_id: item.task_id,
+                        region_id: item.region_id,
+                        work_type: item.work_type,
+                        work_type_name: item.work_type.name(),
+                        created_at: item.created_at,
+                        estimated_size_bytes: item.estimated_size_bytes,
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|a, b| a.queue_type.cmp(&b.queue_type));
+        snapshots
     }
 
     fn check_queue_violations(&self, state: &QueueState, now: Time) {
@@ -861,5 +918,43 @@ mod tests {
                 .iter()
                 .any(|v| matches!(v, CancelDebtViolation::ResourcePressure { .. }))
         );
+    }
+
+    #[test]
+    fn test_queue_state_snapshots_expose_pending_work_metadata() {
+        init_test_logging();
+
+        let oracle = CancelDebtOracle::with_default_config();
+        let task_id = TaskId::new_for_test(11, 0);
+        let region_id = RegionId::testing_default();
+        let created_at = Time::from_nanos(42);
+
+        oracle.on_work_item_added(
+            "finalizers",
+            Some(task_id),
+            Some(region_id),
+            CleanupWorkType::FinalizerExecution,
+            created_at,
+        );
+
+        let snapshots = oracle.get_queue_state_snapshots();
+        assert_eq!(snapshots.len(), 1);
+
+        let queue = &snapshots[0];
+        assert_eq!(queue.queue_type, "finalizers");
+        assert_eq!(queue.pending_items, 1);
+        assert_eq!(queue.work_items.len(), 1);
+
+        let item = &queue.work_items[0];
+        assert_eq!(item.task_id, Some(task_id));
+        assert_eq!(item.region_id, Some(region_id));
+        assert_eq!(item.work_type, CleanupWorkType::FinalizerExecution);
+        assert_eq!(item.work_type_name, "finalizer_execution");
+        assert_eq!(item.created_at, created_at);
+        assert_eq!(
+            item.estimated_size_bytes,
+            CleanupWorkType::FinalizerExecution.estimated_size_bytes()
+        );
+        assert_eq!(queue.estimated_memory_usage, item.estimated_size_bytes);
     }
 }
