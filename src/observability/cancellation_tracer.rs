@@ -8,9 +8,7 @@
 //! on the existing observability infrastructure to provide comprehensive insights into
 //! cancellation behavior across complex structured concurrency applications.
 
-use crate::record::region::RegionState;
-use crate::record::task::TaskPhase;
-use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
+use crate::types::{CancelKind, CancelReason};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -7,11 +7,10 @@ use crate::observability::cancellation_debt_monitor::{
     CancellationDebtConfig, CancellationDebtMonitor, DebtAlert, DebtAlertLevel, DebtSnapshot,
     PendingWork, WorkType,
 };
-use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
-use std::collections::HashMap;
+use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 /// Integration points for debt monitoring in the runtime.
 pub struct DebtRuntimeIntegration {
@@ -397,7 +396,6 @@ pub struct DebtHealthReport {
 /// Example integration showing how to wire debt monitoring into runtime events.
 #[cfg(feature = "test-internals")]
 pub mod integration_examples {
-    use super::*;
 
     /// Example of how TaskRecord cancellation would be instrumented.
     ///
@@ -487,7 +485,6 @@ pub mod integration_examples {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
 
     #[test]

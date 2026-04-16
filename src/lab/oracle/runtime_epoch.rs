@@ -423,7 +423,7 @@ impl RuntimeEpochOracle {
     pub fn notify_epoch_transition_start(
         &self,
         module: RuntimeModule,
-        from_epoch: EpochId,
+        _from_epoch: EpochId,
         now: Time,
     ) {
         let mut states = self.module_states.write();

@@ -467,7 +467,7 @@ impl CancelOrderingOracle {
         // Check if this is a child task being cancelled
         if let Some(parent_task) = new_signal.parent_task {
             // Check if parent was cancelled before this child
-            if let Some(parent_signal) = state.find_cancel_signal(parent_task) {
+            if let Some(_parent_signal) = state.find_cancel_signal(parent_task) {
                 // Parent was already cancelled - this is correct ordering
                 return;
             }

@@ -10,7 +10,7 @@
 use crate::observability::cancellation_tracer::{
     CancellationTracer, CancellationTracerConfig, EntityType, TraceId,
 };
-use crate::record::{region::RegionState, task::TaskPhase};
+use crate::record::{region::RegionState};
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -286,7 +286,6 @@ impl CancellationTracerIntegration {
 /// Example integration points showing where hooks would be called.
 #[cfg(feature = "test-internals")]
 pub mod integration_examples {
-    use super::*;
 
     /// Example of how TaskRecord::request_cancel_with_budget would be modified.
     ///
