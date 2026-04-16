@@ -414,7 +414,7 @@ impl StructuredCancellationAnalyzer {
 
         // Log alert if structured logging is enabled
         if self.config.enable_structured_logging {
-            Self::log_alert(&alert);
+            Self::log_alert(alert);
         }
     }
 

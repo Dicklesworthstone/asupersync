@@ -1,14 +1,12 @@
-//! Golden file management for RaptorQ conformance testing.
+//! Golden File Management for RaptorQ RFC 6330 Conformance Testing
 //!
-//! This module provides infrastructure for managing golden files that contain
-//! known-correct outputs from RaptorQ operations. Golden files enable regression
-//! testing by freezing correct outputs after manual verification.
+//! Implements Pattern 2 (Golden File Testing) with UPDATE_GOLDENS workflow
+//! for complex RaptorQ outputs that are correct once verified, then frozen
+//! as regression tests.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 /// Environment variable to enable golden file updates
 pub const UPDATE_GOLDENS_ENV: &str = "UPDATE_GOLDENS";

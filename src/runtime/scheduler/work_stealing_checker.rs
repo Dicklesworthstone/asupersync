@@ -15,10 +15,10 @@
 //! 4. **Ownership Transfer**: Stealing transfers ownership atomically
 //! 5. **LIFO/FIFO Ordering**: Owner uses LIFO, stealers use FIFO
 
-use crate::runtime::RuntimeState;
-use crate::types::{TaskId, WorkerId};
+use crate::types::TaskId;
+use crate::runtime::scheduler::worker::WorkerId;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -427,9 +427,9 @@ mod tests {
     #[test]
     fn test_basic_ownership_tracking() {
         let checker = WorkStealingChecker::new();
-        let worker1 = WorkerId::new(1);
-        let worker2 = WorkerId::new(2);
-        let task = TaskId::new(100);
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(100, 0);
 
         // Queue task on worker 1
         checker.track_task_queued(task, worker1);
@@ -446,9 +446,9 @@ mod tests {
     #[test]
     fn test_steal_operation() {
         let checker = WorkStealingChecker::new();
-        let worker1 = WorkerId::new(1);
-        let worker2 = WorkerId::new(2);
-        let task = TaskId::new(100);
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(100, 0);
 
         // Queue task on worker 1
         checker.track_task_queued(task, worker1);
@@ -471,9 +471,9 @@ mod tests {
     #[test]
     fn test_double_execution_detection() {
         let checker = WorkStealingChecker::new();
-        let worker1 = WorkerId::new(1);
-        let worker2 = WorkerId::new(2);
-        let task = TaskId::new(100);
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(100, 0);
 
         checker.track_task_queued(task, worker1);
 
@@ -492,10 +492,10 @@ mod tests {
     #[test]
     fn test_ownership_violation_detection() {
         let checker = WorkStealingChecker::new();
-        let worker1 = WorkerId::new(1);
-        let worker2 = WorkerId::new(2);
-        let worker3 = WorkerId::new(3);
-        let task = TaskId::new(100);
+        let worker1 = 1;
+        let worker2 = 2;
+        let worker3 = 3;
+        let task = TaskId::new_for_test(100, 0);
 
         checker.track_task_queued(task, worker1);
 

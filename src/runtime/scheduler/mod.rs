@@ -16,6 +16,7 @@ pub mod intrusive_heap;
 pub mod invariant_monitor;
 pub mod local_queue;
 pub mod priority;
+pub mod priority_inversion_oracle;
 pub mod stealing;
 pub mod three_lane;
 pub mod worker;
@@ -32,6 +33,10 @@ pub use invariant_monitor::{
 pub use local_queue::LocalQueue;
 pub use priority::{
     DispatchLane, ScheduleCertificate, Scheduler as PriorityScheduler, SchedulerMode,
+};
+pub use priority_inversion_oracle::{
+    Priority, PriorityInversion, PriorityInversionOracle, InversionType, InversionSeverity,
+    InversionImpact, InversionStats, InversionOracleConfig, ResourceId, InversionId,
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use worker::{Parker, Worker};
