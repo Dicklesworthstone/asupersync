@@ -112,9 +112,10 @@ fn generate_malformed_resp_data(data: &[u8]) -> Vec<Vec<u8>> {
     // Non-ASCII/Unicode content in bulk strings
     if data.len() > 4 {
         let len = data.len().min(100);
-        malformed.push(format!("${len}\r\n").into_bytes());
-        malformed.extend_from_slice(data.get(..len).unwrap_or(&[]));
-        malformed.extend_from_slice(b"\r\n");
+        let mut bulk_string = format!("${len}\r\n").into_bytes();
+        bulk_string.extend_from_slice(data.get(..len).unwrap_or(&[]));
+        bulk_string.extend_from_slice(b"\r\n");
+        malformed.push(bulk_string);
     }
 
     // Invalid RESP type markers

@@ -1,0 +1,1 @@
+{"type":"io.nats.jetstream.api.v1.pub_ack","stream":"ORDERS","seq":1234567,"domain":"hub","duplicate":false}

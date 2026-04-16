@@ -169,3 +169,17 @@ path = "fuzz_targets/http_accept_encoding_negotiation.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_jetstream_json_api_parsing"
+path = "fuzz_targets/jetstream_json_api_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sql_injection_detection"
+path = "fuzz_targets/sql_injection_detection.rs"
+test = false
+doc = false
+bench = false
