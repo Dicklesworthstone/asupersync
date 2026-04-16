@@ -475,7 +475,7 @@ impl CancellationAnalyzer {
         let mut entity_cleanup_times: HashMap<String, Vec<Duration>> = HashMap::new();
 
         for trace in traces {
-            if let Some(total_time) = trace.total_propagation_time {
+            if let Some(_total_time) = trace.total_propagation_time {
                 for step in &trace.steps {
                     // Rough approximation - in practice would need better tracking
                     entity_cleanup_times
