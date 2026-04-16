@@ -6442,8 +6442,8 @@ mod tests {
 
         let metrics = worker.preemption_metrics();
         assert_eq!(metrics.ready_dispatches, 1);
-        let stats = worker.starvation_stats();
-        assert_eq!(stats.total_priority_inversions, 1);
+        let starvation_stats = worker.starvation_stats();
+        assert_eq!(starvation_stats.total_priority_inversions, 1);
     }
 
     #[test]
@@ -6470,8 +6470,8 @@ mod tests {
         let dispatched = worker.next_task();
         assert_eq!(dispatched, Some(high_global));
 
-        let stats = worker.starvation_stats();
-        assert_eq!(stats.total_priority_inversions, 0);
+        let starvation_stats = worker.starvation_stats();
+        assert_eq!(starvation_stats.total_priority_inversions, 0);
     }
 
     #[test]
@@ -6505,8 +6505,8 @@ mod tests {
 
         let metrics = worker.preemption_metrics();
         assert_eq!(metrics.ready_dispatches, 1);
-        let stats = worker.starvation_stats();
-        assert_eq!(stats.total_priority_inversions, 1);
+        let starvation_stats = worker.starvation_stats();
+        assert_eq!(starvation_stats.total_priority_inversions, 1);
     }
 
     #[test]

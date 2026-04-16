@@ -157,8 +157,8 @@ fn mr_encode_decode_identity() {
 
         // METAMORPHIC ASSERTION: decode(encode(data)) = data
         match decode_result {
-            Ok(decoded) => {
-                let reconstructed = flatten_source_symbols(&decoded.source, data.len());
+            Ok(output) => {
+                let reconstructed = flatten_source_symbols(&output.source, data.len());
                 prop_assert_eq!(
                     reconstructed,
                     data,
@@ -427,8 +427,8 @@ fn mr_composite_encode_decode_properties() {
 
         // COMPOSITE ASSERTION: All properties must hold together
         match decode_result {
-            Ok(decoded) => {
-                let reconstructed = flatten_source_symbols(&decoded.source, data.len());
+            Ok(result) => {
+                let reconstructed = flatten_source_symbols(&result.source, data.len());
                 prop_assert_eq!(
                     reconstructed,
                     data,
