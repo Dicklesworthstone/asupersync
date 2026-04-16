@@ -295,6 +295,7 @@ impl Budget {
     /// Returns true if the deadline has passed.
     #[inline]
     #[must_use]
+    #[inline]
     pub fn is_past_deadline(&self, now: Time) -> bool {
         self.deadline.is_some_and(|d| now >= d)
     }
@@ -356,6 +357,7 @@ impl Budget {
     /// assert_eq!(combined.deadline, Some(Time::from_secs(10))); // min
     /// assert_eq!(combined.poll_quota, 1000);                    // min
     /// ```
+    #[inline]
     #[inline]
     #[must_use]
     pub fn combine(self, other: Self) -> Self {
