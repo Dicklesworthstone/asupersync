@@ -9,11 +9,19 @@
 //! that cancellation drain is making progress toward quiescence.
 
 pub mod progress_certificate;
+pub mod protocol_state_machines;
 pub mod symbol_cancel;
 
 pub use progress_certificate::{
     CertificateVerdict, DrainPhase, EvidenceEntry, ProgressCertificate, ProgressConfig,
     ProgressObservation,
+};
+pub use protocol_state_machines::{
+    CancelProtocolValidator, CancelStateMachine, ChannelContext, ChannelEvent, ChannelState,
+    ChannelStateMachine, IoContext, IoEvent, IoState, IoStateMachine, ObligationContext,
+    ObligationEvent, ObligationState, ObligationStateMachine, RegionContext, RegionEvent,
+    RegionState, RegionStateMachine, TaskContext, TaskEvent, TaskState, TaskStateMachine,
+    TimerContext, TimerEvent, TimerState, TimerStateMachine, TransitionResult, ValidationLevel,
 };
 pub use symbol_cancel::{
     CancelBroadcastMetrics, CancelBroadcaster, CancelListener, CancelMessage, CancelSink,
