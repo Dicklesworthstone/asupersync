@@ -72,6 +72,7 @@ pub struct SubjectPattern {
 
 impl SubjectPattern {
     /// Construct a validated subject pattern from the canonical dotted representation.
+    #[inline]
     #[must_use]
     pub fn new(pattern: impl AsRef<str>) -> Self {
         Self::parse(pattern.as_ref()).expect("subject pattern must be syntactically valid")
@@ -93,30 +94,35 @@ impl SubjectPattern {
     }
 
     /// Return the canonical dotted subject string.
+    #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.raw
     }
 
     /// Return a stable string key used for hashing and diagnostics.
+    #[inline]
     #[must_use]
     pub fn canonical_key(&self) -> String {
         self.raw.clone()
     }
 
     /// Return the canonical pattern segments.
+    #[inline]
     #[must_use]
     pub fn segments(&self) -> &[SubjectToken] {
         &self.segments
     }
 
     /// Return true when the pattern ends in a tail wildcard.
+    #[inline]
     #[must_use]
     pub fn is_full_wildcard(&self) -> bool {
         matches!(self.segments.last(), Some(SubjectToken::Tail))
     }
 
     /// Return true when the pattern contains any wildcard tokens.
+    #[inline]
     #[must_use]
     pub fn has_wildcards(&self) -> bool {
         self.segments
@@ -177,6 +183,7 @@ pub struct Subject {
 
 impl Subject {
     /// Construct a validated concrete subject.
+    #[inline]
     #[must_use]
     pub fn new(subject: impl AsRef<str>) -> Self {
         Self::parse(subject.as_ref()).expect("subject must be syntactically valid")
@@ -207,12 +214,14 @@ impl Subject {
     }
 
     /// Return the canonical dotted subject string.
+    #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.raw
     }
 
     /// Return the literal subject tokens.
+    #[inline]
     #[must_use]
     pub fn tokens(&self) -> &[String] {
         &self.tokens

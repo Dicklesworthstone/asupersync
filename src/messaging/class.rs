@@ -39,6 +39,7 @@ impl DeliveryClass {
     ];
 
     /// Return the operator-facing cost vector for this class.
+    #[inline]
     #[must_use]
     pub const fn cost_vector(self) -> DeliveryCostVector {
         match self {
@@ -51,6 +52,7 @@ impl DeliveryClass {
     }
 
     /// Minimum acknowledgement boundary this class can honestly claim.
+    #[inline]
     #[must_use]
     pub const fn minimum_ack(self) -> AckKind {
         match self {
