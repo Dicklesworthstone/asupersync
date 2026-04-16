@@ -1041,7 +1041,9 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn peek_ready_task(&self) -> Option<(TaskId, u8)> {
-        self.ready_lane.peek().map(|entry| (entry.task, entry.priority))
+        self.ready_lane
+            .peek()
+            .map(|entry| (entry.task, entry.priority))
     }
 
     /// Clears all scheduled tasks.

@@ -443,14 +443,14 @@ pub enum ReservationStatus {
         /// Timestamp when the reservation was committed.
         at: SystemTime,
         /// Size of data committed with the reservation.
-        data_size: usize
+        data_size: usize,
     },
     /// Reservation has been aborted.
     Aborted {
         /// Timestamp when the reservation was aborted.
         at: SystemTime,
         /// Reason for the abort.
-        reason: String
+        reason: String,
     },
 }
 

@@ -8,14 +8,11 @@ use super::atomicity_test::{
     AtomicityOracle, AtomicityTestConfig, CancellationInjector, consumer_task, producer_task,
 };
 use crate::channel::{broadcast, mpsc, oneshot, watch};
-use crate::combinator::select::{Select, Either};
+use crate::combinator::select::{Either, Select};
 use crate::test_utils::lab_with_config;
 use crate::time::{sleep, timeout};
 
-use std::sync::{
-    Arc,
-    atomic::{Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 // Removed tokio dependency - this project IS the async runtime
 
@@ -367,18 +364,16 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                     let changed_fut = receiver.changed(cx);
 
                     match Select::new(changed_fut, timeout_fut).await {
-                        Ok(Either::Left(result)) => {
-                            match result {
-                                Ok(()) => {
-                                    let value = *receiver.borrow();
-                                    if value > last_value {
-                                        updates_seen += 1;
-                                        last_value = value;
-                                    }
+                        Ok(Either::Left(result)) => match result {
+                            Ok(()) => {
+                                let value = *receiver.borrow();
+                                if value > last_value {
+                                    updates_seen += 1;
+                                    last_value = value;
                                 }
-                                Err(_) => break,
                             }
-                        }
+                            Err(_) => break,
+                        },
                         Ok(Either::Right(_)) => {
                             // Timeout - prevent infinite waiting
                             break;
@@ -428,35 +423,35 @@ mod tests {
     #[test]
     fn test_mpsc_light_stress() {
         lab_with_config(|_rt| async move {
-        let config = StressTestConfig {
-            base: AtomicityTestConfig {
-                capacity: 4,
-                num_producers: 3,
-                messages_per_producer: 50,
-                test_duration: Duration::from_secs(2),
-                cancel_probability: 0.1,
-                check_invariants: true,
-            },
-            stress_rounds: 2,
-            round_duration: Duration::from_secs(1),
-            escalating_cancellation: false,
-        };
+            let config = StressTestConfig {
+                base: AtomicityTestConfig {
+                    capacity: 4,
+                    num_producers: 3,
+                    messages_per_producer: 50,
+                    test_duration: Duration::from_secs(2),
+                    cancel_probability: 0.1,
+                    check_invariants: true,
+                },
+                stress_rounds: 2,
+                round_duration: Duration::from_secs(1),
+                escalating_cancellation: false,
+            };
 
-        let result = mpsc_stress_test(config).await.unwrap();
+            let result = mpsc_stress_test(config).await.unwrap();
 
-        println!("Light stress test results:");
-        println!("  Duration: {:?}", result.total_duration);
-        println!("  Rounds: {}", result.rounds_completed);
-        println!("  Messages: {}", result.total_messages);
-        println!("  Throughput: {:.2} msg/s", result.avg_throughput);
-        println!("  Atomicity: {}", result.atomicity_maintained);
+            println!("Light stress test results:");
+            println!("  Duration: {:?}", result.total_duration);
+            println!("  Rounds: {}", result.rounds_completed);
+            println!("  Messages: {}", result.total_messages);
+            println!("  Throughput: {:.2} msg/s", result.avg_throughput);
+            println!("  Atomicity: {}", result.atomicity_maintained);
 
-        assert!(
-            result.rounds_completed >= 1,
-            "Should complete at least one round"
-        );
-        assert!(result.atomicity_maintained, "Atomicity violations detected");
-        assert_eq!(result.total_violations, 0, "Should have no violations");
+            assert!(
+                result.rounds_completed >= 1,
+                "Should complete at least one round"
+            );
+            assert!(result.atomicity_maintained, "Atomicity violations detected");
+            assert_eq!(result.total_violations, 0, "Should have no violations");
         });
     }
 

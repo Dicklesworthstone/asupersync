@@ -182,7 +182,7 @@ pub enum PropagationAnomaly {
         /// The excessive depth reached.
         depth: u32,
         /// ID of the entity at excessive depth.
-        entity_id: String
+        entity_id: String,
     },
 }
 

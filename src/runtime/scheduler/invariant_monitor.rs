@@ -76,7 +76,7 @@ pub enum SchedulerInvariant {
         /// ID of the task found in multiple queues.
         task_id: TaskId,
         /// Number of queues the task was found in.
-        queue_count: usize
+        queue_count: usize,
     },
     /// Higher priority task scheduled after lower priority
     PriorityOrderViolation {

@@ -425,12 +425,12 @@ pub enum WakerStatus {
     /// Waker has been woken and is no longer queued
     Woken {
         /// When the waker was woken.
-        at: SystemTime
+        at: SystemTime,
     },
     /// Waker has been dropped/cleaned up
     Dropped {
         /// When the waker was dropped.
-        at: SystemTime
+        at: SystemTime,
     },
 }
 
