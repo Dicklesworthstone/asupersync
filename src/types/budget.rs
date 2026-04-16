@@ -179,6 +179,7 @@ impl Budget {
     };
 
     /// Creates a new budget with default values (priority 128, unlimited quotas).
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -200,6 +201,7 @@ impl Budget {
     /// let budget = Budget::unlimited();
     /// assert!(!budget.is_exhausted());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn unlimited() -> Self {
         Self::INFINITE
@@ -217,6 +219,7 @@ impl Budget {
     /// let budget = Budget::with_deadline_secs(30);
     /// assert_eq!(budget.deadline, Some(Time::from_secs(30)));
     /// ```
+    #[inline]
     #[must_use]
     pub const fn with_deadline_secs(secs: u64) -> Self {
         Self {
@@ -237,6 +240,7 @@ impl Budget {
     /// let budget = Budget::with_deadline_ns(30_000_000_000); // 30 seconds
     /// assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
     /// ```
+    #[inline]
     #[must_use]
     pub const fn with_deadline_ns(nanos: u64) -> Self {
         Self {
@@ -248,6 +252,7 @@ impl Budget {
     }
 
     /// Sets the deadline.
+    #[inline]
     #[must_use]
     pub const fn with_deadline(mut self, deadline: Time) -> Self {
         self.deadline = Some(deadline);
@@ -255,6 +260,7 @@ impl Budget {
     }
 
     /// Sets the poll quota.
+    #[inline]
     #[must_use]
     pub const fn with_poll_quota(mut self, quota: u32) -> Self {
         self.poll_quota = quota;
@@ -262,6 +268,7 @@ impl Budget {
     }
 
     /// Sets the cost quota.
+    #[inline]
     #[must_use]
     pub const fn with_cost_quota(mut self, quota: u64) -> Self {
         self.cost_quota = Some(quota);
@@ -269,6 +276,7 @@ impl Budget {
     }
 
     /// Sets the priority.
+    #[inline]
     #[must_use]
     pub const fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
@@ -347,6 +355,7 @@ impl Budget {
     /// assert_eq!(combined.deadline, Some(Time::from_secs(10))); // min
     /// assert_eq!(combined.poll_quota, 1000);                    // min
     /// ```
+    #[inline]
     #[must_use]
     pub fn combine(self, other: Self) -> Self {
         let combined = Self {
@@ -428,6 +437,7 @@ impl Budget {
     /// let effective = parent.meet(child);
     /// assert_eq!(effective.deadline, Some(Time::from_secs(10)));
     /// ```
+    #[inline]
     #[must_use]
     pub fn meet(self, other: Self) -> Self {
         self.combine(other)
@@ -504,6 +514,7 @@ impl Budget {
     /// let remaining = budget.remaining_time(now);
     /// assert_eq!(remaining, Some(Duration::from_secs(20)));
     /// ```
+    #[inline]
     #[must_use]
     pub fn remaining_time(&self, now: Time) -> Option<Duration> {
         self.deadline.and_then(|d| {
@@ -573,6 +584,7 @@ impl Budget {
     /// let timeout = budget.to_timeout(now);
     /// assert_eq!(timeout, Some(Duration::from_secs(25)));
     /// ```
+    #[inline]
     #[must_use]
     pub fn to_timeout(&self, now: Time) -> Option<Duration> {
         self.remaining_time(now)
@@ -663,11 +675,13 @@ impl MinPlusCurve {
     ///
     /// # Errors
     /// Returns an error if samples are empty or not nondecreasing.
+    #[inline]
     pub fn from_samples(samples: Vec<u64>) -> Result<Self, CurveError> {
         Self::new(samples, 0)
     }
 
     /// Creates a token-bucket arrival curve `burst + rate * t`.
+    #[inline]
     #[must_use]
     pub fn from_token_bucket(burst: u64, rate: u64, horizon: usize) -> Self {
         let mut samples = Vec::with_capacity(horizon.saturating_add(1));
@@ -682,6 +696,7 @@ impl MinPlusCurve {
     }
 
     /// Creates a rate-latency service curve `max(0, rate * (t - latency))`.
+    #[inline]
     #[must_use]
     pub fn from_rate_latency(rate: u64, latency: usize, horizon: usize) -> Self {
         let mut samples = Vec::with_capacity(horizon.saturating_add(1));
@@ -736,6 +751,7 @@ impl MinPlusCurve {
     /// Computes the min-plus convolution `(self ⊗ other)` over a horizon.
     ///
     /// This is O(horizon^2) and intended for small horizons/demonstrations.
+    #[inline]
     #[must_use]
     pub fn min_plus_convolution(&self, other: &Self, horizon: usize) -> Self {
         let mut samples = Vec::with_capacity(horizon.saturating_add(1));
@@ -787,6 +803,7 @@ impl CurveBudget {
 }
 
 /// Computes the backlog bound `sup_t (arrival(t) - service(t))` over a horizon.
+#[inline]
 #[must_use]
 pub fn backlog_bound(arrival: &MinPlusCurve, service: &MinPlusCurve, horizon: usize) -> u64 {
     let mut worst = 0;
@@ -804,6 +821,7 @@ pub fn backlog_bound(arrival: &MinPlusCurve, service: &MinPlusCurve, horizon: us
 /// Computes a delay bound `d` such that `arrival(t) <= service(t + d)` for all `t`.
 ///
 /// Returns `None` if no bound is found within `max_delay`.
+#[inline]
 #[must_use]
 pub fn delay_bound(
     arrival: &MinPlusCurve,
