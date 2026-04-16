@@ -211,6 +211,7 @@ impl<T> Mutex<T> {
 }
 
 impl<T: Default> Default for Mutex<T> {
+    #[inline]
     fn default() -> Self {
         Self::new(T::default())
     }

@@ -147,6 +147,7 @@ pub enum SchedulerInvariant {
 
 impl SchedulerInvariant {
     /// Returns the category this invariant belongs to.
+    #[must_use]
     pub fn category(&self) -> InvariantCategory {
         match self {
             Self::PriorityOrderViolation { .. } => InvariantCategory::PriorityOrdering,
@@ -161,20 +162,17 @@ impl SchedulerInvariant {
     }
 
     /// Returns the severity level (0=low, 1=medium, 2=high, 3=critical).
+    #[must_use]
     pub fn severity(&self) -> u8 {
         match self {
             Self::QueueDepthMismatch { .. } => 1, // Medium: metrics issue
-            Self::TaskStarvation { .. } => 2,     // High: performance issue
-            Self::LoadImbalance { .. } => 2,      // High: performance issue
-            Self::PriorityOrderViolation { .. } => 2, // High: correctness issue
-            Self::CancelledTaskLeak { .. } => 2,  // High: resource leak
-            Self::TaskInMultipleQueues { .. } => 3, // Critical: corruption
-            Self::WorkStealingDoubleExecution { .. } => 3, // Critical: data race
-            Self::InvalidStateTransition { .. } => 3, // Critical: state corruption
+            Self::TaskStarvation { .. } | Self::LoadImbalance { .. } | Self::PriorityOrderViolation { .. } | Self::CancelledTaskLeak { .. } => 2,     // High: performance/correctness/resource issues
+            Self::TaskInMultipleQueues { .. } | Self::WorkStealingDoubleExecution { .. } | Self::InvalidStateTransition { .. } => 3, // Critical: corruption/data race/state issues
         }
     }
 
     /// Returns a human-readable description of the violation.
+    #[must_use]
     pub fn description(&self) -> String {
         match self {
             Self::TaskInMultipleQueues {
@@ -182,8 +180,7 @@ impl SchedulerInvariant {
                 queue_count,
             } => {
                 format!(
-                    "Task {:?} found in {} queues simultaneously",
-                    task_id, queue_count
+                    "Task {task_id:?} found in {queue_count} queues simultaneously"
                 )
             }
             Self::PriorityOrderViolation {
@@ -193,8 +190,7 @@ impl SchedulerInvariant {
                 low_priority,
             } => {
                 format!(
-                    "Priority violation: task {:?} (priority {}) scheduled after task {:?} (priority {})",
-                    low_priority_task, low_priority, high_priority_task, high_priority
+                    "Priority violation: task {low_priority_task:?} (priority {low_priority}) scheduled after task {high_priority_task:?} (priority {high_priority})"
                 )
             }
             Self::TaskStarvation {
@@ -203,8 +199,7 @@ impl SchedulerInvariant {
                 queue_position,
             } => {
                 format!(
-                    "Task {:?} starved for {}ms at queue position {}",
-                    task_id, wait_time_ms, queue_position
+                    "Task {task_id:?} starved for {wait_time_ms}ms at queue position {queue_position}"
                 )
             }
             Self::LoadImbalance {

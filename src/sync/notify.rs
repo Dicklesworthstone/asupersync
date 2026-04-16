@@ -178,6 +178,7 @@ impl Notify {
     /// will be delivered to the next task that calls `notified().await`.
     ///
     /// If multiple tasks are waiting, exactly one will be woken.
+    #[inline]
     pub fn notify_one(&self) {
         let waker_to_wake = {
             let mut waiters = self.waiters.lock();
@@ -228,6 +229,7 @@ impl Notify {
     ///
     /// This wakes all tasks that are currently waiting. Tasks that
     /// start waiting after this call will not be affected.
+    #[inline]
     pub fn notify_waiters(&self) {
         // Increment generation to signal all waiters.
         let new_generation = self.generation.fetch_add(1, Ordering::Release) + 1;
@@ -314,6 +316,7 @@ impl Notify {
 }
 
 impl Default for Notify {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }

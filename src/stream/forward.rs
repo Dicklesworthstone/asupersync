@@ -19,17 +19,20 @@ pub struct SinkStream<T> {
 
 impl<T> SinkStream<T> {
     /// Create a new SinkStream.
+    #[inline]
     #[must_use]
     pub fn new(sender: mpsc::Sender<T>) -> Self {
         Self { sender }
     }
 
     /// Send item through the channel.
+    #[inline]
     pub async fn send(&self, cx: &Cx, item: T) -> Result<(), SendError<T>> {
         self.sender.send(cx, item).await
     }
 
     /// Send all items from stream.
+    #[inline]
     pub async fn send_all<S>(&self, cx: &Cx, stream: S) -> Result<(), SendError<S::Item>>
     where
         S: Stream<Item = T> + Unpin,
@@ -39,12 +42,14 @@ impl<T> SinkStream<T> {
 }
 
 /// Convert a stream into a channel sender.
+#[inline]
 #[must_use]
 pub fn into_sink<T>(sender: mpsc::Sender<T>) -> SinkStream<T> {
     SinkStream::new(sender)
 }
 
 /// Forward stream to channel.
+#[inline]
 pub async fn forward<S, T>(
     cx: &Cx,
     mut stream: S,

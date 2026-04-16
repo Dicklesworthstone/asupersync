@@ -160,7 +160,7 @@ impl fmt::Display for EpochConsistencyViolation {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}@{}", module, epoch)?;
+                    write!(f, "{module}@{epoch}")?;
                 }
                 Ok(())
             }
@@ -356,7 +356,9 @@ impl EpochConsistencyTracker {
             });
 
         // Check for expected transition sequence
-        let _sync_status = if record.current_epoch != from_epoch {
+        let _sync_status = if record.current_epoch == from_epoch {
+            "synchronized"
+        } else {
             let violation = EpochConsistencyViolation::MissingTransition {
                 module,
                 expected_epoch: record.current_epoch.next(),
@@ -365,15 +367,12 @@ impl EpochConsistencyTracker {
             };
             self.record_violation(violation);
             "violated"
-        } else {
-            "synchronized"
         };
 
         // Calculate transition latency if there was a transition start time
         let transition_latency_ns = record
             .transition_start_time
-            .map(|start| now.duration_since(start))
-            .unwrap_or(0);
+            .map_or(0, |start| now.duration_since(start));
 
         // Update record
         record.current_epoch = to_epoch;
@@ -471,7 +470,7 @@ impl EpochConsistencyTracker {
     ) {
         let mut epochs: BTreeMap<EpochId, Vec<ModuleId>> = BTreeMap::new();
 
-        for (&module, record) in records.iter() {
+        for (&module, record) in records {
             epochs.entry(record.current_epoch).or_default().push(module);
         }
 
@@ -507,7 +506,7 @@ impl EpochConsistencyTracker {
         records: &DetHashMap<ModuleId, EpochTransitionRecord>,
         now: Time,
     ) {
-        for (&module, record) in records.iter() {
+        for (&module, record) in records {
             if let Some(transition_start) = record.transition_start_time {
                 let duration_ns = now.duration_since(transition_start);
                 if duration_ns > self.config.slow_transition_threshold_ns {
@@ -578,7 +577,7 @@ impl EpochConsistencyTracker {
             } => {
                 let _affected_modules: Vec<String> = modules
                     .iter()
-                    .map(|(module, epoch)| format!("{}@{}", module, epoch))
+                    .map(|(module, epoch)| format!("{module}@{epoch}"))
                     .collect();
 
                 // Log epoch consistency violation with affected_modules, epoch_skew, consistency_level
@@ -723,6 +722,7 @@ impl EpochConsistencyTracker {
                 latest_epoch = record.current_epoch;
             }
         }
+        drop(records);
 
         EpochTransitionStatistics {
             total_transitions,
@@ -781,11 +781,11 @@ impl EpochConsistencyTracker {
         scenario_type: &str,
         additional_args: &[(&str, &str)],
     ) -> String {
-        let base_cmd = format!("epoch-tracker-replay --scenario {}", scenario_type);
+        let base_cmd = format!("epoch-tracker-replay --scenario {scenario_type}");
 
         let args: Vec<String> = additional_args
             .iter()
-            .map(|(key, value)| format!("--{} {}", key, value))
+            .map(|(key, value)| format!("--{key} {value}"))
             .collect();
 
         if args.is_empty() {
@@ -831,6 +831,7 @@ impl EpochConsistencyTracker {
                 "module_epoch_state"
             );
         }
+        drop(records);
 
         // Log recent violations summary
         if violation_count > 0 {
@@ -866,7 +867,7 @@ impl EpochConsistencyTracker {
     /// This allows tuning the sensitivity of slow transition detection
     /// based on runtime conditions or performance requirements.
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
-        let _old_threshold = self.config.slow_transition_threshold_ns;
+        let old_threshold = self.config.slow_transition_threshold_ns;
         self.config.slow_transition_threshold_ns = threshold_ns;
 
         info!(

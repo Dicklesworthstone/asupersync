@@ -175,7 +175,7 @@ impl StructuredCancellationAnalyzer {
 
         // Log structured event if enabled
         if self.config.enable_structured_logging {
-            self.log_trace_event("trace_started", &trace_id, None);
+            Self::log_trace_event("trace_started", trace_id, None);
         }
 
         trace_id
@@ -211,7 +211,7 @@ impl StructuredCancellationAnalyzer {
 
         // Log structured event if enabled
         if self.config.enable_structured_logging {
-            self.log_trace_event("step_recorded", &trace_id, Some(&entity_id));
+            Self::log_trace_event("step_recorded", trace_id, Some(&entity_id));
         }
     }
 
@@ -224,7 +224,7 @@ impl StructuredCancellationAnalyzer {
 
         // Log structured event if enabled
         if self.config.enable_structured_logging {
-            self.log_trace_event("trace_completed", &trace_id, None);
+            Self::log_trace_event("trace_completed", trace_id, None);
         }
 
         // Trigger cleanup if needed
@@ -394,7 +394,7 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Trigger a new alert.
-    fn trigger_alert(&self, alert: CancellationAlert) {
+    fn trigger_alert(&self, alert: &CancellationAlert) {
         {
             let mut alerts = self.alerts.lock().unwrap();
             alerts.push(alert.clone());
@@ -403,6 +403,7 @@ impl StructuredCancellationAnalyzer {
             while alerts.len() > 1000 {
                 alerts.remove(0);
             }
+            drop(alerts);
         }
 
         // Update alert count in stats
@@ -413,21 +414,20 @@ impl StructuredCancellationAnalyzer {
 
         // Log alert if structured logging is enabled
         if self.config.enable_structured_logging {
-            self.log_alert(&alert);
+            Self::log_alert(&alert);
         }
     }
 
     /// Log a structured trace event.
     fn log_trace_event(
-        &self,
         event_type: &str,
-        trace_id: &crate::observability::TraceId,
+        trace_id: crate::observability::TraceId,
         entity_id: Option<&str>,
     ) {
         // In a real implementation, this would integrate with the structured logging framework
         #[cfg(debug_assertions)]
         {
-            let entity_info = entity_id.map_or(String::new(), |id| format!(", entity_id: {}", id));
+            let entity_info = entity_id.map_or(String::new(), |id| format!(", entity_id: {id}"));
             eprintln!(
                 "[CANCELLATION_TRACE] {}: trace_id: {}{}",
                 event_type,
@@ -438,7 +438,7 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Log an alert using structured logging.
-    fn log_alert(&self, alert: &CancellationAlert) {
+    fn log_alert(alert: &CancellationAlert) {
         // In a real implementation, this would integrate with the structured logging framework
         #[cfg(debug_assertions)]
         {
@@ -460,6 +460,7 @@ impl StructuredCancellationAnalyzer {
         }
 
         *last_cleanup = now;
+        drop(last_cleanup);
 
         // Get current memory usage estimate
         let stats = self.get_real_time_stats();
@@ -491,6 +492,7 @@ pub struct LabRuntimeIntegration {
 
 impl LabRuntimeIntegration {
     /// Creates a new lab runtime integration.
+    #[must_use]
     pub fn new(config: StructuredCancellationConfig) -> Self {
         Self {
             analyzer: StructuredCancellationAnalyzer::new(config),
