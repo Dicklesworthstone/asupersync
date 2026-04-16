@@ -115,6 +115,7 @@ impl LengthDelimitedCodecBuilder {
     }
 
     /// Builds the codec.
+    #[inline]
     #[must_use]
     pub fn new_codec(self) -> LengthDelimitedCodec {
         assert!(
