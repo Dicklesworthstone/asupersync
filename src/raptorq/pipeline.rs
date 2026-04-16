@@ -178,6 +178,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
 
     /// Returns a reference to the config.
     #[must_use]
+    #[inline]
     pub const fn config(&self) -> &RaptorQConfig {
         &self.config
     }
@@ -311,6 +312,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 
     /// Returns a reference to the config.
     #[must_use]
+    #[inline]
     pub const fn config(&self) -> &RaptorQConfig {
         &self.config
     }

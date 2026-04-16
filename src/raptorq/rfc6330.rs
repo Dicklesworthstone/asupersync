@@ -174,6 +174,7 @@ pub const V3: [u32; 256] = [
 ///
 /// A value in the range `[0, m)`.
 #[must_use]
+#[inline]
 pub fn rand(y: u32, i: u8, m: u32) -> u32 {
     debug_assert!(m > 0, "modulus must be positive");
 
@@ -196,6 +197,7 @@ pub fn rand(y: u32, i: u8, m: u32) -> u32 {
 ///
 /// The degree d for LT encoding.
 #[must_use]
+#[inline]
 pub fn deg(v: u32) -> usize {
     // Degree table from RFC 6330 Section 5.3.5.2
     // Each entry (threshold, degree): for v < threshold, return degree.
