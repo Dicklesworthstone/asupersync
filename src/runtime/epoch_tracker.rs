@@ -36,6 +36,7 @@
 //! ```
 
 use crate::epoch::EpochId;
+use crate::tracing_compat::{debug, error, info, warn};
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
 use parking_lot::RwLock;
@@ -340,6 +341,10 @@ impl EpochConsistencyTracker {
             return;
         }
 
+        // Generate correlation ID for cross-module analysis
+        let correlation_id = self.global_transition_count.load(Ordering::Relaxed) + 1;
+        let transition_start = std::time::Instant::now();
+
         let mut records = self.module_records.write();
         let record = records
             .entry(module)
@@ -351,7 +356,7 @@ impl EpochConsistencyTracker {
             });
 
         // Check for expected transition sequence
-        if record.current_epoch != from_epoch {
+        let sync_status = if record.current_epoch != from_epoch {
             let violation = EpochConsistencyViolation::MissingTransition {
                 module,
                 expected_epoch: record.current_epoch.next(),
@@ -359,7 +364,16 @@ impl EpochConsistencyTracker {
                 detected_at: now,
             };
             self.record_violation(violation);
-        }
+            "violated"
+        } else {
+            "synchronized"
+        };
+
+        // Calculate transition latency if there was a transition start time
+        let transition_latency_ns = record
+            .transition_start_time
+            .map(|start| now.duration_since(start).unwrap_or_default().as_nanos() as u64)
+            .unwrap_or(0);
 
         // Update record
         record.current_epoch = to_epoch;
@@ -370,9 +384,42 @@ impl EpochConsistencyTracker {
         // Increment global counter
         self.global_transition_count.fetch_add(1, Ordering::Relaxed);
 
+        // Structured logging: Each epoch transition logged with module_id, old_epoch, new_epoch, transition_time, sync_status
+        info!(
+            module_id = %module,
+            old_epoch = %from_epoch,
+            new_epoch = %to_epoch,
+            transition_time_ns = now.as_nanos(),
+            sync_status = sync_status,
+            correlation_id = correlation_id,
+            transition_count = record.transition_count,
+            transition_latency_ns = transition_latency_ns,
+            "epoch_transition"
+        );
+
+        // Log performance metrics for epoch transition latency
+        if transition_latency_ns > 0 {
+            debug!(
+                module_id = %module,
+                transition_latency_ns = transition_latency_ns,
+                correlation_id = correlation_id,
+                threshold_ns = self.config.slow_transition_threshold_ns,
+                "epoch_transition_latency"
+            );
+        }
+
         // Check for consistency violations after this transition
         drop(records); // Release lock before consistency check
+        let processing_start = std::time::Instant::now();
         self.check_consistency_internal(now);
+        let processing_latency = processing_start.elapsed().as_nanos() as u64;
+
+        // Log consistency check performance
+        debug!(
+            correlation_id = correlation_id,
+            processing_latency_ns = processing_latency,
+            "epoch_consistency_check_latency"
+        );
     }
 
     /// Notifies the tracker that a module is starting an epoch transition.
@@ -519,6 +566,111 @@ impl EpochConsistencyTracker {
 
     /// Records a violation, maintaining bounded storage.
     fn record_violation(&self, violation: EpochConsistencyViolation) {
+        // Generate correlation ID for this violation
+        let violation_id = self.global_transition_count.load(Ordering::Relaxed);
+
+        // Extract structured logging information based on violation type
+        match &violation {
+            EpochConsistencyViolation::ModuleDesync {
+                modules,
+                detected_at,
+                max_skew,
+            } => {
+                let affected_modules: Vec<String> = modules.iter()
+                    .map(|(module, epoch)| format!("{}@{}", module, epoch))
+                    .collect();
+
+                // Log epoch consistency violation with affected_modules, epoch_skew, consistency_level
+                error!(
+                    violation_type = "module_desync",
+                    affected_modules = ?affected_modules,
+                    epoch_skew = max_skew,
+                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
+                    correlation_id = violation_id,
+                    detected_at_ns = detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type module_desync", violation_id),
+                    "epoch_consistency_violation"
+                );
+            }
+            EpochConsistencyViolation::SlowTransition {
+                module,
+                from_epoch,
+                to_epoch,
+                started_at,
+                detected_at,
+                duration_ns,
+            } => {
+                error!(
+                    violation_type = "slow_transition",
+                    affected_modules = ?[format!("{}@{}->{}", module, from_epoch, to_epoch)],
+                    epoch_skew = 0u64,
+                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
+                    correlation_id = violation_id,
+                    module_id = %module,
+                    transition_duration_ns = duration_ns,
+                    threshold_ns = self.config.slow_transition_threshold_ns,
+                    started_at_ns = started_at.as_nanos(),
+                    detected_at_ns = detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type slow_transition --module {}", violation_id, module),
+                    "epoch_consistency_violation"
+                );
+            }
+            EpochConsistencyViolation::MissingTransition {
+                module,
+                expected_epoch,
+                actual_epoch,
+                detected_at,
+            } => {
+                let epoch_skew = if actual_epoch > expected_epoch {
+                    actual_epoch.as_u64() - expected_epoch.as_u64()
+                } else {
+                    expected_epoch.as_u64() - actual_epoch.as_u64()
+                };
+
+                error!(
+                    violation_type = "missing_transition",
+                    affected_modules = ?[format!("{}@{}", module, actual_epoch)],
+                    epoch_skew = epoch_skew,
+                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
+                    correlation_id = violation_id,
+                    module_id = %module,
+                    expected_epoch = %expected_epoch,
+                    actual_epoch = %actual_epoch,
+                    detected_at_ns = detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type missing_transition --module {} --expected-epoch {} --actual-epoch {}", violation_id, module, expected_epoch, actual_epoch),
+                    "epoch_consistency_violation"
+                );
+            }
+            EpochConsistencyViolation::AdvancementOrderViolation {
+                module,
+                advanced_to,
+                dependency_module,
+                dependency_epoch,
+                detected_at,
+            } => {
+                let epoch_skew = if advanced_to > dependency_epoch {
+                    advanced_to.as_u64() - dependency_epoch.as_u64()
+                } else {
+                    dependency_epoch.as_u64() - advanced_to.as_u64()
+                };
+
+                error!(
+                    violation_type = "advancement_order_violation",
+                    affected_modules = ?[format!("{}@{}", module, advanced_to), format!("{}@{}", dependency_module, dependency_epoch)],
+                    epoch_skew = epoch_skew,
+                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
+                    correlation_id = violation_id,
+                    violating_module = %module,
+                    advanced_to = %advanced_to,
+                    dependency_module = %dependency_module,
+                    dependency_epoch = %dependency_epoch,
+                    detected_at_ns = detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type order_violation --module {} --dependency-module {}", violation_id, module, dependency_module),
+                    "epoch_consistency_violation"
+                );
+            }
+        }
+
         let mut violations = self.violations.write();
         violations.push(violation);
 
@@ -526,6 +678,12 @@ impl EpochConsistencyTracker {
         if violations.len() > self.max_violations {
             let excess = violations.len() - self.max_violations;
             violations.drain(0..excess);
+
+            warn!(
+                violations_trimmed = excess,
+                max_violations = self.max_violations,
+                "epoch_violation_buffer_trimmed"
+            );
         }
     }
 
@@ -609,6 +767,108 @@ pub struct EpochModuleStatistics {
     pub transition_count: u64,
     /// When this module last transitioned.
     pub last_transition_time: Time,
+}
+
+impl EpochConsistencyTracker {
+    /// Generates a replay command for reproducing epoch inconsistency scenarios.
+    ///
+    /// This method is useful for creating diagnostic commands that can reproduce
+    /// specific epoch consistency issues for debugging purposes.
+    #[must_use]
+    pub fn generate_replay_command(&self, scenario_type: &str, additional_args: &[(&str, &str)]) -> String {
+        let base_cmd = format!("epoch-tracker-replay --scenario {}", scenario_type);
+
+        let args: Vec<String> = additional_args
+            .iter()
+            .map(|(key, value)| format!("--{} {}", key, value))
+            .collect();
+
+        if args.is_empty() {
+            base_cmd
+        } else {
+            format!("{} {}", base_cmd, args.join(" "))
+        }
+    }
+
+    /// Logs comprehensive epoch state for debugging and monitoring.
+    ///
+    /// This method provides structured logging of the complete epoch state
+    /// across all modules, which can be useful for debugging and monitoring
+    /// epoch consistency in production environments.
+    pub fn log_epoch_state(&self) {
+        let records = self.module_records.read();
+        let violation_count = self.violation_count();
+        let total_transitions = self.global_transition_count.load(Ordering::Relaxed);
+
+        // Log overall epoch state
+        info!(
+            total_modules = records.len(),
+            total_transitions = total_transitions,
+            violation_count = violation_count,
+            consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
+            max_epoch_skew_allowed = self.config.max_epoch_skew,
+            slow_transition_threshold_ns = self.config.slow_transition_threshold_ns,
+            "epoch_tracker_state"
+        );
+
+        // Log per-module state
+        for (&module, record) in records.iter() {
+            debug!(
+                module_id = %module,
+                current_epoch = %record.current_epoch,
+                transition_count = record.transition_count,
+                last_transition_time_ns = record.last_transition_time.as_nanos(),
+                is_transitioning = record.transition_start_time.is_some(),
+                "module_epoch_state"
+            );
+        }
+
+        // Log recent violations summary
+        if violation_count > 0 {
+            let violations = self.violations.read();
+            for (idx, violation) in violations.iter().enumerate().take(5) {
+                debug!(
+                    violation_index = idx,
+                    violation_type = match violation {
+                        EpochConsistencyViolation::ModuleDesync { .. } => "module_desync",
+                        EpochConsistencyViolation::SlowTransition { .. } => "slow_transition",
+                        EpochConsistencyViolation::MissingTransition { .. } => "missing_transition",
+                        EpochConsistencyViolation::AdvancementOrderViolation { .. } => "advancement_order_violation",
+                    },
+                    violation_summary = %format!("{}", violation),
+                    "recent_epoch_violation"
+                );
+            }
+        }
+    }
+
+    /// Enables or disables epoch consistency checking at runtime.
+    ///
+    /// This can be useful for temporarily disabling checking during
+    /// performance-critical sections or enabling it for debugging.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.config.enabled = enabled;
+
+        info!(
+            enabled = enabled,
+            "epoch_tracker_enabled_changed"
+        );
+    }
+
+    /// Updates the slow transition threshold dynamically.
+    ///
+    /// This allows tuning the sensitivity of slow transition detection
+    /// based on runtime conditions or performance requirements.
+    pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
+        let old_threshold = self.config.slow_transition_threshold_ns;
+        self.config.slow_transition_threshold_ns = threshold_ns;
+
+        info!(
+            old_threshold_ns = old_threshold,
+            new_threshold_ns = threshold_ns,
+            "epoch_tracker_threshold_updated"
+        );
+    }
 }
 
 #[cfg(test)]
