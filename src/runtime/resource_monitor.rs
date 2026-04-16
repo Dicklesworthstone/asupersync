@@ -21,9 +21,8 @@
 //! - Memory allocators trigger on heap pressure
 
 use crate::types::pressure::SystemPressure;
-use crate::types::{RegionId, TaskId};
-use crate::runtime::RuntimeError;
-use parking_lot::{RwLock, Mutex};
+use crate::types::RegionId;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
@@ -271,7 +270,9 @@ impl TriggerConfig {
         // Apply hysteresis for downgrades
         if new_level < current_level {
             // Only downgrade if we're well below the threshold
-            if new_level <= current_level.saturating_sub(1) {
+            let new_u8 = new_level as u8;
+            let current_u8 = current_level as u8;
+            if new_u8 <= current_u8.saturating_sub(1) {
                 new_level
             } else {
                 current_level
@@ -659,6 +660,7 @@ impl DegradationStatsSnapshot {
 
 /// System resource collector for platform-specific monitoring.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SystemResourceCollector {
     /// Whether monitoring is active.
     active: AtomicBool,

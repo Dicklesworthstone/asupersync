@@ -152,6 +152,7 @@ pub struct RegionContext {
 
 /// Region lifecycle state machine.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct RegionStateMachine {
     state: RegionState,
     region_id: RegionId,
@@ -489,6 +490,7 @@ pub struct TaskContext {
 }
 
 /// Task lifecycle state machine.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct TaskStateMachine {
     state: TaskState,
@@ -668,6 +670,7 @@ pub struct ObligationContext {
     pub validation_level: ValidationLevel,
 }
 
+#[allow(dead_code)]
 /// Obligation lifecycle state machine.
 #[derive(Debug)]
 pub struct ObligationStateMachine {
@@ -836,6 +839,7 @@ pub struct ChannelContext {
     pub channel_id: u64, // Simplified channel ID
     pub validation_level: ValidationLevel,
 }
+#[allow(dead_code)]
 
 /// Channel lifecycle state machine.
 #[derive(Debug)]
@@ -1042,6 +1046,7 @@ pub struct IoContext {
 
 /// IO operation state machine.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct IoStateMachine {
     state: IoState,
     operation_id: u64,
@@ -1203,6 +1208,7 @@ pub struct TimerContext {
 
 /// Timer state machine.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TimerStateMachine {
     state: TimerState,
     timer_id: u64,

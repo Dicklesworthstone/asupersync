@@ -94,6 +94,7 @@ pub struct LocalEpochStats {
 // ============================================================================
 
 /// Global epoch counter with automatic advancement.
+#[allow(dead_code)]
 pub struct GlobalEpochCounter {
     /// Current global epoch (monotonic, never decreases).
     epoch: AtomicU64,
