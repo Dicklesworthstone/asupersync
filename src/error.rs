@@ -379,6 +379,7 @@ impl BackoffHint {
 }
 
 impl Default for BackoffHint {
+    #[inline]
     fn default() -> Self {
         Self::DEFAULT
     }
@@ -493,6 +494,7 @@ impl Error {
 
     /// Adds a message description to the error.
     #[must_use]
+    #[inline]
     pub fn with_message(mut self, msg: impl Into<String>) -> Self {
         self.message = Some(msg.into());
         self
@@ -500,6 +502,7 @@ impl Error {
 
     /// Adds structured context to the error.
     #[must_use]
+    #[inline]
     pub fn with_context(mut self, ctx: ErrorContext) -> Self {
         self.context = ctx;
         self
@@ -507,6 +510,7 @@ impl Error {
 
     /// Adds a source error to the chain.
     #[must_use]
+    #[inline]
     pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         self.source = Some(Arc::new(source));
         self
@@ -514,6 +518,7 @@ impl Error {
 
     /// Creates a cancellation error from a structured reason.
     #[must_use]
+    #[inline]
     pub fn cancelled(reason: &CancelReason) -> Self {
         Self::new(ErrorKind::Cancelled).with_message(reason.to_string())
     }

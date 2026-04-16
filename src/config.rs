@@ -124,6 +124,7 @@ pub struct ServerConfig {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Default for ServerConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             bind_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
@@ -274,6 +275,7 @@ pub struct EncodingConfig {
 }
 
 impl Default for EncodingConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             repair_overhead: 1.05,
@@ -305,6 +307,7 @@ pub struct TransportConfig {
 }
 
 impl Default for TransportConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             max_paths: 4,
@@ -356,6 +359,7 @@ pub struct BackoffConfig {
 }
 
 impl Default for BackoffConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             initial_delay: Duration::from_millis(100),
@@ -375,6 +379,7 @@ pub struct AdaptiveConfig {
 }
 
 impl Default for AdaptiveConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             min_samples: 16,
