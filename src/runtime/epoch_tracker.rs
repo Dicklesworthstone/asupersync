@@ -343,7 +343,7 @@ impl EpochConsistencyTracker {
 
         // Generate correlation ID for cross-module analysis
         let _correlation_id = self.global_transition_count.load(Ordering::Relaxed) + 1;
-        let transition_start = std::time::Instant::now();
+        let _transition_start = std::time::Instant::now();
 
         let mut records = self.module_records.write();
         let record = records
@@ -356,7 +356,7 @@ impl EpochConsistencyTracker {
             });
 
         // Check for expected transition sequence
-        let sync_status = if record.current_epoch != from_epoch {
+        let _sync_status = if record.current_epoch != from_epoch {
             let violation = EpochConsistencyViolation::MissingTransition {
                 module,
                 expected_epoch: record.current_epoch.next(),
@@ -412,7 +412,7 @@ impl EpochConsistencyTracker {
         drop(records); // Release lock before consistency check
         let processing_start = std::time::Instant::now();
         self.check_consistency_internal(now);
-        let processing_latency = processing_start.elapsed().as_nanos() as u64;
+        let _processing_latency = processing_start.elapsed().as_nanos() as u64;
 
         // Log consistency check performance
         debug!(
