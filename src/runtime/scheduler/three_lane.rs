@@ -1703,6 +1703,7 @@ impl TaskStarvationInfo {
     fn record_skip(&mut self, current_time_ns: u64) {
         self.skip_count = self.skip_count.saturating_add(1);
         self.last_skip_time_ns = current_time_ns;
+        self.total_wait_time_ns = self.current_wait_time_ns(current_time_ns);
     }
 
     fn current_wait_time_ns(&self, current_time_ns: u64) -> u64 {
@@ -1883,7 +1884,7 @@ impl FairnessMonitor {
 
                 let is_starved =
                     info.is_starved(self.config.starvation_threshold_ns, current_time_ns);
-                let is_inversion = executing_priority > info.priority;
+                let is_inversion = info.priority > executing_priority;
                 let priority = info.priority;
 
                 (is_starved, is_inversion, priority)
@@ -1967,15 +1968,57 @@ impl FairnessMonitor {
     /// Returns starvation statistics for monitoring.
     pub fn starvation_stats(&self, current_time_ns: u64) -> StarvationStats {
         let currently_starved = self.count_starved_tasks(current_time_ns);
+        let total_tracked_wait_time_ns = self
+            .tracked_tasks
+            .values()
+            .map(|info| {
+                info.total_wait_time_ns
+                    .max(info.current_wait_time_ns(current_time_ns))
+            })
+            .sum::<u64>();
         let avg_wait_time_ns = if !self.tracked_tasks.is_empty() {
-            self.tracked_tasks
-                .values()
-                .map(|info| info.current_wait_time_ns(current_time_ns))
-                .sum::<u64>()
-                / self.tracked_tasks.len() as u64
+            total_tracked_wait_time_ns / self.tracked_tasks.len() as u64
         } else {
             0
         };
+        let oldest_tracked_task = self
+            .tracked_tasks
+            .values()
+            .max_by_key(|info| info.current_wait_time_ns(current_time_ns))
+            .map(|info| StarvedTaskSummary {
+                task_id: info.task_id,
+                priority: info.priority,
+                current_lane: info.current_lane,
+                skip_count: info.skip_count,
+                wait_time_ns: info.current_wait_time_ns(current_time_ns),
+                total_wait_time_ns: info
+                    .total_wait_time_ns
+                    .max(info.current_wait_time_ns(current_time_ns)),
+            });
+        let latest_priority_inversion =
+            self.priority_inversions
+                .last()
+                .map(|event| PriorityInversionSummary {
+                    blocked_task_id: event.blocked_task_id,
+                    blocked_priority: event.blocked_priority,
+                    executing_task_id: event.executing_task_id,
+                    executing_priority: event.executing_priority,
+                    priority_gap: event
+                        .blocked_priority
+                        .saturating_sub(event.executing_priority),
+                    timestamp_ns: event.timestamp_ns,
+                    duration_ns: event.duration_ns,
+                });
+        let max_priority_inversion_gap = self
+            .priority_inversions
+            .iter()
+            .map(|event| {
+                event
+                    .blocked_priority
+                    .saturating_sub(event.executing_priority)
+            })
+            .max()
+            .unwrap_or(0);
 
         StarvationStats {
             total_starvation_events: self.total_starvation_events,
@@ -1985,6 +2028,10 @@ impl FairnessMonitor {
             total_priority_inversions: self.total_priority_inversions,
             tracked_tasks_count: self.tracked_tasks.len() as u32,
             pattern_detected: self.detect_starvation_pattern(current_time_ns),
+            total_tracked_wait_time_ns,
+            oldest_tracked_task,
+            max_priority_inversion_gap,
+            latest_priority_inversion,
         }
     }
 
@@ -2007,6 +2054,42 @@ impl FairnessMonitor {
 }
 
 /// Starvation monitoring statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StarvedTaskSummary {
+    /// Identifier of the oldest currently tracked task.
+    pub task_id: TaskId,
+    /// Priority assigned to the tracked task.
+    pub priority: u8,
+    /// Queue lane where the task is currently tracked (Cancel=0, Timed=1, Ready=2).
+    pub current_lane: u8,
+    /// Number of times the task has been skipped.
+    pub skip_count: u32,
+    /// Current wait time for the task.
+    pub wait_time_ns: u64,
+    /// Total accumulated wait time snapshot recorded for the task.
+    pub total_wait_time_ns: u64,
+}
+
+/// Summary of the latest observed priority inversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriorityInversionSummary {
+    /// High-priority task that was blocked.
+    pub blocked_task_id: TaskId,
+    /// Priority of the blocked task.
+    pub blocked_priority: u8,
+    /// Lower-priority task that executed instead.
+    pub executing_task_id: TaskId,
+    /// Priority of the executing task.
+    pub executing_priority: u8,
+    /// Difference between blocked and executing priorities.
+    pub priority_gap: u8,
+    /// Timestamp when the inversion was observed.
+    pub timestamp_ns: u64,
+    /// Recorded duration of the inversion.
+    pub duration_ns: u64,
+}
+
+/// Starvation monitoring statistics.
 #[derive(Debug, Clone, Default)]
 pub struct StarvationStats {
     /// Total starvation events detected.
@@ -2023,6 +2106,14 @@ pub struct StarvationStats {
     pub tracked_tasks_count: u32,
     /// Whether a starvation pattern has been detected.
     pub pattern_detected: bool,
+    /// Sum of the current wait times for all tracked tasks.
+    pub total_tracked_wait_time_ns: u64,
+    /// Oldest task currently tracked by the monitor.
+    pub oldest_tracked_task: Option<StarvedTaskSummary>,
+    /// Largest priority gap observed across retained inversion events.
+    pub max_priority_inversion_gap: u8,
+    /// Most recent priority inversion retained by the monitor.
+    pub latest_priority_inversion: Option<PriorityInversionSummary>,
 }
 
 /// Deterministic witness for cancel-lane fairness guarantees.
@@ -6416,6 +6507,65 @@ mod tests {
         assert_eq!(metrics.ready_dispatches, 1);
         let stats = worker.starvation_stats();
         assert_eq!(stats.total_priority_inversions, 1);
+    }
+
+    #[test]
+    fn fairness_monitor_reports_priority_inversion_details() {
+        let mut monitor = FairnessMonitor::with_defaults();
+        let blocked = TaskId::new_for_test(30, 0);
+        let executing = TaskId::new_for_test(31, 0);
+
+        monitor.record_task_enqueue(blocked, 200, 1_000, 2);
+        monitor.record_task_skip(blocked, executing, 10, 1_250);
+
+        let stats = monitor.starvation_stats(1_250);
+        assert_eq!(stats.total_priority_inversions, 1);
+        assert_eq!(stats.max_priority_inversion_gap, 190);
+
+        let inversion = stats
+            .latest_priority_inversion
+            .expect("latest inversion should be reported");
+        assert_eq!(inversion.blocked_task_id, blocked);
+        assert_eq!(inversion.blocked_priority, 200);
+        assert_eq!(inversion.executing_task_id, executing);
+        assert_eq!(inversion.executing_priority, 10);
+        assert_eq!(inversion.priority_gap, 190);
+        assert_eq!(inversion.timestamp_ns, 1_250);
+        assert_eq!(inversion.duration_ns, 0);
+
+        let oldest = stats
+            .oldest_tracked_task
+            .expect("blocked task should remain tracked");
+        assert_eq!(oldest.task_id, blocked);
+        assert_eq!(oldest.priority, 200);
+        assert_eq!(oldest.current_lane, 2);
+        assert_eq!(oldest.skip_count, 1);
+        assert_eq!(oldest.wait_time_ns, 250);
+        assert_eq!(oldest.total_wait_time_ns, 250);
+    }
+
+    #[test]
+    fn fairness_monitor_reports_oldest_tracked_task_details() {
+        let mut monitor = FairnessMonitor::with_defaults();
+        let oldest = TaskId::new_for_test(32, 0);
+        let newer = TaskId::new_for_test(33, 0);
+
+        monitor.record_task_enqueue(oldest, 120, 1_000, 1);
+        monitor.record_task_enqueue(newer, 90, 1_200, 2);
+
+        let stats = monitor.starvation_stats(1_300);
+        assert_eq!(stats.tracked_tasks_count, 2);
+        assert_eq!(stats.total_tracked_wait_time_ns, 400);
+
+        let oldest = stats
+            .oldest_tracked_task
+            .expect("oldest tracked task should be reported");
+        assert_eq!(oldest.task_id, TaskId::new_for_test(32, 0));
+        assert_eq!(oldest.priority, 120);
+        assert_eq!(oldest.current_lane, 1);
+        assert_eq!(oldest.skip_count, 0);
+        assert_eq!(oldest.wait_time_ns, 300);
+        assert_eq!(oldest.total_wait_time_ns, 300);
     }
 
     #[test]
