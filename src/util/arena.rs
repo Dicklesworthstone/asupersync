@@ -168,6 +168,7 @@ impl<T> Arena<T> {
     ///
     /// The closure receives the assigned `ArenaIndex`, allowing callers to
     /// construct records that embed their final ID without placeholder updates.
+    #[inline]
     pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
     where
         F: FnOnce(ArenaIndex) -> T,
@@ -210,6 +211,7 @@ impl<T> Arena<T> {
     /// Removes the value at the given index and returns it.
     ///
     /// Returns `None` if the index is invalid or the slot is vacant.
+    #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<T> {
         let slot = self.slots.get_mut(index.index as usize)?;
 

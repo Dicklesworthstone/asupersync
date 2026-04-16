@@ -34,60 +34,70 @@ pub enum SignalKind {
 impl SignalKind {
     /// Creates a `SignalKind` for SIGINT (Ctrl+C).
     #[must_use]
+    #[inline]
     pub const fn interrupt() -> Self {
         Self::Interrupt
     }
 
     /// Creates a `SignalKind` for SIGTERM.
     #[must_use]
+    #[inline]
     pub const fn terminate() -> Self {
         Self::Terminate
     }
 
     /// Creates a `SignalKind` for SIGHUP.
     #[must_use]
+    #[inline]
     pub const fn hangup() -> Self {
         Self::Hangup
     }
 
     /// Creates a `SignalKind` for SIGQUIT.
     #[must_use]
+    #[inline]
     pub const fn quit() -> Self {
         Self::Quit
     }
 
     /// Creates a `SignalKind` for SIGUSR1.
     #[must_use]
+    #[inline]
     pub const fn user_defined1() -> Self {
         Self::User1
     }
 
     /// Creates a `SignalKind` for SIGUSR2.
     #[must_use]
+    #[inline]
     pub const fn user_defined2() -> Self {
         Self::User2
     }
 
     /// Creates a `SignalKind` for SIGCHLD.
     #[must_use]
+    #[inline]
     pub const fn child() -> Self {
         Self::Child
     }
 
     /// Creates a `SignalKind` for SIGWINCH.
     #[must_use]
+    #[inline]
     pub const fn window_change() -> Self {
         Self::WindowChange
     }
 
     /// Creates a `SignalKind` for SIGPIPE.
     #[must_use]
+    #[inline]
     pub const fn pipe() -> Self {
         Self::Pipe
     }
 
     /// Creates a `SignalKind` for SIGALRM.
     #[must_use]
+    #[inline]
     pub const fn alarm() -> Self {
         Self::Alarm
     }
@@ -95,6 +105,7 @@ impl SignalKind {
     /// Returns the platform signal number on Unix.
     #[cfg(unix)]
     #[must_use]
+    #[inline]
     pub const fn as_raw_value(&self) -> i32 {
         match self {
             Self::Interrupt => libc::SIGINT,
@@ -120,6 +131,7 @@ impl SignalKind {
     /// Other signal kinds are unsupported and return `None`.
     #[cfg(windows)]
     #[must_use]
+    #[inline]
     pub const fn as_raw_value(&self) -> Option<i32> {
         // signal_hook::consts::SIGBREAK is 21 on Windows (Ctrl+Break).
         // We use the literal here because `const fn` cannot call non-const
@@ -138,6 +150,7 @@ impl SignalKind {
     /// Returns `None` when no mapping exists.
     #[cfg(not(any(unix, windows)))]
     #[must_use]
+    #[inline]
     pub const fn as_raw_value(&self) -> Option<i32> {
         None
     }
