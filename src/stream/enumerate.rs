@@ -28,6 +28,7 @@ impl<S> Enumerate<S> {
 
     /// Returns a reference to the underlying stream.
     #[inline]
+    #[inline]
     pub fn get_ref(&self) -> &S {
         &self.stream
     }
