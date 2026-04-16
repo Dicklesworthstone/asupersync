@@ -411,7 +411,7 @@ impl OracleSuite {
 
     /// Checks all oracles and returns any violations.
     #[must_use]
-    pub fn check_all(&self, now: Time) -> Vec<OracleViolation> {
+    pub fn check_all(&mut self, now: Time) -> Vec<OracleViolation> {
         let mut violations = Vec::new();
 
         if let Err(v) = self.task_leak.check(now) {
@@ -551,7 +551,7 @@ impl OracleSuite {
     /// Generates a unified oracle report with per-oracle status and statistics.
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn report(&self, now: Time) -> OracleReport {
+    pub fn report(&mut self, now: Time) -> OracleReport {
         let entries = vec![
             OracleEntryReport::from_result(
                 "task_leak",

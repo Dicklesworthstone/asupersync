@@ -835,6 +835,7 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::LoserDrain(_) => INVARIANT_LOSER_DRAIN,
         OracleViolation::Finalizer(_) => INVARIANT_FINALIZER,
         OracleViolation::RegionTree(_) => INVARIANT_REGION_TREE,
+        OracleViolation::RegionLeak(_) => "region_leak",
         OracleViolation::AmbientAuthority(_) => INVARIANT_AMBIENT_AUTHORITY,
         OracleViolation::DeadlineMonotone(_) => INVARIANT_DEADLINE_MONOTONE,
         OracleViolation::CancellationProtocol(_) => INVARIANT_CANCELLATION_PROTOCOL,

@@ -101,7 +101,7 @@ impl Default for RegionLeakConfig {
 }
 
 /// State of a region being tracked by the oracle
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RegionState {
     pub region_id: RegionId,
     pub parent_id: Option<RegionId>,
@@ -191,7 +191,7 @@ pub struct BudgetInfo {
 }
 
 /// Task information tracked by the oracle
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TaskState {
     pub task_id: TaskId,
     pub region_id: RegionId,
@@ -212,7 +212,7 @@ pub enum TaskLifecycleState {
 }
 
 /// The main region leak detection oracle
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RegionLeakOracle {
     config: RegionLeakConfig,
     regions: HashMap<RegionId, RegionState>,
@@ -872,6 +872,12 @@ mod tests {
         let violations = oracle.check_for_violations().unwrap();
         assert!(!violations.is_empty());
         assert!(matches!(violations[0].violation_type, ViolationType::OrphanedTasks));
+    }
+}
+
+impl Default for RegionLeakOracle {
+    fn default() -> Self {
+        Self::with_defaults()
     }
 }
 
