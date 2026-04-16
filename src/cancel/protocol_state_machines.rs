@@ -151,7 +151,13 @@ pub struct RegionContext {
 }
 
 /// Region lifecycle state machine.
+///
+/// Identity fields (`region_id`, `validation_level`) are retained for tracing,
+/// structured logging, and external validator harnesses even when the in-crate
+/// consumer only reads `state`. Suppress `dead_code` for the whole struct so
+/// the lib builds without a `protocol_validator_test_suite`-like reader.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct RegionStateMachine {
     state: RegionState,
     region_id: RegionId,
@@ -490,6 +496,7 @@ pub struct TaskContext {
 
 /// Task lifecycle state machine.
 #[derive(Debug)]
+#[allow(dead_code)] // identity fields retained for tracing/validator harnesses
 pub struct TaskStateMachine {
     state: TaskState,
     task_id: TaskId,
@@ -670,6 +677,7 @@ pub struct ObligationContext {
 
 /// Obligation lifecycle state machine.
 #[derive(Debug)]
+#[allow(dead_code)] // identity fields retained for tracing/validator harnesses
 pub struct ObligationStateMachine {
     state: ObligationState,
     obligation_id: ObligationId,
@@ -839,6 +847,7 @@ pub struct ChannelContext {
 
 /// Channel lifecycle state machine.
 #[derive(Debug)]
+#[allow(dead_code)] // identity fields retained for tracing/validator harnesses
 pub struct ChannelStateMachine {
     state: ChannelState,
     channel_id: u64,
@@ -1042,6 +1051,7 @@ pub struct IoContext {
 
 /// IO operation state machine.
 #[derive(Debug)]
+#[allow(dead_code)] // identity fields retained for tracing/validator harnesses
 pub struct IoStateMachine {
     state: IoState,
     operation_id: u64,
@@ -1203,6 +1213,7 @@ pub struct TimerContext {
 
 /// Timer state machine.
 #[derive(Debug)]
+#[allow(dead_code)] // identity fields retained for tracing/validator harnesses
 pub struct TimerStateMachine {
     state: TimerState,
     timer_id: u64,
