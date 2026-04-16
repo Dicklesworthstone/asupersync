@@ -1522,6 +1522,16 @@ pub struct PreemptionMetrics {
     pub browser_ready_handoff_yields: u64,
     /// Times the cancel streak hit the fairness limit.
     pub fairness_yields: u64,
+    /// Worst observed cancel streak immediately before a ready dispatch.
+    ///
+    /// This records the largest number of consecutive cancel dispatches that a
+    /// ready task actually waited through before being selected.
+    pub max_ready_dispatch_stall: usize,
+    /// Worst observed cancel streak immediately before a timed dispatch.
+    ///
+    /// This records the largest number of consecutive cancel dispatches that a
+    /// due timed task actually waited through before being selected.
+    pub max_timed_dispatch_stall: usize,
     /// Maximum cancel streak observed.
     pub max_cancel_streak: usize,
     /// Fallback cancel dispatches (after limit, no other work available).
@@ -1615,6 +1625,13 @@ impl PreemptionMetrics {
             .saturating_add(self.follower_timeout_parks);
         Self::ratio_bps(self.follower_short_wait_skip_le_5ms, opportunities)
     }
+
+    /// Returns the worst observed cancel-induced stall across ready/timed lanes.
+    #[must_use]
+    pub fn max_non_cancel_dispatch_stall(&self) -> usize {
+        self.max_ready_dispatch_stall
+            .max(self.max_timed_dispatch_stall)
+    }
 }
 
 /// Deterministic witness for cancel-lane fairness guarantees.
@@ -1639,6 +1656,10 @@ pub struct PreemptionFairnessCertificate {
     pub ready_dispatches: u64,
     /// Times the fairness gate forced a non-cancel attempt.
     pub fairness_yields: u64,
+    /// Largest observed cancel streak immediately before a ready dispatch.
+    pub observed_max_ready_stall_steps: usize,
+    /// Largest observed cancel streak immediately before a timed dispatch.
+    pub observed_max_timed_stall_steps: usize,
     /// Fallback cancel dispatches used when no other work existed.
     pub fallback_cancel_dispatches: u64,
     /// Count of streak samples above baseline `L`.
@@ -1661,6 +1682,13 @@ impl PreemptionFairnessCertificate {
         self.effective_limit.saturating_add(1)
     }
 
+    /// Returns the largest observed cancel-induced stall across ready/timed work.
+    #[must_use]
+    pub fn observed_non_cancel_stall_steps(&self) -> usize {
+        self.observed_max_ready_stall_steps
+            .max(self.observed_max_timed_stall_steps)
+    }
+
     /// Returns `true` when fairness invariants hold for observed dispatches.
     #[must_use]
     pub fn invariant_holds(&self) -> bool {
@@ -1681,6 +1709,8 @@ impl PreemptionFairnessCertificate {
         self.timed_dispatches.hash(&mut h);
         self.ready_dispatches.hash(&mut h);
         self.fairness_yields.hash(&mut h);
+        self.observed_max_ready_stall_steps.hash(&mut h);
+        self.observed_max_timed_stall_steps.hash(&mut h);
         self.fallback_cancel_dispatches.hash(&mut h);
         self.base_limit_exceedances.hash(&mut h);
         self.effective_limit_exceedances.hash(&mut h);
@@ -1755,6 +1785,8 @@ impl ThreeLaneWorker {
             timed_dispatches: self.preemption_metrics.timed_dispatches,
             ready_dispatches: self.preemption_metrics.ready_dispatches,
             fairness_yields: self.preemption_metrics.fairness_yields,
+            observed_max_ready_stall_steps: self.preemption_metrics.max_ready_dispatch_stall,
+            observed_max_timed_stall_steps: self.preemption_metrics.max_timed_dispatch_stall,
             fallback_cancel_dispatches: self.preemption_metrics.fallback_cancel_dispatches,
             base_limit_exceedances: self.preemption_metrics.base_limit_exceedances,
             effective_limit_exceedances: self.preemption_metrics.effective_limit_exceedances,
@@ -2131,9 +2163,7 @@ impl ThreeLaneWorker {
         if suggestion == SchedulingSuggestion::MeetDeadlines {
             // Deadline pressure: global timed first.
             if let Some(tt) = self.global.pop_timed_if_due(now) {
-                self.cancel_streak = 0;
-                self.ready_dispatch_streak = 0;
-                self.preemption_metrics.timed_dispatches += 1;
+                self.record_timed_dispatch();
                 return Some(self.finish_dispatch(tt.task));
             }
         } else {
@@ -2158,9 +2188,7 @@ impl ThreeLaneWorker {
             // MeetDeadlines: Timed > Cancel (global timed already checked)
             if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
                 drop(local);
-                self.cancel_streak = 0;
-                self.ready_dispatch_streak = 0;
-                self.preemption_metrics.timed_dispatches += 1;
+                self.record_timed_dispatch();
                 return Some(self.finish_dispatch(task));
             }
             if check_cancel {
@@ -2192,16 +2220,12 @@ impl ThreeLaneWorker {
             }
             if let Some(tt) = self.global.pop_timed_if_due(now) {
                 drop(local);
-                self.cancel_streak = 0;
-                self.ready_dispatch_streak = 0;
-                self.preemption_metrics.timed_dispatches += 1;
+                self.record_timed_dispatch();
                 return Some(self.finish_dispatch(tt.task));
             }
             if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
                 drop(local);
-                self.cancel_streak = 0;
-                self.ready_dispatch_streak = 0;
-                self.preemption_metrics.timed_dispatches += 1;
+                self.record_timed_dispatch();
                 return Some(self.finish_dispatch(task));
             }
         }
@@ -2222,21 +2246,15 @@ impl ThreeLaneWorker {
             .try_lock()
             .and_then(|mut queue| queue.pop());
         if let Some(task) = local_ready_task {
-            self.cancel_streak = 0;
-            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
-            self.preemption_metrics.ready_dispatches += 1;
+            self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
         if let Some(task) = self.fast_queue.pop() {
-            self.cancel_streak = 0;
-            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
-            self.preemption_metrics.ready_dispatches += 1;
+            self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
-            self.cancel_streak = 0;
-            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
-            self.preemption_metrics.ready_dispatches += 1;
+            self.record_ready_dispatch();
             return Some(self.finish_dispatch(pt.task));
         }
 
@@ -2248,17 +2266,13 @@ impl ThreeLaneWorker {
             local.pop_ready_only_with_hint(rng_hint)
         };
         if let Some(task) = local_task {
-            self.cancel_streak = 0;
-            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
-            self.preemption_metrics.ready_dispatches += 1;
+            self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
 
         // ── PHASE 4: Steal from other workers ────────────────────────
         if let Some(task) = self.try_steal() {
-            self.cancel_streak = 0;
-            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
-            self.preemption_metrics.ready_dispatches += 1;
+            self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
 
@@ -2315,6 +2329,26 @@ impl ThreeLaneWorker {
         if self.cancel_streak > effective_limit {
             self.preemption_metrics.effective_limit_exceedances += 1;
         }
+    }
+
+    #[inline]
+    fn record_timed_dispatch(&mut self) {
+        if self.cancel_streak > self.preemption_metrics.max_timed_dispatch_stall {
+            self.preemption_metrics.max_timed_dispatch_stall = self.cancel_streak;
+        }
+        self.cancel_streak = 0;
+        self.ready_dispatch_streak = 0;
+        self.preemption_metrics.timed_dispatches += 1;
+    }
+
+    #[inline]
+    fn record_ready_dispatch(&mut self) {
+        if self.cancel_streak > self.preemption_metrics.max_ready_dispatch_stall {
+            self.preemption_metrics.max_ready_dispatch_stall = self.cancel_streak;
+        }
+        self.cancel_streak = 0;
+        self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
+        self.preemption_metrics.ready_dispatches += 1;
     }
 
     #[inline]
@@ -3589,6 +3623,7 @@ impl Wake for ThreeLaneLocalCancelWaker {
 mod tests {
     use super::*;
     use crate::record::task::TaskWakeState;
+    use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
     use parking_lot::RwLock;
     use std::time::Duration;
@@ -5761,13 +5796,57 @@ mod tests {
         assert!(m.fairness_yields > 0, "should yield under cancel flood");
         assert_eq!(m.base_limit_exceedances, 0);
         assert_eq!(m.effective_limit_exceedances, 0);
+        assert_eq!(
+            m.max_ready_dispatch_stall, limit,
+            "ready work should observe the configured stall ceiling under cancel flood"
+        );
+        assert_eq!(
+            m.max_non_cancel_dispatch_stall(),
+            limit,
+            "worst observed non-cancel stall should match the ready stall in this workload"
+        );
 
         let cert = worker.preemption_fairness_certificate();
         assert!(cert.invariant_holds());
         assert_eq!(cert.ready_stall_bound_steps(), limit + 1);
+        assert_eq!(cert.observed_max_ready_stall_steps, limit);
+        assert_eq!(cert.observed_non_cancel_stall_steps(), limit);
         let hash_a = cert.witness_hash();
         let hash_b = cert.witness_hash();
         assert_eq!(hash_a, hash_b, "witness hash should be deterministic");
+    }
+
+    #[test]
+    fn test_timed_dispatch_stall_recorded_under_cancel_flood() {
+        let limit: usize = 3;
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
+        let mut runtime_state = RuntimeState::new();
+        runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
+
+        for i in 0..9u32 {
+            scheduler.inject_cancel(TaskId::new_for_test(11, i), 100);
+        }
+        scheduler.inject_timed(TaskId::new_for_test(12, 0), Time::from_nanos(500));
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().expect("worker");
+        for _ in 0..10 {
+            worker.next_task();
+        }
+
+        let metrics = worker.preemption_metrics();
+        assert_eq!(
+            metrics.max_timed_dispatch_stall, limit,
+            "due timed work should observe the configured stall ceiling under cancel flood"
+        );
+        assert_eq!(metrics.max_non_cancel_dispatch_stall(), limit);
+
+        let cert = worker.preemption_fairness_certificate();
+        assert_eq!(cert.observed_max_timed_stall_steps, limit);
+        assert_eq!(cert.observed_non_cancel_stall_steps(), limit);
+        assert!(cert.invariant_holds());
     }
 
     #[test]
