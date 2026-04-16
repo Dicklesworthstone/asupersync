@@ -595,9 +595,9 @@ impl EpochConsistencyTracker {
             }
             EpochConsistencyViolation::SlowTransition {
                 module: _,
-                from_epoch,
-                to_epoch,
-                started_at,
+                from_epoch: _,
+                to_epoch: _,
+                started_at: _,
                 detected_at,
                 duration_ns,
             } => {
