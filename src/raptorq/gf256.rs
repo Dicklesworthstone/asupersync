@@ -68,13 +68,13 @@ use core::arch::aarch64::{
 use core::arch::x86::{
     __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
     _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    _mm256_storeu_si256, _mm256_xor_si256, _mm_prefetch, _MM_HINT_T0,
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
     _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    _mm256_storeu_si256, _mm256_xor_si256, _mm_prefetch, _MM_HINT_T0,
 };
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.
@@ -1996,10 +1996,21 @@ fn gf256_add_slice_aarch64_neon(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-/// Minimum slice length to amortize SIMD nibble-table setup in mul paths.
-const MUL_TABLE_THRESHOLD: usize = 64;
-/// Minimum slice length to amortize SIMD nibble-table setup in addmul paths.
-const ADDMUL_TABLE_THRESHOLD: usize = 64;
+/// Architecture-specific thresholds for SIMD nibble-table setup in mul paths.
+#[cfg(all(feature = "simd-intrinsics", any(target_arch = "x86", target_arch = "x86_64")))]
+const MUL_TABLE_THRESHOLD: usize = 32; // x86-avx2-t32 tuning evidence
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+const MUL_TABLE_THRESHOLD: usize = 32; // aarch64-neon-t32 tuning evidence
+#[cfg(not(feature = "simd-intrinsics"))]
+const MUL_TABLE_THRESHOLD: usize = 16; // scalar-t16 baseline
+
+/// Architecture-specific thresholds for SIMD nibble-table setup in addmul paths.
+#[cfg(all(feature = "simd-intrinsics", any(target_arch = "x86", target_arch = "x86_64")))]
+const ADDMUL_TABLE_THRESHOLD: usize = 32; // x86-avx2-t32 tuning evidence
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+const ADDMUL_TABLE_THRESHOLD: usize = 32; // aarch64-neon-t32 tuning evidence
+#[cfg(not(feature = "simd-intrinsics"))]
+const ADDMUL_TABLE_THRESHOLD: usize = 16; // scalar-t16 baseline
 
 #[inline]
 fn mul_table_for(c: Gf256) -> &'static [u8; 256] {
@@ -2869,6 +2880,32 @@ unsafe fn gf256_mul_slice_x86_avx2_impl_tables(
     let nibble_mask = _mm256_set1_epi8(0x0f_i8);
 
     let mut i = 0usize;
+
+    // Unrolled loop processing 4×32 = 128 bytes per iteration (u4 unroll factor)
+    while i + 128 <= dst.len() {
+        // Prefetch next cache lines (pf64 prefetch distance)
+        if i + 128 + 64 < dst.len() {
+            unsafe {
+                _mm_prefetch((dst.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+            }
+        }
+
+        // Unroll factor 4: process 4 chunks of 32 bytes each
+        for chunk_offset in [0, 32, 64, 96] {
+            let ptr = unsafe { dst.as_mut_ptr().add(i + chunk_offset) };
+            // SAFETY: pointer range is in-bounds and unaligned loads/stores are used.
+            let input = unsafe { _mm256_loadu_si256(ptr.cast::<__m256i>()) };
+            let low_nibbles = _mm256_and_si256(input, nibble_mask);
+            let high_nibbles = _mm256_and_si256(_mm256_srli_epi16(input, 4), nibble_mask);
+            let low_mul = _mm256_shuffle_epi8(low_tbl_256, low_nibbles);
+            let high_mul = _mm256_shuffle_epi8(high_tbl_256, high_nibbles);
+            let result = _mm256_xor_si256(low_mul, high_mul);
+            unsafe { _mm256_storeu_si256(ptr.cast::<__m256i>(), result) };
+        }
+        i += 128;
+    }
+
+    // Handle remaining chunks that don't fit in the unrolled loop
     while i + 32 <= dst.len() {
         let ptr = unsafe { dst.as_mut_ptr().add(i) };
         // SAFETY: pointer range is in-bounds and unaligned loads/stores are used.
@@ -2908,6 +2945,43 @@ unsafe fn gf256_mul_slices2_x86_avx2_impl_tables(
 
     let common = dst_a.len().min(dst_b.len());
     let mut i = 0usize;
+
+    // Unrolled loop processing 4×32 = 128 bytes per iteration for dual slices
+    while i + 128 <= common {
+        // Prefetch next cache lines (pf64 prefetch distance)
+        if i + 128 + 64 < common {
+            unsafe {
+                _mm_prefetch((dst_a.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+                _mm_prefetch((dst_b.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+            }
+        }
+
+        // Unroll factor 4: process 4 chunks of 32 bytes each for both slices
+        for chunk_offset in [0, 32, 64, 96] {
+            let ptr_a = unsafe { dst_a.as_mut_ptr().add(i + chunk_offset) };
+            let ptr_b = unsafe { dst_b.as_mut_ptr().add(i + chunk_offset) };
+            // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
+            let input_a = unsafe { _mm256_loadu_si256(ptr_a.cast::<__m256i>()) };
+            let input_b = unsafe { _mm256_loadu_si256(ptr_b.cast::<__m256i>()) };
+            let low_nibbles_a = _mm256_and_si256(input_a, nibble_mask);
+            let high_nibbles_a = _mm256_and_si256(_mm256_srli_epi16(input_a, 4), nibble_mask);
+            let low_nibbles_b = _mm256_and_si256(input_b, nibble_mask);
+            let high_nibbles_b = _mm256_and_si256(_mm256_srli_epi16(input_b, 4), nibble_mask);
+            let result_a = _mm256_xor_si256(
+                _mm256_shuffle_epi8(low_tbl_256, low_nibbles_a),
+                _mm256_shuffle_epi8(high_tbl_256, high_nibbles_a),
+            );
+            let result_b = _mm256_xor_si256(
+                _mm256_shuffle_epi8(low_tbl_256, low_nibbles_b),
+                _mm256_shuffle_epi8(high_tbl_256, high_nibbles_b),
+            );
+            unsafe { _mm256_storeu_si256(ptr_a.cast::<__m256i>(), result_a) };
+            unsafe { _mm256_storeu_si256(ptr_b.cast::<__m256i>(), result_b) };
+        }
+        i += 128;
+    }
+
+    // Handle remaining chunks that don't fit in the unrolled loop
     while i + 32 <= common {
         let ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };
         let ptr_b = unsafe { dst_b.as_mut_ptr().add(i) };
@@ -2993,6 +3067,36 @@ unsafe fn gf256_addmul_slice_x86_avx2_impl_tables(
     let nibble_mask = _mm256_set1_epi8(0x0f_i8);
 
     let mut i = 0usize;
+
+    // Unrolled loop processing 4×32 = 128 bytes per iteration for addmul
+    while i + 128 <= src.len() {
+        // Prefetch next cache lines (pf64 prefetch distance)
+        if i + 128 + 64 < src.len() {
+            unsafe {
+                _mm_prefetch((src.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+                _mm_prefetch((dst.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+            }
+        }
+
+        // Unroll factor 4: process 4 chunks of 32 bytes each
+        for chunk_offset in [0, 32, 64, 96] {
+            let src_ptr = unsafe { src.as_ptr().add(i + chunk_offset) };
+            let dst_ptr = unsafe { dst.as_mut_ptr().add(i + chunk_offset) };
+            // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
+            let src_v = unsafe { _mm256_loadu_si256(src_ptr.cast::<__m256i>()) };
+            let dst_v = unsafe { _mm256_loadu_si256(dst_ptr.cast::<__m256i>()) };
+            let low_nibbles = _mm256_and_si256(src_v, nibble_mask);
+            let high_nibbles = _mm256_and_si256(_mm256_srli_epi16(src_v, 4), nibble_mask);
+            let low_mul = _mm256_shuffle_epi8(low_tbl_256, low_nibbles);
+            let high_mul = _mm256_shuffle_epi8(high_tbl_256, high_nibbles);
+            let product = _mm256_xor_si256(low_mul, high_mul);
+            let result = _mm256_xor_si256(dst_v, product);
+            unsafe { _mm256_storeu_si256(dst_ptr.cast::<__m256i>(), result) };
+        }
+        i += 128;
+    }
+
+    // Handle remaining chunks that don't fit in the unrolled loop
     while i + 32 <= src.len() {
         let src_ptr = unsafe { src.as_ptr().add(i) };
         let dst_ptr = unsafe { dst.as_mut_ptr().add(i) };
