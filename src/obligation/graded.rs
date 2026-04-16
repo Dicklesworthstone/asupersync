@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn toy_channel_abort_usage() {
         init_test("toy_channel_abort_usage");
-        let ch = toy_api::ToyChannel::new(10);
+        let mut ch = toy_api::ToyChannel::new(10);
 
         let permit = ch.reserve_send().expect("should get permit");
         let proof = ch.abort_send(permit);
@@ -985,7 +985,7 @@ mod tests {
     #[should_panic(expected = "OBLIGATION LEAKED")]
     fn toy_channel_leaked_permit_panics() {
         init_test("toy_channel_leaked_permit_panics");
-        let ch = toy_api::ToyChannel::new(10);
+        let mut ch = toy_api::ToyChannel::new(10);
         let _permit = ch.reserve_send().expect("should get permit");
         // Dropped without commit or abort — panics.
     }

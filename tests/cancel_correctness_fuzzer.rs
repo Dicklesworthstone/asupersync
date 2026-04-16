@@ -666,7 +666,8 @@ impl CancelCorrectnessFuzzer {
         trace.task_count = 2;
 
         let budget = Budget::INFINITE;
-        let cx = Cx::new(region, budget);
+        let task = TaskId::testing_default();
+        let cx = Cx::new(region, task, budget);
 
         // Create two controllable futures for join test
         let fut1 = ControllableFuture::new(1);
@@ -733,8 +734,8 @@ impl CancelCorrectnessFuzzer {
             CancelTiming::NaturalCompletion => {
                 // Both should complete successfully - no draining needed
                 if fut1_completed && fut2_completed {
-                    trace.completion_order.push(TaskId::default()); // fut1
-                    trace.completion_order.push(TaskId::default()); // fut2
+                    trace.completion_order.push(TaskId::testing_default()); // fut1
+                    trace.completion_order.push(TaskId::testing_default()); // fut2
                 } else {
                     oracle_results.cancellation_violations.push(
                         "join2 did not complete both futures in natural completion scenario"
@@ -746,18 +747,18 @@ impl CancelCorrectnessFuzzer {
                 // Partial completion cases - depends on join semantics
                 if fut1_completed && !fut2_completed {
                     // fut1 completed, fut2 should wait for completion or cancellation
-                    trace.completion_order.push(TaskId::default());
+                    trace.completion_order.push(TaskId::testing_default());
                 }
                 if fut2_completed && !fut1_completed {
                     // fut2 completed, fut1 should wait for completion or cancellation
-                    trace.completion_order.push(TaskId::default());
+                    trace.completion_order.push(TaskId::testing_default());
                 }
             }
         }
 
         // Record execution trace
         trace.cancellation_events.push(CancellationEvent {
-            task_id: TaskId::default(),
+            task_id: TaskId::testing_default(),
             timestamp_ms: 0,
             event_type: "join2_completed".to_string(),
             details: serde_json::json!({

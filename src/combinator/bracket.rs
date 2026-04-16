@@ -532,7 +532,7 @@ mod tests {
     // =========================================================================
 
     fn noop_waker() -> Waker {
-        Waker::noop()
+        Waker::noop().clone()
     }
 
     fn poll_ready<F: Future>(fut: F) -> F::Output {
