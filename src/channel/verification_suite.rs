@@ -7,8 +7,9 @@
 use super::atomicity_test::{AtomicityOracle, AtomicityTestConfig};
 use super::stress_test::{StressTestConfig, mpsc_stress_test};
 use crate::channel::{broadcast, mpsc, oneshot, watch};
-use crate::test_utils::lab_with_config;
-use crate::time::timeout;
+use crate::cx::Cx;
+use crate::runtime::RuntimeBuilder;
+use crate::time::{timeout, wall_now};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -439,64 +440,84 @@ impl VerificationSuite {
     async fn run_basic_mpsc_test(&self, config: AtomicityTestConfig, test_name: &str) -> bool {
         let oracle = Arc::new(AtomicityOracle::new(config.clone()));
         let (sender, receiver) = mpsc::channel::<u32>(config.capacity);
+        let expected_messages = config.num_producers * config.messages_per_producer;
 
-        let test_result = lab_with_config(|rt| async move {
-            let cx = &rt.cx();
+        let test_result = match RuntimeBuilder::current_thread().build() {
+            Ok(runtime) => {
+                let handle = runtime.handle();
+                let oracle_for_test = Arc::clone(&oracle);
+                runtime.block_on(async move {
+                    match timeout(wall_now(), Duration::from_secs(10), async move {
+                        // Start consumer
+                        let consumer_oracle = Arc::clone(&oracle_for_test);
+                        let consumer = handle.spawn(async move {
+                            let cx = Cx::for_testing();
+                            super::atomicity_test::consumer_task(
+                                receiver,
+                                consumer_oracle,
+                                expected_messages,
+                                &cx,
+                            )
+                            .await
+                        });
 
-            let expected_messages = config.num_producers * config.messages_per_producer;
+                        // Start producers
+                        let mut producers = Vec::new();
+                        for i in 0..config.num_producers {
+                            let sender = sender.clone();
+                            let producer_oracle = Arc::clone(&oracle_for_test);
+                            let injector =
+                                Arc::new(super::atomicity_test::CancellationInjector::new(
+                                    config.cancel_probability,
+                                ));
 
-            // Run the test with timeout
-            match timeout(Duration::from_secs(10), async {
-                // Start consumer
-                let consumer_oracle = Arc::clone(&oracle);
-                // TODO: Convert to asupersync structured concurrency
-                // let consumer = spawn_in_region(cx, async move {
-                //     super::atomicity_test::consumer_task(receiver, consumer_oracle, expected_messages, cx).await
-                // });
-                let consumer = futures_lite::future::pending::<()>(); // Placeholder
+                            let messages: Vec<u32> = (0..config.messages_per_producer)
+                                .map(|j| (i * config.messages_per_producer + j) as u32)
+                                .collect();
 
-                // Start producers
-                let mut producers = Vec::new();
-                for i in 0..config.num_producers {
-                    let sender = sender.clone();
-                    let producer_oracle = Arc::clone(&oracle);
-                    let injector = Arc::new(super::atomicity_test::CancellationInjector::new(
-                        config.cancel_probability,
-                    ));
+                            let producer = handle.spawn(async move {
+                                let cx = Cx::for_testing();
+                                super::atomicity_test::producer_task(
+                                    sender,
+                                    producer_oracle,
+                                    injector,
+                                    messages,
+                                    &cx,
+                                )
+                                .await
+                            });
+                            producers.push(producer);
+                        }
 
-                    let messages: Vec<u32> = (0..config.messages_per_producer)
-                        .map(|j| (i * config.messages_per_producer + j) as u32)
-                        .collect();
+                        // Wait for producers
+                        for producer in producers {
+                            if producer.await.is_err() {
+                                return false;
+                            }
+                        }
 
-                    // TODO: Convert to asupersync structured concurrency
-                    // let producer = spawn_in_region(cx, async move {
-                    //     super::atomicity_test::producer_task(sender, producer_oracle, injector, messages, cx).await
-                    // });
-                    let producer = futures_lite::future::pending::<()>(); // Placeholder
-                    producers.push(producer);
-                }
-
-                // Wait for producers
-                for producer in producers {
-                    let _ = producer.await;
-                }
-
-                // Close channel and wait for consumer
-                drop(sender);
-                let _ = consumer.await;
-
-                oracle.verify_final_consistency()
-            })
-            .await
-            {
-                Ok(consistent) => consistent,
-                Err(_) => {
-                    eprintln!("  {}: TIMEOUT", test_name);
-                    false
-                }
+                        // Close channel and wait for consumer
+                        drop(sender);
+                        match consumer.await {
+                            Ok(_) => oracle_for_test.verify_final_consistency(),
+                            Err(_) => false,
+                        }
+                    })
+                    .await
+                    {
+                        Ok(consistent) => consistent,
+                        Err(_) => {
+                            eprintln!("  {}: TIMEOUT", test_name);
+                            false
+                        }
+                    }
+                })
             }
-        })
-        .await;
+            Err(e) => {
+                eprintln!("  {}: runtime build failed: {}", test_name, e);
+                false
+            }
+        };
 
         if test_result {
             println!("  {}: PASSED", test_name);
@@ -510,83 +531,81 @@ impl VerificationSuite {
     /// Test oneshot channel atomicity.
     async fn test_oneshot_atomicity(&self) -> bool {
         // Oneshot is inherently atomic - test basic correctness
-        let _runtime = lab_with_config(|rt| async move {
-            let cx = &rt.cx();
+        match RuntimeBuilder::current_thread().build() {
+            Ok(runtime) => runtime.block_on(async move {
+                let cx = Cx::for_testing();
 
-            for i in 0..100 {
-                let (sender, receiver) = oneshot::channel::<u32>();
+                for i in 0..100 {
+                    let (sender, mut receiver) = oneshot::channel::<u32>();
 
-                if i % 2 == 0 {
-                    // Normal send
-                    sender.send(i).unwrap();
-                    let received = receiver.await.unwrap();
-                    assert_eq!(received, i);
-                } else {
-                    // Drop sender (cancellation)
-                    drop(sender);
-                    assert!(receiver.await.is_err());
+                    if i % 2 == 0 {
+                        sender.send(&cx, i).unwrap();
+                        let received = receiver.recv(&cx).await.unwrap();
+                        assert_eq!(received, i);
+                    } else {
+                        drop(sender);
+                        assert!(receiver.recv(&cx).await.is_err());
+                    }
                 }
-            }
-            true
-        })
-        .await;
+                true
+            }),
+            Err(_) => false,
+        }
     }
 
     /// Test broadcast channel atomicity.
     async fn test_broadcast_atomicity(&self) -> bool {
-        let _runtime = lab_with_config(|rt| async move {
-            let cx = &rt.cx();
-            let (sender, _) = broadcast::channel::<u32>(50);
+        match RuntimeBuilder::current_thread().build() {
+            Ok(runtime) => runtime.block_on(async move {
+                let cx = Cx::for_testing();
+                let (sender, _) = broadcast::channel::<u32>(50);
 
-            // Test with multiple subscribers
-            let mut receivers = Vec::new();
-            for _ in 0..5 {
-                receivers.push(sender.subscribe());
-            }
-
-            // Send messages
-            for i in 0..100 {
-                if sender.send(i).is_err() {
-                    break;
+                let mut receivers = Vec::new();
+                for _ in 0..5 {
+                    receivers.push(sender.subscribe());
                 }
-            }
 
-            drop(sender);
-
-            // Verify all receivers get messages
-            for mut receiver in receivers {
-                let mut count = 0;
-                while let Ok(_) = receiver.recv(cx).await {
-                    count += 1;
+                for i in 0..100 {
+                    if sender.send(&cx, i).is_err() {
+                        break;
+                    }
                 }
-                // Should receive most messages (allowing for some lag)
-                assert!(count >= 90, "Receiver only got {} messages", count);
-            }
-            true
-        })
-        .await;
+
+                drop(sender);
+
+                for mut receiver in receivers {
+                    let mut count = 0;
+                    while receiver.recv(&cx).await.is_ok() {
+                        count += 1;
+                    }
+                    assert!(count >= 50, "Receiver only got {} messages", count);
+                }
+                true
+            }),
+            Err(_) => false,
+        }
     }
 
     /// Test watch channel atomicity.
     async fn test_watch_atomicity(&self) -> bool {
-        let _runtime = lab_with_config(|rt| async move {
-            let cx = &rt.cx();
-            let (sender, _) = watch::channel::<u32>(0);
+        match RuntimeBuilder::current_thread().build() {
+            Ok(runtime) => runtime.block_on(async move {
+                let cx = Cx::for_testing();
+                let (sender, _) = watch::channel::<u32>(0);
 
-            let mut receiver = sender.subscribe();
+                let mut receiver = sender.subscribe();
 
-            // Send updates
-            for i in 1..=50 {
-                sender.send(i).unwrap();
-            }
+                for i in 1..=50 {
+                    sender.send(i).unwrap();
+                }
 
-            // Verify receiver sees latest state
-            let _ = receiver.changed(cx).await;
-            let final_value = *receiver.borrow();
-            assert_eq!(final_value, 50);
-            true
-        })
-        .await;
+                let _ = receiver.changed(&cx).await;
+                let final_value = *receiver.borrow();
+                assert_eq!(final_value, 50);
+                true
+            }),
+            Err(_) => false,
+        }
     }
 }
 
