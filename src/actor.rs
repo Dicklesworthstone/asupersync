@@ -107,20 +107,24 @@ struct ActorStateCell {
 }
 
 impl ActorStateCell {
+    #[inline]
     fn new(state: ActorState) -> Self {
         Self {
             state: AtomicU8::new(Self::encode(state)),
         }
     }
 
+    #[inline]
     fn load(&self) -> ActorState {
         Self::decode(self.state.load(Ordering::Acquire))
     }
 
+    #[inline]
     fn store(&self, state: ActorState) {
         self.state.store(Self::encode(state), Ordering::Release);
     }
 
+    #[inline]
     const fn encode(state: ActorState) -> u8 {
         match state {
             ActorState::Created => 0,
@@ -130,6 +134,7 @@ impl ActorStateCell {
         }
     }
 
+    #[inline]
     const fn decode(value: u8) -> ActorState {
         match value {
             0 => ActorState::Created,

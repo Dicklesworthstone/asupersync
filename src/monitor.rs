@@ -60,6 +60,7 @@ pub struct MonitorRef(u64);
 
 impl MonitorRef {
     /// Allocates a fresh, globally unique monitor reference.
+    #[inline]
     fn new() -> Self {
         Self(MONITOR_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
@@ -73,12 +74,14 @@ impl MonitorRef {
     /// Creates a `MonitorRef` for integration testing purposes.
     #[doc(hidden)]
     #[must_use]
+    #[inline]
     pub const fn new_for_test(id: u64) -> Self {
         Self(id)
     }
 
     /// Returns the underlying numeric identifier.
     #[must_use]
+    #[inline]
     pub fn id(self) -> u64 {
         self.0
     }
@@ -113,6 +116,7 @@ pub enum DownReason {
 impl DownReason {
     /// Converts a task outcome to a down reason.
     #[must_use]
+    #[inline]
     pub fn from_task_outcome(outcome: &Outcome<(), crate::error::Error>) -> Self {
         match outcome {
             Outcome::Ok(()) => Self::Normal,
@@ -124,24 +128,28 @@ impl DownReason {
 
     /// Returns `true` if the process terminated normally.
     #[must_use]
+    #[inline]
     pub fn is_normal(&self) -> bool {
         matches!(self, Self::Normal)
     }
 
     /// Returns `true` if the process terminated with an error.
     #[must_use]
+    #[inline]
     pub fn is_error(&self) -> bool {
         matches!(self, Self::Error(_))
     }
 
     /// Returns `true` if the process was cancelled.
     #[must_use]
+    #[inline]
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled(_))
     }
 
     /// Returns `true` if the process panicked.
     #[must_use]
+    #[inline]
     pub fn is_panicked(&self) -> bool {
         matches!(self, Self::Panicked(_))
     }
