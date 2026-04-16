@@ -554,7 +554,6 @@ impl Error {
     /// Returns the error message, if any.
     #[must_use]
     #[inline]
-    #[inline]
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
     }
