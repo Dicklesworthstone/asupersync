@@ -530,6 +530,7 @@ impl<T, E> Outcome<T, E> {
     /// let result: Result<i32, &str> = cancelled.ok_or_else(|| "was cancelled");
     /// assert_eq!(result, Err("was cancelled"));
     /// ```
+    #[inline]
     pub fn ok_or_else<F2, G: FnOnce() -> F2>(self, f: G) -> Result<T, F2> {
         match self {
             Self::Ok(v) => Ok(v),
