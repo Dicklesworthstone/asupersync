@@ -31,6 +31,7 @@ pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
 pub struct OsEntropy;
 
 impl EntropySource for OsEntropy {
+    #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         check_ambient_entropy("os");
         getrandom::fill(dest).expect("OS entropy failed");

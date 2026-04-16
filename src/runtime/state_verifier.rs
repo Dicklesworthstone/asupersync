@@ -490,7 +490,7 @@ mod tests {
         });
 
         use RegionState::*;
-        let region_id = RegionId::new(1);
+        let region_id = RegionId::new_for_test(1, 0);
 
         // Valid transition
         assert!(

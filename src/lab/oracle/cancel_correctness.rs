@@ -800,6 +800,8 @@ mod tests {
         // Simulate concurrent witnesses for the same task
         std::thread::scope(|s| {
             for i in 0..4 {
+                let oracle = &oracle;
+                let reason = reason.clone();
                 s.spawn(move || {
                     oracle.notify_cancel_witness(
                         CancelWitness::new(
@@ -812,7 +814,7 @@ mod tests {
                                 2 => CancelPhase::Finalizing,
                                 _ => CancelPhase::Completed,
                             },
-                            reason.clone(),
+                            reason,
                         ),
                         now + Duration::from_nanos(i * 1000),
                     );

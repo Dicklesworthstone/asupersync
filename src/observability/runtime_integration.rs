@@ -414,7 +414,7 @@ mod tests {
         let config = CancellationTracerConfig::default();
         let integration = CancellationTracerIntegration::new(config);
 
-        let region_id = RegionId::new(1);
+        let region_id = RegionId::new_for_test(1, 0);
         let cancel_reason = CancelReason::with_user_reason("region test".to_string());
         let cancel_kind = CancelKind::User;
 
