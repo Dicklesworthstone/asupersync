@@ -16,7 +16,7 @@ use crate::types::Budget;
 
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::Duration;
-use tokio::{task, select};
+// Removed tokio dependency - this project IS the async runtime
 
 /// Stress test configuration for high-concurrency scenarios.
 #[derive(Debug, Clone)]
