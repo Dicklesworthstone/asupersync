@@ -82,6 +82,7 @@ pub struct Arena<T> {
 }
 
 impl<T> Default for Arena<T> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -90,6 +91,7 @@ impl<T> Default for Arena<T> {
 impl<T> Arena<T> {
     /// Creates a new empty arena.
     #[must_use]
+    #[inline]
     pub const fn new() -> Self {
         Self {
             slots: Vec::new(),
@@ -100,6 +102,7 @@ impl<T> Arena<T> {
 
     /// Creates a new arena with the specified capacity.
     #[must_use]
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             slots: Vec::with_capacity(capacity),
@@ -450,6 +453,7 @@ impl<T> Iterator for DrainValues<'_, T> {
         None
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, Some(self.arena.len))
     }

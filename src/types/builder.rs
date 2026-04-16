@@ -271,6 +271,7 @@ impl BuildError {
 
     /// Creates a `MissingRequired` error.
     #[must_use]
+    #[inline]
     pub const fn missing_required(field: &'static str) -> Self {
         Self::MissingRequired { field }
     }
@@ -286,18 +287,21 @@ impl BuildError {
 
     /// Creates an `InvalidRange` error.
     #[must_use]
+    #[inline]
     pub const fn invalid_range(field: &'static str, min: u64, max: u64) -> Self {
         Self::InvalidRange { field, min, max }
     }
 
     /// Creates a `ConflictingOptions` error.
     #[must_use]
+    #[inline]
     pub const fn conflicting_options(option_a: &'static str, option_b: &'static str) -> Self {
         Self::ConflictingOptions { option_a, option_b }
     }
 
     /// Creates an `InvalidProbability` error.
     #[must_use]
+    #[inline]
     pub const fn invalid_probability(field: &'static str, value: f64) -> Self {
         Self::InvalidProbability { field, value }
     }
@@ -313,6 +317,7 @@ impl BuildError {
 
     /// Creates a `DependencyMissing` error.
     #[must_use]
+    #[inline]
     pub const fn dependency_missing(feature: &'static str, dependency: &'static str) -> Self {
         Self::DependencyMissing {
             feature,
@@ -334,6 +339,7 @@ impl BuildError {
 
     /// Returns the field name associated with this error, if any.
     #[must_use]
+    #[inline]
     pub const fn field(&self) -> Option<&'static str> {
         match self {
             Self::MissingRequired { field }
@@ -349,18 +355,21 @@ impl BuildError {
 
     /// Returns true if this is a missing required field error.
     #[must_use]
+    #[inline]
     pub const fn is_missing_required(&self) -> bool {
         matches!(self, Self::MissingRequired { .. })
     }
 
     /// Returns true if this is an invalid value error.
     #[must_use]
+    #[inline]
     pub const fn is_invalid_value(&self) -> bool {
         matches!(self, Self::InvalidValue { .. })
     }
 
     /// Returns true if this is a conflicting options error.
     #[must_use]
+    #[inline]
     pub const fn is_conflicting_options(&self) -> bool {
         matches!(self, Self::ConflictingOptions { .. })
     }
@@ -436,6 +445,7 @@ pub mod validate {
     /// ```ignore
     /// validate::probability("cancel_rate", self.cancel_rate)?;
     /// ```
+    #[inline]
     pub fn probability(field: &'static str, value: f64) -> BuildResult<()> {
         if (0.0..=1.0).contains(&value) {
             Ok(())
@@ -450,6 +460,7 @@ pub mod validate {
     /// ```ignore
     /// validate::positive("worker_threads", self.threads)?;
     /// ```
+    #[inline]
     pub fn positive(field: &'static str, value: usize) -> BuildResult<()> {
         if value > 0 {
             Ok(())
@@ -464,6 +475,7 @@ pub mod validate {
     /// ```ignore
     /// validate::at_least_one("replicas", self.replicas)?;
     /// ```
+    #[inline]
     pub fn at_least_one(field: &'static str, value: usize) -> BuildResult<()> {
         if value >= 1 {
             Ok(())
@@ -478,6 +490,7 @@ pub mod validate {
     /// ```ignore
     /// validate::range("connections", self.min_conn, self.max_conn)?;
     /// ```
+    #[inline]
     pub fn range(field: &'static str, min: u64, max: u64) -> BuildResult<()> {
         if min <= max {
             Ok(())
@@ -492,6 +505,7 @@ pub mod validate {
     /// ```ignore
     /// validate::nonzero_duration("timeout", self.timeout)?;
     /// ```
+    #[inline]
     pub fn nonzero_duration(field: &'static str, duration: Duration) -> BuildResult<()> {
         if duration.is_zero() {
             Err(BuildError::invalid_duration(field, "must be non-zero"))
@@ -506,6 +520,7 @@ pub mod validate {
     /// ```ignore
     /// validate::non_empty_string("name", &self.name)?;
     /// ```
+    #[inline]
     pub fn non_empty_string(field: &'static str, value: &str) -> BuildResult<()> {
         if value.is_empty() {
             Err(BuildError::invalid_value(field, "must not be empty"))
@@ -520,6 +535,7 @@ pub mod validate {
     /// ```ignore
     /// let name = validate::required("name", self.name)?;
     /// ```
+    #[inline]
     pub fn required<T>(field: &'static str, value: Option<T>) -> BuildResult<T> {
         value.ok_or_else(|| BuildError::missing_required(field))
     }
