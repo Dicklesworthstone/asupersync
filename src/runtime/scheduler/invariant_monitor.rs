@@ -300,6 +300,27 @@ pub struct QueueSnapshot {
     pub time_range: Option<(Time, Time)>,
 }
 
+/// Snapshot of a tracked task in the invariant monitor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedTaskSnapshot {
+    /// Task identifier.
+    pub task_id: TaskId,
+    /// Queues currently containing the task.
+    pub queues: Vec<String>,
+    /// Task priority captured at enqueue time.
+    pub priority: u8,
+    /// Time when the task was first enqueued.
+    pub enqueue_time: Time,
+    /// Last time the task state changed.
+    pub last_update: Time,
+    /// Current lifecycle state string.
+    pub lifecycle_state: String,
+    /// Worker that owns the task, when known.
+    pub owner_worker: Option<usize>,
+    /// Whether the task has been cancelled.
+    pub is_cancelled: bool,
+}
+
 /// Worker load state for load balancing verification.
 #[derive(Debug, Clone)]
 pub struct WorkerLoadSnapshot {
@@ -698,6 +719,30 @@ impl SchedulerInvariantMonitor {
             .collect()
     }
 
+    /// Returns snapshots of all currently tracked tasks.
+    pub fn tracked_tasks(&self) -> Vec<TrackedTaskSnapshot> {
+        let mut tasks = self
+            .task_states
+            .iter()
+            .map(|(task_id, state)| {
+                let mut queues = state.queues.iter().cloned().collect::<Vec<_>>();
+                queues.sort();
+                TrackedTaskSnapshot {
+                    task_id: *task_id,
+                    queues,
+                    priority: state.priority,
+                    enqueue_time: state.enqueue_time,
+                    last_update: state.last_update,
+                    lifecycle_state: state.lifecycle_state.clone(),
+                    owner_worker: state.owner_worker,
+                    is_cancelled: state.is_cancelled,
+                }
+            })
+            .collect::<Vec<_>>();
+        tasks.sort_by_key(|task| task.task_id);
+        tasks
+    }
+
     /// Cleans up old task states and violations to prevent memory growth.
     pub fn cleanup_old_data(&mut self, current_time: Time, max_age: Duration) {
         let cutoff_time = Time::from_nanos(
@@ -905,5 +950,31 @@ mod tests {
 
         assert_eq!(monitor.task_states.len(), 0);
         assert_eq!(monitor.violations.len(), 0);
+    }
+
+    #[test]
+    fn test_tracked_task_snapshots_expose_internal_state() {
+        let mut monitor = SchedulerInvariantMonitor::with_defaults();
+        let enqueue_time = Time::from_nanos(1000);
+        let task_id = TaskId::from(7);
+
+        monitor.record_task_enqueue(task_id, "ready_queue", 3, enqueue_time);
+        if let Some(state) = monitor.task_states.get_mut(&task_id) {
+            state.owner_worker = Some(2);
+        }
+        monitor.record_task_cancel(task_id, Time::from_nanos(1500));
+
+        let snapshots = monitor.tracked_tasks();
+        assert_eq!(snapshots.len(), 1);
+
+        let snapshot = &snapshots[0];
+        assert_eq!(snapshot.task_id, task_id);
+        assert_eq!(snapshot.queues, vec!["ready_queue".to_string()]);
+        assert_eq!(snapshot.priority, 3);
+        assert_eq!(snapshot.enqueue_time, enqueue_time);
+        assert_eq!(snapshot.last_update, Time::from_nanos(1500));
+        assert_eq!(snapshot.lifecycle_state, "cancelled");
+        assert_eq!(snapshot.owner_worker, Some(2));
+        assert!(snapshot.is_cancelled);
     }
 }
