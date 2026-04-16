@@ -102,18 +102,21 @@ impl SymbolBuffer {
 
     /// Returns the length of the buffer in bytes.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
     /// Returns true if the buffer is empty.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
     /// Returns a shared view of the buffer.
     #[must_use]
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
@@ -200,18 +203,21 @@ impl SymbolPool {
 
     /// Returns the current pool configuration.
     #[must_use]
+    #[inline]
     pub fn config(&self) -> &PoolConfig {
         &self.config
     }
 
     /// Returns pool usage statistics.
     #[must_use]
+    #[inline]
     pub fn stats(&self) -> &PoolStats {
         &self.stats
     }
 
     /// Returns the number of buffers currently available in the free list.
     #[must_use]
+    #[inline]
     pub fn free_count(&self) -> usize {
         self.free_list.len()
     }
@@ -376,6 +382,7 @@ pub struct ResourceLimits {
 impl ResourceLimits {
     /// Returns true if all limits are zero.
     #[must_use]
+    #[inline]
     pub const fn is_zero(&self) -> bool {
         self.max_symbol_memory == 0
             && self.max_encoding_ops == 0
@@ -426,6 +433,7 @@ impl ResourceRequest {
 
     /// Returns the requested symbol memory in bytes.
     #[must_use]
+    #[inline]
     pub const fn symbol_memory(&self) -> usize {
         self.symbol_memory
     }
@@ -497,18 +505,21 @@ impl ResourceTracker {
 
     /// Returns the current resource usage.
     #[must_use]
+    #[inline]
     pub fn usage(&self) -> &ResourceUsage {
         &self.current
     }
 
     /// Returns the configured limits.
     #[must_use]
+    #[inline]
     pub fn limits(&self) -> &ResourceLimits {
         &self.limits
     }
 
     /// Checks if a request can be satisfied.
     #[must_use]
+    #[inline]
     pub fn can_acquire(&self, request: &ResourceRequest) -> bool {
         self.check_limits(request).is_ok()
     }
@@ -521,6 +532,7 @@ impl ResourceTracker {
 
     /// Computes the current pressure (0.0 to 1.0).
     #[must_use]
+    #[inline]
     pub fn pressure(&self) -> f64 {
         let mut max_ratio: f64 = 0.0;
         // Per-object limits are checked per request in `check_limits`; they

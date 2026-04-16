@@ -49,6 +49,7 @@ impl SystemPressure {
     /// Uses `Relaxed` ordering — reads may be slightly stale but are
     /// always valid f32 values in `[0.0, 1.0]`.
     #[must_use]
+    #[inline]
     pub fn headroom(&self) -> f32 {
         f32::from_bits(self.headroom_bits.load(Ordering::Relaxed))
     }
@@ -64,6 +65,7 @@ impl SystemPressure {
 
     /// True if headroom is below the given threshold.
     #[must_use]
+    #[inline]
     pub fn should_degrade(&self, threshold: f32) -> bool {
         self.headroom() < threshold
     }
@@ -76,6 +78,7 @@ impl SystemPressure {
     /// - Level 3: headroom >= 0.05 (Critical — writes throttled)
     /// - Level 4: headroom < 0.05 (Emergency — read-only mode)
     #[must_use]
+    #[inline]
     pub fn degradation_level(&self) -> u8 {
         let h = self.headroom();
         if h >= 0.5 {
@@ -93,6 +96,7 @@ impl SystemPressure {
 
     /// Human-readable label for the current degradation level.
     #[must_use]
+    #[inline]
     pub fn level_label(&self) -> &'static str {
         match self.degradation_level() {
             0 => "normal",

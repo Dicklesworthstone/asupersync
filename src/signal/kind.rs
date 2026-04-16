@@ -144,6 +144,7 @@ impl SignalKind {
 
     /// Returns the name of the signal.
     #[must_use]
+    #[inline]
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Interrupt => "SIGINT",

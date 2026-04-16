@@ -33,6 +33,7 @@ impl Default for DetHasher {
 }
 
 impl Hasher for DetHasher {
+    #[inline]
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             self.mix_byte(byte);
@@ -105,6 +106,7 @@ impl Hasher for DetHasher {
         self.write_i64(i as i64);
     }
 
+    #[inline]
     fn finish(&self) -> u64 {
         // Final mixing for better distribution.
         let mut h = self.state;
@@ -124,6 +126,7 @@ pub struct DetBuildHasher;
 impl BuildHasher for DetBuildHasher {
     type Hasher = DetHasher;
 
+    #[inline]
     fn build_hasher(&self) -> Self::Hasher {
         DetHasher::default()
     }

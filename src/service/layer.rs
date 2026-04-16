@@ -35,11 +35,13 @@ impl<Inner, Outer> Stack<Inner, Outer> {
     }
 
     /// Returns a reference to the inner layer.
+    #[inline]
     pub fn inner(&self) -> &Inner {
         &self.inner
     }
 
     /// Returns a reference to the outer layer.
+    #[inline]
     pub fn outer(&self) -> &Outer {
         &self.outer
     }

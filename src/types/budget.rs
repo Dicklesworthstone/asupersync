@@ -701,18 +701,21 @@ impl MinPlusCurve {
 
     /// Returns the discrete horizon (last sample index).
     #[must_use]
+    #[inline]
     pub fn horizon(&self) -> usize {
         self.samples.len().saturating_sub(1)
     }
 
     /// Returns the tail rate used for extrapolation beyond the horizon.
     #[must_use]
+    #[inline]
     pub fn tail_rate(&self) -> u64 {
         self.tail_rate
     }
 
     /// Returns the curve value at integer time `t`.
     #[must_use]
+    #[inline]
     pub fn value_at(&self, t: usize) -> u64 {
         let horizon = self.horizon();
         if t <= horizon {
@@ -725,6 +728,7 @@ impl MinPlusCurve {
 
     /// Returns the underlying samples.
     #[must_use]
+    #[inline]
     pub fn samples(&self) -> &[u64] {
         &self.samples
     }
@@ -767,6 +771,7 @@ pub struct CurveBudget {
 impl CurveBudget {
     /// Computes the backlog bound `sup_t (arrival(t) - service(t))` over a horizon.
     #[must_use]
+    #[inline]
     pub fn backlog_bound(&self, horizon: usize) -> u64 {
         backlog_bound(&self.arrival, &self.service, horizon)
     }
@@ -775,6 +780,7 @@ impl CurveBudget {
     ///
     /// Returns `None` if no delay bound is found within `max_delay`.
     #[must_use]
+    #[inline]
     pub fn delay_bound(&self, horizon: usize, max_delay: usize) -> Option<usize> {
         delay_bound(&self.arrival, &self.service, horizon, max_delay)
     }
