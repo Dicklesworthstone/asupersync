@@ -31,15 +31,10 @@
 //! - ≡ `reserve(tx₂) → reserve(tx₁) → commit(tx₁) → commit(tx₂)`
 //! - Reserve pool operations are commutative
 
-#[macro_use]
-mod common;
-
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::lab::LabRuntime;
 use asupersync::types::{Budget, Time};
-use common::*;
-use proptest::prelude::*;
 use std::collections::VecDeque;
 use std::sync::Arc;
 

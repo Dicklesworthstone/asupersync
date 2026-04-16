@@ -109,3 +109,17 @@ path = "fuzz_targets/gf256_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_channel_state_machine"
+path = "fuzz_targets/channel_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_websocket_frame_parsing"
+path = "fuzz_targets/websocket_frame_parsing.rs"
+test = false
+doc = false
+bench = false

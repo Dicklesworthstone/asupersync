@@ -15,6 +15,8 @@ pub mod intrusive;
 pub mod intrusive_heap;
 pub mod invariant_monitor;
 pub mod local_queue;
+#[cfg(test)]
+pub mod metamorphic_tests;
 pub mod priority;
 pub mod priority_inversion_oracle;
 pub mod stealing;
