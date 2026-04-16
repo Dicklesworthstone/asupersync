@@ -155,3 +155,10 @@ path = "fuzz_targets/postgres_scram_auth.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_redis_resp_protocol"
+path = "fuzz_targets/redis_resp_protocol.rs"
+test = false
+doc = false
+bench = false

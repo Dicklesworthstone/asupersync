@@ -6,15 +6,54 @@
 pub mod hpack_rfc7541;
 pub mod hpack_metamorphic;
 pub mod codec_framing;
+pub mod h2_rfc7540;
 
 // Re-export main conformance test functionality
 pub use hpack_rfc7541::{
     HpackConformanceHarness,
-    ConformanceTestResult,
     RequirementLevel,
-    TestCategory,
     TestVerdict,
 };
+pub use h2_rfc7540::{H2ConformanceHarness, H2ConformanceResult};
+
+// Unified test categories for all conformance suites
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestCategory {
+    // HPACK categories
+    StaticTable,
+    DynamicTable,
+    Huffman,
+    Indexing,
+    Context,
+    ErrorHandling,
+    RoundTrip,
+    // HTTP/2 categories
+    FrameFormat,
+    StreamStates,
+    Connection,
+    Settings,
+    FlowControl,
+    Priority,
+    Security,
+    // Codec categories
+    Framing,
+    ResourceLimits,
+    EdgeCases,
+    Performance,
+}
+
+// Unified conformance test result
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConformanceTestResult {
+    pub test_id: String,
+    pub description: String,
+    pub category: TestCategory,
+    pub requirement_level: RequirementLevel,
+    pub verdict: TestVerdict,
+    pub error_message: Option<String>,
+    pub execution_time_ms: u64,
+}
 
 /// Run all available conformance test suites.
 pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
@@ -22,14 +61,86 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
 
     // HPACK RFC 7541 conformance
     let hpack_harness = HpackConformanceHarness::new();
-    results.extend(hpack_harness.run_all_tests());
+    let hpack_results: Vec<ConformanceTestResult> = hpack_harness.run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                hpack_rfc7541::TestCategory::StaticTable => TestCategory::StaticTable,
+                hpack_rfc7541::TestCategory::DynamicTable => TestCategory::DynamicTable,
+                hpack_rfc7541::TestCategory::Huffman => TestCategory::Huffman,
+                hpack_rfc7541::TestCategory::Indexing => TestCategory::Indexing,
+                hpack_rfc7541::TestCategory::Context => TestCategory::Context,
+                hpack_rfc7541::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
+                hpack_rfc7541::TestCategory::RoundTrip => TestCategory::RoundTrip,
+            },
+            requirement_level: r.requirement_level,
+            verdict: r.verdict,
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(hpack_results);
+
+    // HTTP/2 RFC 7540 conformance
+    let h2_harness = H2ConformanceHarness::new();
+    let h2_results: Vec<ConformanceTestResult> = h2_harness.run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                h2_rfc7540::TestCategory::FrameFormat => TestCategory::FrameFormat,
+                h2_rfc7540::TestCategory::StreamStates => TestCategory::StreamStates,
+                h2_rfc7540::TestCategory::Connection => TestCategory::Connection,
+                h2_rfc7540::TestCategory::Settings => TestCategory::Settings,
+                h2_rfc7540::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
+                h2_rfc7540::TestCategory::FlowControl => TestCategory::FlowControl,
+                h2_rfc7540::TestCategory::Priority => TestCategory::Priority,
+                h2_rfc7540::TestCategory::Security => TestCategory::Security,
+            },
+            requirement_level: match r.requirement_level {
+                h2_rfc7540::RequirementLevel::Must => RequirementLevel::Must,
+                h2_rfc7540::RequirementLevel::Should => RequirementLevel::Should,
+                h2_rfc7540::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                h2_rfc7540::TestVerdict::Pass => TestVerdict::Pass,
+                h2_rfc7540::TestVerdict::Fail => TestVerdict::Fail,
+                h2_rfc7540::TestVerdict::Skipped => TestVerdict::Skipped,
+                h2_rfc7540::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.notes,
+            execution_time_ms: r.elapsed_ms,
+        })
+        .collect();
+    results.extend(h2_results);
 
     // Codec framing conformance
     let codec_harness = codec_framing::CodecConformanceHarness::new();
-    results.extend(codec_harness.run_all_tests());
+    let codec_results: Vec<ConformanceTestResult> = codec_harness.run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                codec_framing::TestCategory::Framing => TestCategory::Framing,
+                codec_framing::TestCategory::RoundTrip => TestCategory::RoundTrip,
+                codec_framing::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
+                codec_framing::TestCategory::ResourceLimits => TestCategory::ResourceLimits,
+                codec_framing::TestCategory::EdgeCases => TestCategory::EdgeCases,
+                codec_framing::TestCategory::Performance => TestCategory::Performance,
+            },
+            requirement_level: r.requirement_level,
+            verdict: r.verdict,
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(codec_results);
 
     // Additional conformance suites will be added here:
-    // - HTTP/2 RFC 7540 conformance
     // - WebSocket RFC 6455 conformance
     // - gRPC conformance
 
@@ -112,6 +223,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "RFC 7541 Appendix C test vectors"
+                },
+                "h2_rfc7540": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 7540 HTTP/2 specification requirements"
                 },
                 "codec_framing": {
                     "status": "implemented",
