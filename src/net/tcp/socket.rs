@@ -28,6 +28,7 @@ struct TcpSocketState {
 
 impl TcpSocket {
     /// Creates a new IPv4 TCP socket.
+    #[inline]
     pub fn new_v4() -> io::Result<Self> {
         Ok(Self {
             state: Mutex::new(TcpSocketState {
@@ -40,6 +41,7 @@ impl TcpSocket {
     }
 
     /// Creates a new IPv6 TCP socket.
+    #[inline]
     pub fn new_v6() -> io::Result<Self> {
         Ok(Self {
             state: Mutex::new(TcpSocketState {
