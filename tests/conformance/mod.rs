@@ -7,6 +7,7 @@ pub mod hpack_rfc7541;
 pub mod hpack_metamorphic;
 pub mod codec_framing;
 pub mod h2_rfc7540;
+pub mod websocket_rfc6455;
 
 // Re-export main conformance test functionality
 pub use hpack_rfc7541::{
@@ -15,6 +16,7 @@ pub use hpack_rfc7541::{
     TestVerdict,
 };
 pub use h2_rfc7540::{H2ConformanceHarness, H2ConformanceResult};
+pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -41,6 +43,15 @@ pub enum TestCategory {
     ResourceLimits,
     EdgeCases,
     Performance,
+    // WebSocket categories
+    Handshake,
+    ControlFrames,
+    ConnectionClose,
+    Extensions,
+    Subprotocols,
+    Masking,
+    Fragmentation,
+    DataFrames,
 }
 
 // Unified conformance test result
@@ -116,6 +127,42 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         })
         .collect();
     results.extend(h2_results);
+
+    // WebSocket RFC 6455 conformance
+    let ws_harness = WsConformanceHarness::new();
+    let ws_results: Vec<ConformanceTestResult> = ws_harness.run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                websocket_rfc6455::TestCategory::FrameFormat => TestCategory::FrameFormat,
+                websocket_rfc6455::TestCategory::Handshake => TestCategory::Handshake,
+                websocket_rfc6455::TestCategory::ControlFrames => TestCategory::ControlFrames,
+                websocket_rfc6455::TestCategory::ConnectionClose => TestCategory::ConnectionClose,
+                websocket_rfc6455::TestCategory::Extensions => TestCategory::Extensions,
+                websocket_rfc6455::TestCategory::Subprotocols => TestCategory::Subprotocols,
+                websocket_rfc6455::TestCategory::Masking => TestCategory::Masking,
+                websocket_rfc6455::TestCategory::Fragmentation => TestCategory::Fragmentation,
+                websocket_rfc6455::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
+                websocket_rfc6455::TestCategory::DataFrames => TestCategory::DataFrames,
+            },
+            requirement_level: match r.requirement_level {
+                websocket_rfc6455::RequirementLevel::Must => RequirementLevel::Must,
+                websocket_rfc6455::RequirementLevel::Should => RequirementLevel::Should,
+                websocket_rfc6455::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                websocket_rfc6455::TestVerdict::Pass => TestVerdict::Pass,
+                websocket_rfc6455::TestVerdict::Fail => TestVerdict::Fail,
+                websocket_rfc6455::TestVerdict::Skipped => TestVerdict::Skipped,
+                websocket_rfc6455::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.notes,
+            execution_time_ms: r.elapsed_ms,
+        })
+        .collect();
+    results.extend(ws_results);
 
     // Codec framing conformance
     let codec_harness = codec_framing::CodecConformanceHarness::new();
@@ -228,6 +275,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "RFC 7540 HTTP/2 specification requirements"
+                },
+                "websocket_rfc6455": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 6455 WebSocket specification requirements"
                 },
                 "codec_framing": {
                     "status": "implemented",
