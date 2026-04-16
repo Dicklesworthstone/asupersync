@@ -371,11 +371,12 @@ impl<T: Clone> Receiver<T> {
     /// - `RecvError::Closed`: All senders dropped.
     /// - `RecvError::PolledAfterCompletion`: This specific future was already resolved.
     pub async fn recv(&mut self, cx: &Cx) -> Result<T, RecvError> {
-        RecvFuture {
+        Recv {
             receiver: self,
-            phantom: PhantomData,
+            cx,
+            waiter: None,
+            completed: false,
         }
-        .await_cx(cx)
         .await
     }
 

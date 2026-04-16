@@ -1121,6 +1121,7 @@ pub struct TraceEvent {
 impl TraceEvent {
     /// Creates a new trace event.
     #[must_use]
+    #[inline]
     pub fn new(seq: u64, time: Time, kind: TraceEventKind, data: TraceData) -> Self {
         Self {
             version: TRACE_EVENT_SCHEMA_VERSION,
@@ -1133,6 +1134,7 @@ impl TraceEvent {
     }
 
     /// Attaches a logical clock timestamp to this event for causal ordering.
+    #[inline]
     #[must_use]
     pub fn with_logical_time(mut self, logical_time: LogicalTime) -> Self {
         self.logical_time = Some(logical_time);
