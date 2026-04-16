@@ -729,8 +729,12 @@ impl WorkerCoordinator {
             return Err(WorkerChannelError::ShutdownInProgress);
         }
         validate_payload_size(payload.len())?;
-        if self.jobs.contains_key(&job_id) {
-            return Err(WorkerChannelError::DuplicateJobId(job_id));
+        if let Some(existing_state) = self.jobs.get(&job_id).map(|job| job.state) {
+            if existing_state == JobState::Failed {
+                self.jobs.remove(&job_id);
+            } else {
+                return Err(WorkerChannelError::DuplicateJobId(job_id));
+            }
         }
 
         let mut tracked = TrackedJob::new(job_id, region_id);
@@ -2076,6 +2080,56 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_allows_reusing_failed_job_id_after_shutdown_completed() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![1]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker one accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.request_shutdown("done".into()).unwrap();
+        let _ = coord.drain_outbox();
+        let shutdown = test_worker_envelope(3, 3, 2, WorkerOp::ShutdownCompleted);
+        coord.handle_inbound(&shutdown).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Failed));
+
+        let reboot = worker_envelope(
+            "test-worker-2",
+            1,
+            1,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "test-worker-2".into(),
+            },
+        );
+        coord.handle_inbound(&reboot).unwrap();
+
+        coord.spawn_job(1, 100, 201, 301, vec![7, 8]).unwrap();
+        let respawn = coord.drain_outbox().unwrap();
+        match respawn.op {
+            WorkerOp::SpawnJob(request) => {
+                assert_eq!(request.job_id, 1);
+                assert_eq!(request.task_id, 201);
+                assert_eq!(request.obligation_id, 301);
+                assert_eq!(request.payload, vec![7, 8]);
+            }
+            other => panic!("expected respawn after shutdown-complete reboot, got {other:?}"),
+        }
+        assert_eq!(coord.job_state(1), Some(JobState::Queued));
+    }
+
+    #[test]
     fn coordinator_marks_running_job_failed_when_worker_instance_changes() {
         let mut coord = WorkerCoordinator::new(42);
         coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
@@ -2138,6 +2192,51 @@ mod tests {
             WorkerOp::SpawnJob(request) => assert_eq!(request.job_id, 2),
             other => panic!("expected fresh spawn after reboot, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn coordinator_allows_reusing_failed_job_id_after_worker_instance_change() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![1, 2, 3]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker one accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        let reboot = worker_envelope(
+            "test-worker-2",
+            1,
+            1,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "test-worker-2".into(),
+            },
+        );
+        coord.handle_inbound(&reboot).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Failed));
+
+        coord.spawn_job(1, 100, 201, 301, vec![9]).unwrap();
+        let respawn = coord.drain_outbox().unwrap();
+        match respawn.op {
+            WorkerOp::SpawnJob(request) => {
+                assert_eq!(request.job_id, 1);
+                assert_eq!(request.task_id, 201);
+                assert_eq!(request.obligation_id, 301);
+                assert_eq!(request.payload, vec![9]);
+            }
+            other => panic!("expected respawn after reboot, got {other:?}"),
+        }
+        assert_eq!(coord.job_state(1), Some(JobState::Queued));
     }
 
     #[test]
