@@ -29,6 +29,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use std::time::Duration;
+
 /// Configuration for the cancel-correctness oracle.
 #[derive(Debug, Clone)]
 pub struct CancelCorrectnessConfig {
