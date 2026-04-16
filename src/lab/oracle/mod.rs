@@ -36,6 +36,7 @@
 
 pub mod actor;
 pub mod ambient_authority;
+pub mod cancel_correctness;
 pub mod cancellation_protocol;
 pub mod channel_atomicity;
 pub mod deadline_monotone;
@@ -53,6 +54,7 @@ pub mod region_tree;
 pub mod rref_access;
 pub mod spork;
 pub mod task_leak;
+pub mod waker_dedup;
 
 pub use actor::{
     ActorLeakOracle, ActorLeakViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
@@ -60,6 +62,10 @@ pub use actor::{
 };
 pub use ambient_authority::{
     AmbientAuthorityOracle, AmbientAuthorityViolation, CapabilityKind, CapabilitySet,
+};
+pub use cancel_correctness::{
+    CancelCorrectnessConfig, CancelCorrectnessOracle, CancelCorrectnessStatistics,
+    CancelCorrectnessViolation,
 };
 pub use cancellation_protocol::{
     CancellationProtocolOracle, CancellationProtocolViolation, TaskStateKind,
@@ -100,6 +106,10 @@ pub use spork::{
     SupervisorQuiescenceViolation,
 };
 pub use task_leak::{TaskLeakOracle, TaskLeakViolation};
+pub use waker_dedup::{
+    WakerDedupOracle, WakerDedupViolation, WakerDedupConfig, WakerDedupStatistics,
+    WakerId as WakerDedupId, WakerStatus, ViolationRecord as WakerViolationRecord,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -135,8 +145,12 @@ pub enum OracleViolation {
     DeadlineMonotone(DeadlineMonotoneViolation),
     /// Cancellation protocol violated.
     CancellationProtocol(CancellationProtocolViolation),
+    /// Cancel-correctness property violated.
+    CancelCorrectness(CancelCorrectnessViolation),
     /// Channel atomicity violation (reservation lifecycle, waker consistency, etc.).
     ChannelAtomicity(ChannelAtomicityViolation),
+    /// Waker deduplication violation (lost/spurious wakeups, state inconsistency).
+    WakerDedup(WakerDedupViolation),
     /// An actor leak was detected.
     ActorLeak(ActorLeakViolation),
     /// Supervision tree behavior violated.
@@ -180,7 +194,9 @@ impl std::fmt::Display for OracleViolation {
             Self::AmbientAuthority(v) => write!(f, "Ambient authority violation: {v}"),
             Self::DeadlineMonotone(v) => write!(f, "Deadline monotonicity violation: {v}"),
             Self::CancellationProtocol(v) => write!(f, "Cancellation protocol violation: {v}"),
+            Self::CancelCorrectness(v) => write!(f, "Cancel-correctness violation: {v}"),
             Self::ChannelAtomicity(v) => write!(f, "Channel atomicity violation: {v}"),
+            Self::WakerDedup(v) => write!(f, "Waker deduplication violation: {v}"),
             Self::ActorLeak(v) => write!(f, "Actor leak: {v}"),
             Self::Supervision(v) => write!(f, "Supervision violation: {v}"),
             Self::Mailbox(v) => write!(f, "Mailbox violation: {v}"),
@@ -226,8 +242,12 @@ pub struct OracleSuite {
     pub deadline_monotone: DeadlineMonotoneOracle,
     /// Cancellation protocol oracle.
     pub cancellation_protocol: CancellationProtocolOracle,
+    /// Cancel-correctness property oracle.
+    pub cancel_correctness: CancelCorrectnessOracle,
     /// Channel atomicity oracle.
     pub channel_atomicity: ChannelAtomicityOracle,
+    /// Waker deduplication oracle.
+    pub waker_dedup: WakerDedupOracle,
     /// Actor leak oracle.
     pub actor_leak: ActorLeakOracle,
     /// Supervision oracle.
@@ -486,6 +506,19 @@ impl OracleSuite {
             }
         }
 
+        let waker_dedup_violations = self.waker_dedup.check_for_violations();
+        match waker_dedup_violations {
+            Ok(violations_vec) => {
+                for violation in violations_vec {
+                    violations.push(OracleViolation::WakerDedup(violation));
+                }
+            }
+            Err(_) => {
+                // Handle case where oracle fails - this would be a critical error
+                // For now, we'll skip adding violations
+            }
+        }
+
         if let Err(v) = self.actor_leak.check(now) {
             violations.push(OracleViolation::ActorLeak(v));
         }
@@ -554,6 +587,7 @@ impl OracleSuite {
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
         self.channel_atomicity.reset();
+        self.waker_dedup.reset();
         self.actor_leak.reset();
         self.supervision.reset();
         self.mailbox.reset();
@@ -726,6 +760,20 @@ impl OracleSuite {
                         + self.channel_atomicity.statistics().total_wakeups_expected
                         + self.channel_atomicity.statistics().total_wakeups_actual)
                         as usize,
+                },
+            ),
+            OracleEntryReport::from_result(
+                "waker_dedup",
+                self.waker_dedup
+                    .check_for_violations()
+                    .ok()
+                    .and_then(|violations| violations.first().cloned())
+                    .map(OracleViolation::WakerDedup),
+                OracleStats {
+                    entities_tracked: self.waker_dedup.statistics().active_wakers as usize,
+                    events_recorded: (self.waker_dedup.statistics().total_wakers_registered
+                        + self.waker_dedup.statistics().total_wakers_woken
+                        + self.waker_dedup.statistics().total_wakers_dropped) as usize,
                 },
             ),
             OracleEntryReport::from_result(

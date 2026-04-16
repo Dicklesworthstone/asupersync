@@ -27,8 +27,12 @@ pub const INVARIANT_AMBIENT_AUTHORITY: &str = "ambient_authority";
 pub const INVARIANT_DEADLINE_MONOTONE: &str = "deadline_monotone";
 /// Invariant name for the cancellation protocol oracle.
 pub const INVARIANT_CANCELLATION_PROTOCOL: &str = "cancellation_protocol";
+/// Invariant name for the cancel-correctness oracle.
+pub const INVARIANT_CANCEL_CORRECTNESS: &str = "cancel_correctness";
 /// Invariant name for the channel atomicity oracle.
 pub const INVARIANT_CHANNEL_ATOMICITY: &str = "channel_atomicity";
+/// Invariant name for the waker deduplication oracle.
+pub const INVARIANT_WAKER_DEDUP: &str = "waker_dedup";
 /// Invariant name for the actor leak oracle.
 pub const INVARIANT_ACTOR_LEAK: &str = "actor_leak";
 /// Invariant name for the supervision oracle.
@@ -841,7 +845,9 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::AmbientAuthority(_) => INVARIANT_AMBIENT_AUTHORITY,
         OracleViolation::DeadlineMonotone(_) => INVARIANT_DEADLINE_MONOTONE,
         OracleViolation::CancellationProtocol(_) => INVARIANT_CANCELLATION_PROTOCOL,
+        OracleViolation::CancelCorrectness(_) => INVARIANT_CANCEL_CORRECTNESS,
         OracleViolation::ChannelAtomicity(_) => INVARIANT_CHANNEL_ATOMICITY,
+        OracleViolation::WakerDedup(_) => INVARIANT_WAKER_DEDUP,
         OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,
         OracleViolation::Supervision(_) => INVARIANT_SUPERVISION,
         OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,

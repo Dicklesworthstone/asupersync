@@ -388,6 +388,8 @@ pub struct RuntimeState {
     next_finalizer_id: u64,
     /// Epoch consistency tracker for runtime state transitions.
     epoch_tracker: super::epoch_tracker::EpochConsistencyTracker,
+    /// State machine transition verifier for runtime entities.
+    state_verifier: Arc<super::state_verifier::StateTransitionVerifier>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -428,6 +430,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("async_finalizer_tasks", &self.async_finalizer_tasks.len())
             .field("finalizer_history_len", &self.finalizer_history.len())
             .field("next_finalizer_id", &self.next_finalizer_id)
+            .field("state_verifier", &"<StateTransitionVerifier>")
             .finish()
     }
 }
@@ -475,6 +478,9 @@ impl RuntimeState {
             finalizer_history: Vec::new(),
             next_finalizer_id: 0,
             epoch_tracker: super::epoch_tracker::EpochConsistencyTracker::new(),
+            state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
+                super::state_verifier::StateVerifierConfig::default()
+            )),
         }
     }
 
@@ -582,6 +588,19 @@ impl RuntimeState {
     #[must_use]
     pub fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
         self.blocking_pool.clone()
+    }
+
+    /// Gets a reference to the state transition verifier.
+    #[inline]
+    #[must_use]
+    pub fn state_verifier(&self) -> &Arc<super::state_verifier::StateTransitionVerifier> {
+        &self.state_verifier
+    }
+
+    /// Gets the state verifier statistics snapshot.
+    #[must_use]
+    pub fn state_verifier_stats(&self) -> super::state_verifier::StateVerifierStatsSnapshot {
+        self.state_verifier.stats()
     }
 
     /// Sets the blocking pool handle for this runtime.
