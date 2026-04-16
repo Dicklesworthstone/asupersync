@@ -271,7 +271,9 @@ impl TaskCancelState {
 
     fn update_with_witness(&mut self, witness: CancelWitness, now: Time) {
         self.current_phase = witness.phase;
+        self.epoch = witness.epoch;
         self.last_transition = now;
+        self.cancel_reason = witness.reason.clone();
         self.witness_history.push_back(witness);
 
         // Keep only last few witnesses to avoid unbounded growth
@@ -279,6 +281,25 @@ impl TaskCancelState {
             self.witness_history.pop_front();
         }
     }
+}
+
+/// Snapshot of a tracked task's cancellation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedCancelTaskSnapshot {
+    /// Task identifier.
+    pub task_id: TaskId,
+    /// Region containing the task.
+    pub region_id: RegionId,
+    /// Current cancellation phase.
+    pub current_phase: CancelPhase,
+    /// Latest cancellation epoch carried by the witness stream.
+    pub epoch: u64,
+    /// Latest cancellation reason observed for the task.
+    pub cancel_reason: CancelReason,
+    /// Time of the last phase transition.
+    pub last_transition: Time,
+    /// Number of witnesses retained in the local history window.
+    pub witness_history_len: usize,
 }
 
 /// The cancel-correctness property oracle.
@@ -422,6 +443,25 @@ impl CancelCorrectnessOracle {
     pub fn get_recent_violations(&self, limit: usize) -> Vec<CancelCorrectnessViolation> {
         let violations = self.violations.read();
         violations.iter().rev().take(limit).cloned().collect()
+    }
+
+    /// Returns snapshots of the currently tracked task cancellation states.
+    pub fn tracked_tasks(&self) -> Vec<TrackedCancelTaskSnapshot> {
+        let task_states = self.task_states.read();
+        let mut snapshots = task_states
+            .values()
+            .map(|state| TrackedCancelTaskSnapshot {
+                task_id: state.task_id,
+                region_id: state.region_id,
+                current_phase: state.current_phase,
+                epoch: state.epoch,
+                cancel_reason: state.cancel_reason.clone(),
+                last_transition: state.last_transition,
+                witness_history_len: state.witness_history.len(),
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|snapshot| snapshot.task_id);
+        snapshots
     }
 
     /// Check for violations following the oracle pattern.
@@ -977,5 +1017,51 @@ mod tests {
 
         let stats = oracle.get_statistics();
         assert_eq!(stats.witnesses_processed, 1);
+    }
+
+    #[test]
+    fn test_tracked_tasks_expose_cancel_epoch_and_reason() {
+        init_test_logging();
+
+        let oracle = CancelCorrectnessOracle::with_default_config();
+        let task_id = TaskId::new_for_test(9, 0);
+        let region_id = RegionId::testing_default();
+        let requested_at = Time::from_nanos(1234);
+        let updated_at = Time::from_nanos(5678);
+        let requested_reason = CancelReason::user("snapshot-test");
+        let updated_reason = CancelReason::timeout_with_message("snapshot-updated");
+
+        oracle.notify_cancel_witness(
+            CancelWitness::new(
+                task_id,
+                region_id,
+                7,
+                CancelPhase::Requested,
+                requested_reason,
+            ),
+            requested_at,
+        );
+        oracle.notify_cancel_witness(
+            CancelWitness::new(
+                task_id,
+                region_id,
+                8,
+                CancelPhase::Cancelling,
+                updated_reason.clone(),
+            ),
+            updated_at,
+        );
+
+        let tracked = oracle.tracked_tasks();
+        assert_eq!(tracked.len(), 1);
+
+        let snapshot = &tracked[0];
+        assert_eq!(snapshot.task_id, task_id);
+        assert_eq!(snapshot.region_id, region_id);
+        assert_eq!(snapshot.current_phase, CancelPhase::Cancelling);
+        assert_eq!(snapshot.epoch, 8);
+        assert_eq!(snapshot.cancel_reason, updated_reason);
+        assert_eq!(snapshot.last_transition, updated_at);
+        assert_eq!(snapshot.witness_history_len, 2);
     }
 }
