@@ -416,6 +416,7 @@ impl<T> TypedSymbol<T> {
 
     /// Returns the underlying symbol.
     #[must_use]
+    #[inline]
     pub fn symbol(&self) -> &Symbol {
         &self.symbol
     }
