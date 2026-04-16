@@ -620,9 +620,9 @@ impl EpochConsistencyTracker {
                 module: _,
                 expected_epoch,
                 actual_epoch,
-                detected_at,
+                detected_at: _,
             } => {
-                let epoch_skew = if actual_epoch > expected_epoch {
+                let _epoch_skew = if actual_epoch > expected_epoch {
                     actual_epoch.as_u64() - expected_epoch.as_u64()
                 } else {
                     expected_epoch.as_u64() - actual_epoch.as_u64()
@@ -643,7 +643,7 @@ impl EpochConsistencyTracker {
                 );
             }
             EpochConsistencyViolation::AdvancementOrderViolation {
-                module,
+                module: _,
                 advanced_to,
                 dependency_module,
                 dependency_epoch,
