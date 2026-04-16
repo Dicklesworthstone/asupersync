@@ -124,6 +124,7 @@ pub struct OnceCell<T> {
 
 impl<T> OnceCell<T> {
     /// Creates a new uninitialized `OnceCell`.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -138,6 +139,7 @@ impl<T> OnceCell<T> {
     }
 
     /// Creates a new `OnceCell` with the given value.
+    #[inline]
     #[must_use]
     pub fn with_value(value: T) -> Self {
         let cell = Self::new();
