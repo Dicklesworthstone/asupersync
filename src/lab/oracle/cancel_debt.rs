@@ -23,7 +23,7 @@
 //! - Tracks finalizer execution rates and completion times
 //! - Provides early warning for potential resource exhaustion
 
-use crate::types::{RegionId, TaskId, Time, Budget};
+use crate::types::{RegionId, TaskId, Time};
 use parking_lot::RwLock;
 use std::backtrace::Backtrace;
 use std::collections::{HashMap, VecDeque};

@@ -24,7 +24,6 @@
 //! - **Order violations**: Modules advancing epochs out of sequence
 
 use crate::epoch::EpochId;
-use crate::runtime::epoch_tracker::ModuleId;
 use crate::types::Time;
 use parking_lot::RwLock;
 use std::backtrace::Backtrace;

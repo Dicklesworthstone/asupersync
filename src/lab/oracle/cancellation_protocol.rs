@@ -61,14 +61,8 @@ use crate::runtime::RuntimeState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Macro for zero-cost oracle operations when the feature is disabled.
-#[cfg(not(feature = "cancel-correctness-oracle"))]
-macro_rules! oracle_op {
-    ($($tt:tt)*) => {};
-}
 
 #[cfg(feature = "cancel-correctness-oracle")]
 macro_rules! oracle_op {
