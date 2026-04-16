@@ -178,6 +178,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_http_compression_decompression"
+path = "fuzz_targets/http_compression_decompression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_sql_injection_detection"
 path = "fuzz_targets/sql_injection_detection.rs"
 test = false
