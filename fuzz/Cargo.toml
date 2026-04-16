@@ -183,3 +183,10 @@ path = "fuzz_targets/sql_injection_detection.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_dns_protocol_parsing"
+path = "fuzz_targets/dns_protocol_parsing.rs"
+test = false
+doc = false
+bench = false

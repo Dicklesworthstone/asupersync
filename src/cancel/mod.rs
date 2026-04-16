@@ -10,6 +10,7 @@
 
 pub mod progress_certificate;
 pub mod protocol_state_machines;
+pub mod protocol_validator_test_suite;
 pub mod symbol_cancel;
 
 pub use progress_certificate::{
@@ -22,6 +23,13 @@ pub use protocol_state_machines::{
     ObligationEvent, ObligationState, ObligationStateMachine, RegionContext, RegionEvent,
     RegionState, RegionStateMachine, TaskContext, TaskEvent, TaskState, TaskStateMachine,
     TimerContext, TimerEvent, TimerState, TimerStateMachine, TransitionResult, ValidationLevel,
+};
+#[cfg(test)]
+pub use protocol_validator_test_suite::{
+    BugInjectionConfig, BugInjectionStats, BugInjector, CancelProtocolTestSuite,
+    FalsePositiveTestHarness, IntegrationTestConfig, IntegrationTestHarness,
+    PerformanceMeasurement, PerformanceTestConfig, PerformanceTestHarness,
+    PropertyTestHarness, ProtocolViolationType,
 };
 pub use symbol_cancel::{
     CancelBroadcastMetrics, CancelBroadcaster, CancelListener, CancelMessage, CancelSink,
