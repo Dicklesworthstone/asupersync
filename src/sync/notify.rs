@@ -150,6 +150,7 @@ impl Notify {
     /// Creates a new `Notify` in the empty state.
     #[inline]
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self {
             generation: AtomicU64::new(0),
@@ -262,6 +263,7 @@ impl Notify {
     }
 
     /// Returns the number of tasks currently waiting.
+    #[inline]
     #[inline]
     #[must_use]
     pub fn waiter_count(&self) -> usize {

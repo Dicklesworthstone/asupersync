@@ -126,6 +126,7 @@ impl<T> OnceCell<T> {
     /// Creates a new uninitialized `OnceCell`.
     #[inline]
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self {
             state: AtomicU8::new(UNINIT),
@@ -158,6 +159,7 @@ impl<T> OnceCell<T> {
     /// Gets the value if initialized.
     ///
     /// Returns `None` if the cell is not yet initialized.
+    #[inline]
     #[inline]
     #[must_use]
     pub fn get(&self) -> Option<&T> {
