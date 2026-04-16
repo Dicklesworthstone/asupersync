@@ -50,6 +50,7 @@ pub mod metrics;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
+pub mod otel_structured_concurrency;
 pub mod resource_accounting;
 pub mod runtime_integration;
 pub mod spectral_health;
@@ -107,6 +108,9 @@ pub use obligation_tracker::{
 pub use otel::{
     CardinalityOverflow, ExportError, InMemoryExporter, MetricsConfig, MetricsExporter,
     MetricsSnapshot, MultiExporter, NullExporter, OtelMetrics, SamplingConfig, StdoutExporter,
+};
+pub use otel_structured_concurrency::{
+    EntityId, SpanType, OtelStructuredConcurrencyConfig, SpanStorage,
 };
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
