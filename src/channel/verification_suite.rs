@@ -243,7 +243,7 @@ impl VerificationSuite {
                     all_passed = false;
                     category
                         .failure_details
-                        .push(format!("High concurrency MPSC error: {}", e));
+                        .push(format!("High concurrency MPSC error: {e}"));
                 }
             }
         }
@@ -423,7 +423,7 @@ impl VerificationSuite {
                 all_passed = false;
                 category
                     .failure_details
-                    .push(format!("{} test failed", phase_name));
+                    .push(format!("{phase_name} test failed"));
             }
         }
 
@@ -507,20 +507,20 @@ impl VerificationSuite {
                     {
                         Ok(consistent) => consistent,
                         Err(_) => {
-                            eprintln!("  {}: TIMEOUT", test_name);
+                            eprintln!("  {test_name}: TIMEOUT");
                             false
                         }
                     }
                 })
             }
             Err(e) => {
-                eprintln!("  {}: runtime build failed: {}", test_name, e);
+                eprintln!("  {test_name}: runtime build failed: {e}");
                 false
             }
         };
 
         if test_result {
-            println!("  {}: PASSED", test_name);
+            println!("  {test_name}: PASSED");
         } else {
             println!("  {}: FAILED", test_name);
         }
@@ -540,8 +540,8 @@ impl VerificationSuite {
 
                     if i % 2 == 0 {
                         sender.send(&cx, i).unwrap();
-                        let received = receiver.recv(&cx).await.unwrap();
-                        assert_eq!(received, i);
+                        let value = receiver.recv(&cx).await.unwrap();
+                        assert_eq!(value, i);
                     } else {
                         drop(sender);
                         assert!(receiver.recv(&cx).await.is_err());
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Long-running test
+    #[ignore = "Long-running test"]
     fn test_full_verification_suite() {
         let result = future::block_on(run_verification_suite());
 
