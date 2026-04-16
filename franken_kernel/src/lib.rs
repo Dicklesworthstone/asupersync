@@ -75,6 +75,7 @@ pub struct TraceId(
 
 impl TraceId {
     /// Create a `TraceId` from raw 128-bit value.
+    #[must_use]
     pub const fn from_raw(raw: u128) -> Self {
         Self(raw)
     }
@@ -83,6 +84,7 @@ impl TraceId {
     ///
     /// The high 48 bits store `ts_ms`, the low 80 bits store `random`.
     /// The `random` value is truncated to 80 bits.
+    #[must_use]
     pub const fn from_parts(ts_ms: u64, random: u128) -> Self {
         let ts_bits = (ts_ms as u128) << 80;
         let rand_bits = random & 0xFFFF_FFFF_FFFF_FFFF_FFFF; // mask to 80 bits
@@ -90,16 +92,19 @@ impl TraceId {
     }
 
     /// Extract the millisecond timestamp from the high 48 bits.
+    #[must_use]
     pub const fn timestamp_ms(self) -> u64 {
         (self.0 >> 80) as u64
     }
 
     /// Return the raw 128-bit value.
+    #[must_use]
     pub const fn as_u128(self) -> u128 {
         self.0
     }
 
     /// Return the bytes in big-endian order.
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; 16] {
         self.0.to_be_bytes()
     }
