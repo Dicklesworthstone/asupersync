@@ -19,6 +19,10 @@ arbitrary = { version = "1", features = ["derive"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 
+# For SCRAM-SHA-256 parsing
+base64 = "0.22"
+sha2 = "0.10"
+
 [dev-dependencies]
 # For seed generation and corpus management
 rand = "0.8"
@@ -141,6 +145,13 @@ bench = false
 [[bin]]
 name = "fuzz_tls_message_parsing"
 path = "fuzz_targets/tls_message_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_postgres_scram_auth"
+path = "fuzz_targets/postgres_scram_auth.rs"
 test = false
 doc = false
 bench = false
