@@ -36,6 +36,7 @@
 //! ```
 
 pub mod analyzer_plugin;
+pub mod cancellation_tracer;
 pub mod collector;
 pub mod context;
 pub mod diagnostics;
@@ -56,6 +57,11 @@ pub use analyzer_plugin::{
     AnalyzerSandboxPolicy, AnalyzerSchemaVersion, AnalyzerSeverity, PluginExecutionRecord,
     PluginExecutionState, PluginLifecycleEvent, PluginLifecyclePhase, PluginRegistrationError,
     SchemaDecision, SchemaNegotiation, negotiate_schema_version, run_analyzer_plugin_pack_smoke,
+};
+pub use cancellation_tracer::{
+    CancellationAnalysis, CancellationTrace, CancellationTraceStep, CancellationTracer,
+    CancellationTracerConfig, CancellationTracerStats, CancellationTracerStatsSnapshot,
+    EntityType, PropagationAnomaly, TraceId, analyze_cancellation_patterns,
 };
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
