@@ -170,6 +170,7 @@ impl LeakMonitor {
     ///
     /// This ensures the e-process is a non-negative supermartingale under H0.
     pub fn observe(&mut self, age_ns: u64) {
+        let was_alert = self.is_alert();
         self.observations += 1;
 
         #[allow(clippy::cast_precision_loss)]
@@ -197,7 +198,7 @@ impl LeakMonitor {
             self.peak_e_value = self.e_value;
         }
 
-        if self.e_value >= self.threshold && self.observations >= self.config.min_observations {
+        if !was_alert && self.is_alert() {
             self.alert_count += 1;
         }
     }
@@ -438,6 +439,38 @@ mod tests {
         let alert_count = monitor.alert_count();
         crate::assert_with_log!(alert_count > 0, "alert count > 0", true, alert_count > 0);
         crate::test_complete!("leaked_obligations_trigger_alert");
+    }
+
+    #[test]
+    fn alert_count_tracks_threshold_crossings_not_samples() {
+        init_test("alert_count_tracks_threshold_crossings_not_samples");
+        let mut monitor = LeakMonitor::new(MonitorConfig {
+            alpha: 0.01,
+            expected_lifetime_ns: 1_000_000,
+            min_observations: 3,
+        });
+
+        for _ in 0..10 {
+            monitor.observe(100_000_000);
+        }
+        crate::assert_with_log!(
+            monitor.alert_count() == 1,
+            "first alert episode counted once",
+            1,
+            monitor.alert_count()
+        );
+
+        monitor.reset();
+        for _ in 0..5 {
+            monitor.observe(100_000_000);
+        }
+        crate::assert_with_log!(
+            monitor.alert_count() == 1,
+            "post-reset alert episode counted once",
+            1,
+            monitor.alert_count()
+        );
+        crate::test_complete!("alert_count_tracks_threshold_crossings_not_samples");
     }
 
     // ---- Min observations gate -------------------------------------------
