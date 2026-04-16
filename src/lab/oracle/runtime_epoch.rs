@@ -220,9 +220,13 @@ pub enum RuntimeEpochViolation {
 
     /// General epoch consistency failure across multiple modules.
     ConsistencyFailure {
+        /// List of modules and their epochs that are inconsistent.
         affected_modules: Vec<(RuntimeModule, EpochId)>,
+        /// Level of consistency failure severity.
         consistency_level: ConsistencyLevel,
+        /// Timestamp when the consistency failure was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 }
