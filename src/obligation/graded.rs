@@ -448,6 +448,7 @@ pub mod toy_api {
     pub struct ToyChannel {
         capacity: usize,
         messages: Vec<String>,
+        reserved_permits: usize,
     }
 
     impl ToyChannel {
@@ -457,6 +458,7 @@ pub mod toy_api {
             Self {
                 capacity,
                 messages: Vec::new(),
+                reserved_permits: 0,
             }
         }
 
@@ -468,8 +470,9 @@ pub mod toy_api {
         ///
         /// Dropping the permit without resolving panics.
         #[must_use]
-        pub fn reserve_send(&self) -> Option<GradedObligation> {
-            if self.messages.len() < self.capacity {
+        pub fn reserve_send(&mut self) -> Option<GradedObligation> {
+            if self.messages.len() + self.reserved_permits < self.capacity {
+                self.reserved_permits += 1;
                 Some(GradedObligation::reserve(
                     ObligationKind::SendPermit,
                     "toy channel send permit",
@@ -481,13 +484,21 @@ pub mod toy_api {
 
         /// Commit a send: consumes the permit and enqueues the message.
         pub fn commit_send(&mut self, permit: GradedObligation, message: String) -> ResolvedProof {
+            self.reserved_permits = self
+                .reserved_permits
+                .checked_sub(1)
+                .expect("commit_send requires an outstanding reservation");
             self.messages.push(message);
             permit.resolve(Resolution::Commit)
         }
 
         /// Abort a send: cancels the permit without sending.
         #[must_use]
-        pub fn abort_send(&self, permit: GradedObligation) -> ResolvedProof {
+        pub fn abort_send(&mut self, permit: GradedObligation) -> ResolvedProof {
+            self.reserved_permits = self
+                .reserved_permits
+                .checked_sub(1)
+                .expect("abort_send requires an outstanding reservation");
             permit.resolve(Resolution::Abort)
         }
 
@@ -982,11 +993,36 @@ mod tests {
     #[test]
     fn toy_channel_full_returns_none() {
         init_test("toy_channel_full_returns_none");
-        let ch = toy_api::ToyChannel::new(0);
+        let mut ch = toy_api::ToyChannel::new(0);
         let permit = ch.reserve_send();
         let is_none = permit.is_none();
         crate::assert_with_log!(is_none, "full", true, is_none);
         crate::test_complete!("toy_channel_full_returns_none");
+    }
+
+    #[test]
+    fn toy_channel_reservation_tracks_outstanding_capacity() {
+        init_test("toy_channel_reservation_tracks_outstanding_capacity");
+        let mut ch = toy_api::ToyChannel::new(1);
+
+        let first = ch.reserve_send().expect("first permit should succeed");
+        let second = ch.reserve_send();
+        crate::assert_with_log!(
+            second.is_none(),
+            "second permit blocked by outstanding reservation",
+            true,
+            second.is_none()
+        );
+
+        let _proof = ch.abort_send(first);
+        let retry = ch.reserve_send();
+        crate::assert_with_log!(
+            retry.is_some(),
+            "capacity should reopen after abort",
+            true,
+            retry.is_some()
+        );
+        crate::test_complete!("toy_channel_reservation_tracks_outstanding_capacity");
     }
 
     // ---- Display impls -----------------------------------------------------
