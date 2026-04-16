@@ -50,9 +50,10 @@ impl<S1: Stream, S2: Stream> Zip<S1, S2> {
         (&mut self.stream1, &mut self.stream2)
     }
 
-    /// Consumes the combinator, returning the underlying streams.
-    pub fn into_inner(self) -> (S1, S2) {
-        (self.stream1, self.stream2)
+    /// Consumes the combinator, returning the underlying streams and any
+    /// already-buffered items that were not yet yielded as a pair.
+    pub fn into_inner(self) -> (S1, S2, Option<S1::Item>, Option<S2::Item>) {
+        (self.stream1, self.stream2, self.queued1, self.queued2)
     }
 }
 
@@ -399,8 +400,10 @@ mod tests {
         // get_mut returns mutable references to both streams.
         let (_s1, _s2) = stream.get_mut();
 
-        // into_inner consumes and returns both streams.
-        let (s1, s2) = stream.into_inner();
+        // into_inner consumes and returns both streams plus any buffered items.
+        let (s1, s2, queued1, queued2) = stream.into_inner();
+        assert!(queued1.is_none());
+        assert!(queued2.is_none());
         // Verify we can still poll the recovered streams.
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -414,5 +417,53 @@ mod tests {
         crate::assert_with_log!(got_3, "s2 still has items", true, got_3);
 
         crate::test_complete!("zip_accessors");
+    }
+
+    #[test]
+    fn zip_into_inner_preserves_buffered_items() {
+        init_test("zip_into_inner_preserves_buffered_items");
+        let mut stream = Zip::new(iter(vec![1, 2]), PendingOnceThenIter::new(vec![10, 20]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first_poll = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "first poll buffers left item while right is pending",
+            true,
+            first_poll.is_pending()
+        );
+
+        let (mut left, mut right, queued_left, queued_right) = stream.into_inner();
+        crate::assert_with_log!(
+            queued_left == Some(1),
+            "buffered left item preserved",
+            Some(1),
+            queued_left
+        );
+        crate::assert_with_log!(
+            queued_right.is_none(),
+            "right side has no buffered item",
+            true,
+            queued_right.is_none()
+        );
+
+        let left_next = Pin::new(&mut left).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(left_next, Poll::Ready(Some(2))),
+            "left stream advances past preserved buffered item",
+            "Poll::Ready(Some(2))",
+            format!("{left_next:?}")
+        );
+
+        let right_next = Pin::new(&mut right).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(right_next, Poll::Ready(Some(10))),
+            "right stream still yields its first item",
+            "Poll::Ready(Some(10))",
+            format!("{right_next:?}")
+        );
+
+        crate::test_complete!("zip_into_inner_preserves_buffered_items");
     }
 }
