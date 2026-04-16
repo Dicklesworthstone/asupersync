@@ -408,7 +408,7 @@ impl StructuredCancellationAnalyzer {
         #[cfg(debug_assertions)]
         {
             let entity_info = entity_id.map_or(String::new(), |id| format!(", entity_id: {}", id));
-            eprintln!("[CANCELLATION_TRACE] {}: trace_id: {}{}", event_type, trace_id.0, entity_info);
+            eprintln!("[CANCELLATION_TRACE] {}: trace_id: {}{}", event_type, trace_id.as_u64(), entity_info);
         }
     }
 
@@ -474,7 +474,7 @@ impl LabRuntimeIntegration {
     /// Advance deterministic time (for testing).
     pub fn advance_time(&self, delta: Duration) {
         let mut time = self.deterministic_time.lock().unwrap();
-        *time = *time + Time::from_duration(delta);
+        *time = *time + Time::from_nanos(delta.as_nanos() as u64);
     }
 
     /// Get the underlying analyzer.
