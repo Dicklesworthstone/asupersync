@@ -81,7 +81,9 @@ pub enum CancelDebtViolation {
         current_debt: usize,
         /// Maximum allowed debt threshold.
         max_debt: usize,
+        /// Type of queue where debt threshold was exceeded.
         queue_type: String,
+        /// Timestamp when threshold violation was detected.
         detected_at: Time,
         stack_trace: Option<Arc<Backtrace>>,
     },
@@ -200,7 +202,7 @@ struct CleanupWorkItem {
 
 /// Type of cleanup work.
 #[derive(Debug, Clone)]
-enum CleanupWorkType {
+pub enum CleanupWorkType {
     TaskFinalization,
     RegionCleanup,
     ObligationDischarge,
