@@ -732,7 +732,7 @@ mod tests {
         for i in 0..10 {
             oracle.on_work_item_added(
                 "finalizers",
-                Some(TaskId::from_u64(i)),
+                Some(TaskId::new_for_test(i as u32, 0)),
                 Some(RegionId::testing_default()),
                 CleanupWorkType::FinalizerExecution,
                 Time::from_nanos(i * 1000),
@@ -768,7 +768,7 @@ mod tests {
         for i in 0..10 {
             oracle.on_work_item_added(
                 "finalizers",
-                Some(TaskId::from_u64(i)),
+                Some(TaskId::new_for_test(i as u32, 0)),
                 Some(RegionId::testing_default()),
                 CleanupWorkType::FinalizerExecution,
                 Time::from_nanos(i * 100_000_000), // 100ms intervals
@@ -816,7 +816,7 @@ mod tests {
         // Add more work but don't complete it
         oracle.on_work_item_added(
             "finalizers",
-            Some(TaskId::from_u64(2)),
+            Some(TaskId::new_for_test(2, 0)),
             Some(RegionId::testing_default()),
             CleanupWorkType::FinalizerExecution,
             Time::from_nanos(500_000_000),
@@ -852,7 +852,7 @@ mod tests {
             // Above default threshold of 1000
             oracle.on_work_item_added(
                 "finalizers",
-                Some(TaskId::from_u64(i)),
+                Some(TaskId::new_for_test(i as u32, 0)),
                 Some(RegionId::testing_default()),
                 CleanupWorkType::FinalizerExecution,
                 Time::from_nanos(i * 1000),
@@ -903,7 +903,7 @@ mod tests {
         for i in 0..5000 {
             oracle.on_work_item_added(
                 "large_finalizers",
-                Some(TaskId::from_u64(i)),
+                Some(TaskId::new_for_test(i as u32, 0)),
                 Some(RegionId::testing_default()),
                 CleanupWorkType::FinalizerExecution, // ~250 bytes each
                 Time::from_nanos(i * 1000),
