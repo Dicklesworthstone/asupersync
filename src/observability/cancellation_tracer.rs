@@ -143,30 +143,47 @@ pub struct CancellationTrace {
 pub enum PropagationAnomaly {
     /// Propagation took longer than expected threshold.
     SlowPropagation {
+        /// Step ID where slow propagation was detected.
         step_id: u32,
+        /// ID of the entity with slow propagation.
         entity_id: String,
+        /// Actual time elapsed during propagation.
         elapsed: Duration,
+        /// Expected threshold duration.
         threshold: Duration,
     },
     /// Cancellation appears to be stuck.
     StuckCancellation {
+        /// ID of the entity with stuck cancellation.
         entity_id: String,
+        /// How long the cancellation has been stuck.
         stuck_duration: Duration,
     },
     /// Child was cancelled before parent.
     IncorrectPropagationOrder {
+        /// ID of the parent entity that should have been cancelled first.
         parent_entity: String,
+        /// ID of the child entity that was incorrectly cancelled first.
         child_entity: String,
+        /// Step ID where parent cancellation occurred.
         parent_step: u32,
+        /// Step ID where child cancellation occurred.
         child_step: u32,
     },
     /// Unexpected propagation pattern.
     UnexpectedPropagation {
+        /// Description of the unexpected pattern.
         description: String,
+        /// List of entities affected by the pattern.
         affected_entities: Vec<String>,
     },
     /// Propagation depth exceeded normal bounds.
-    ExcessiveDepth { depth: u32, entity_id: String },
+    ExcessiveDepth {
+        /// The excessive depth reached.
+        depth: u32,
+        /// ID of the entity at excessive depth.
+        entity_id: String
+    },
 }
 
 /// Statistics about cancellation tracing.
@@ -209,11 +226,17 @@ impl CancellationTracerStats {
 /// Snapshot of cancellation tracer statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancellationTracerStatsSnapshot {
+    /// Total number of traces collected.
     pub traces_collected: u64,
+    /// Total number of propagation steps recorded.
     pub steps_recorded: u64,
+    /// Number of anomalies detected.
     pub anomalies_detected: u64,
+    /// Number of slow propagation incidents.
     pub slow_propagations: u64,
+    /// Number of stuck cancellation incidents.
     pub stuck_cancellations: u64,
+    /// Number of incorrect propagation order incidents.
     pub incorrect_orders: u64,
     pub avg_trace_depth: u64,
     pub avg_propagation_time_us: u64,
