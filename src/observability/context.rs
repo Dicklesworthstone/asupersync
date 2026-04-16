@@ -29,6 +29,7 @@ pub struct SpanId(pub u64);
 
 impl SpanId {
     /// Generates a new monotonically increasing span ID.
+    #[inline]
     pub fn new() -> Self {
         // Deterministic sequence keeps lab replays stable and avoids ambient RNG.
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -37,6 +38,7 @@ impl SpanId {
 }
 
 impl Default for SpanId {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -74,11 +76,13 @@ pub struct DiagnosticContext {
 impl DiagnosticContext {
     /// Creates a new empty diagnostic context.
     #[must_use]
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Sets the task ID.
+    #[inline]
     #[must_use]
     pub fn with_task_id(mut self, id: TaskId) -> Self {
         self.task_id = Some(id);
@@ -86,6 +90,7 @@ impl DiagnosticContext {
     }
 
     /// Sets the region ID.
+    #[inline]
     #[must_use]
     pub fn with_region_id(mut self, id: RegionId) -> Self {
         self.region_id = Some(id);
@@ -93,6 +98,7 @@ impl DiagnosticContext {
     }
 
     /// Sets the span ID.
+    #[inline]
     #[must_use]
     pub fn with_span_id(mut self, id: SpanId) -> Self {
         self.span_id = Some(id);
@@ -100,6 +106,7 @@ impl DiagnosticContext {
     }
 
     /// Sets the max completed spans config (internal use).
+    #[inline]
     #[must_use]
     pub(crate) fn with_max_completed(mut self, max: usize) -> Self {
         self.max_completed_spans = max;
@@ -107,6 +114,7 @@ impl DiagnosticContext {
     }
 
     /// Adds a custom string field.
+    #[inline]
     #[must_use]
     pub fn with_custom(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.custom.insert(key.into(), value.into());
@@ -171,6 +179,7 @@ impl DiagnosticContext {
     /// Returns the current thread-local context.
     ///
     /// If no context is currently entered on this thread, returns an empty context.
+    #[inline]
     #[must_use]
     pub fn current() -> Self {
         CONTEXT_STACK.with(|stack| {
@@ -184,30 +193,35 @@ impl DiagnosticContext {
     // Accessors
 
     /// Returns the task ID.
+    #[inline]
     #[must_use]
     pub fn task_id(&self) -> Option<TaskId> {
         self.task_id
     }
 
     /// Returns the region ID.
+    #[inline]
     #[must_use]
     pub fn region_id(&self) -> Option<RegionId> {
         self.region_id
     }
 
     /// Returns the span ID.
+    #[inline]
     #[must_use]
     pub fn span_id(&self) -> Option<SpanId> {
         self.span_id
     }
 
     /// Returns the parent span ID.
+    #[inline]
     #[must_use]
     pub fn parent_span_id(&self) -> Option<SpanId> {
         self.parent_span_id
     }
 
     /// Gets a custom field.
+    #[inline]
     #[must_use]
     pub fn custom(&self, key: &str) -> Option<&str> {
         self.custom.get(key).map(String::as_str)
