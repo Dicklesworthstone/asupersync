@@ -852,7 +852,7 @@ mod tests {
     fn test_flow_control_monitor_basic_operations() {
         let mut monitor = FlowControlMonitor::with_defaults();
         let now = Time::from_nanos(1000);
-        let task_id = TaskId::from(1);
+        let task_id = TaskId::new_for_test(1, 0);
         let channel_id = 42;
 
         // Test producer blocked event
@@ -876,7 +876,7 @@ mod tests {
 
         let mut monitor = FlowControlMonitor::new(config);
         let start_time = Time::from_nanos(1_000_000_000);
-        let task_id = TaskId::from(1);
+        let task_id = TaskId::new_for_test(1, 0);
         let channel_id = 42;
 
         // Task gets blocked
@@ -891,7 +891,7 @@ mod tests {
         let later_time = Time::from_nanos(3_000_000_000); // 2 seconds later
         monitor.record_event(FlowControlEvent::BackpressureApplied {
             channel_id,
-            consumer_task: TaskId::from(2),
+            consumer_task: TaskId::new_for_test(2, 0),
             queue_depth: 10,
             timestamp: later_time,
         });
@@ -917,8 +917,8 @@ mod tests {
         let mut monitor = FlowControlMonitor::new(config);
         let now = Time::from_nanos(1000);
 
-        let task1 = TaskId::from(1);
-        let task2 = TaskId::from(2);
+        let task1 = TaskId::new_for_test(1, 0);
+        let task2 = TaskId::new_for_test(2, 0);
         let channel1 = 10;
         let channel2 = 20;
 
@@ -950,7 +950,7 @@ mod tests {
 
         let mut monitor = FlowControlMonitor::new(config);
         let start_time = Time::from_nanos(1_000_000_000);
-        let task_id = TaskId::from(1);
+        let task_id = TaskId::new_for_test(1, 0);
         let channel_id = 42;
 
         // Task gets blocked
@@ -965,7 +965,7 @@ mod tests {
         let later_time = Time::from_nanos(3_000_000_000); // 2 seconds later
         monitor.record_event(FlowControlEvent::BackpressureApplied {
             channel_id: 99,
-            consumer_task: TaskId::from(2),
+            consumer_task: TaskId::new_for_test(2, 0),
             queue_depth: 5,
             timestamp: later_time,
         });
@@ -987,7 +987,7 @@ mod tests {
     fn test_producer_unblock_updates_stats() {
         let mut monitor = FlowControlMonitor::with_defaults();
         let now = Time::from_nanos(1000);
-        let task_id = TaskId::from(1);
+        let task_id = TaskId::new_for_test(1, 0);
         let channel_id = 42;
 
         monitor.record_event(FlowControlEvent::ProducerUnblocked {

@@ -803,7 +803,7 @@ mod tests {
     fn test_invariant_monitor_basic_operations() {
         let mut monitor = SchedulerInvariantMonitor::with_defaults();
         let now = Time::from_nanos(1000);
-        let task_id = TaskId::from(42);
+        let task_id = TaskId::new_for_test(42, 0);
 
         // Test basic enqueue/dequeue
         monitor.record_task_enqueue(task_id, "ready_queue", 1, now);
@@ -821,7 +821,7 @@ mod tests {
     fn test_invariant_violations_detected() {
         let mut monitor = SchedulerInvariantMonitor::with_defaults();
         let now = Time::from_nanos(1000);
-        let task_id = TaskId::from(42);
+        let task_id = TaskId::new_for_test(42, 0);
 
         // Test double enqueue violation
         monitor.record_task_enqueue(task_id, "ready_queue", 1, now);
@@ -846,7 +846,7 @@ mod tests {
         let now = Time::from_nanos(1000);
 
         // Test priority violation (higher number = lower priority)
-        monitor.verify_priority_ordering(TaskId::from(1), 5, TaskId::from(2), 3, now);
+        monitor.verify_priority_ordering(TaskId::new_for_test(1, 0), 5, TaskId::new_for_test(2, 0), 3, now);
 
         assert_eq!(monitor.violations.len(), 1);
         match &monitor.violations[0].invariant {
@@ -856,9 +856,9 @@ mod tests {
                 low_priority_task,
                 low_priority,
             } => {
-                assert_eq!(*high_priority_task, TaskId::from(2));
+                assert_eq!(*high_priority_task, TaskId::new_for_test(2, 0));
                 assert_eq!(*high_priority, 3);
-                assert_eq!(*low_priority_task, TaskId::from(1));
+                assert_eq!(*low_priority_task, TaskId::new_for_test(1, 0));
                 assert_eq!(*low_priority, 5);
             }
             _ => panic!("Expected PriorityOrderViolation"),
@@ -873,7 +873,7 @@ mod tests {
         let snapshot = QueueSnapshot {
             name: "test_queue".to_string(),
             reported_depth: 5,
-            actual_tasks: vec![TaskId::from(1), TaskId::from(2), TaskId::from(3)],
+            actual_tasks: vec![TaskId::new_for_test(1, 0), TaskId::new_for_test(2, 0), TaskId::new_for_test(3, 0)],
             priority_range: Some((1, 3)),
             time_range: Some((Time::from_nanos(500), now)),
         };
@@ -940,8 +940,8 @@ mod tests {
         let now = Time::from_nanos(1000);
 
         // Generate some violations
-        monitor.verify_priority_ordering(TaskId::from(1), 5, TaskId::from(2), 3, now);
-        monitor.verify_priority_ordering(TaskId::from(3), 7, TaskId::from(4), 2, now);
+        monitor.verify_priority_ordering(TaskId::new_for_test(1, 0), 5, TaskId::new_for_test(2, 0), 3, now);
+        monitor.verify_priority_ordering(TaskId::new_for_test(3, 0), 7, TaskId::new_for_test(4, 0), 2, now);
 
         let stats = monitor.stats();
         assert_eq!(
@@ -959,10 +959,10 @@ mod tests {
         let new_time = Time::from_nanos(5000);
 
         // Add old task state
-        monitor.record_task_enqueue(TaskId::from(1), "queue", 1, old_time);
+        monitor.record_task_enqueue(TaskId::new_for_test(1, 0), "queue", 1, old_time);
 
         // Add old violation
-        monitor.verify_priority_ordering(TaskId::from(2), 5, TaskId::from(3), 3, old_time);
+        monitor.verify_priority_ordering(TaskId::new_for_test(2, 0), 5, TaskId::new_for_test(3, 0), 3, old_time);
 
         assert_eq!(monitor.task_states.len(), 1);
         assert_eq!(monitor.violations.len(), 1);
@@ -978,7 +978,7 @@ mod tests {
     fn test_tracked_task_snapshots_expose_internal_state() {
         let mut monitor = SchedulerInvariantMonitor::with_defaults();
         let enqueue_time = Time::from_nanos(1000);
-        let task_id = TaskId::from(7);
+        let task_id = TaskId::new_for_test(7, 0);
 
         monitor.record_task_enqueue(task_id, "ready_queue", 3, enqueue_time);
         if let Some(state) = monitor.task_states.get_mut(&task_id) {

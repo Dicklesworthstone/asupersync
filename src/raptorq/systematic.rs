@@ -935,18 +935,21 @@ impl SystematicEncoder {
     ///
     /// Panics if `i >= L`.
     #[must_use]
+    #[inline]
     pub fn intermediate_symbol(&self, i: usize) -> &[u8] {
         &self.intermediate[i]
     }
 
     /// Returns the current encoding statistics.
     #[must_use]
+    #[inline]
     pub fn stats(&self) -> &EncodingStats {
         &self.stats
     }
 
     /// Returns the seed used for encoding.
     #[must_use]
+    #[inline]
     pub const fn seed(&self) -> u64 {
         self.seed
     }

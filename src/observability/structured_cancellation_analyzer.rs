@@ -355,7 +355,7 @@ impl StructuredCancellationAnalyzer {
             .count();
 
         if slow_count > entity_traces.len() / 2 {
-            self.trigger_alert(CancellationAlert {
+            self.trigger_alert(&CancellationAlert {
                 alert_type: AlertType::SlowPropagation,
                 severity: AlertSeverity::Warning,
                 message: format!(
@@ -377,7 +377,7 @@ impl StructuredCancellationAnalyzer {
         let total_anomalies: usize = entity_traces.iter().map(|t| t.anomalies.len()).sum();
 
         if total_anomalies > entity_traces.len() {
-            self.trigger_alert(CancellationAlert {
+            self.trigger_alert(&CancellationAlert {
                 alert_type: AlertType::AnomalySpike,
                 severity: AlertSeverity::Error,
                 message: format!("High anomaly rate detected for entity {}", entity_id),
@@ -467,7 +467,7 @@ impl StructuredCancellationAnalyzer {
         if stats.memory_usage_percentage > 80.0 {
             // Trigger aggressive cleanup
             // In a real implementation, this would clean up old traces from the tracer
-            self.trigger_alert(CancellationAlert {
+            self.trigger_alert(&CancellationAlert {
                 alert_type: AlertType::ResourceLeakRisk,
                 severity: AlertSeverity::Warning,
                 message: "High memory usage detected - cleaned up old traces".to_string(),

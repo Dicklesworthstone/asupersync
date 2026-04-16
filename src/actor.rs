@@ -61,12 +61,14 @@ pub struct ActorId(TaskId);
 impl ActorId {
     /// Create an actor ID from a task ID.
     #[must_use]
+    #[inline]
     pub const fn from_task(task_id: TaskId) -> Self {
         Self(task_id)
     }
 
     /// Returns the underlying task ID.
     #[must_use]
+    #[inline]
     pub const fn task_id(self) -> TaskId {
         self.0
     }

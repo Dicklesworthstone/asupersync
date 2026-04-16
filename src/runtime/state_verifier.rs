@@ -460,7 +460,7 @@ mod tests {
         });
 
         use crate::record::task::TaskPhase::*;
-        let task_id = TaskId::new(1);
+        let task_id = TaskId::new_for_test(1, 0);
 
         // Valid transition
         assert!(

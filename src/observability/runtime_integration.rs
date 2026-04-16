@@ -379,7 +379,7 @@ mod tests {
         let config = CancellationTracerConfig::default();
         let integration = CancellationTracerIntegration::new(config);
 
-        let task_id = TaskId::new(1);
+        let task_id = TaskId::new_for_test(1, 0);
         let cancel_reason = CancelReason::with_user_reason("test".to_string());
         let cancel_kind = CancelKind::User;
 

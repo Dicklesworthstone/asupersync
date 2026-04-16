@@ -1737,6 +1737,7 @@ impl Gf256 {
     ///
     /// Returns `ONE` for any base raised to the zero power.
     /// Returns `ZERO` for zero raised to any positive power.
+    #[inline]
     #[must_use]
     pub fn pow(self, exp: u8) -> Self {
         if exp == 0 {
@@ -1950,6 +1951,7 @@ fn gf256_add_slices2_scalar(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], sr
     }
 }
 
+#[inline]
 fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
 

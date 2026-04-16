@@ -867,11 +867,11 @@ impl EpochConsistencyTracker {
     /// This allows tuning the sensitivity of slow transition detection
     /// based on runtime conditions or performance requirements.
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
-        let old_threshold = self.config.slow_transition_threshold_ns;
+        let _old_threshold = self.config.slow_transition_threshold_ns;
         self.config.slow_transition_threshold_ns = threshold_ns;
 
         info!(
-            old_threshold_ns = old_threshold,
+            old_threshold_ns = _old_threshold,
             new_threshold_ns = threshold_ns,
             "epoch_tracker_threshold_updated"
         );
