@@ -218,3 +218,10 @@ path = "fuzz_targets/trace_compression.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_symbol_id_deserialization"
+path = "fuzz_targets/symbol_id_deserialization.rs"
+test = false
+doc = false
+bench = false
