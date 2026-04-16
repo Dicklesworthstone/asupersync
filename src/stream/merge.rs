@@ -76,6 +76,7 @@ where
 {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let initial_len = self.streams.len();
         if initial_len == 0 {
