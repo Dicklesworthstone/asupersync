@@ -32,6 +32,7 @@ pub struct FramedWrite<W, E> {
 
 impl<W, E> FramedWrite<W, E> {
     /// Creates a new `FramedWrite` with default buffer capacity.
+    #[inline]
     pub fn new(inner: W, encoder: E) -> Self {
         Self::with_capacity(inner, encoder, DEFAULT_CAPACITY)
     }
@@ -46,6 +47,7 @@ impl<W, E> FramedWrite<W, E> {
     }
 
     /// Returns a reference to the underlying writer.
+    #[inline]
     #[must_use]
     pub fn get_ref(&self) -> &W {
         &self.inner
@@ -57,6 +59,7 @@ impl<W, E> FramedWrite<W, E> {
     }
 
     /// Returns a reference to the encoder.
+    #[inline]
     #[must_use]
     pub fn encoder(&self) -> &E {
         &self.encoder
@@ -68,12 +71,14 @@ impl<W, E> FramedWrite<W, E> {
     }
 
     /// Returns a reference to the write buffer.
+    #[inline]
     #[must_use]
     pub fn write_buffer(&self) -> &BytesMut {
         &self.buffer
     }
 
     /// Consumes `self` and returns the inner writer.
+    #[inline]
     pub fn into_inner(self) -> W {
         self.inner
     }

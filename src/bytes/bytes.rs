@@ -192,6 +192,7 @@ impl Bytes {
     /// assert_eq!(&b[..], b"hello ");
     /// assert_eq!(&world[..], b"world");
     /// ```
+    #[inline]
     #[must_use]
     pub fn split_off(&mut self, at: usize) -> Self {
         assert!(
