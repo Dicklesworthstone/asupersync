@@ -364,10 +364,9 @@ impl CancelCorrectnessOracle {
             }
             existing_state.update_with_witness(witness, now);
         } else {
-                // First witness for this task
-                let state = TaskCancelState::new(witness, now);
-                task_states.insert(state.task_id, state);
-            }
+            // First witness for this task
+            let state = TaskCancelState::new(witness, now);
+            task_states.insert(state.task_id, state);
         }
     }
 
