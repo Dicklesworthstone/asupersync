@@ -328,24 +328,28 @@ impl DerefMut for BytesMut {
 }
 
 impl AsRef<[u8]> for BytesMut {
+    #[inline]
     fn as_ref(&self) -> &[u8] {
         &self.data
     }
 }
 
 impl AsMut<[u8]> for BytesMut {
+    #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 }
 
 impl From<Vec<u8>> for BytesMut {
+    #[inline]
     fn from(vec: Vec<u8>) -> Self {
         Self { data: vec }
     }
 }
 
 impl From<&[u8]> for BytesMut {
+    #[inline]
     fn from(slice: &[u8]) -> Self {
         Self {
             data: slice.to_vec(),
@@ -354,6 +358,7 @@ impl From<&[u8]> for BytesMut {
 }
 
 impl From<&str> for BytesMut {
+    #[inline]
     fn from(s: &str) -> Self {
         Self {
             data: s.as_bytes().to_vec(),
@@ -362,6 +367,7 @@ impl From<&str> for BytesMut {
 }
 
 impl From<String> for BytesMut {
+    #[inline]
     fn from(s: String) -> Self {
         Self {
             data: s.into_bytes(),
@@ -380,6 +386,7 @@ impl std::fmt::Debug for BytesMut {
 }
 
 impl PartialEq for BytesMut {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.data == other.data
     }
@@ -388,24 +395,28 @@ impl PartialEq for BytesMut {
 impl Eq for BytesMut {}
 
 impl PartialEq<[u8]> for BytesMut {
+    #[inline]
     fn eq(&self, other: &[u8]) -> bool {
         self.data.as_slice() == other
     }
 }
 
 impl PartialEq<BytesMut> for [u8] {
+    #[inline]
     fn eq(&self, other: &BytesMut) -> bool {
         self == other.data.as_slice()
     }
 }
 
 impl PartialEq<Vec<u8>> for BytesMut {
+    #[inline]
     fn eq(&self, other: &Vec<u8>) -> bool {
         &self.data == other
     }
 }
 
 impl std::hash::Hash for BytesMut {
+    #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.data.hash(state);
     }
