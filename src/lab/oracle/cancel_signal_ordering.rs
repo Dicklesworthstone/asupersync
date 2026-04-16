@@ -226,6 +226,9 @@ struct OrderingState {
     parent_child_map: HashMap<TaskId, Vec<TaskId>>,
     child_parent_map: HashMap<TaskId, TaskId>,
 
+    /// Task-to-region mapping for tracking which task belongs to which region.
+    task_region_map: HashMap<TaskId, RegionId>,
+
     /// Region hierarchy mapping.
     region_parent_map: HashMap<RegionId, RegionId>,
     region_children_map: HashMap<RegionId, Vec<RegionId>>,
@@ -237,6 +240,7 @@ impl OrderingState {
             cancel_signals: VecDeque::new(),
             parent_child_map: HashMap::new(),
             child_parent_map: HashMap::new(),
+            task_region_map: HashMap::new(),
             region_parent_map: HashMap::new(),
             region_children_map: HashMap::new(),
         }
@@ -250,6 +254,10 @@ impl OrderingState {
     fn add_region_relationship(&mut self, parent_region: RegionId, child_region: RegionId) {
         self.region_parent_map.insert(child_region, parent_region);
         self.region_children_map.entry(parent_region).or_default().push(child_region);
+    }
+
+    fn add_task_region_mapping(&mut self, task_id: TaskId, region_id: RegionId) {
+        self.task_region_map.insert(task_id, region_id);
     }
 
     fn add_cancel_signal(&mut self, signal: CancelSignal) {
@@ -266,6 +274,10 @@ impl OrderingState {
 
     fn find_cancel_signal(&self, task_id: TaskId) -> Option<&CancelSignal> {
         self.cancel_signals.iter().find(|signal| signal.task_id == task_id)
+    }
+
+    fn get_task_region(&self, task_id: TaskId) -> Option<RegionId> {
+        self.task_region_map.get(&task_id).copied()
     }
 }
 
@@ -316,6 +328,8 @@ impl CancelOrderingOracle {
     pub fn on_task_spawned(&self, parent_task: TaskId, child_task: TaskId, parent_region: RegionId, child_region: RegionId) {
         let mut state = self.state.write();
         state.add_parent_child_relationship(parent_task, child_task);
+        state.add_task_region_mapping(parent_task, parent_region);
+        state.add_task_region_mapping(child_task, child_region);
         if parent_region != child_region {
             state.add_region_relationship(parent_region, child_region);
         }
@@ -328,6 +342,9 @@ impl CancelOrderingOracle {
         self.signals_processed.fetch_add(1, Ordering::Relaxed);
 
         let mut state = self.state.write();
+
+        // Record task-region mapping when we learn about it
+        state.add_task_region_mapping(task_id, region_id);
 
         let parent_task = state.get_parent_task(task_id);
         let parent_region = state.region_parent_map.get(&region_id).copied();
@@ -362,11 +379,13 @@ impl CancelOrderingOracle {
                     if state.find_cancel_signal(child_task).is_none() {
                         let time_since_parent = now.as_nanos() - signal.cancel_time.as_nanos();
                         if time_since_parent > self.config.max_ordering_window_ns {
+                            let child_region = state.get_task_region(child_task)
+                                .unwrap_or(RegionId::testing_default());
                             let violation = CancelOrderingViolation::MissingChildCancellation {
                                 parent_task: signal.task_id,
                                 child_task,
                                 parent_region: signal.region_id,
-                                child_region: RegionId::testing_default(), // TODO: get actual child region
+                                child_region,
                                 parent_cancel_time: signal.cancel_time,
                                 detected_at: now,
                                 stack_trace: self.capture_stack_trace(),
@@ -737,5 +756,36 @@ mod tests {
         assert_eq!(stats_after.signals_processed, 0);
         assert_eq!(stats_after.tracked_signals, 0);
         assert_eq!(stats_after.tracked_relationships, 0);
+    }
+
+    #[test]
+    fn test_task_region_tracking() {
+        init_test_logging();
+
+        let oracle = CancelOrderingOracle::with_default_config();
+        let parent_task = TaskId::testing_default();
+        let child_task = TaskId::from(42);
+        let parent_region = RegionId::testing_default();
+        let child_region = RegionId::from(123);
+
+        // Spawn a task - this should record the task-region mappings
+        oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
+
+        // Cancel the parent task
+        oracle.on_cancel_signal(parent_task, parent_region, Time::from_nanos(1000), CancelReason::UserCancelled);
+
+        // Wait for the ordering window to expire so missing child cancellation is detected
+        oracle.check_ordering_violations(Time::from_nanos(20_000_000));
+
+        // Should detect a violation with the correct child region (not testing_default placeholder)
+        let violations = oracle.get_recent_violations(10);
+        assert_eq!(violations.len(), 1);
+
+        match &violations[0] {
+            CancelOrderingViolation::MissingChildCancellation { child_region: detected_child_region, .. } => {
+                assert_eq!(*detected_child_region, child_region, "Should use actual child region, not placeholder");
+            }
+            other => panic!("Expected MissingChildCancellation, got: {:?}", other),
+        }
     }
 }
