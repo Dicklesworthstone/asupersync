@@ -92,7 +92,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Wake, Waker};
+use std::task::Waker;
 use std::time::Duration;
 
 type NamedFuture<T> = (&'static str, Pin<Box<dyn Future<Output = T> + Send>>);
@@ -104,7 +104,7 @@ fn wall_clock_now() -> Time {
 }
 
 fn noop_waker() -> Waker {
-    Waker::noop()
+    Waker::noop().clone()
 }
 
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone

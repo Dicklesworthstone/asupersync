@@ -107,6 +107,11 @@ impl DenseRow {
     #[inline]
     #[must_use]
     pub fn get(&self, index: usize) -> Gf256 {
+        assert!(
+            index < self.data.len(),
+            "dense row index out of range: {index} >= {}",
+            self.data.len()
+        );
         Gf256::new(self.data[index])
     }
 
@@ -117,6 +122,11 @@ impl DenseRow {
     /// Panics if `index >= self.len()`.
     #[inline]
     pub fn set(&mut self, index: usize, value: Gf256) {
+        assert!(
+            index < self.data.len(),
+            "dense row index out of range: {index} >= {}",
+            self.data.len()
+        );
         self.data[index] = value.raw();
     }
 
@@ -1116,6 +1126,20 @@ mod tests {
         assert!(!row.is_zero());
         row.clear();
         assert!(row.is_zero());
+    }
+
+    #[test]
+    #[should_panic(expected = "dense row index out of range: 3 >= 3")]
+    fn dense_row_get_rejects_out_of_range_indices() {
+        let row = DenseRow::new(vec![1, 2, 3]);
+        let _ = row.get(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "dense row index out of range: 3 >= 3")]
+    fn dense_row_set_rejects_out_of_range_indices() {
+        let mut row = DenseRow::new(vec![1, 2, 3]);
+        row.set(3, Gf256::new(9));
     }
 
     #[test]

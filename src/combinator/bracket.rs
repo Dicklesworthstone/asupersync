@@ -16,8 +16,7 @@
 use crate::cx::Cx;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 /// Error returned by [`Bracket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,7 +322,7 @@ where
             // Drive it to completion synchronously using a noop waker.
             // This is Phase 0 behavior; full implementation would use the
             // runtime's cancel mask to run release asynchronously.
-            let waker = Waker::noop();
+            let waker = Waker::noop().clone();
             let mut cx = Context::from_waker(&waker);
 
             // Poll until complete (bounded iteration to prevent infinite loops)
@@ -526,14 +525,14 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     // =========================================================================
     // Test Utilities
     // =========================================================================
 
     fn noop_waker() -> Waker {
-        Waker::noop()
+        Waker::noop().clone()
     }
 
     fn poll_ready<F: Future>(fut: F) -> F::Output {
