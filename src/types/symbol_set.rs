@@ -23,6 +23,7 @@ pub struct ThresholdConfig {
 
 impl ThresholdConfig {
     /// Creates a new threshold configuration.
+    #[inline]
     #[must_use]
     pub const fn new(overhead_factor: f64, min_overhead: usize, max_per_block: usize) -> Self {
         Self {
@@ -34,6 +35,7 @@ impl ThresholdConfig {
 }
 
 impl Default for ThresholdConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             overhead_factor: 1.02,
@@ -60,6 +62,7 @@ pub struct BlockProgress {
 
 impl BlockProgress {
     /// Returns the total number of symbols for this block.
+    #[inline]
     #[must_use]
     pub const fn total(&self) -> usize {
         self.source_symbols + self.repair_symbols
@@ -101,12 +104,14 @@ pub struct SymbolSet {
 
 impl SymbolSet {
     /// Creates a new SymbolSet with the default threshold configuration.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::with_config(ThresholdConfig::default())
     }
 
     /// Creates a new SymbolSet with the specified configuration.
+    #[inline]
     #[must_use]
     pub fn with_config(config: ThresholdConfig) -> Self {
         Self {
@@ -121,6 +126,7 @@ impl SymbolSet {
     }
 
     /// Creates a new SymbolSet with a memory budget.
+    #[inline]
     #[must_use]
     pub fn with_memory_budget(config: ThresholdConfig, budget_bytes: usize) -> Self {
         Self {
@@ -209,12 +215,14 @@ impl SymbolSet {
     }
 
     /// Returns true if a symbol is present.
+    #[inline]
     #[must_use]
     pub fn contains(&self, id: &SymbolId) -> bool {
         self.symbols.contains_key(id)
     }
 
     /// Gets a symbol by ID.
+    #[inline]
     #[must_use]
     pub fn get(&self, id: &SymbolId) -> Option<&Symbol> {
         self.symbols.get(id)
@@ -254,12 +262,14 @@ impl SymbolSet {
     }
 
     /// Returns block progress for a given block.
+    #[inline]
     #[must_use]
     pub fn block_progress(&self, sbn: u8) -> Option<&BlockProgress> {
         self.block_counts.get(&sbn)
     }
 
     /// Returns true if the threshold is reached for a block.
+    #[inline]
     #[must_use]
     pub fn threshold_reached(&self, sbn: u8) -> bool {
         self.block_counts
@@ -286,18 +296,21 @@ impl SymbolSet {
     }
 
     /// Returns the total number of symbols stored.
+    #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
         self.total_count
     }
 
     /// Returns true if no symbols are stored.
+    #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.total_count == 0
     }
 
     /// Returns estimated memory usage in bytes.
+    #[inline]
     #[must_use]
     pub const fn memory_usage(&self) -> usize {
         self.total_bytes
