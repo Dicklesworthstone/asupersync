@@ -103,16 +103,27 @@ impl Default for RegionLeakConfig {
 /// State of a region being tracked by the oracle
 #[derive(Debug, Clone)]
 pub struct RegionState {
+    /// Unique identifier for this region.
     pub region_id: RegionId,
+    /// Optional ID of the parent region.
     pub parent_id: Option<RegionId>,
+    /// Current lifecycle state of the region.
     pub state: RegionLifecycleState,
+    /// Timestamp when the region was created.
     pub creation_time: Instant,
+    /// Timestamp of the last activity in this region.
     pub last_activity: Instant,
+    /// Set of active task IDs in this region.
     pub active_tasks: HashSet<TaskId>,
+    /// Set of child region IDs.
     pub child_regions: HashSet<RegionId>,
+    /// Number of finalizers expected to run.
     pub expected_finalizers: u32,
+    /// Number of finalizers that have completed.
     pub completed_finalizers: u32,
+    /// Optional context string for region creation debugging.
     pub creation_context: Option<String>,
+    /// Budget allocated for this region's cleanup.
     pub budget: Budget,
 }
 
