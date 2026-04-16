@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::thread;
 
 /// Integration points for debt monitoring in the runtime.
-#[derive(Debug)]
 pub struct DebtRuntimeIntegration {
     monitor: Arc<CancellationDebtMonitor>,
     /// Background monitoring thread handle.
@@ -239,11 +238,14 @@ impl DebtRuntimeIntegration {
         let snapshot = self.get_debt_status();
         let recent_alerts = self.monitor.get_recent_alerts(10);
 
+        let recommendations = self.generate_recommendations(&snapshot);
+        let health_score = self.calculate_health_score(&snapshot);
+
         DebtHealthReport {
             snapshot,
             recent_alerts,
-            recommendations: self.generate_recommendations(&snapshot),
-            health_score: self.calculate_health_score(&snapshot),
+            recommendations,
+            health_score,
         }
     }
 

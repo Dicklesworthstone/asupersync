@@ -295,6 +295,8 @@ impl CancellationVisualizer {
                         PropagationAnomaly::SlowPropagation { .. } => "SlowPropagation".to_string(),
                         PropagationAnomaly::StuckCancellation { .. } => "StuckCancellation".to_string(),
                         PropagationAnomaly::IncorrectPropagationOrder { .. } => "IncorrectPropagationOrder".to_string(),
+                        PropagationAnomaly::UnexpectedPropagation { .. } => "UnexpectedPropagation".to_string(),
+                        PropagationAnomaly::ExcessiveDepth { .. } => "ExcessiveDepth".to_string(),
                     },
                     severity: self.anomaly_severity(anomaly),
                     description: self.format_anomaly(anomaly),

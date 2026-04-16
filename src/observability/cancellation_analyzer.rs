@@ -512,7 +512,7 @@ impl CancellationAnalyzer {
     /// Calculate parallelization effectiveness score.
     fn calculate_parallelization_score(&self, traces: &[CancellationTrace]) -> f64 {
         // Simplified score based on depth vs entities ratio
-        let total_entities: usize = traces.iter().map(|t| t.entities_cancelled).sum();
+        let total_entities: usize = traces.iter().map(|t| t.entities_cancelled as usize).sum();
         let total_depth: u32 = traces.iter().map(|t| t.max_depth).sum();
 
         if total_depth == 0 {
@@ -543,7 +543,7 @@ impl CancellationAnalyzer {
                 match anomaly {
                     PropagationAnomaly::SlowPropagation { entity_id, .. } |
                     PropagationAnomaly::StuckCancellation { entity_id, .. } |
-                    PropagationAnomaly::IncorrectOrdering { entity_id, .. } => {
+                    PropagationAnomaly::IncorrectPropagationOrder { parent_entity, .. } => {
                         *entity_anomalies.entry(entity_id.clone()).or_default() += 1;
                     }
                 }
@@ -654,7 +654,7 @@ impl CancellationAnalyzer {
         }
 
         // General recommendations based on patterns
-        let total_entities: usize = traces.iter().map(|t| t.entities_cancelled).sum();
+        let total_entities: usize = traces.iter().map(|t| t.entities_cancelled as usize).sum();
         if total_entities > traces.len() * 50 {
             recommendations.push(OptimizationRecommendation {
                 priority: RecommendationPriority::Medium,
