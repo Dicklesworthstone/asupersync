@@ -766,13 +766,7 @@ impl InjectionRunner {
     ) -> InstrumentedPollResult<F::Output> {
         use std::task::{Wake, Waker};
 
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-            fn wake_by_ref(self: &Arc<Self>) {}
-        }
-
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = Waker::noop();
         let mut cx = std::task::Context::from_waker(&waker);
         let mut pinned = Box::pin(future);
 

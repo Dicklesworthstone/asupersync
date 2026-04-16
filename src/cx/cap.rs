@@ -104,13 +104,13 @@ pub type None = CapSet<false, false, false, false, false>;
 // Manual Default implementations for type aliases to avoid confusion
 impl Default for All {
     fn default() -> Self {
-        CapSet::<true, true, true, true, true>
+        Self
     }
 }
 
 impl Default for None {
     fn default() -> Self {
-        CapSet::<false, false, false, false, false>
+        Self
     }
 }
 

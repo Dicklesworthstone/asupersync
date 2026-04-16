@@ -409,10 +409,10 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
         if this.buffer.len() >= this.capacity || !this.staged_symbols.is_empty() {
             // Try to flush existing backlog to make room. This also registers
             // the waker if the inner sink is blocked.
-            match Pin::new(&mut *this).poll_flush(cx) {
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                _ => {} // Pending or Ready(Ok(()))
+            if let Poll::Ready(Err(err)) = Pin::new(&mut *this).poll_flush(cx) {
+                return Poll::Ready(Err(err));
             }
+            // Pending or Ready(Ok(()))
         }
 
         if this.buffer.len() < this.capacity && this.staged_symbols.is_empty() {
