@@ -76,6 +76,7 @@ where
     A: ToSocketAddrs + Send + 'static,
 {
     /// Create a new builder for the given address.
+    #[inline]
     #[must_use]
     pub fn new(addr: A) -> Self {
         Self {
@@ -87,6 +88,7 @@ where
     }
 
     /// Set a connection timeout.
+    #[inline]
     #[must_use]
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = Some(timeout);
@@ -94,6 +96,7 @@ where
     }
 
     /// Enable or disable TCP_NODELAY.
+    #[inline]
     #[must_use]
     pub fn nodelay(mut self, enable: bool) -> Self {
         self.nodelay = Some(enable);

@@ -169,24 +169,37 @@ pub enum ChannelAtomicityViolation {
     },
     /// Wakeup lost during channel operation
     LostWakeup {
+        /// ID of the waker that lost its wakeup.
         waker_id: WakerId,
+        /// ID of the channel where the wakeup was lost.
         channel_id: ChannelId,
+        /// Timestamp when the wakeup was expected.
         expected_at: SystemTime,
+        /// Timestamp when the loss was detected.
         detected_at: SystemTime,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
     /// Spurious wakeup without corresponding channel event
     SpuriousWakeup {
+        /// ID of the waker that had a spurious wakeup.
         waker_id: WakerId,
+        /// ID of the channel where the spurious wakeup occurred.
         channel_id: ChannelId,
+        /// Timestamp of the spurious wakeup.
         wakeup_at: SystemTime,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
     /// Data loss detected during cancellation
     DataLossOnCancel {
+        /// ID of the channel where data loss occurred.
         channel_id: ChannelId,
+        /// Size of the lost data in bytes.
         data_size: usize,
+        /// Timestamp when cancellation occurred.
         cancel_at: SystemTime,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
 }

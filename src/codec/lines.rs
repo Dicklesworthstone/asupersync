@@ -37,6 +37,7 @@ impl std::error::Error for LinesCodecError {
 impl LinesCodecError {
     /// Returns the underlying I/O error kind when this error originated from
     /// the transport instead of the line parser.
+    #[inline]
     #[must_use]
     pub fn io_kind(&self) -> Option<io::ErrorKind> {
         match self {
@@ -62,12 +63,14 @@ pub struct LinesCodec {
 
 impl LinesCodec {
     /// Creates a new `LinesCodec` with no length limit.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::new_with_max_length(usize::MAX)
     }
 
     /// Creates a new `LinesCodec` with a maximum line length.
+    #[inline]
     #[must_use]
     pub fn new_with_max_length(max_length: usize) -> Self {
         Self {
@@ -78,6 +81,7 @@ impl LinesCodec {
     }
 
     /// Returns the maximum allowed line length.
+    #[inline]
     #[must_use]
     pub fn max_length(&self) -> usize {
         self.max_length

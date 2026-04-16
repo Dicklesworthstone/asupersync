@@ -13,6 +13,7 @@ pub struct BytesCodec;
 
 impl BytesCodec {
     /// Creates a new `BytesCodec`.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self

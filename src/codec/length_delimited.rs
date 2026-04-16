@@ -30,12 +30,14 @@ enum DecodeState {
 
 impl LengthDelimitedCodec {
     /// Creates a codec with default settings.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::builder().new_codec()
     }
 
     /// Returns a builder for configuring the codec.
+    #[inline]
     #[must_use]
     pub fn builder() -> LengthDelimitedCodecBuilder {
         LengthDelimitedCodecBuilder {
@@ -57,6 +59,7 @@ impl Default for LengthDelimitedCodec {
 
 impl LengthDelimitedCodecBuilder {
     /// Sets the length field offset.
+    #[inline]
     #[must_use]
     pub fn length_field_offset(mut self, val: usize) -> Self {
         self.length_field_offset = val;
@@ -64,6 +67,7 @@ impl LengthDelimitedCodecBuilder {
     }
 
     /// Sets the length field length (1..=8 bytes).
+    #[inline]
     #[must_use]
     pub fn length_field_length(mut self, val: usize) -> Self {
         self.length_field_length = val;
@@ -71,6 +75,7 @@ impl LengthDelimitedCodecBuilder {
     }
 
     /// Adjusts the reported length by this amount.
+    #[inline]
     #[must_use]
     pub fn length_adjustment(mut self, val: isize) -> Self {
         self.length_adjustment = val;
@@ -78,6 +83,7 @@ impl LengthDelimitedCodecBuilder {
     }
 
     /// Number of bytes to skip before frame data.
+    #[inline]
     #[must_use]
     pub fn num_skip(mut self, val: usize) -> Self {
         self.num_skip = val;
@@ -85,6 +91,7 @@ impl LengthDelimitedCodecBuilder {
     }
 
     /// Sets the maximum frame length.
+    #[inline]
     #[must_use]
     pub fn max_frame_length(mut self, val: usize) -> Self {
         self.max_frame_length = val;
@@ -92,6 +99,7 @@ impl LengthDelimitedCodecBuilder {
     }
 
     /// Configures the codec to read lengths in big-endian order.
+    #[inline]
     #[must_use]
     pub fn big_endian(mut self) -> Self {
         self.big_endian = true;
@@ -99,6 +107,7 @@ impl LengthDelimitedCodecBuilder {
     }
 
     /// Configures the codec to read lengths in little-endian order.
+    #[inline]
     #[must_use]
     pub fn little_endian(mut self) -> Self {
         self.big_endian = false;
