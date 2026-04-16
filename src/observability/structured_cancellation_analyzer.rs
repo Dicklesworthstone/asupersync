@@ -9,9 +9,8 @@ use crate::observability::{
     cancellation_tracer::{CancellationTrace, CancellationTracer, CancellationTracerConfig},
     cancellation_visualizer::{CancellationDashboard, CancellationVisualizer, VisualizerConfig},
 };
-use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
+use crate::types::{CancelKind, CancelReason, Time};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -491,7 +490,7 @@ impl LabRuntimeIntegration {
     /// Advance deterministic time (for testing).
     pub fn advance_time(&self, delta: Duration) {
         let mut time = self.deterministic_time.lock().unwrap();
-        *time = *time + Time::from_nanos(delta.as_nanos() as u64);
+        *time = *time + delta;
     }
 
     /// Get the underlying analyzer.
