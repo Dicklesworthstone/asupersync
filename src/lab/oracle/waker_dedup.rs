@@ -417,30 +417,49 @@ pub struct WakerState {
     pub last_operation_at: SystemTime,
 }
 
+/// Current status of a waker in the deduplication system.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakerStatus {
     /// Waker is registered and queued for wakeup
     Queued,
     /// Waker has been woken and is no longer queued
-    Woken { at: SystemTime },
+    Woken {
+        /// When the waker was woken.
+        at: SystemTime
+    },
     /// Waker has been dropped/cleaned up
-    Dropped { at: SystemTime },
+    Dropped {
+        /// When the waker was dropped.
+        at: SystemTime
+    },
 }
 
 /// Channel-level statistics for waker deduplication
 #[derive(Debug, Clone, Default)]
 pub struct WakerDedupStatistics {
+    /// Total number of wakers registered.
     pub total_wakers_registered: u64,
+    /// Total number of wakers successfully woken.
     pub total_wakers_woken: u64,
+    /// Total number of wakers that were dropped/cleaned up.
     pub total_wakers_dropped: u64,
+    /// Total number of lost wakeup incidents.
     pub total_lost_wakeups: u64,
+    /// Total number of spurious wakeup incidents.
     pub total_spurious_wakeups: u64,
+    /// Total number of double wakeup incidents.
     pub total_double_wakeups: u64,
+    /// Total number of registration race incidents.
     pub total_registration_races: u64,
+    /// Total number of state inconsistency incidents.
     pub total_state_inconsistencies: u64,
+    /// Total number of waker leak incidents.
     pub total_leaks: u64,
+    /// Total number of use-after-drop incidents.
     pub total_use_after_drop: u64,
+    /// Total number of violations across all categories.
     pub total_violations: u64,
+    /// Number of currently active wakers.
     pub active_wakers: u64,
 }
 
