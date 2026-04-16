@@ -19,6 +19,7 @@ pub mod priority;
 pub mod stealing;
 pub mod three_lane;
 pub mod worker;
+pub mod work_stealing_checker;
 
 pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
@@ -34,6 +35,7 @@ pub use priority::{
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use worker::{Parker, Worker};
+pub use work_stealing_checker::{OwnershipState, StealingStats, ViolationType, WorkStealingChecker};
 
 use crate::types::TaskId;
 
