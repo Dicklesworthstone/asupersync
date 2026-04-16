@@ -66,6 +66,7 @@ struct DetEntropyInner {
 
 impl DetEntropy {
     /// Create a deterministic entropy source from a seed.
+    #[inline]
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {
