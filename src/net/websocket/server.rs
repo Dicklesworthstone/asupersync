@@ -498,9 +498,17 @@ where
                 Some(frame) if frame.opcode == Opcode::Close => {
                     self.close_handshake.receive_close(&frame)?;
                 }
-                Some(_) => {
-                    // Ignore non-close frames during close
-                }
+                Some(frame) => match frame.opcode {
+                    Opcode::Ping => {
+                        self.send_frame(Frame::pong(frame.payload)).await?;
+                    }
+                    Opcode::Pong => {
+                        // Keepalive confirmation; nothing else to do while closing.
+                    }
+                    _ => {
+                        // Ignore data frames during close.
+                    }
+                },
                 None => {
                     let time_now = current_time();
 
@@ -1440,6 +1448,44 @@ mod tests {
             assert_eq!(
                 ws.io.written, expected,
                 "retrying close must finish the original server close frame without appending another"
+            );
+        });
+    }
+
+    #[test]
+    fn close_replies_to_ping_before_finishing_handshake() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let read_data = [
+                encode_client_frame(Frame::ping(crate::bytes::Bytes::from_static(b"hb"))),
+                encode_client_frame(Frame::close(Some(1000), None)),
+            ]
+            .concat();
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(read_data),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+
+            ws.close(&cx, CloseReason::going_away())
+                .await
+                .expect("close should answer ping and finish handshake");
+
+            assert!(ws.is_closed(), "peer close should complete the handshake");
+            assert_eq!(
+                ws.io.written,
+                [
+                    encode_server_frame(Frame::close(Some(1001), None)),
+                    encode_server_frame(Frame::pong(crate::bytes::Bytes::from_static(b"hb"))),
+                ]
+                .concat(),
+                "close must still reply to ping frames received during the handshake"
             );
         });
     }
