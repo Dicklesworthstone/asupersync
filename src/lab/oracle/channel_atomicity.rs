@@ -1060,7 +1060,7 @@ mod tests {
             reservation_id: ReservationId(1),
             channel_id: ChannelId(1),
             created_at: SystemTime::now(),
-            trace_id: Some(TraceId::new()),
+            trace_id: Some(TraceId::new_for_test(1)),
         };
 
         let record = ViolationRecord::new(violation, &config);
