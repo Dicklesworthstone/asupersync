@@ -1177,7 +1177,7 @@ mod tests {
         init_test("tracker_violation_correlation_ids");
 
         let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
-        let now = Time::from_nanos(1000);
+        let _now = Time::from_nanos(1000);
 
         // Create multiple violations to test correlation ID uniqueness
         for i in 0..3 {

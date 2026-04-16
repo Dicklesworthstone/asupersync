@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn test_visualizer_creation() {
         let config = VisualizerConfig::default();
-        let visualizer = CancellationVisualizer::new(config);
+        let _visualizer = CancellationVisualizer::new(config);
 
         // Just test that creation works
         assert!(true);

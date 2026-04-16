@@ -543,7 +543,13 @@ impl CancellationAnalyzer {
                 match anomaly {
                     PropagationAnomaly::SlowPropagation { entity_id, .. } |
                     PropagationAnomaly::StuckCancellation { entity_id, .. } |
+                    PropagationAnomaly::ExcessiveDepth { entity_id, .. } => {
+                        *entity_anomalies.entry(entity_id.clone()).or_default() += 1;
+                    }
                     PropagationAnomaly::IncorrectPropagationOrder { parent_entity, .. } => {
+                        *entity_anomalies.entry(parent_entity.clone()).or_default() += 1;
+                    }
+                    PropagationAnomaly::UnexpectedPropagation { entity_id, .. } => {
                         *entity_anomalies.entry(entity_id.clone()).or_default() += 1;
                     }
                 }
@@ -745,7 +751,7 @@ mod tests {
     #[test]
     fn test_analyzer_creation() {
         let config = AnalyzerConfig::default();
-        let analyzer = CancellationAnalyzer::new(config);
+        let _analyzer = CancellationAnalyzer::new(config);
         assert!(true); // Just test creation
     }
 
