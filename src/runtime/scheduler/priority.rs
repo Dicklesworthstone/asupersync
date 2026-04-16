@@ -1030,6 +1030,13 @@ impl Scheduler {
         !self.ready_lane.is_empty()
     }
 
+    /// Returns the highest ready-lane priority currently pending.
+    #[inline]
+    #[must_use]
+    pub fn peek_ready_priority(&self) -> Option<u8> {
+        self.ready_lane.peek().map(|entry| entry.priority)
+    }
+
     /// Clears all scheduled tasks.
     pub fn clear(&mut self) {
         self.cancel_lane.clear();

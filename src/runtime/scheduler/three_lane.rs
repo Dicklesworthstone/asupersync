@@ -1532,6 +1532,11 @@ pub struct PreemptionMetrics {
     /// This records the largest number of consecutive cancel dispatches that a
     /// due timed task actually waited through before being selected.
     pub max_timed_dispatch_stall: usize,
+    /// Number of times a lower-priority global ready dispatch bypassed a
+    /// higher-priority local ready task.
+    pub ready_priority_inversions: u64,
+    /// Largest observed priority gap for a ready-lane inversion.
+    pub max_ready_priority_inversion_gap: u8,
     /// Maximum cancel streak observed.
     pub max_cancel_streak: usize,
     /// Fallback cancel dispatches (after limit, no other work available).
@@ -1660,6 +1665,10 @@ pub struct PreemptionFairnessCertificate {
     pub observed_max_ready_stall_steps: usize,
     /// Largest observed cancel streak immediately before a timed dispatch.
     pub observed_max_timed_stall_steps: usize,
+    /// Number of observed ready-lane priority inversions.
+    pub ready_priority_inversions: u64,
+    /// Largest observed ready-lane priority gap when an inversion occurred.
+    pub max_ready_priority_inversion_gap: u8,
     /// Fallback cancel dispatches used when no other work existed.
     pub fallback_cancel_dispatches: u64,
     /// Count of streak samples above baseline `L`.
@@ -1694,6 +1703,7 @@ impl PreemptionFairnessCertificate {
     pub fn invariant_holds(&self) -> bool {
         self.effective_limit_exceedances == 0
             && self.observed_max_cancel_streak <= self.effective_limit
+            && self.ready_priority_inversions == 0
     }
 
     /// Deterministic hash of the certificate contents for replay/audit linkage.
@@ -1711,6 +1721,8 @@ impl PreemptionFairnessCertificate {
         self.fairness_yields.hash(&mut h);
         self.observed_max_ready_stall_steps.hash(&mut h);
         self.observed_max_timed_stall_steps.hash(&mut h);
+        self.ready_priority_inversions.hash(&mut h);
+        self.max_ready_priority_inversion_gap.hash(&mut h);
         self.fallback_cancel_dispatches.hash(&mut h);
         self.base_limit_exceedances.hash(&mut h);
         self.effective_limit_exceedances.hash(&mut h);
@@ -1787,6 +1799,10 @@ impl ThreeLaneWorker {
             fairness_yields: self.preemption_metrics.fairness_yields,
             observed_max_ready_stall_steps: self.preemption_metrics.max_ready_dispatch_stall,
             observed_max_timed_stall_steps: self.preemption_metrics.max_timed_dispatch_stall,
+            ready_priority_inversions: self.preemption_metrics.ready_priority_inversions,
+            max_ready_priority_inversion_gap: self
+                .preemption_metrics
+                .max_ready_priority_inversion_gap,
             fallback_cancel_dispatches: self.preemption_metrics.fallback_cancel_dispatches,
             base_limit_exceedances: self.preemption_metrics.base_limit_exceedances,
             effective_limit_exceedances: self.preemption_metrics.effective_limit_exceedances,
@@ -2254,6 +2270,11 @@ impl ThreeLaneWorker {
             return Some(self.finish_dispatch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
+            let local_blocked_priority = {
+                let local = self.local.lock();
+                local.peek_ready_priority()
+            };
+            self.record_ready_priority_inversion(pt.priority, local_blocked_priority);
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(pt.task));
         }
@@ -2349,6 +2370,25 @@ impl ThreeLaneWorker {
         self.cancel_streak = 0;
         self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
         self.preemption_metrics.ready_dispatches += 1;
+    }
+
+    #[inline]
+    fn record_ready_priority_inversion(
+        &mut self,
+        dispatched_priority: u8,
+        blocked_priority: Option<u8>,
+    ) {
+        let Some(blocked_priority) = blocked_priority else {
+            return;
+        };
+        if blocked_priority <= dispatched_priority {
+            return;
+        }
+        self.preemption_metrics.ready_priority_inversions += 1;
+        let gap = blocked_priority.saturating_sub(dispatched_priority);
+        if gap > self.preemption_metrics.max_ready_priority_inversion_gap {
+            self.preemption_metrics.max_ready_priority_inversion_gap = gap;
+        }
     }
 
     #[inline]
@@ -5847,6 +5887,65 @@ mod tests {
         assert_eq!(cert.observed_max_timed_stall_steps, limit);
         assert_eq!(cert.observed_non_cancel_stall_steps(), limit);
         assert!(cert.invariant_holds());
+    }
+
+    #[test]
+    fn test_global_ready_dispatch_records_local_priority_inversion() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        let low_global = TaskId::new_for_test(21, 1);
+        let high_local = TaskId::new_for_test(21, 2);
+        scheduler.inject_ready(low_global, 10);
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        worker.schedule_local(high_local, 200);
+
+        let dispatched = worker.next_task();
+        assert_eq!(
+            dispatched,
+            Some(low_global),
+            "global ready queue currently dispatches before local ready heap"
+        );
+
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.ready_dispatches, 1);
+        assert_eq!(metrics.ready_priority_inversions, 1);
+        assert_eq!(metrics.max_ready_priority_inversion_gap, 190);
+
+        let cert = worker.preemption_fairness_certificate();
+        assert_eq!(cert.ready_priority_inversions, 1);
+        assert_eq!(cert.max_ready_priority_inversion_gap, 190);
+        assert!(
+            !cert.invariant_holds(),
+            "priority inversions should invalidate the scheduler certificate"
+        );
+    }
+
+    #[test]
+    fn test_global_ready_dispatch_skips_inversion_when_local_priority_is_not_higher() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        let high_global = TaskId::new_for_test(22, 1);
+        let lower_local = TaskId::new_for_test(22, 2);
+        scheduler.inject_ready(high_global, 200);
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        worker.schedule_local(lower_local, 10);
+
+        let dispatched = worker.next_task();
+        assert_eq!(dispatched, Some(high_global));
+
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.ready_priority_inversions, 0);
+        assert_eq!(metrics.max_ready_priority_inversion_gap, 0);
+
+        let cert = worker.preemption_fairness_certificate();
+        assert_eq!(cert.ready_priority_inversions, 0);
+        assert_eq!(cert.max_ready_priority_inversion_gap, 0);
     }
 
     #[test]
