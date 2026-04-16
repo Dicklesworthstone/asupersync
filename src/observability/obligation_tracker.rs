@@ -690,6 +690,127 @@ mod tests {
     }
 
     #[test]
+    fn test_region_close_obligation_detection() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        // Create an obligation in the region
+        let obligation_id = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, Some("test permit".into()))
+            .expect("create obligation");
+
+        state.now = Time::from_secs(30);
+
+        let tracker = ObligationTracker::new(Arc::new(state), None);
+
+        // Check for leaks at region close
+        let region_obligations = tracker.check_region_close_obligations(root);
+
+        assert_eq!(region_obligations.len(), 1);
+        assert_eq!(region_obligations[0].id, obligation_id);
+        assert_eq!(region_obligations[0].type_name, "SendPermit");
+        assert_eq!(region_obligations[0].age, Duration::from_secs(30));
+        assert!(region_obligations[0].is_active());
+    }
+
+    #[cfg(feature = "obligation-leak-detection")]
+    #[test]
+    fn test_enhanced_leak_detection() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        // Create obligations with different ages
+        let old_obligation = state
+            .create_obligation(ObligationKind::Lease, task_id, root, Some("old lease".into()))
+            .expect("create obligation");
+
+        state.now = Time::from_secs(120); // Make the first obligation very old
+
+        let new_obligation = state
+            .create_obligation(ObligationKind::Ack, task_id, root, Some("new ack".into()))
+            .expect("create obligation");
+
+        state.now = Time::from_secs(150); // Age the second obligation moderately
+
+        let tracker = ObligationTracker::new(Arc::new(state), None);
+        let threshold = Duration::from_secs(60);
+
+        let report = tracker.enhanced_leak_detection(threshold);
+
+        assert_eq!(report.attributed_leaks.len(), 2);
+        assert_eq!(report.affected_regions.len(), 1);
+        assert_eq!(report.affected_regions[0], root);
+        assert_eq!(report.threshold_used, threshold);
+
+        // Check leak severity classification
+        let critical_leak = report.attributed_leaks.iter()
+            .find(|leak| leak.obligation.id == old_obligation)
+            .expect("should find old obligation");
+        assert_eq!(critical_leak.leak_severity, LeakSeverity::Critical);
+
+        let warning_leak = report.attributed_leaks.iter()
+            .find(|leak| leak.obligation.id == new_obligation)
+            .expect("should find new obligation");
+        assert_eq!(warning_leak.leak_severity, LeakSeverity::Warning);
+    }
+
+    #[cfg(feature = "obligation-leak-detection")]
+    #[test]
+    fn test_leak_attribution() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        let obligation_id = state
+            .create_obligation(ObligationKind::IoOp, task_id, root, Some("test io".into()))
+            .expect("create obligation");
+
+        state.now = Time::from_secs(90);
+
+        let tracker = ObligationTracker::new(Arc::new(state), None);
+
+        let attribution = tracker.get_leak_attribution(obligation_id)
+            .expect("should find attribution");
+
+        assert_eq!(attribution.obligation_id, obligation_id);
+        assert_eq!(attribution.obligation_type, "IoOp");
+        assert_eq!(attribution.holder_task, task_id);
+        assert_eq!(attribution.holder_region, root);
+        assert_eq!(attribution.age, Duration::from_secs(90));
+        assert_eq!(attribution.description.as_deref(), Some("test io"));
+    }
+
+    #[test]
+    fn test_runtime_clean_state() {
+        let state = RuntimeState::new();
+        let tracker = ObligationTracker::new(Arc::new(state), None);
+
+        assert!(tracker.is_runtime_clean());
+
+        // Test with obligations - need a mutable state for this
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        let _obligation_id = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+
+        let tracker = ObligationTracker::new(Arc::new(state), None);
+        assert!(!tracker.is_runtime_clean());
+    }
+
+    #[test]
     fn obligation_state_info_debug_clone_copy_eq() {
         let s = ObligationStateInfo::Reserved;
         let s2 = s;
