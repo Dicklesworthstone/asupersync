@@ -28,6 +28,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Configuration for the cancel-correctness oracle.
 #[derive(Debug, Clone)]
@@ -811,7 +812,7 @@ mod tests {
                             },
                             reason.clone(),
                         ),
-                        now + Time::from_nanos(i * 1000),
+                        now + Duration::from_nanos(i * 1000),
                     );
                 });
             }
@@ -854,7 +855,7 @@ mod tests {
                     CancelPhase::Cancelling,
                     reason.clone(),
                 ),
-                now + Time::from_nanos(1000),
+                now + Duration::from_nanos(1000),
             );
 
             oracle.notify_cancel_witness(
@@ -865,7 +866,7 @@ mod tests {
                     CancelPhase::Finalizing,
                     reason.clone(),
                 ),
-                now + Time::from_nanos(2000),
+                now + Duration::from_nanos(2000),
             );
 
             oracle.notify_cancel_witness(
@@ -876,7 +877,7 @@ mod tests {
                     CancelPhase::Completed,
                     reason.clone(),
                 ),
-                now + Time::from_nanos(3000),
+                now + Duration::from_nanos(3000),
             );
         }
 
@@ -913,11 +914,11 @@ mod tests {
 
         oracle.notify_cancel_witness(
             CancelWitness::new(task_id, region_id, 1, CancelPhase::Cancelling, reason),
-            now + Time::from_nanos(100),
+            now + Duration::from_nanos(100),
         );
 
         // Check for stuck cancellations after timeout period
-        oracle.check_stuck_cancellations(now + Time::from_nanos(2000));
+        oracle.check_stuck_cancellations(now + Duration::from_nanos(2000));
 
         let stats = oracle.get_statistics();
         assert_eq!(stats.violations_detected, 1);
@@ -1029,7 +1030,7 @@ mod tests {
         let requested_at = Time::from_nanos(1234);
         let updated_at = Time::from_nanos(5678);
         let requested_reason = CancelReason::user("snapshot-test");
-        let updated_reason = CancelReason::timeout_with_message("snapshot-updated");
+        let updated_reason = CancelReason::timeout().with_message("snapshot-updated");
 
         oracle.notify_cancel_witness(
             CancelWitness::new(
