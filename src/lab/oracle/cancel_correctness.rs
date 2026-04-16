@@ -449,8 +449,7 @@ impl CancelCorrectnessOracle {
 
     /// Returns snapshots of the currently tracked task cancellation states.
     pub fn tracked_tasks(&self) -> Vec<TrackedCancelTaskSnapshot> {
-        let task_states = self.task_states.read();
-        let mut snapshots = task_states
+        let mut snapshots = self.task_states.read()
             .values()
             .map(|state| TrackedCancelTaskSnapshot {
                 task_id: state.task_id,
@@ -476,8 +475,11 @@ impl CancelCorrectnessOracle {
         // Return the first violation if any exist
         let violations = self.violations.read();
         if let Some(violation) = violations.front() {
-            return Err(violation.clone());
+            let violation = violation.clone();
+            drop(violations);
+            return Err(violation);
         }
+        drop(violations);
 
         Ok(())
     }
@@ -552,6 +554,7 @@ impl CancelCorrectnessOracle {
         while violations.len() > self.config.max_violations {
             violations.pop_front();
         }
+        drop(violations);
     }
 
     fn capture_stack_trace(&self) -> Option<Arc<Backtrace>> {

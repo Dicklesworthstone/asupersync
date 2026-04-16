@@ -1010,16 +1010,9 @@ impl CleanupCoordinator {
         // The lock hierarchy (handlers -> pending -> completed) prevents deadlocks,
         // and holding them all prevents concurrent cleanup calls from interleaving and
         // losing symbols by finding a pending set without its handler.
-        let (handler, pending_set) = {
-            let mut handlers = self.handlers.write();
-            let mut pending = self.pending.write();
-            let mut completed = self.completed.write();
-
-            let h = handlers.remove(&object_id);
-            completed.insert(object_id);
-            let p = pending.remove(&object_id);
-            (h, p)
-        };
+        let handler = self.handlers.write().remove(&object_id);
+        let pending_set = self.pending.write().remove(&object_id);
+        self.completed.write().insert(object_id);
 
         if let Some(set) = pending_set {
             let symbol_count = set.symbols.len();

@@ -104,7 +104,7 @@ fn wall_clock_now() -> Time {
 }
 
 fn noop_waker() -> Waker {
-    Waker::noop()
+    Waker::noop().clone()
 }
 
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone

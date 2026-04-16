@@ -1483,6 +1483,7 @@ impl<S: GenServer> GenServerRef<S> {
     }
 
     /// Returns the server's actor ID.
+    #[inline]
     #[must_use]
     pub const fn actor_id(&self) -> ActorId {
         self.actor_id
@@ -1491,6 +1492,7 @@ impl<S: GenServer> GenServerRef<S> {
 
 impl<S: GenServer> GenServerHandle<S> {
     /// Returns a lightweight, clonable reference for casting.
+    #[inline]
     #[must_use]
     pub fn server_ref(&self) -> GenServerRef<S> {
         GenServerRef {
@@ -1868,6 +1870,7 @@ pub struct NamedGenServerHandle<S: GenServer> {
 
 impl<S: GenServer> NamedGenServerHandle<S> {
     /// The registered name of this server.
+    #[inline]
     #[must_use]
     pub fn name(&self) -> &str {
         self.lease
@@ -1876,18 +1879,21 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     }
 
     /// The underlying task ID.
+    #[inline]
     #[must_use]
     pub fn task_id(&self) -> TaskId {
         self.handle.task_id()
     }
 
     /// The actor ID of this server.
+    #[inline]
     #[must_use]
     pub fn actor_id(&self) -> ActorId {
         self.handle.actor_id()
     }
 
     /// Whether the server has finished execution.
+    #[inline]
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.handle.is_finished()
