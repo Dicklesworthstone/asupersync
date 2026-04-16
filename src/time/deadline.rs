@@ -4,6 +4,7 @@ use crate::cx::Scope;
 use crate::types::{Policy, Time};
 use std::time::Duration;
 
+#[inline]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
