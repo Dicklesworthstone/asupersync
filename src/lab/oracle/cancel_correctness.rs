@@ -715,4 +715,233 @@ mod tests {
             CancelCorrectnessViolation::MissedFinalization { .. }
         ));
     }
+
+    #[test]
+    fn test_concurrent_cancellation_safety() {
+        init_test_logging();
+
+        let oracle = CancelCorrectnessOracle::with_default_config();
+        let task_id = TaskId::testing_default();
+        let region_id = RegionId::testing_default();
+        let now = Time::ZERO;
+        let reason = CancelReason::user("concurrent_test");
+
+        // Simulate concurrent witnesses for the same task
+        std::thread::scope(|s| {
+            for i in 0..4 {
+                s.spawn(|| {
+                    oracle.notify_cancel_witness(
+                        CancelWitness::new(
+                            task_id,
+                            region_id,
+                            1,
+                            match i {
+                                0 => CancelPhase::Requested,
+                                1 => CancelPhase::Cancelling,
+                                2 => CancelPhase::Finalizing,
+                                _ => CancelPhase::Completed,
+                            },
+                            reason.clone(),
+                        ),
+                        now + Time::from_nanos(i * 1000),
+                    );
+                });
+            }
+        });
+
+        // Should handle concurrent updates without panicking
+        let stats = oracle.get_statistics();
+        assert!(stats.witnesses_processed >= 4);
+    }
+
+    #[test]
+    fn test_multiple_task_tracking() {
+        init_test_logging();
+
+        let oracle = CancelCorrectnessOracle::with_default_config();
+        let region_id = RegionId::testing_default();
+        let now = Time::ZERO;
+        let reason = CancelReason::user("multi_task_test");
+
+        // Track multiple tasks through normal cancellation flow
+        for i in 0..5 {
+            let task_id = TaskId::new_for_test(i, 0);
+
+            oracle.notify_cancel_witness(
+                CancelWitness::new(
+                    task_id,
+                    region_id,
+                    1,
+                    CancelPhase::Requested,
+                    reason.clone(),
+                ),
+                now,
+            );
+
+            oracle.notify_cancel_witness(
+                CancelWitness::new(
+                    task_id,
+                    region_id,
+                    1,
+                    CancelPhase::Cancelling,
+                    reason.clone(),
+                ),
+                now + Time::from_nanos(1000),
+            );
+
+            oracle.notify_cancel_witness(
+                CancelWitness::new(
+                    task_id,
+                    region_id,
+                    1,
+                    CancelPhase::Finalizing,
+                    reason.clone(),
+                ),
+                now + Time::from_nanos(2000),
+            );
+
+            oracle.notify_cancel_witness(
+                CancelWitness::new(
+                    task_id,
+                    region_id,
+                    1,
+                    CancelPhase::Completed,
+                    reason.clone(),
+                ),
+                now + Time::from_nanos(3000),
+            );
+        }
+
+        let stats = oracle.get_statistics();
+        assert_eq!(stats.witnesses_processed, 20); // 5 tasks × 4 witnesses each
+        assert_eq!(stats.violations_detected, 0); // No violations in normal flow
+    }
+
+    #[test]
+    fn test_stuck_cancellation_detection() {
+        init_test_logging();
+
+        let config = CancelCorrectnessConfig {
+            max_phase_duration_ns: 1000, // Very short timeout for testing
+            ..Default::default()
+        };
+        let oracle = CancelCorrectnessOracle::new(config);
+        let task_id = TaskId::testing_default();
+        let region_id = RegionId::testing_default();
+        let now = Time::ZERO;
+        let reason = CancelReason::user("stuck_test");
+
+        // Task gets stuck in Cancelling phase
+        oracle.notify_cancel_witness(
+            CancelWitness::new(task_id, region_id, 1, CancelPhase::Requested, reason.clone()),
+            now,
+        );
+
+        oracle.notify_cancel_witness(
+            CancelWitness::new(task_id, region_id, 1, CancelPhase::Cancelling, reason),
+            now + Time::from_nanos(100),
+        );
+
+        // Check for stuck cancellations after timeout period
+        oracle.check_stuck_cancellations(now + Time::from_nanos(2000));
+
+        let stats = oracle.get_statistics();
+        assert_eq!(stats.violations_detected, 1);
+
+        let violations = oracle.get_recent_violations(1);
+        assert_eq!(violations.len(), 1);
+        assert!(matches!(
+            violations[0],
+            CancelCorrectnessViolation::StuckCancellation { .. }
+        ));
+    }
+
+    #[test]
+    fn test_violation_statistics_tracking() {
+        init_test_logging();
+
+        let oracle = CancelCorrectnessOracle::with_default_config();
+        let task_id = TaskId::testing_default();
+        let region_id = RegionId::testing_default();
+        let now = Time::ZERO;
+        let reason = CancelReason::user("stats_test");
+
+        // Create several violation types
+
+        // 1. Premature completion
+        oracle.notify_cancel_witness(
+            CancelWitness::new(task_id, region_id, 1, CancelPhase::Requested, reason.clone()),
+            now,
+        );
+        oracle.notify_task_completed(task_id, now);
+
+        // 2. Invalid transition (different task)
+        let task_id2 = TaskId::new_for_test(2, 0);
+        oracle.notify_cancel_witness(
+            CancelWitness::new(
+                task_id2,
+                region_id,
+                1,
+                CancelPhase::Finalizing,
+                reason.clone(),
+            ),
+            now,
+        );
+        oracle.notify_cancel_witness(
+            CancelWitness::new(
+                task_id2,
+                region_id,
+                1,
+                CancelPhase::Cancelling,
+                reason,
+            ),
+            now,
+        );
+
+        let stats = oracle.get_statistics();
+        assert!(stats.violations_detected >= 2);
+
+        let violations = oracle.get_recent_violations(10);
+        assert!(!violations.is_empty());
+    }
+
+    #[test]
+    fn test_oracle_configuration() {
+        init_test_logging();
+
+        // Test default configuration
+        let oracle = CancelCorrectnessOracle::with_default_config();
+        let stats = oracle.get_statistics();
+        assert_eq!(stats.witnesses_processed, 0);
+        assert_eq!(stats.violations_detected, 0);
+
+        // Test custom configuration
+        let config = CancelCorrectnessConfig {
+            max_phase_duration_ns: 5000,
+            max_violations: 50,
+            panic_on_violation: false,
+            capture_stack_traces: false,
+            max_stack_trace_depth: 16,
+        };
+
+        let oracle = CancelCorrectnessOracle::new(config);
+        let task_id = TaskId::testing_default();
+        let region_id = RegionId::testing_default();
+        let now = Time::ZERO;
+
+        // Normal flow should work with custom config
+        oracle.notify_cancel_witness(
+            CancelWitness::new(
+                task_id,
+                region_id,
+                1,
+                CancelPhase::Requested,
+                CancelReason::user("config_test"),
+            ),
+            now,
+        );
+
+        let stats = oracle.get_statistics();
+        assert_eq!(stats.witnesses_processed, 1);
+    }
 }
