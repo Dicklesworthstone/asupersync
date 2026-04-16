@@ -548,6 +548,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns true if a registry handle is attached.
+    #[inline]
     #[must_use]
     pub fn has_registry(&self) -> bool {
         self.handles.registry.is_some()
@@ -670,6 +671,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a reference to the attached Macaroon token, if any.
+    #[inline]
     #[must_use]
     pub fn macaroon(&self) -> Option<&MacaroonToken> {
         self.handles.macaroon.as_deref()
@@ -896,12 +898,14 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns the current logical time without ticking.
+    #[inline]
     #[must_use]
     pub fn logical_now(&self) -> LogicalTime {
         self.handles.logical_clock.now()
     }
 
     /// Returns a clone of the task's logical clock handle.
+    #[inline]
     #[must_use]
     pub(crate) fn logical_clock_handle(&self) -> LogicalClockHandle {
         self.handles.logical_clock.clone()

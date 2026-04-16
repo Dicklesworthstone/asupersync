@@ -28,6 +28,7 @@ pub struct ForEach<S, F> {
 
 impl<S, F> ForEach<S, F> {
     /// Creates a new `ForEach` future.
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,
@@ -87,6 +88,7 @@ pub struct ForEachAsync<S, F, Fut> {
 }
 
 impl<S, F, Fut> ForEachAsync<S, F, Fut> {
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,
@@ -105,6 +107,7 @@ where
 {
     type Output = ();
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
         if *this.completed {
