@@ -91,6 +91,7 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 ///
 /// For virtual time in tests/lab runtime, use a timer driver's `now()` method.
 #[must_use]
+#[inline]
 pub fn wall_now() -> Time {
     let start = START_TIME.get_or_init(Instant::now);
     let now = Instant::now();
@@ -210,6 +211,7 @@ impl Sleep {
     /// assert_eq!(sleep.deadline(), Time::from_secs(5));
     /// ```
     #[must_use]
+    #[inline]
     pub fn new(deadline: Time) -> Self {
         Self {
             deadline,
@@ -247,6 +249,7 @@ impl Sleep {
     /// assert_eq!(sleep.deadline(), Time::from_secs(15));
     /// ```
     #[must_use]
+    #[inline]
     pub fn after(now: Time, duration: Duration) -> Self {
         let deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         Self::new(deadline)
@@ -750,6 +753,7 @@ impl Clone for Sleep {
 /// assert_eq!(sleep_future.deadline(), Time::from_nanos(10_100_000_000));
 /// ```
 #[must_use]
+#[inline]
 pub fn sleep(now: Time, duration: Duration) -> Sleep {
     Sleep::after(now, duration)
 }
@@ -770,6 +774,7 @@ pub fn sleep(now: Time, duration: Duration) -> Sleep {
 /// assert_eq!(sleep_future.deadline(), Time::from_secs(5));
 /// ```
 #[must_use]
+#[inline]
 pub fn sleep_until(deadline: Time) -> Sleep {
     Sleep::new(deadline)
 }
