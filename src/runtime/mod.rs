@@ -133,6 +133,7 @@ pub mod obligation_table;
 pub mod reactor;
 pub mod region_heap;
 pub mod region_table;
+pub mod resource_monitor;
 pub mod scheduler;
 pub mod sharded_state;
 /// Async wrapper for blocking pool operations.

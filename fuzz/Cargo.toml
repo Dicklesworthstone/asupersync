@@ -232,3 +232,24 @@ path = "fuzz_targets/raptorq_symbol_parsing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_bytes_buffer_manipulation"
+path = "fuzz_targets/bytes_buffer_manipulation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_buf_trait_operations"
+path = "fuzz_targets/buf_trait_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_buffer_composition"
+path = "fuzz_targets/buffer_composition.rs"
+test = false
+doc = false
+bench = false
