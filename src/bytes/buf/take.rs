@@ -28,11 +28,13 @@ pub struct Take<T> {
 
 impl<T> Take<T> {
     /// Create a new `Take`.
+    #[inline]
     pub(crate) fn new(inner: T, limit: usize) -> Self {
         Self { inner, limit }
     }
 
     /// Consumes this `Take`, returning the underlying buffer.
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> T {
         self.inner
@@ -42,17 +44,20 @@ impl<T> Take<T> {
     ///
     /// The reader position of the returned reference may not be the same
     /// as that of the buffer passed to [`Buf::take()`].
+    #[inline]
     #[must_use]
     pub fn get_ref(&self) -> &T {
         &self.inner
     }
 
     /// Gets a mutable reference to the underlying buffer.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 
     /// Returns the maximum number of bytes that can be read.
+    #[inline]
     #[must_use]
     pub fn limit(&self) -> usize {
         self.limit
@@ -61,22 +66,26 @@ impl<T> Take<T> {
     /// Sets the maximum number of bytes that can be read.
     ///
     /// Note: this does not reset the position of the inner buffer.
+    #[inline]
     pub fn set_limit(&mut self, limit: usize) {
         self.limit = limit;
     }
 }
 
 impl<T: Buf> Buf for Take<T> {
+    #[inline]
     fn remaining(&self) -> usize {
         std::cmp::min(self.inner.remaining(), self.limit)
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         let chunk = self.inner.chunk();
         let len = std::cmp::min(chunk.len(), self.limit);
         &chunk[..len]
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         let remaining = self.remaining();
         assert!(

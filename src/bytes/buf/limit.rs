@@ -28,11 +28,13 @@ pub struct Limit<T> {
 
 impl<T> Limit<T> {
     /// Create a new `Limit`.
+    #[inline]
     pub(crate) fn new(inner: T, limit: usize) -> Self {
         Self { inner, limit }
     }
 
     /// Consumes this `Limit`, returning the underlying buffer.
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> T {
         self.inner
@@ -62,6 +64,7 @@ impl<T> Limit<T> {
 }
 
 impl<T: BufMut> BufMut for Limit<T> {
+    #[inline]
     fn remaining_mut(&self) -> usize {
         std::cmp::min(self.inner.remaining_mut(), self.limit)
     }

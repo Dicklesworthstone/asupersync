@@ -29,33 +29,39 @@ pub struct Chain<T, U> {
 
 impl<T, U> Chain<T, U> {
     /// Create a new `Chain` from two buffers.
+    #[inline]
     pub(crate) fn new(a: T, b: U) -> Self {
         Self { a, b }
     }
 
     /// Gets a reference to the first buffer.
+    #[inline]
     #[must_use]
     pub fn first_ref(&self) -> &T {
         &self.a
     }
 
     /// Gets a mutable reference to the first buffer.
+    #[inline]
     pub fn first_mut(&mut self) -> &mut T {
         &mut self.a
     }
 
     /// Gets a reference to the second buffer.
+    #[inline]
     #[must_use]
     pub fn last_ref(&self) -> &U {
         &self.b
     }
 
     /// Gets a mutable reference to the second buffer.
+    #[inline]
     pub fn last_mut(&mut self) -> &mut U {
         &mut self.b
     }
 
     /// Consumes this `Chain`, returning the underlying buffers.
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> (T, U) {
         (self.a, self.b)
@@ -63,10 +69,12 @@ impl<T, U> Chain<T, U> {
 }
 
 impl<T: Buf, U: Buf> Buf for Chain<T, U> {
+    #[inline]
     fn remaining(&self) -> usize {
         self.a.remaining().saturating_add(self.b.remaining())
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         if self.a.has_remaining() {
             self.a.chunk()
@@ -75,6 +83,7 @@ impl<T: Buf, U: Buf> Buf for Chain<T, U> {
         }
     }
 
+    #[inline]
     fn advance(&mut self, mut cnt: usize) {
         let a_rem = self.a.remaining();
 
