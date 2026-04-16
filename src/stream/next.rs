@@ -19,6 +19,7 @@ pub struct Next<'a, S: ?Sized> {
 
 impl<'a, S: ?Sized> Next<'a, S> {
     /// Creates a new `Next` future.
+    #[inline]
     pub(crate) fn new(stream: &'a mut S) -> Self {
         Self {
             stream,

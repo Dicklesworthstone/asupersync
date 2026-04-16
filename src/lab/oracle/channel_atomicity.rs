@@ -102,43 +102,69 @@ pub enum EnforcementMode {
 pub enum ChannelAtomicityViolation {
     /// Reservation was created but never committed or aborted
     ReservationLeak {
+        /// ID of the leaked reservation.
         reservation_id: ReservationId,
+        /// ID of the channel where the leak occurred.
         channel_id: ChannelId,
+        /// Timestamp when the reservation was created.
         created_at: SystemTime,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
     /// Attempt to commit an already committed reservation
     DoubleCommit {
+        /// ID of the reservation that was double-committed.
         reservation_id: ReservationId,
+        /// ID of the channel where the double commit occurred.
         channel_id: ChannelId,
+        /// Timestamp of the first commit.
         first_commit_at: SystemTime,
+        /// Timestamp of the second (invalid) commit.
         second_commit_at: SystemTime,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
     /// Attempt to abort an already aborted reservation
     DoubleAbort {
+        /// ID of the reservation that was double-aborted.
         reservation_id: ReservationId,
+        /// ID of the channel where the double abort occurred.
         channel_id: ChannelId,
+        /// Timestamp of the first abort.
         first_abort_at: SystemTime,
+        /// Timestamp of the second (invalid) abort.
         second_abort_at: SystemTime,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
     /// Attempt to use reservation after commit
     UseAfterCommit {
+        /// ID of the reservation used after commit.
         reservation_id: ReservationId,
+        /// ID of the channel where the violation occurred.
         channel_id: ChannelId,
+        /// Timestamp when the reservation was committed.
         commit_at: SystemTime,
+        /// Timestamp of the invalid use attempt.
         use_at: SystemTime,
+        /// Description of the invalid operation attempted.
         operation: String,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
     /// Attempt to use reservation after abort
     UseAfterAbort {
+        /// ID of the reservation used after abort.
         reservation_id: ReservationId,
+        /// ID of the channel where the violation occurred.
         channel_id: ChannelId,
+        /// Timestamp when the reservation was aborted.
         abort_at: SystemTime,
+        /// Timestamp of the invalid use attempt.
         use_at: SystemTime,
+        /// Description of the invalid operation attempted.
         operation: String,
+        /// Optional trace ID for debugging context.
         trace_id: Option<TraceId>,
     },
     /// Wakeup lost during channel operation

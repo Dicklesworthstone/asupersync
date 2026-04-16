@@ -688,7 +688,6 @@ impl CancellationProtocolOracle {
         let new_depth = record.mask_depth;
         if new_depth > crate::types::MAX_MASK_DEPTH {
             // Need to record violation after releasing the borrow
-            drop(record); // explicitly drop the mutable borrow
             self.record_violation(CancellationProtocolViolation::MaskDepthExceeded {
                 task,
                 depth: new_depth,
@@ -732,7 +731,6 @@ impl CancellationProtocolOracle {
             let current_mask_depth = record.mask_depth;
             if current_mask_depth > 0 {
                 // Need to record violation after releasing the borrow
-                drop(record); // explicitly drop the mutable borrow
                 self.record_violation(CancellationProtocolViolation::CancelAckWhileMasked {
                     task,
                     mask_depth: current_mask_depth,

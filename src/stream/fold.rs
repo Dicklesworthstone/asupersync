@@ -30,6 +30,7 @@ pub struct Fold<S, F, Acc> {
 
 impl<S, F, Acc> Fold<S, F, Acc> {
     /// Creates a new `Fold` future.
+    #[inline]
     pub(crate) fn new(stream: S, init: Acc, f: F) -> Self {
         Self {
             stream,

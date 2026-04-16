@@ -89,35 +89,57 @@ pub enum CancelOrderingViolation {
 
     /// Parent was cancelled but child was not cancelled within the expected window.
     MissingChildCancellation {
+        /// ID of the parent task that was cancelled.
         parent_task: TaskId,
+        /// ID of the child task that should have been cancelled.
         child_task: TaskId,
+        /// ID of the parent region.
         parent_region: RegionId,
+        /// ID of the child region.
         child_region: RegionId,
+        /// Timestamp when the parent was cancelled.
         parent_cancel_time: Time,
+        /// Timestamp when the missing cancellation was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Child was cancelled but parent shows no sign of cancellation.
     OrphanedChildCancellation {
+        /// ID of the child task that was cancelled.
         child_task: TaskId,
+        /// Optional ID of the parent task.
         parent_task: Option<TaskId>,
+        /// ID of the child region.
         child_region: RegionId,
+        /// ID of the parent region.
         parent_region: RegionId,
+        /// Timestamp when the child was cancelled.
         child_cancel_time: Time,
+        /// Timestamp when the orphaned cancellation was detected.
         detected_at: Time,
+        /// Optional stack trace captured at detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 
     /// Concurrent cancellation signals violated ordering requirements.
     ConcurrentOrderingViolation {
+        /// ID of the first task involved in the violation.
         first_task: TaskId,
+        /// ID of the second task involved in the violation.
         second_task: TaskId,
+        /// ID of the first region.
         first_region: RegionId,
+        /// ID of the second region.
         second_region: RegionId,
+        /// Timestamp when the first task was cancelled.
         first_cancel_time: Time,
+        /// Timestamp when the second task was cancelled.
         second_cancel_time: Time,
-        relationship: String, // describes the parent-child relationship
+        /// Description of the parent-child relationship between tasks.
+        relationship: String,
+        /// Optional stack trace captured at violation detection time.
         stack_trace: Option<Arc<Backtrace>>,
     },
 }

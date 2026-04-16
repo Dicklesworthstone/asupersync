@@ -20,6 +20,7 @@ pub struct Chain<S1, S2> {
 
 impl<S1, S2> Chain<S1, S2> {
     /// Creates a new `Chain` stream.
+    #[inline]
     pub(crate) fn new(first: S1, second: S2) -> Self {
         Self {
             first: Some(first),
@@ -29,26 +30,31 @@ impl<S1, S2> Chain<S1, S2> {
     }
 
     /// Returns a reference to the first stream, if still active.
+    #[inline]
     pub fn first_ref(&self) -> Option<&S1> {
         self.first.as_ref()
     }
 
     /// Returns a mutable reference to the first stream, if still active.
+    #[inline]
     pub fn first_mut(&mut self) -> Option<&mut S1> {
         self.first.as_mut()
     }
 
     /// Returns a reference to the second stream.
+    #[inline]
     pub fn second_ref(&self) -> &S2 {
         &self.second
     }
 
     /// Returns a mutable reference to the second stream.
+    #[inline]
     pub fn second_mut(&mut self) -> &mut S2 {
         &mut self.second
     }
 
     /// Consumes the combinator, returning the two underlying streams.
+    #[inline]
     pub fn into_inner(self) -> (Option<S1>, S2) {
         (self.first, self.second)
     }
@@ -88,6 +94,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.done {
             return (0, Some(0));

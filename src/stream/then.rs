@@ -20,6 +20,7 @@ pub struct Then<S, Fut, F> {
 }
 
 impl<S, Fut, F> Then<S, Fut, F> {
+    #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {
             stream,
@@ -70,6 +71,7 @@ where
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.done {
             return (0, Some(0));

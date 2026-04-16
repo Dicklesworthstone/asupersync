@@ -55,6 +55,7 @@ impl Bytes {
     /// Create an empty `Bytes`.
     ///
     /// No allocation occurs.
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -76,6 +77,7 @@ impl Bytes {
     /// let b = Bytes::from_static(b"hello");
     /// assert_eq!(&b[..], b"hello");
     /// ```
+    #[inline]
     #[must_use]
     pub const fn from_static(bytes: &'static [u8]) -> Self {
         Self {
@@ -98,6 +100,7 @@ impl Bytes {
     /// let b = Bytes::copy_from_slice(&data);
     /// assert_eq!(&b[..], &[1, 2, 3, 4, 5]);
     /// ```
+    #[inline]
     #[must_use]
     pub fn copy_from_slice(data: &[u8]) -> Self {
         if data.is_empty() {
@@ -246,6 +249,7 @@ impl Bytes {
     /// Truncate the buffer to `len` bytes.
     ///
     /// If `len` is greater than the current length, this has no effect.
+    #[inline]
     pub fn truncate(&mut self, len: usize) {
         if len < self.len {
             self.len = len;
