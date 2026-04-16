@@ -423,7 +423,7 @@ impl EpochConsistencyTracker {
     }
 
     /// Notifies the tracker that a module is starting an epoch transition.
-    pub fn notify_epoch_transition_start(&self, module: ModuleId, from_epoch: EpochId, now: Time) {
+    pub fn notify_epoch_transition_start(&self, module: ModuleId, _from_epoch: EpochId, now: Time) {
         if !self.config.enabled {
             return;
         }
@@ -567,13 +567,13 @@ impl EpochConsistencyTracker {
     /// Records a violation, maintaining bounded storage.
     fn record_violation(&self, violation: EpochConsistencyViolation) {
         // Generate correlation ID for this violation
-        let violation_id = self.global_transition_count.load(Ordering::Relaxed);
+        let _violation_id = self.global_transition_count.load(Ordering::Relaxed);
 
         // Extract structured logging information based on violation type
         match &violation {
             EpochConsistencyViolation::ModuleDesync {
                 modules,
-                detected_at,
+                detected_at: _,
                 max_skew,
             } => {
                 let affected_modules: Vec<String> = modules
