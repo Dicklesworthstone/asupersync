@@ -460,15 +460,21 @@ impl CancellationVisualizer {
         match anomaly {
             PropagationAnomaly::SlowPropagation { elapsed, threshold, .. } => {
                 format!("Slow propagation: {} (threshold: {})",
-                    self.format_duration(*delay),
+                    self.format_duration(*elapsed),
                     self.format_duration(*threshold))
             }
             PropagationAnomaly::StuckCancellation { stuck_duration, .. } => {
                 format!("Stuck cancellation: timeout after {}",
-                    self.format_duration(*timeout))
+                    self.format_duration(*stuck_duration))
             }
             PropagationAnomaly::IncorrectPropagationOrder { parent_entity, child_entity, .. } => {
-                format!("Incorrect ordering: expected {}, got {}", expected, actual)
+                format!("Incorrect ordering: parent {} before child {}", parent_entity, child_entity)
+            }
+            PropagationAnomaly::UnexpectedPropagation { description, .. } => {
+                format!("Unexpected propagation: {}", description)
+            }
+            PropagationAnomaly::ExcessiveDepth { depth, entity_id } => {
+                format!("Excessive depth: {} levels for entity {}", depth, entity_id)
             }
         }
     }
@@ -477,9 +483,9 @@ impl CancellationVisualizer {
     fn anomaly_severity(&self, anomaly: &PropagationAnomaly) -> AnomalySeverity {
         match anomaly {
             PropagationAnomaly::SlowPropagation { elapsed, .. } => {
-                if delay.as_millis() > 1000 {
+                if elapsed.as_millis() > 1000 {
                     AnomalySeverity::High
-                } else if delay.as_millis() > 100 {
+                } else if elapsed.as_millis() > 100 {
                     AnomalySeverity::Medium
                 } else {
                     AnomalySeverity::Low
@@ -487,6 +493,8 @@ impl CancellationVisualizer {
             }
             PropagationAnomaly::StuckCancellation { .. } => AnomalySeverity::Critical,
             PropagationAnomaly::IncorrectPropagationOrder { .. } => AnomalySeverity::High,
+            PropagationAnomaly::UnexpectedPropagation { .. } => AnomalySeverity::Medium,
+            PropagationAnomaly::ExcessiveDepth { .. } => AnomalySeverity::Medium,
         }
     }
 
@@ -495,7 +503,7 @@ impl CancellationVisualizer {
         // Simple check - could be more sophisticated
         match anomaly {
             PropagationAnomaly::SlowPropagation { elapsed, .. } => {
-                step.elapsed_since_prev >= *delay
+                step.elapsed_since_prev >= *elapsed
             }
             _ => false, // Would need entity tracking for other anomaly types
         }

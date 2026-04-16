@@ -37,9 +37,11 @@
 
 pub mod analyzer_plugin;
 pub mod cancellation_analyzer;
+pub mod cancellation_debt_monitor;
 pub mod cancellation_tracer;
 pub mod cancellation_visualizer;
 pub mod collector;
+pub mod debt_runtime_integration;
 pub mod runtime_integration;
 pub mod structured_cancellation_analyzer;
 pub mod context;
@@ -78,6 +80,11 @@ pub use cancellation_visualizer::{
     AnomalyInfo, AnomalySeverity, BottleneckInfo, CancellationDashboard, CancellationTreeNode,
     CancellationVisualizer, ThroughputStats, TimingFormat, VisualizerConfig,
 };
+pub use cancellation_debt_monitor::{
+    CancellationDebtConfig, CancellationDebtMonitor, DebtAlert, DebtAlertLevel, DebtSnapshot,
+    PendingWork, WorkType,
+};
+pub use debt_runtime_integration::{DebtHealthReport, DebtRuntimeIntegration};
 pub use structured_cancellation_analyzer::{
     AlertSeverity, AlertType, CancellationAlert, LabRuntimeIntegration, RealTimeStats,
     StructuredCancellationAnalyzer, StructuredCancellationConfig,
