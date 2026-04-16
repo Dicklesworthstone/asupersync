@@ -861,14 +861,15 @@ mod tests {
     #[test]
     fn test_region_lifecycle_tracking() {
         let mut oracle = RegionLeakOracle::with_strict_timeouts();
+        let region_id = RegionId::new_for_test(1, 0);
 
         // Create a region
-        oracle.on_region_created(1, None, None, Budget::INFINITE);
+        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
 
         // Activate and close it properly
-        oracle.on_region_activated(1);
-        oracle.on_region_closing(1, 0);
-        oracle.on_region_closed(1);
+        oracle.on_region_activated(region_id);
+        oracle.on_region_closing(region_id, 0);
+        oracle.on_region_closed(region_id);
 
         // Should have no violations
         let violations = oracle.check_for_violations().unwrap();
@@ -878,9 +879,10 @@ mod tests {
     #[test]
     fn test_stuck_region_detection() {
         let mut oracle = RegionLeakOracle::with_strict_timeouts();
+        let region_id = RegionId::new_for_test(1, 0);
 
         // Create a region but never activate it
-        oracle.on_region_created(1, None, None, Budget::INFINITE);
+        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
 
         // Wait longer than timeout would allow
         std::thread::sleep(Duration::from_millis(50));
@@ -897,17 +899,19 @@ mod tests {
     #[test]
     fn test_task_tracking() {
         let mut oracle = RegionLeakOracle::with_defaults();
+        let region_id = RegionId::new_for_test(1, 0);
+        let task_id = TaskId::new_for_test(100, 0);
 
         // Create region and spawn task
-        oracle.on_region_created(1, None, None, Budget::INFINITE);
-        oracle.on_task_spawned(100, 1, None);
+        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
+        oracle.on_task_spawned(task_id, region_id, None);
 
         // Complete task
-        oracle.on_task_completed(100, Outcome::Ok(()));
+        oracle.on_task_completed(task_id, Outcome::Ok(()));
 
         // Close region
-        oracle.on_region_closing(1, 0);
-        oracle.on_region_closed(1);
+        oracle.on_region_closing(region_id, 0);
+        oracle.on_region_closed(region_id);
 
         // Should have no violations
         let violations = oracle.check_for_violations().unwrap();
@@ -921,14 +925,16 @@ mod tests {
     #[test]
     fn test_orphaned_task_detection() {
         let mut oracle = RegionLeakOracle::with_defaults();
+        let region_id = RegionId::new_for_test(1, 0);
+        let task_id = TaskId::new_for_test(100, 0);
 
         // Create region and spawn task
-        oracle.on_region_created(1, None, None, Budget::INFINITE);
-        oracle.on_task_spawned(100, 1, None);
+        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
+        oracle.on_task_spawned(task_id, region_id, None);
 
         // Close region without completing task (violation!)
-        oracle.on_region_closing(1, 0);
-        oracle.on_region_closed(1);
+        oracle.on_region_closing(region_id, 0);
+        oracle.on_region_closed(region_id);
 
         // Should detect orphaned tasks
         let violations = oracle.check_for_violations().unwrap();
