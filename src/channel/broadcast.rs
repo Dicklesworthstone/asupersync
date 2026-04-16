@@ -363,7 +363,6 @@ impl<T> Receiver<T> {
 }
 
 impl<T: Clone> Receiver<T> {
-
     /// Attempts to receive the next message without blocking.
     ///
     /// # Errors

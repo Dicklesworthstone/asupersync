@@ -67,12 +67,14 @@ pub enum FinalizerEscalation {
 
 impl FinalizerEscalation {
     /// Returns true if this policy allows continuing after budget exhaustion.
+    #[inline]
     #[must_use]
     pub const fn allows_continuation(self) -> bool {
         matches!(self, Self::BoundedLog)
     }
 
     /// Returns true if this policy requires waiting indefinitely.
+    #[inline]
     #[must_use]
     pub const fn is_soft(self) -> bool {
         matches!(self, Self::Soft)

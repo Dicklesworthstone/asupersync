@@ -449,6 +449,7 @@ impl OwnedSemaphorePermit {
     }
 
     /// Tries to acquire an owned permit without waiting.
+    #[inline]
     pub fn try_acquire(
         semaphore: std::sync::Arc<Semaphore>,
         count: usize,
@@ -465,6 +466,7 @@ impl OwnedSemaphorePermit {
     ///
     /// This avoids an `Arc::clone` + refcount round-trip when the semaphore
     /// has no available permits (the common contended case).
+    #[inline]
     pub fn try_acquire_arc(
         semaphore: &std::sync::Arc<Semaphore>,
         count: usize,
@@ -565,6 +567,7 @@ impl Drop for OwnedAcquireFuture {
 impl Future for OwnedAcquireFuture {
     type Output = Result<OwnedSemaphorePermit, AcquireError>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if this.completed {
