@@ -149,6 +149,7 @@ pub enum ErrorKind {
 impl ErrorKind {
     /// Returns the error category for this kind.
     #[must_use]
+    #[inline]
     pub const fn category(&self) -> ErrorCategory {
         match self {
             Self::Cancelled | Self::CancelTimeout => ErrorCategory::Cancellation,
@@ -192,6 +193,7 @@ impl ErrorKind {
     ///
     /// This helps retry logic decide whether to attempt recovery.
     #[must_use]
+    #[inline]
     pub const fn recoverability(&self) -> Recoverability {
         match self {
             // Transient errors - safe to retry
