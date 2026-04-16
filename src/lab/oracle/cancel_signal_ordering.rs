@@ -224,6 +224,23 @@ struct CancelSignal {
     parent_region: Option<RegionId>,
 }
 
+/// Snapshot of a tracked cancellation signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelSignalSnapshot {
+    /// Task receiving the cancellation signal.
+    pub task_id: TaskId,
+    /// Region containing the task.
+    pub region_id: RegionId,
+    /// Time when the signal was observed.
+    pub cancel_time: Time,
+    /// Cancellation reason carried by the signal.
+    pub cancel_reason: CancelReason,
+    /// Parent task in the structured concurrency tree, if known.
+    pub parent_task: Option<TaskId>,
+    /// Parent region in the structured concurrency tree, if known.
+    pub parent_region: Option<RegionId>,
+}
+
 /// Tracked state for cancel signal ordering.
 #[derive(Debug)]
 struct OrderingState {
@@ -469,6 +486,25 @@ impl CancelOrderingOracle {
     pub fn get_recent_violations(&self, limit: usize) -> Vec<CancelOrderingViolation> {
         let violations = self.violations.read();
         violations.iter().rev().take(limit).cloned().collect()
+    }
+
+    /// Returns snapshots of the tracked cancellation signals.
+    pub fn tracked_signals(&self) -> Vec<CancelSignalSnapshot> {
+        let state = self.state.read();
+        let mut snapshots = state
+            .cancel_signals
+            .iter()
+            .map(|signal| CancelSignalSnapshot {
+                task_id: signal.task_id,
+                region_id: signal.region_id,
+                cancel_time: signal.cancel_time,
+                cancel_reason: signal.cancel_reason.clone(),
+                parent_task: signal.parent_task,
+                parent_region: signal.parent_region,
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|snapshot| snapshot.task_id);
+        snapshots
     }
 
     fn check_signal_ordering(&self, state: &OrderingState, new_signal: &CancelSignal) {
@@ -828,5 +864,33 @@ mod tests {
             }
             other => panic!("Expected MissingChildCancellation, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_tracked_signals_preserve_reason_and_ancestry() {
+        init_test_logging();
+
+        let oracle = CancelOrderingOracle::with_default_config();
+        let parent_task = TaskId::testing_default();
+        let child_task = TaskId::from_u64(2);
+        let parent_region = RegionId::testing_default();
+        let child_region = RegionId::from_u64(2);
+
+        oracle.on_task_spawned(parent_task, child_task, parent_region, child_region);
+
+        let reason = CancelReason::user("ordered shutdown");
+        let cancel_time = Time::from_nanos(1234);
+        oracle.on_cancel_signal(child_task, child_region, cancel_time, reason.clone());
+
+        let tracked = oracle.tracked_signals();
+        assert_eq!(tracked.len(), 1);
+
+        let snapshot = &tracked[0];
+        assert_eq!(snapshot.task_id, child_task);
+        assert_eq!(snapshot.region_id, child_region);
+        assert_eq!(snapshot.cancel_time, cancel_time);
+        assert_eq!(snapshot.cancel_reason, reason);
+        assert_eq!(snapshot.parent_task, Some(parent_task));
+        assert_eq!(snapshot.parent_region, Some(parent_region));
     }
 }
