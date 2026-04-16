@@ -765,7 +765,6 @@ impl Clone for Sleep {
 /// ```
 #[must_use]
 #[inline]
-#[inline]
 pub fn sleep(now: Time, duration: Duration) -> Sleep {
     Sleep::after(now, duration)
 }
