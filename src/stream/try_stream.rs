@@ -83,6 +83,7 @@ where
 {
     type Output = Result<C, TryStreamError<E>>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
@@ -148,6 +149,7 @@ where
 {
     type Output = Result<Acc, TryStreamError<E>>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
@@ -224,6 +226,7 @@ where
 {
     type Output = Result<(), TryStreamError<E>>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
