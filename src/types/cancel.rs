@@ -982,48 +982,56 @@ impl CancelReason {
     // ========================================================================
 
     /// Returns the kind of this cancellation reason.
+    #[inline]
     #[must_use]
     pub const fn kind(&self) -> CancelKind {
         self.kind
     }
 
     /// Returns the origin region of this cancellation.
+    #[inline]
     #[must_use]
     pub const fn origin_region(&self) -> RegionId {
         self.origin_region
     }
 
     /// Returns the origin task of this cancellation (if any).
+    #[inline]
     #[must_use]
     pub const fn origin_task(&self) -> Option<TaskId> {
         self.origin_task
     }
 
     /// Returns the timestamp when this cancellation was requested.
+    #[inline]
     #[must_use]
     pub const fn timestamp(&self) -> Time {
         self.timestamp
     }
 
     /// Returns the message associated with this cancellation (if any).
+    #[inline]
     #[must_use]
     pub const fn message(&self) -> Option<&'static str> {
         self.message
     }
 
     /// Returns a reference to the parent cause (if any).
+    #[inline]
     #[must_use]
     pub fn cause(&self) -> Option<&Self> {
         self.cause.as_deref()
     }
 
     /// Returns true if this reason's cause chain was truncated due to limits.
+    #[inline]
     #[must_use]
     pub const fn is_truncated(&self) -> bool {
         self.truncated
     }
 
     /// Returns the depth at which truncation occurred (if any).
+    #[inline]
     #[must_use]
     pub const fn truncated_at_depth(&self) -> Option<usize> {
         self.truncated_at_depth
