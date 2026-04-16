@@ -323,8 +323,17 @@ impl SparseRow {
     }
 
     /// Returns the element at the given index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= self.len()`.
     #[must_use]
     pub fn get(&self, index: usize) -> Gf256 {
+        assert!(
+            index < self.len,
+            "sparse row index out of range: {index} >= {}",
+            self.len
+        );
         self.entries
             .binary_search_by_key(&index, |(i, _)| *i)
             .map_or(Gf256::ZERO, |pos| self.entries[pos].1)
@@ -1172,6 +1181,13 @@ mod tests {
         assert_eq!(row.get(1), Gf256::new(10));
         assert_eq!(row.get(3), Gf256::new(30));
         assert_eq!(row.first_nonzero(), Some(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "sparse row index out of range: 5 >= 5")]
+    fn sparse_row_get_rejects_out_of_range_indices() {
+        let row = SparseRow::new(vec![(1, Gf256::new(10)), (3, Gf256::new(30))], 5);
+        let _ = row.get(5);
     }
 
     #[test]
