@@ -1539,6 +1539,11 @@ pub struct PreemptionMetrics {
     /// This records the largest number of consecutive cancel dispatches that a
     /// due timed task actually waited through before being selected.
     pub max_timed_dispatch_stall: usize,
+    /// Number of times a lower-priority global ready dispatch bypassed a
+    /// higher-priority local ready task.
+    pub ready_priority_inversions: u64,
+    /// Largest observed priority gap for a ready-lane inversion.
+    pub max_ready_priority_inversion_gap: u8,
     /// Maximum cancel streak observed.
     pub max_cancel_streak: usize,
     /// Fallback cancel dispatches (after limit, no other work available).
@@ -2142,6 +2147,10 @@ pub struct PreemptionFairnessCertificate {
     pub observed_max_ready_stall_steps: usize,
     /// Largest observed cancel streak immediately before a timed dispatch.
     pub observed_max_timed_stall_steps: usize,
+    /// Number of observed ready-lane priority inversions.
+    pub ready_priority_inversions: u64,
+    /// Largest observed ready-lane priority gap when an inversion occurred.
+    pub max_ready_priority_inversion_gap: u8,
     /// Fallback cancel dispatches used when no other work existed.
     pub fallback_cancel_dispatches: u64,
     /// Count of streak samples above baseline `L`.
@@ -2176,6 +2185,7 @@ impl PreemptionFairnessCertificate {
     pub fn invariant_holds(&self) -> bool {
         self.effective_limit_exceedances == 0
             && self.observed_max_cancel_streak <= self.effective_limit
+            && self.ready_priority_inversions == 0
     }
 
     /// Deterministic hash of the certificate contents for replay/audit linkage.
@@ -2193,6 +2203,8 @@ impl PreemptionFairnessCertificate {
         self.fairness_yields.hash(&mut h);
         self.observed_max_ready_stall_steps.hash(&mut h);
         self.observed_max_timed_stall_steps.hash(&mut h);
+        self.ready_priority_inversions.hash(&mut h);
+        self.max_ready_priority_inversion_gap.hash(&mut h);
         self.fallback_cancel_dispatches.hash(&mut h);
         self.base_limit_exceedances.hash(&mut h);
         self.effective_limit_exceedances.hash(&mut h);
@@ -2310,6 +2322,10 @@ impl ThreeLaneWorker {
             fairness_yields: self.preemption_metrics.fairness_yields,
             observed_max_ready_stall_steps: self.preemption_metrics.max_ready_dispatch_stall,
             observed_max_timed_stall_steps: self.preemption_metrics.max_timed_dispatch_stall,
+            ready_priority_inversions: self.preemption_metrics.ready_priority_inversions,
+            max_ready_priority_inversion_gap: self
+                .preemption_metrics
+                .max_ready_priority_inversion_gap,
             fallback_cancel_dispatches: self.preemption_metrics.fallback_cancel_dispatches,
             base_limit_exceedances: self.preemption_metrics.base_limit_exceedances,
             effective_limit_exceedances: self.preemption_metrics.effective_limit_exceedances,
@@ -2899,6 +2915,11 @@ impl ThreeLaneWorker {
         };
         if blocked_priority <= executing_priority {
             return;
+        }
+        self.preemption_metrics.ready_priority_inversions += 1;
+        let gap = blocked_priority.saturating_sub(executing_priority);
+        if gap > self.preemption_metrics.max_ready_priority_inversion_gap {
+            self.preemption_metrics.max_ready_priority_inversion_gap = gap;
         }
         self.fairness_monitor.record_priority_inversion(
             blocked_task,
@@ -6442,8 +6463,18 @@ mod tests {
 
         let metrics = worker.preemption_metrics();
         assert_eq!(metrics.ready_dispatches, 1);
+        assert_eq!(metrics.ready_priority_inversions, 1);
+        assert_eq!(metrics.max_ready_priority_inversion_gap, 190);
         let starvation_stats = worker.starvation_stats();
         assert_eq!(starvation_stats.total_priority_inversions, 1);
+
+        let cert = worker.preemption_fairness_certificate();
+        assert_eq!(cert.ready_priority_inversions, 1);
+        assert_eq!(cert.max_ready_priority_inversion_gap, 190);
+        assert!(
+            !cert.invariant_holds(),
+            "priority inversions should invalidate the scheduler certificate"
+        );
     }
 
     #[test]
@@ -6472,6 +6503,14 @@ mod tests {
 
         let starvation_stats = worker.starvation_stats();
         assert_eq!(starvation_stats.total_priority_inversions, 0);
+
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.ready_priority_inversions, 0);
+        assert_eq!(metrics.max_ready_priority_inversion_gap, 0);
+
+        let cert = worker.preemption_fairness_certificate();
+        assert_eq!(cert.ready_priority_inversions, 0);
+        assert_eq!(cert.max_ready_priority_inversion_gap, 0);
     }
 
     #[test]

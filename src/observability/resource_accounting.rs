@@ -581,10 +581,23 @@ impl ResourceAccountingSnapshot {
         self.admission_stats.iter().map(|s| s.rejections).sum()
     }
 
+    /// Returns true if any obligations remain unresolved in the snapshot.
+    #[must_use]
+    pub fn has_unresolved_obligations(&self) -> bool {
+        self.obligations_pending > 0
+    }
+
     /// Returns true if no obligations have ever leaked.
     #[must_use]
     pub fn is_leak_free(&self) -> bool {
         self.total_leaked() == 0
+    }
+
+    /// Returns true when cleanup has fully completed: no explicit leaks and no
+    /// unresolved obligations still pending.
+    #[must_use]
+    pub fn is_cleanup_complete(&self) -> bool {
+        self.is_leak_free() && !self.has_unresolved_obligations()
     }
 
     /// Renders a human-readable summary.
@@ -615,6 +628,16 @@ impl ResourceAccountingSnapshot {
             out,
             "  Total pending: {}  Peak: {}",
             self.obligations_pending, self.obligations_peak
+        )
+        .ok();
+        writeln!(
+            out,
+            "  Cleanup complete: {}",
+            if self.is_cleanup_complete() {
+                "yes"
+            } else {
+                "no"
+            }
         )
         .ok();
         writeln!(out).ok();
@@ -828,6 +851,22 @@ mod tests {
 
         let snap = acc.snapshot();
         assert!(snap.is_leak_free());
+        assert!(snap.is_cleanup_complete());
+    }
+
+    #[test]
+    fn pending_obligations_block_cleanup_completion() {
+        let acc = ResourceAccounting::new();
+
+        acc.obligation_reserved(ObligationKind::SendPermit);
+
+        let snap = acc.snapshot();
+        assert!(snap.is_leak_free(), "pending is not an explicit leak");
+        assert!(snap.has_unresolved_obligations());
+        assert!(
+            !snap.is_cleanup_complete(),
+            "cleanup is incomplete while obligations remain pending"
+        );
     }
 
     #[test]
@@ -894,6 +933,7 @@ mod tests {
         assert!(summary.contains("send_permit"));
         assert!(summary.contains("Task"));
         assert!(summary.contains("Poll consumed"));
+        assert!(summary.contains("Cleanup complete: yes"));
     }
 
     #[test]

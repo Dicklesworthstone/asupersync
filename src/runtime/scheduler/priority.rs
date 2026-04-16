@@ -1013,6 +1013,20 @@ impl Scheduler {
             }
         }
 
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                out.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+                "stolen ready batch must preserve non-increasing priority order"
+            );
+            let mut seen = std::collections::BTreeSet::new();
+            let duplicate_free = out.iter().all(|(task, _)| seen.insert(*task));
+            debug_assert!(
+                duplicate_free,
+                "stolen ready batch must not contain duplicate task ids"
+            );
+        }
+
         stolen
     }
 
@@ -1044,6 +1058,13 @@ impl Scheduler {
         self.ready_lane
             .peek()
             .map(|entry| (entry.task, entry.priority))
+    }
+
+    /// Returns the highest ready-lane priority currently pending.
+    #[inline]
+    #[must_use]
+    pub fn peek_ready_priority(&self) -> Option<u8> {
+        self.ready_lane.peek().map(|entry| entry.priority)
     }
 
     /// Clears all scheduled tasks.
@@ -2125,6 +2146,152 @@ mod tests {
             buf[0].0
         );
         crate::test_complete!("steal_ready_batch_into_clears_buffer");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_preserves_priority_order() {
+        init_test("steal_ready_batch_into_preserves_priority_order");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 10);
+        sched.schedule(task(2), 90);
+        sched.schedule(task(3), 50);
+        sched.schedule(task(4), 80);
+        sched.schedule(task(5), 20);
+        sched.schedule(task(6), 70);
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(3, &mut buf);
+
+        crate::assert_with_log!(count == 3, "stole requested batch", 3usize, count);
+        crate::assert_with_log!(
+            buf.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+            "stolen batch preserves non-increasing priority order",
+            true,
+            buf.windows(2).all(|pair| pair[0].1 >= pair[1].1)
+        );
+        crate::assert_with_log!(
+            buf[0] == (task(2), 90),
+            "highest priority first",
+            (task(2), 90),
+            buf[0]
+        );
+        crate::assert_with_log!(
+            buf[1] == (task(4), 80),
+            "second-highest priority second",
+            (task(4), 80),
+            buf[1]
+        );
+        crate::assert_with_log!(
+            buf[2] == (task(6), 70),
+            "third-highest priority third",
+            (task(6), 70),
+            buf[2]
+        );
+        crate::test_complete!("steal_ready_batch_into_preserves_priority_order");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_preserves_fifo_within_priority() {
+        init_test("steal_ready_batch_into_preserves_fifo_within_priority");
+        let mut sched = Scheduler::new();
+        for i in 0..6 {
+            sched.schedule(task(i), 50);
+        }
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(3, &mut buf);
+
+        crate::assert_with_log!(count == 3, "stole requested batch", 3usize, count);
+        crate::assert_with_log!(
+            buf == vec![(task(0), 50), (task(1), 50), (task(2), 50)],
+            "equal-priority steals preserve FIFO generation order",
+            vec![(task(0), 50), (task(1), 50), (task(2), 50)],
+            buf.clone()
+        );
+        crate::test_complete!("steal_ready_batch_into_preserves_fifo_within_priority");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_respects_half_steal_after_cancel_promotion() {
+        init_test("steal_ready_batch_into_respects_half_steal_after_cancel_promotion");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 90);
+        sched.schedule(task(2), 80);
+        sched.schedule(task(3), 70);
+        sched.schedule(task(4), 60);
+        sched.schedule(task(5), 50);
+        sched.schedule(task(6), 40);
+
+        // Promote the two highest-priority ready tasks into the cancel lane
+        // before stealing from the remaining live ready set.
+        sched.move_to_cancel_lane(task(1), 200);
+        sched.move_to_cancel_lane(task(2), 200);
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(3, &mut buf);
+
+        crate::assert_with_log!(
+            count == 2,
+            "half-steal is computed over remaining live ready tasks",
+            2usize,
+            count
+        );
+        crate::assert_with_log!(
+            buf == vec![(task(3), 70), (task(4), 60)],
+            "promoted tasks leave the ready lane and the remaining half-steal keeps priority order",
+            vec![(task(3), 70), (task(4), 60)],
+            buf.clone()
+        );
+
+        let (first, lane1) = sched.pop_with_lane(0).expect("first cancel task");
+        crate::assert_with_log!(
+            first == task(1),
+            "first promoted task remains in cancel lane",
+            task(1),
+            first
+        );
+        crate::assert_with_log!(
+            matches!(lane1, DispatchLane::Cancel),
+            "first promoted lane is cancel",
+            true,
+            true
+        );
+
+        let (second, lane2) = sched.pop_with_lane(0).expect("second cancel task");
+        crate::assert_with_log!(
+            second == task(2),
+            "second promoted task remains in cancel lane",
+            task(2),
+            second
+        );
+        crate::assert_with_log!(
+            matches!(lane2, DispatchLane::Cancel),
+            "second promoted lane is cancel",
+            true,
+            true
+        );
+
+        let remaining = sched.pop_with_lane(0);
+        crate::assert_with_log!(
+            remaining == Some((task(5), DispatchLane::Ready)),
+            "highest-priority unstolen ready task remains after cancel and steal activity",
+            Some((task(5), DispatchLane::Ready)),
+            remaining
+        );
+        let final_ready = sched.pop_with_lane(0);
+        crate::assert_with_log!(
+            final_ready == Some((task(6), DispatchLane::Ready)),
+            "lowest-priority ready task drains last",
+            Some((task(6), DispatchLane::Ready)),
+            final_ready
+        );
+        crate::assert_with_log!(
+            sched.is_empty(),
+            "scheduler drained cleanly",
+            true,
+            sched.is_empty()
+        );
+        crate::test_complete!("steal_ready_batch_into_respects_half_steal_after_cancel_promotion");
     }
 
     // ── pop_timed_only edge cases ─────────────────────────────────────────
