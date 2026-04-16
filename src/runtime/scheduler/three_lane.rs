@@ -2682,10 +2682,21 @@ impl ThreeLaneWorker {
             return Some(self.finish_dispatch(task));
         }
         if let Some(task) = self.fast_queue.pop() {
+            let blocked_local_task = {
+                let local = self.local.lock();
+                local.peek_ready_task()
+            };
+            let dispatched_priority = self.task_sched_priority(task);
+            self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
+            let blocked_local_task = {
+                let local = self.local.lock();
+                local.peek_ready_task()
+            };
+            self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(pt.task));
         }
@@ -2781,6 +2792,35 @@ impl ThreeLaneWorker {
         self.cancel_streak = 0;
         self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
         self.preemption_metrics.ready_dispatches += 1;
+    }
+
+    fn record_ready_priority_inversion(
+        &mut self,
+        blocked_task: Option<(TaskId, u8)>,
+        executing_task: TaskId,
+        executing_priority: Option<u8>,
+    ) {
+        let Some((blocked_task, blocked_priority)) = blocked_task else {
+            return;
+        };
+        let Some(executing_priority) = executing_priority else {
+            return;
+        };
+        if blocked_priority <= executing_priority {
+            return;
+        }
+        self.fairness_monitor.record_priority_inversion(
+            blocked_task,
+            blocked_priority,
+            executing_task,
+            executing_priority,
+            self.current_time_ns(),
+        );
+    }
+
+    #[inline]
+    fn task_sched_priority(&self, task: TaskId) -> Option<u8> {
+        self.with_task_table_ref(|tt| tt.task(task).map(|record| record.sched_priority))
     }
 
     #[inline]
@@ -6279,6 +6319,103 @@ mod tests {
         assert_eq!(cert.observed_max_timed_stall_steps, limit);
         assert_eq!(cert.observed_non_cancel_stall_steps(), limit);
         assert!(cert.invariant_holds());
+    }
+
+    #[test]
+    fn test_global_ready_dispatch_records_local_priority_inversion() {
+        let state = LocalQueue::test_state(32);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        let low_global = TaskId::new_for_test(21, 0);
+        let high_local = TaskId::new_for_test(22, 0);
+        scheduler.workers[0].with_task_table(|tt| {
+            tt.task_mut(low_global)
+                .expect("global task record missing")
+                .sched_priority = 10;
+            tt.task_mut(high_local)
+                .expect("local task record missing")
+                .sched_priority = 200;
+        });
+        scheduler.inject_ready(low_global, 10);
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        worker.schedule_local(high_local, 200);
+
+        let dispatched = worker.next_task();
+        assert_eq!(
+            dispatched,
+            Some(low_global),
+            "global ready queue currently dispatches before local ready heap"
+        );
+
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.ready_dispatches, 1);
+        let stats = worker.starvation_stats();
+        assert_eq!(stats.total_priority_inversions, 1);
+    }
+
+    #[test]
+    fn test_global_ready_dispatch_skips_inversion_when_local_priority_is_not_higher() {
+        let state = LocalQueue::test_state(32);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        let high_global = TaskId::new_for_test(23, 0);
+        let lower_local = TaskId::new_for_test(24, 0);
+        scheduler.workers[0].with_task_table(|tt| {
+            tt.task_mut(high_global)
+                .expect("global task record missing")
+                .sched_priority = 200;
+            tt.task_mut(lower_local)
+                .expect("local task record missing")
+                .sched_priority = 10;
+        });
+        scheduler.inject_ready(high_global, 200);
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        worker.schedule_local(lower_local, 10);
+
+        let dispatched = worker.next_task();
+        assert_eq!(dispatched, Some(high_global));
+
+        let stats = worker.starvation_stats();
+        assert_eq!(stats.total_priority_inversions, 0);
+    }
+
+    #[test]
+    fn test_fast_queue_dispatch_records_local_priority_inversion() {
+        let state = LocalQueue::test_state(32);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let low_fast = TaskId::new_for_test(23, 0);
+        let high_local = TaskId::new_for_test(24, 0);
+
+        worker.with_task_table(|tt| {
+            tt.task_mut(low_fast)
+                .expect("fast task record missing")
+                .sched_priority = 10;
+            tt.task_mut(high_local)
+                .expect("local task record missing")
+                .sched_priority = 200;
+        });
+
+        worker.fast_queue.push(low_fast);
+        worker.schedule_local(high_local, 200);
+
+        let dispatched = worker.next_task();
+        assert_eq!(
+            dispatched,
+            Some(low_fast),
+            "fast_queue currently dispatches before the local ready heap"
+        );
+
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.ready_dispatches, 1);
+        let stats = worker.starvation_stats();
+        assert_eq!(stats.total_priority_inversions, 1);
     }
 
     #[test]
