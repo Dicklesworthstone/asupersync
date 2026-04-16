@@ -49,6 +49,7 @@ pub struct WakerId(pub u64);
 
 /// Configuration for the Channel Atomicity Oracle
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ChannelAtomicityConfig {
     /// Whether to track reservation lifecycles
     pub track_reservations: bool,
@@ -205,9 +206,10 @@ pub enum ChannelAtomicityViolation {
 }
 
 impl std::fmt::Display for ChannelAtomicityViolation {
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChannelAtomicityViolation::ReservationLeak {
+            Self::ReservationLeak {
                 reservation_id,
                 channel_id,
                 created_at,
@@ -215,15 +217,14 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Reservation leak: {:?} on channel {:?} created at {:?}",
-                    reservation_id, channel_id, created_at
+                    "Reservation leak: {reservation_id:?} on channel {channel_id:?} created at {created_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            ChannelAtomicityViolation::DoubleCommit {
+            Self::DoubleCommit {
                 reservation_id,
                 channel_id,
                 first_commit_at,
@@ -232,15 +233,14 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Double commit: {:?} on channel {:?} first at {:?}, second at {:?}",
-                    reservation_id, channel_id, first_commit_at, second_commit_at
+                    "Double commit: {reservation_id:?} on channel {channel_id:?} first at {first_commit_at:?}, second at {second_commit_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            ChannelAtomicityViolation::DoubleAbort {
+            Self::DoubleAbort {
                 reservation_id,
                 channel_id,
                 first_abort_at,
@@ -249,15 +249,14 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Double abort: {:?} on channel {:?} first at {:?}, second at {:?}",
-                    reservation_id, channel_id, first_abort_at, second_abort_at
+                    "Double abort: {reservation_id:?} on channel {channel_id:?} first at {first_abort_at:?}, second at {second_abort_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            ChannelAtomicityViolation::UseAfterCommit {
+            Self::UseAfterCommit {
                 reservation_id,
                 channel_id,
                 commit_at,
@@ -267,15 +266,14 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Use after commit: {:?} on channel {:?} committed at {:?}, used at {:?} for {}",
-                    reservation_id, channel_id, commit_at, use_at, operation
+                    "Use after commit: {reservation_id:?} on channel {channel_id:?} committed at {commit_at:?}, used at {use_at:?} for {operation}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            ChannelAtomicityViolation::UseAfterAbort {
+            Self::UseAfterAbort {
                 reservation_id,
                 channel_id,
                 abort_at,
@@ -285,15 +283,14 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Use after abort: {:?} on channel {:?} aborted at {:?}, used at {:?} for {}",
-                    reservation_id, channel_id, abort_at, use_at, operation
+                    "Use after abort: {reservation_id:?} on channel {channel_id:?} aborted at {abort_at:?}, used at {use_at:?} for {operation}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            ChannelAtomicityViolation::LostWakeup {
+            Self::LostWakeup {
                 waker_id,
                 channel_id,
                 expected_at,
@@ -302,15 +299,14 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Lost wakeup: {:?} on channel {:?} expected at {:?}, detected at {:?}",
-                    waker_id, channel_id, expected_at, detected_at
+                    "Lost wakeup: {waker_id:?} on channel {channel_id:?} expected at {expected_at:?}, detected at {detected_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            ChannelAtomicityViolation::SpuriousWakeup {
+            Self::SpuriousWakeup {
                 waker_id,
                 channel_id,
                 wakeup_at,
@@ -318,15 +314,14 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Spurious wakeup: {:?} on channel {:?} at {:?}",
-                    waker_id, channel_id, wakeup_at
+                    "Spurious wakeup: {waker_id:?} on channel {channel_id:?} at {wakeup_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            ChannelAtomicityViolation::DataLossOnCancel {
+            Self::DataLossOnCancel {
                 channel_id,
                 data_size,
                 cancel_at,
@@ -334,11 +329,10 @@ impl std::fmt::Display for ChannelAtomicityViolation {
             } => {
                 write!(
                     f,
-                    "Data loss on cancel: channel {:?} lost {} bytes at {:?}",
-                    channel_id, data_size, cancel_at
+                    "Data loss on cancel: channel {channel_id:?} lost {data_size} bytes at {cancel_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
@@ -366,14 +360,14 @@ impl ViolationRecord {
     /// Creates a new violation record with metadata from the given violation and config.
     pub fn new(violation: ChannelAtomicityViolation, config: &ChannelAtomicityConfig) -> Self {
         let trace_id = match &violation {
-            ChannelAtomicityViolation::ReservationLeak { trace_id, .. } => *trace_id,
-            ChannelAtomicityViolation::DoubleCommit { trace_id, .. } => *trace_id,
-            ChannelAtomicityViolation::DoubleAbort { trace_id, .. } => *trace_id,
-            ChannelAtomicityViolation::UseAfterCommit { trace_id, .. } => *trace_id,
-            ChannelAtomicityViolation::UseAfterAbort { trace_id, .. } => *trace_id,
-            ChannelAtomicityViolation::LostWakeup { trace_id, .. } => *trace_id,
-            ChannelAtomicityViolation::SpuriousWakeup { trace_id, .. } => *trace_id,
-            ChannelAtomicityViolation::DataLossOnCancel { trace_id, .. } => *trace_id,
+            Self::ReservationLeak { trace_id, .. } => *trace_id,
+            Self::DoubleCommit { trace_id, .. } => *trace_id,
+            Self::DoubleAbort { trace_id, .. } => *trace_id,
+            Self::UseAfterCommit { trace_id, .. } => *trace_id,
+            Self::UseAfterAbort { trace_id, .. } => *trace_id,
+            Self::LostWakeup { trace_id, .. } => *trace_id,
+            Self::SpuriousWakeup { trace_id, .. } => *trace_id,
+            Self::DataLossOnCancel { trace_id, .. } => *trace_id,
         };
 
         let stack_trace = if config.include_stack_traces {
@@ -603,7 +597,7 @@ impl ChannelAtomicityOracle {
                     self.stats.total_reservations_committed += 1;
                 }
                 ReservationStatus::Committed { at, .. } => {
-                    let violation = ChannelAtomicityViolation::DoubleCommit {
+                    let violation = Self::DoubleCommit {
                         reservation_id,
                         channel_id: state.channel_id,
                         first_commit_at: *at,
@@ -613,7 +607,7 @@ impl ChannelAtomicityOracle {
                     self.record_violation(violation);
                 }
                 ReservationStatus::Aborted { .. } => {
-                    let violation = ChannelAtomicityViolation::UseAfterAbort {
+                    let violation = Self::UseAfterAbort {
                         reservation_id,
                         channel_id: state.channel_id,
                         abort_at: match state.status {
@@ -647,7 +641,7 @@ impl ChannelAtomicityOracle {
                     self.stats.total_reservations_aborted += 1;
                 }
                 ReservationStatus::Aborted { at, .. } => {
-                    let violation = ChannelAtomicityViolation::DoubleAbort {
+                    let violation = Self::DoubleAbort {
                         reservation_id,
                         channel_id: state.channel_id,
                         first_abort_at: *at,
@@ -657,7 +651,7 @@ impl ChannelAtomicityOracle {
                     self.record_violation(violation);
                 }
                 ReservationStatus::Committed { at, .. } => {
-                    let violation = ChannelAtomicityViolation::UseAfterCommit {
+                    let violation = Self::UseAfterCommit {
                         reservation_id,
                         channel_id: state.channel_id,
                         commit_at: *at,
@@ -727,7 +721,7 @@ impl ChannelAtomicityOracle {
                 if let Ok(delay) = actual_at.duration_since(expected_at) {
                     if delay.as_millis() > 100 {
                         // 100ms threshold for "lost" wakeup
-                        let violation = ChannelAtomicityViolation::LostWakeup {
+                        let violation = Self::LostWakeup {
                             waker_id,
                             channel_id: state.channel_id,
                             expected_at,
@@ -740,7 +734,7 @@ impl ChannelAtomicityOracle {
                 }
             } else {
                 // Spurious wakeup (actual without expected)
-                let violation = ChannelAtomicityViolation::SpuriousWakeup {
+                let violation = Self::SpuriousWakeup {
                     waker_id,
                     channel_id: state.channel_id,
                     wakeup_at: actual_at,
@@ -759,7 +753,7 @@ impl ChannelAtomicityOracle {
         data_size: usize,
         trace_id: Option<TraceId>,
     ) {
-        let violation = ChannelAtomicityViolation::DataLossOnCancel {
+        let violation = Self::DataLossOnCancel {
             channel_id,
             data_size,
             cancel_at: SystemTime::now(),
@@ -837,7 +831,7 @@ impl ChannelAtomicityOracle {
                 if let Ok(age) = now.duration_since(state.created_at) {
                     if age.as_secs() > self.config.max_reservation_age_seconds {
                         leaked_reservations.push(*reservation_id);
-                        let violation = ChannelAtomicityViolation::ReservationLeak {
+                        let violation = Self::ReservationLeak {
                             reservation_id: *reservation_id,
                             channel_id: state.channel_id,
                             created_at: state.created_at,
@@ -932,7 +926,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert!(matches!(
             violations[0],
-            ChannelAtomicityViolation::DoubleCommit { .. }
+            Self::DoubleCommit { .. }
         ));
     }
 
@@ -954,7 +948,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert!(matches!(
             violations[0],
-            ChannelAtomicityViolation::UseAfterAbort { .. }
+            Self::UseAfterAbort { .. }
         ));
     }
 
@@ -978,7 +972,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert!(matches!(
             violations[0],
-            ChannelAtomicityViolation::ReservationLeak { .. }
+            Self::ReservationLeak { .. }
         ));
     }
 
@@ -999,7 +993,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert!(matches!(
             violations[0],
-            ChannelAtomicityViolation::SpuriousWakeup { .. }
+            Self::SpuriousWakeup { .. }
         ));
     }
 
@@ -1025,7 +1019,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert!(matches!(
             violations[0],
-            ChannelAtomicityViolation::LostWakeup { .. }
+            Self::LostWakeup { .. }
         ));
     }
 
@@ -1043,7 +1037,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert!(matches!(
             violations[0],
-            ChannelAtomicityViolation::DataLossOnCancel { .. }
+            Self::DataLossOnCancel { .. }
         ));
     }
 
@@ -1056,7 +1050,7 @@ mod tests {
             ..Default::default()
         };
 
-        let violation = ChannelAtomicityViolation::ReservationLeak {
+        let violation = Self::ReservationLeak {
             reservation_id: ReservationId(1),
             channel_id: ChannelId(1),
             created_at: SystemTime::now(),
