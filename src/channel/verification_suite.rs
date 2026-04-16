@@ -4,17 +4,14 @@
 //! across all channel types under various stress conditions, cancellation
 //! scenarios, and edge cases.
 
-use super::atomicity_test::{AtomicityOracle, AtomicityStats, AtomicityTestConfig};
-use super::stress_test::{StressTestConfig, StressTestResult, mpsc_stress_test};
+use super::atomicity_test::{AtomicityOracle, AtomicityTestConfig};
+use super::stress_test::{StressTestConfig, mpsc_stress_test};
 use crate::channel::{broadcast, mpsc, oneshot, watch};
-use crate::cx::Cx;
 use crate::test_utils::lab_with_config;
-use crate::time::{sleep, timeout};
+use crate::time::{timeout};
 
-use std::collections::HashMap;
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 

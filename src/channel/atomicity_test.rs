@@ -6,12 +6,10 @@
 
 use crate::channel::mpsc::{self, RecvError, SendError};
 use crate::cx::Cx;
-use crate::test_utils::test_lab;
 use crate::time::sleep;
-use crate::types::{Budget, Time};
+use crate::types::{Time};
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 // Removed tokio dependency - this project IS the async runtime

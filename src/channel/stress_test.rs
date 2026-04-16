@@ -8,14 +8,12 @@ use super::atomicity_test::{
     AtomicityOracle, AtomicityTestConfig, CancellationInjector, consumer_task, producer_task,
 };
 use crate::channel::{broadcast, mpsc, oneshot, watch};
-use crate::cx::Cx;
 use crate::test_utils::lab_with_config;
 use crate::time::{sleep, timeout};
-use crate::types::Budget;
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{Ordering},
 };
 use std::time::Duration;
 // Removed tokio dependency - this project IS the async runtime
