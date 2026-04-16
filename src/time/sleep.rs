@@ -79,6 +79,7 @@ fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandl
     finished
 }
 
+#[inline]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
