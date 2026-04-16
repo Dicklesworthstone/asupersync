@@ -53,7 +53,7 @@ impl CancellationTracerIntegration {
         parent_task: Option<TaskId>,
     ) {
         // Check if this is part of an existing trace
-        let (trace_id, is_new_trace) = if let Some(parent) = parent_task {
+        let (trace_id, _is_new_trace) = if let Some(parent) = parent_task {
             if let Some(&parent_trace_id) = self.task_traces.read().get(&parent) {
                 (parent_trace_id, false)
             } else {
