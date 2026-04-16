@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use crate::types::{TaskId, RegionId};
+use crate::types::TaskId;
 
 /// Detects and reports priority inversion violations in the scheduler.
 #[derive(Debug)]
@@ -67,6 +67,7 @@ struct PriorityInversionState {
 
 /// Information about an active task.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TaskInfo {
     /// Task identifier.
     pub task_id: TaskId,
@@ -118,6 +119,7 @@ pub struct ResourceId(pub u64);
 
 /// Information about a resource lock.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ResourceLockInfo {
     /// Resource identifier.
     pub resource_id: ResourceId,

@@ -55,6 +55,8 @@ pub const INVARIANT_REGISTRY_LEASE: &str = "registry_lease";
 pub const INVARIANT_DOWN_ORDER: &str = "down_order";
 /// Invariant name for the supervisor quiescence oracle (Spork).
 pub const INVARIANT_SUPERVISOR_QUIESCENCE: &str = "supervisor_quiescence";
+/// Invariant name for the priority inversion oracle.
+pub const INVARIANT_PRIORITY_INVERSION: &str = "priority_inversion";
 /// Invariant name for the FABRIC publish oracle.
 #[cfg(feature = "messaging-fabric")]
 pub const INVARIANT_FABRIC_PUBLISH: &str = "fabric_publish";
@@ -873,6 +875,7 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::FabricQuiescence(_) => INVARIANT_FABRIC_QUIESCENCE,
         #[cfg(feature = "messaging-fabric")]
         OracleViolation::FabricRedelivery(_) => INVARIANT_FABRIC_REDELIVERY,
+        OracleViolation::PriorityInversion(_) => INVARIANT_PRIORITY_INVERSION,
     }
 }
 

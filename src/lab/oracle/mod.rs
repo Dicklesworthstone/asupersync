@@ -50,6 +50,7 @@ pub mod fabric;
 pub mod finalizer;
 pub mod loser_drain;
 pub mod obligation_leak;
+pub mod priority_inversion;
 pub mod quiescence;
 pub mod region_leak;
 pub mod region_tree;
@@ -102,6 +103,10 @@ pub use fabric::{
 pub use finalizer::{FinalizerId, FinalizerOracle, FinalizerViolation};
 pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
 pub use obligation_leak::{ObligationLeakOracle, ObligationLeakViolation};
+pub use priority_inversion::{
+    PriorityInversionOracle, PriorityInversionConfig, PriorityInversionStatistics,
+    PriorityInversion, InversionType, Priority, ResourceId, InversionId,
+};
 pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
 pub use region_leak::{
     BudgetInfo, RegionLeakConfig, RegionLeakOracle, RegionLeakStatistics, RegionLifecycleState,
@@ -199,6 +204,8 @@ pub enum OracleViolation {
     /// FABRIC redelivery exceeded its configured bound.
     #[cfg(feature = "messaging-fabric")]
     FabricRedelivery(FabricRedeliveryViolation),
+    /// Priority inversion violation (high-priority task blocked by low-priority task).
+    PriorityInversion(PriorityInversion),
 }
 
 impl std::fmt::Display for OracleViolation {
@@ -236,6 +243,9 @@ impl std::fmt::Display for OracleViolation {
             Self::FabricQuiescence(v) => write!(f, "FABRIC quiescence violation: {v}"),
             #[cfg(feature = "messaging-fabric")]
             Self::FabricRedelivery(v) => write!(f, "FABRIC redelivery violation: {v}"),
+            Self::PriorityInversion(v) => write!(f, "Priority inversion: Task {:?}(P{:?}) blocked by Task {:?}(P{:?}) on Resource {:?} for {:?}",
+                v.blocked_task, v.blocked_priority, v.blocking_task, v.blocking_priority, v.resource_id,
+                v.duration.unwrap_or_else(|| v.start_time.elapsed())),
         }
     }
 }
