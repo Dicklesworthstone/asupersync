@@ -55,6 +55,7 @@ impl ObjectId {
     }
 
     /// Creates an object ID from a 128-bit value.
+    #[inline]
     #[must_use]
     pub const fn from_u128(value: u128) -> Self {
         Self {
@@ -64,18 +65,21 @@ impl ObjectId {
     }
 
     /// Converts the object ID to a 128-bit value.
+    #[inline]
     #[must_use]
     pub const fn as_u128(self) -> u128 {
         ((self.high as u128) << 64) | (self.low as u128)
     }
 
     /// Returns the high 64 bits.
+    #[inline]
     #[must_use]
     pub const fn high(self) -> u64 {
         self.high
     }
 
     /// Returns the low 64 bits.
+    #[inline]
     #[must_use]
     pub const fn low(self) -> u64 {
         self.low
@@ -151,30 +155,35 @@ impl SymbolId {
     }
 
     /// Returns the parent object ID.
+    #[inline]
     #[must_use]
     pub const fn object_id(self) -> ObjectId {
         self.object_id
     }
 
     /// Returns the Source Block Number.
+    #[inline]
     #[must_use]
     pub const fn sbn(self) -> u8 {
         self.sbn
     }
 
     /// Returns the Encoding Symbol ID.
+    #[inline]
     #[must_use]
     pub const fn esi(self) -> u32 {
         self.esi
     }
 
     /// Returns true if this is a source symbol (ESI < source_count).
+    #[inline]
     #[must_use]
     pub const fn is_source(self, source_count: u32) -> bool {
         self.esi < source_count
     }
 
     /// Returns true if this is a repair symbol (ESI >= source_count).
+    #[inline]
     #[must_use]
     pub const fn is_repair(self, source_count: u32) -> bool {
         self.esi >= source_count
@@ -219,12 +228,14 @@ pub enum SymbolKind {
 
 impl SymbolKind {
     /// Returns true if this is a source symbol.
+    #[inline]
     #[must_use]
     pub const fn is_source(self) -> bool {
         matches!(self, Self::Source)
     }
 
     /// Returns true if this is a repair symbol.
+    #[inline]
     #[must_use]
     pub const fn is_repair(self) -> bool {
         matches!(self, Self::Repair)
@@ -294,12 +305,14 @@ impl Symbol {
     }
 
     /// Returns the symbol's unique identifier.
+    #[inline]
     #[must_use]
     pub const fn id(&self) -> SymbolId {
         self.id
     }
 
     /// Returns the symbol's kind.
+    #[inline]
     #[must_use]
     pub const fn kind(&self) -> SymbolKind {
         self.kind
@@ -313,12 +326,14 @@ impl Symbol {
     }
 
     /// Returns a mutable reference to the symbol's data payload.
+    #[inline]
     #[must_use]
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 
     /// Consumes the symbol and returns its data.
+    #[inline]
     #[must_use]
     pub fn into_data(self) -> Vec<u8> {
         self.data
@@ -346,12 +361,14 @@ impl Symbol {
     }
 
     /// Returns the Source Block Number.
+    #[inline]
     #[must_use]
     pub const fn sbn(&self) -> u8 {
         self.id.sbn()
     }
 
     /// Returns the Encoding Symbol ID.
+    #[inline]
     #[must_use]
     pub const fn esi(&self) -> u32 {
         self.id.esi()

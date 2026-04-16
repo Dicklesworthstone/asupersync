@@ -159,12 +159,14 @@ impl CancelAttributionConfig {
     /// - 1 byte: truncated flag
     /// - 8 bytes: truncated_at_depth (`Option<usize>`)
     /// - Total: ~80 bytes (rounded up for alignment)
+    #[inline]
     #[must_use]
     pub const fn single_reason_cost() -> usize {
         80
     }
 
     /// Estimates memory cost for a chain of given depth.
+    #[inline]
     #[must_use]
     pub const fn estimated_chain_cost(depth: usize) -> usize {
         if depth == 0 {
@@ -339,6 +341,7 @@ pub enum CancelWitnessError {
 
 impl CancelKind {
     /// Returns the variant name as a static string (matches `Debug` output).
+    #[inline]
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -366,6 +369,7 @@ impl CancelKind {
     /// - 3: FailFast, RaceLost (sibling/peer outcomes)
     /// - 4: ParentCancelled, ResourceUnavailable (structural/resource)
     /// - 5: Shutdown (system-level)
+    #[inline]
     #[must_use]
     pub const fn severity(self) -> u8 {
         match self {
@@ -788,12 +792,14 @@ impl CancelReason {
     /// - 3: FailFast/RaceLost (sibling events)
     /// - 4: ParentCancelled/ResourceUnavailable (external pressure)
     /// - 5: Shutdown (highest priority, minimal cleanup)
+    #[inline]
     #[must_use]
     pub const fn severity(&self) -> u8 {
         self.kind.severity()
     }
 
     /// Returns true if this reason's kind matches the given kind.
+    #[inline]
     #[must_use]
     pub const fn is_kind(&self, kind: CancelKind) -> bool {
         matches!(
@@ -816,12 +822,14 @@ impl CancelReason {
     }
 
     /// Returns true if this reason indicates shutdown.
+    #[inline]
     #[must_use]
     pub const fn is_shutdown(&self) -> bool {
         matches!(self.kind, CancelKind::Shutdown)
     }
 
     /// Returns true if this is a budget-related cancellation (Deadline, PollQuota, CostBudget).
+    #[inline]
     #[must_use]
     pub const fn is_budget_exceeded(&self) -> bool {
         matches!(
@@ -831,6 +839,7 @@ impl CancelReason {
     }
 
     /// Returns true if this is a timeout or deadline cancellation.
+    #[inline]
     #[must_use]
     pub const fn is_time_exceeded(&self) -> bool {
         matches!(self.kind, CancelKind::Timeout | CancelKind::Deadline)

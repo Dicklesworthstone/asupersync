@@ -118,6 +118,7 @@ impl PanicPayload {
     }
 
     /// Returns the panic message.
+    #[inline]
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
@@ -177,6 +178,7 @@ impl Severity {
     /// Creates a Severity from a numeric value.
     ///
     /// Returns `None` if the value is out of range (> 3).
+    #[inline]
     #[must_use]
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {

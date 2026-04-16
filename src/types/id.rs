@@ -401,6 +401,7 @@ impl fmt::Debug for Time {
 }
 
 impl fmt::Display for Time {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0 >= 1_000_000_000 {
             write!(
