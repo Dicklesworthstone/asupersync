@@ -2924,17 +2924,31 @@ impl ThreeLaneWorker {
         if blocked_priority <= executing_priority {
             return;
         }
+        let timestamp = Time::from_nanos(self.current_time_ns());
         self.preemption_metrics.ready_priority_inversions += 1;
         let gap = blocked_priority.saturating_sub(executing_priority);
         if gap > self.preemption_metrics.max_ready_priority_inversion_gap {
             self.preemption_metrics.max_ready_priority_inversion_gap = gap;
         }
+        self.invariant_monitor.record_task_enqueue(
+            blocked_task,
+            "local_ready_heap",
+            blocked_priority,
+            timestamp,
+        );
+        self.invariant_monitor.verify_priority_ordering(
+            executing_task,
+            executing_priority,
+            blocked_task,
+            blocked_priority,
+            timestamp,
+        );
         self.fairness_monitor.record_priority_inversion(
             blocked_task,
             blocked_priority,
             executing_task,
             executing_priority,
-            self.current_time_ns(),
+            timestamp.as_nanos(),
         );
     }
 
@@ -4228,6 +4242,7 @@ impl Wake for ThreeLaneLocalCancelWaker {
 mod tests {
     use super::*;
     use crate::record::task::TaskWakeState;
+    use crate::runtime::scheduler::{InvariantCategory, SchedulerInvariant};
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
     use parking_lot::RwLock;
@@ -6488,6 +6503,29 @@ mod tests {
         assert_eq!(metrics.max_ready_priority_inversion_gap, 190);
         let starvation_stats = worker.starvation_stats();
         assert_eq!(starvation_stats.total_priority_inversions, 1);
+        let invariant_stats = worker.invariant_stats();
+        assert_eq!(
+            invariant_stats.violations_by_category[&InvariantCategory::PriorityOrdering],
+            1
+        );
+        let invariant_violation = worker
+            .invariant_violations()
+            .back()
+            .expect("priority-order violation should be recorded");
+        match &invariant_violation.invariant {
+            SchedulerInvariant::PriorityOrderViolation {
+                high_priority_task,
+                high_priority,
+                low_priority_task,
+                low_priority,
+            } => {
+                assert_eq!(*high_priority_task, high_local);
+                assert_eq!(*high_priority, 200);
+                assert_eq!(*low_priority_task, low_global);
+                assert_eq!(*low_priority, 10);
+            }
+            other => panic!("expected priority-order violation, got {other:?}"),
+        }
 
         let cert = worker.preemption_fairness_certificate();
         assert_eq!(cert.ready_priority_inversions, 1);
@@ -6528,6 +6566,7 @@ mod tests {
         let metrics = worker.preemption_metrics();
         assert_eq!(metrics.ready_priority_inversions, 0);
         assert_eq!(metrics.max_ready_priority_inversion_gap, 0);
+        assert!(worker.invariant_violations().is_empty());
 
         let cert = worker.preemption_fairness_certificate();
         assert_eq!(cert.ready_priority_inversions, 0);
@@ -6567,6 +6606,11 @@ mod tests {
         assert_eq!(metrics.ready_dispatches, 1);
         let starvation_stats = worker.starvation_stats();
         assert_eq!(starvation_stats.total_priority_inversions, 1);
+        let invariant_stats = worker.invariant_stats();
+        assert_eq!(
+            invariant_stats.violations_by_category[&InvariantCategory::PriorityOrdering],
+            1
+        );
     }
 
     #[test]

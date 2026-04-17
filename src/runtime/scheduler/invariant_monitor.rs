@@ -423,10 +423,10 @@ impl SchedulerInvariantMonitor {
                     });
 
             let already_queued = !task_state.queues.is_empty();
-            task_state.queues.insert(queue_name.to_string());
+            let inserted_new_queue = task_state.queues.insert(queue_name.to_string());
             task_state.last_update = timestamp;
 
-            if already_queued {
+            if already_queued && inserted_new_queue {
                 Some(task_state.queues.len())
             } else {
                 None
@@ -488,7 +488,7 @@ impl SchedulerInvariantMonitor {
 
         let leaked_queues = {
             if let Some(task_state) = self.task_states.get_mut(&task_id) {
-                let leaked = if !task_state.queues.is_empty() && !task_state.is_cancelled {
+                let leaked = if !task_state.queues.is_empty() && task_state.is_cancelled {
                     let time_since_cancel = timestamp
                         .as_nanos()
                         .saturating_sub(task_state.last_update.as_nanos())
@@ -534,8 +534,8 @@ impl SchedulerInvariantMonitor {
             return;
         }
 
-        // Higher priority (lower number) should be scheduled first
-        if first_priority > second_priority {
+        // Higher numeric priorities should be scheduled first.
+        if first_priority < second_priority {
             self.record_violation(
                 SchedulerInvariant::PriorityOrderViolation {
                     high_priority_task: second_task,
@@ -843,12 +843,12 @@ mod tests {
         let mut monitor = SchedulerInvariantMonitor::with_defaults();
         let now = Time::from_nanos(1000);
 
-        // Test priority violation (higher number = lower priority)
+        // Test priority violation (higher number = higher priority)
         monitor.verify_priority_ordering(
             TaskId::new_for_test(1, 0),
-            5,
-            TaskId::new_for_test(2, 0),
             3,
+            TaskId::new_for_test(2, 0),
+            5,
             now,
         );
 
@@ -861,9 +861,9 @@ mod tests {
                 low_priority,
             } => {
                 assert_eq!(*high_priority_task, TaskId::new_for_test(2, 0));
-                assert_eq!(*high_priority, 3);
+                assert_eq!(*high_priority, 5);
                 assert_eq!(*low_priority_task, TaskId::new_for_test(1, 0));
-                assert_eq!(*low_priority, 5);
+                assert_eq!(*low_priority, 3);
             }
             _ => panic!("Expected PriorityOrderViolation"),
         }
@@ -950,16 +950,16 @@ mod tests {
         // Generate some violations
         monitor.verify_priority_ordering(
             TaskId::new_for_test(1, 0),
-            5,
-            TaskId::new_for_test(2, 0),
             3,
+            TaskId::new_for_test(2, 0),
+            5,
             now,
         );
         monitor.verify_priority_ordering(
             TaskId::new_for_test(3, 0),
-            7,
-            TaskId::new_for_test(4, 0),
             2,
+            TaskId::new_for_test(4, 0),
+            7,
             now,
         );
 
@@ -984,9 +984,9 @@ mod tests {
         // Add old violation
         monitor.verify_priority_ordering(
             TaskId::new_for_test(2, 0),
-            5,
-            TaskId::new_for_test(3, 0),
             3,
+            TaskId::new_for_test(3, 0),
+            5,
             old_time,
         );
 
@@ -1024,5 +1024,51 @@ mod tests {
         assert_eq!(snapshot.lifecycle_state, "cancelled");
         assert_eq!(snapshot.owner_worker, Some(2));
         assert!(snapshot.is_cancelled);
+    }
+
+    #[test]
+    fn test_reenqueue_same_queue_does_not_trigger_multiple_queue_violation() {
+        let mut monitor = SchedulerInvariantMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(9, 0);
+
+        monitor.record_task_enqueue(task_id, "ready_queue", 10, Time::from_nanos(1_000));
+        monitor.record_task_enqueue(task_id, "ready_queue", 10, Time::from_nanos(1_200));
+
+        assert!(
+            monitor.violations.is_empty(),
+            "re-observing the same queue must not look like a multiple-queue violation"
+        );
+    }
+
+    #[test]
+    fn test_cancelled_task_leak_requires_cancelled_task_state() {
+        let task_id = TaskId::new_for_test(10, 0);
+
+        let mut uncancelled = SchedulerInvariantMonitor::with_defaults();
+        uncancelled.record_task_enqueue(task_id, "ready_queue", 10, Time::from_nanos(1_000));
+        uncancelled.record_task_complete(task_id, 0, Time::from_nanos(2_000));
+        assert!(
+            uncancelled.violations.is_empty(),
+            "non-cancelled tasks must not be reported as cancelled leaks"
+        );
+
+        let mut cancelled = SchedulerInvariantMonitor::with_defaults();
+        cancelled.record_task_enqueue(task_id, "ready_queue", 10, Time::from_nanos(1_000));
+        cancelled.record_task_cancel(task_id, Time::from_nanos(1_500));
+        cancelled.record_task_complete(task_id, 0, Time::from_nanos(3_500));
+
+        assert_eq!(cancelled.violations.len(), 1);
+        match &cancelled.violations[0].invariant {
+            SchedulerInvariant::CancelledTaskLeak {
+                task_id: leaked_task,
+                queue_name,
+                time_since_cancel_ms,
+            } => {
+                assert_eq!(*leaked_task, task_id);
+                assert_eq!(queue_name, "ready_queue");
+                assert_eq!(*time_since_cancel_ms, 0);
+            }
+            other => panic!("Expected CancelledTaskLeak, got {other:?}"),
+        }
     }
 }
