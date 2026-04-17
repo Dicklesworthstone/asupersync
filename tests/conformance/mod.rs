@@ -14,6 +14,7 @@ pub mod h2_rst_stream_ping_rfc9113;
 pub mod kafka_record_batch_v2;
 pub mod quic_retry_rfc9000;
 pub mod tls_0rtt_replay_rfc8446;
+pub mod cancel_dag_determinism;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod postgres_logical_replication;
@@ -34,6 +35,7 @@ pub use mysql_stmt_prepare_execute::{MySqlStmtConformanceHarness, MySqlStmtConfo
 pub use postgres_logical_replication::{PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory};
 pub use quic_retry_rfc9000::{QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory};
 pub use tls_0rtt_replay_rfc8446::{Tls0RttConformanceHarness, Tls0RttConformanceResult, TestCategory as Tls0RttTestCategory};
+pub use cancel_dag_determinism::{CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -117,6 +119,12 @@ pub enum TestCategory {
     EarlyDataLimits,
     FreshnessWindow,
     HelloRetryRequest,
+    // Cancel DAG determinism categories
+    DagSerialization,
+    CancellationOrdering,
+    FinalizerLogging,
+    BudgetExhaustion,
+    DependencyTopology,
 }
 
 // Unified conformance test result
@@ -273,6 +281,41 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             })
             .collect();
         results.extend(tls_0rtt_results);
+    }
+
+    // Cancel DAG Determinism conformance
+    #[cfg(feature = "deterministic-mode")]
+    {
+        let cancel_dag_harness = CancelDagDeterminismHarness::new();
+        let cancel_dag_results: Vec<ConformanceTestResult> = cancel_dag_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    cancel_dag_determinism::TestCategory::DagSerialization => TestCategory::DagSerialization,
+                    cancel_dag_determinism::TestCategory::CancellationOrdering => TestCategory::CancellationOrdering,
+                    cancel_dag_determinism::TestCategory::FinalizerLogging => TestCategory::FinalizerLogging,
+                    cancel_dag_determinism::TestCategory::BudgetExhaustion => TestCategory::BudgetExhaustion,
+                    cancel_dag_determinism::TestCategory::DependencyTopology => TestCategory::DependencyTopology,
+                },
+                requirement_level: match r.requirement_level {
+                    cancel_dag_determinism::RequirementLevel::Must => RequirementLevel::Must,
+                    cancel_dag_determinism::RequirementLevel::Should => RequirementLevel::Should,
+                    cancel_dag_determinism::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    cancel_dag_determinism::TestVerdict::Pass => TestVerdict::Pass,
+                    cancel_dag_determinism::TestVerdict::Fail => TestVerdict::Fail,
+                    cancel_dag_determinism::TestVerdict::Skipped => TestVerdict::Skipped,
+                    cancel_dag_determinism::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(cancel_dag_results);
     }
 
     // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
@@ -466,6 +509,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "coverage": "systematic",
                     "reference": "RFC 8446 Section 8 TLS 1.3 0-RTT replay protection conformance"
                 },
+                "cancel_dag_determinism": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "Cancel DAG determinism under identical LabRuntime seeds"
+                },
                 "websocket_rfc6455": {
                     "status": "implemented",
                     "coverage": "systematic",
@@ -652,6 +700,56 @@ mod tests {
 
         assert!(passes > 0, "Should have passing tests for positive cases");
         assert!(expected_failures > 0, "Should have expected failures for negative tests");
+    }
+
+    #[test]
+    #[cfg(feature = "deterministic-mode")]
+    fn test_cancel_dag_determinism_conformance_integration() {
+        let cancel_dag_harness = CancelDagDeterminismHarness::new();
+        let results = cancel_dag_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "Cancel DAG determinism conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&cancel_dag_determinism::TestCategory::DagSerialization),
+            "Should test DAG serialization determinism"
+        );
+        assert!(
+            categories.contains(&cancel_dag_determinism::TestCategory::CancellationOrdering),
+            "Should test cancellation ordering preservation"
+        );
+        assert!(
+            categories.contains(&cancel_dag_determinism::TestCategory::FinalizerLogging),
+            "Should test finalizer logging consistency"
+        );
+        assert!(
+            categories.contains(&cancel_dag_determinism::TestCategory::BudgetExhaustion),
+            "Should test budget exhaustion determinism"
+        );
+        assert!(
+            categories.contains(&cancel_dag_determinism::TestCategory::DependencyTopology),
+            "Should test dependency topology ordering"
+        );
+
+        // Verify we have appropriate requirement levels
+        let must_tests = results.iter()
+            .filter(|r| r.requirement_level == cancel_dag_determinism::RequirementLevel::Must)
+            .count();
+
+        assert!(must_tests > 0, "Should have MUST requirements for determinism");
+
+        // Verify test execution completed without panic
+        for result in &results {
+            if let Some(ref error) = result.error_message {
+                if error.contains("panicked") {
+                    panic!("Test {} panicked: {}", result.test_id, error);
+                }
+            }
+        }
     }
 
     #[test]
