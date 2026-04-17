@@ -2333,7 +2333,12 @@ mod metamorphic_tests {
     impl CountWaker {
         fn new() -> (Self, Arc<AtomicUsize>) {
             let count = Arc::new(AtomicUsize::new(0));
-            (Self { count: count.clone() }, count)
+            (
+                Self {
+                    count: count.clone(),
+                },
+                count,
+            )
         }
     }
 
@@ -2430,14 +2435,12 @@ mod metamorphic_tests {
             let mut reader_results = Vec::new();
             for _ in 0..num_readers {
                 let lock_clone = lock.clone();
-                let cx_clone = cx.clone();
-
-                // Poll once to ensure readers are queued
-                let mut read_fut = lock_clone.read(&cx_clone);
                 let (count_waker, wake_count) = CountWaker::new();
                 let waker = Waker::from(Arc::new(count_waker));
                 let mut task_cx = Context::from_waker(&waker);
 
+                // Use owned future to avoid lifetime issues
+                let mut read_fut = OwnedRwLockReadGuard::read(lock_clone, &cx);
                 let poll_result = Pin::new(&mut read_fut).poll(&mut task_cx);
                 prop_assert!(
                     poll_result.is_pending(),
@@ -2449,8 +2452,7 @@ mod metamorphic_tests {
 
             // Now queue a writer (this should have preference over waiting readers)
             let writer_lock = lock.clone();
-            let writer_cx = cx.clone();
-            let mut write_fut = writer_lock.write(&writer_cx);
+            let mut write_fut = OwnedRwLockWriteGuard::write(writer_lock, &cx);
             let (writer_waker, writer_wake_count) = CountWaker::new();
             let writer_waker_obj = Waker::from(Arc::new(writer_waker));
             let mut writer_task_cx = Context::from_waker(&writer_waker_obj);
@@ -2559,8 +2561,7 @@ mod metamorphic_tests {
 
             // Queue a writer that we will cancel
             let cancelable_lock = lock.clone();
-            let cancelable_cx = cx.clone();
-            let mut cancelable_write_fut = cancelable_lock.write(&cancelable_cx);
+            let mut cancelable_write_fut = OwnedRwLockWriteGuard::write(cancelable_lock, &cx);
 
             let (cancel_waker, cancel_wake_count) = CountWaker::new();
             let cancel_waker_obj = Waker::from(Arc::new(cancel_waker));
@@ -2579,8 +2580,7 @@ mod metamorphic_tests {
 
             for _ in 0..num_readers_after_cancel {
                 let reader_lock = lock.clone();
-                let reader_cx = cx.clone();
-                let mut read_fut = reader_lock.read(&reader_cx);
+                let mut read_fut = OwnedRwLockReadGuard::read(reader_lock, &cx);
 
                 let (reader_waker, reader_wake_count) = CountWaker::new();
                 let reader_waker_obj = Waker::from(Arc::new(reader_waker));
@@ -2724,15 +2724,13 @@ mod metamorphic_tests {
             let mut cancellable_readers = Vec::new();
             for _ in 0..num_cancellable_readers {
                 let reader_lock = lock.clone();
-                let reader_cx = cx.clone();
-                let read_fut = reader_lock.read(&reader_cx);
+                let read_fut = OwnedRwLockReadGuard::read(reader_lock, &cx);
                 cancellable_readers.push(read_fut);
             }
 
             // Queue a writer (should have preference)
             let priority_writer_lock = lock.clone();
-            let priority_writer_cx = cx.clone();
-            let mut priority_write_fut = priority_writer_lock.write(&priority_writer_cx);
+            let mut priority_write_fut = OwnedRwLockWriteGuard::write(priority_writer_lock, &cx);
             let (priority_waker, priority_wake_count) = CountWaker::new();
             let priority_waker_obj = Waker::from(Arc::new(priority_waker));
             let mut priority_task_cx = Context::from_waker(&priority_waker_obj);
@@ -2748,8 +2746,7 @@ mod metamorphic_tests {
             let mut persistent_wake_counts = Vec::new();
             for _ in 0..num_persistent_readers {
                 let reader_lock = lock.clone();
-                let reader_cx = cx.clone();
-                let mut read_fut = reader_lock.read(&reader_cx);
+                let mut read_fut = OwnedRwLockReadGuard::read(reader_lock, &cx);
 
                 let (reader_waker, reader_wake_count) = CountWaker::new();
                 let reader_waker_obj = Waker::from(Arc::new(reader_waker));
