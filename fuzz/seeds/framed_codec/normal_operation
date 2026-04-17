@@ -1,0 +1,18 @@
+{
+  "buffer_capacity": "Default",
+  "transport_behavior": {
+    "Normal": {
+      "data": [72, 101, 108, 108, 111, 10, 87, 111, 114, 108, 100, 10]
+    }
+  },
+  "codec_type": "Lines",
+  "operations": [
+    "PollNext",
+    { "Send": { "data": [72, 105, 10] } },
+    "PollFlush",
+    "PollNext",
+    "InspectReadBuffer",
+    "InspectWriteBuffer",
+    "PollClose"
+  ]
+}

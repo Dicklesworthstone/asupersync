@@ -1,0 +1,26 @@
+{
+  "buffer_capacity": "Tiny",
+  "transport_behavior": {
+    "ErrorProne": {
+      "data": [84, 101, 115, 116, 10, 69, 114, 114, 111, 114, 10],
+      "error_frequency": 3
+    }
+  },
+  "codec_type": {
+    "ErrorProne": {
+      "error_frequency": 5
+    }
+  },
+  "operations": [
+    "PollNext",
+    { "Send": { "data": [69, 114, 114, 10] } },
+    "PollNext",
+    "PollFlush",
+    { "Send": { "data": [65, 66, 67] } },
+    "PollNext",
+    "InspectReadBuffer",
+    { "ModifyCodec": { "new_behavior": 2 } },
+    "PollFlush",
+    "PollClose"
+  ]
+}
