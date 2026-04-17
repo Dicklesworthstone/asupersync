@@ -46,6 +46,7 @@ pub mod client;
 pub mod codec;
 pub mod health;
 pub mod interceptor;
+pub mod protobuf;
 pub mod reflection;
 pub mod server;
 pub mod service;
@@ -73,6 +74,7 @@ pub use codec::{
 };
 #[cfg(feature = "compression")]
 pub use codec::{gzip_frame_compress, gzip_frame_decompress};
+pub use protobuf::{ProstCodec, ProtobufError};
 pub use health::{
     HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
     HealthWatcher, ServingStatus,

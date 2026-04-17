@@ -18,6 +18,7 @@ arbitrary = { version = "1", features = ["derive"] }
 # Optional: for structured fuzzing
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
+prost = "0.13"
 
 # For SCRAM-SHA-256 parsing
 base64 = "0.22"
@@ -257,6 +258,13 @@ bench = false
 [[bin]]
 name = "fuzz_buffer_composition"
 path = "fuzz_targets/buffer_composition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_grpc_message_framing"
+path = "fuzz_targets/grpc_message_framing.rs"
 test = false
 doc = false
 bench = false
