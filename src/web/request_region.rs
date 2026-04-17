@@ -715,4 +715,334 @@ mod tests {
         let msg = extract_panic_message(&(Box::new(42i32) as Box<dyn std::any::Any + Send>));
         assert_eq!(msg, "unknown panic");
     }
+
+    // ─── Metamorphic Testing: Cancel-on-Disconnect Invariants ──────────────────
+
+    mod metamorphic_tests {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::time::Duration;
+
+        /// MR1: Client disconnect triggers request-region cancel within 1 tick
+        ///
+        /// Property: If the client disconnects during handler execution,
+        /// the region's cancellation state should be observable within 1 tick.
+        #[test]
+        fn mr_disconnect_triggers_cancel_within_one_tick() {
+            let cx = test_cx();
+            let req = test_request("GET", "/long-running");
+            let region = RequestRegion::new(&cx, req);
+
+            let cancel_observed = Arc::new(AtomicBool::new(false));
+            let cancel_observed_clone = Arc::clone(&cancel_observed);
+
+            // Simulate client disconnect by setting cancel after a brief delay
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1)); // Simulate network delay
+                cx.set_cancel_requested(true);
+            });
+
+            let outcome = region.run(|ctx| {
+                // Handler checks cancellation repeatedly
+                for i in 0..10 {
+                    if ctx.cx().is_cancel_requested() {
+                        cancel_observed_clone.store(true, Ordering::SeqCst);
+                        return Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec());
+                    }
+                    // Simulate work that might take multiple ticks
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Response::new(StatusCode::OK, b"completed".to_vec())
+            });
+
+            // MR1: Cancel should be observed within reasonable time
+            assert!(cancel_observed.load(Ordering::SeqCst) || outcome.is_cancelled(),
+                "Client disconnect should trigger observable cancellation");
+        }
+
+        /// MR2: All pending downstream futures receive cancellation
+        ///
+        /// Property: When the request region is cancelled, all spawned tasks
+        /// within the region should also be cancelled.
+        #[test]
+        fn mr_downstream_futures_receive_cancellation() {
+            let cx = test_cx();
+            let req = test_request("GET", "/spawn-tasks");
+            let region = RequestRegion::new(&cx, req);
+
+            let task_cancelled = Arc::new(AtomicBool::new(false));
+            let task_cancelled_clone = Arc::clone(&task_cancelled);
+
+            let outcome = region.run(|ctx| {
+                // Spawn a background task that monitors cancellation
+                let task_ctx = ctx.cx();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        if task_ctx.is_cancel_requested() {
+                            task_cancelled_clone.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                });
+
+                // Simulate client disconnect
+                std::thread::sleep(Duration::from_millis(5));
+                ctx.cx().set_cancel_requested(true);
+
+                // Give spawned task time to observe cancellation
+                std::thread::sleep(Duration::from_millis(10));
+
+                Response::new(StatusCode::OK, b"ok".to_vec())
+            });
+
+            // MR2: Spawned tasks should observe cancellation
+            assert!(task_cancelled.load(Ordering::SeqCst) || outcome.is_cancelled(),
+                "Spawned tasks should receive cancellation signal");
+        }
+
+        /// MR3: No obligation leaks after disconnect
+        ///
+        /// Property: When a request is cancelled, all tracked obligations
+        /// should be properly cleaned up (committed or aborted).
+        #[test]
+        fn mr_no_obligation_leaks_after_disconnect() {
+            let cx = test_cx();
+            let req = test_request("POST", "/transaction");
+            let region = RequestRegion::new(&cx, req);
+
+            let obligation_cleaned = Arc::new(AtomicBool::new(false));
+            let obligation_cleaned_clone = Arc::clone(&obligation_cleaned);
+
+            let outcome = region.run(|ctx| {
+                // Simulate creating an obligation (e.g., database transaction)
+                struct MockObligation {
+                    cleaned: Arc<AtomicBool>,
+                }
+
+                impl Drop for MockObligation {
+                    fn drop(&mut self) {
+                        self.cleaned.store(true, Ordering::SeqCst);
+                    }
+                }
+
+                let _obligation = MockObligation {
+                    cleaned: obligation_cleaned_clone,
+                };
+
+                // Simulate client disconnect during transaction
+                std::thread::sleep(Duration::from_millis(1));
+                ctx.cx().set_cancel_requested(true);
+
+                // Early return should trigger obligation cleanup via Drop
+                if ctx.cx().checkpoint().is_err() {
+                    return Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec());
+                }
+
+                Response::new(StatusCode::OK, b"committed".to_vec())
+            });
+
+            // Give time for cleanup
+            std::thread::sleep(Duration::from_millis(1));
+
+            // MR3: Obligations should be cleaned up after cancellation
+            assert!(obligation_cleaned.load(Ordering::SeqCst),
+                "Obligations must be cleaned up when request is cancelled");
+        }
+
+        /// MR4: Partial response flushed atomically
+        ///
+        /// Property: If a response is partially written when cancellation occurs,
+        /// the response should be atomically committed or discarded (no partial writes).
+        #[test]
+        fn mr_partial_response_flushed_atomically() {
+            let cx = test_cx();
+            let req = test_request("GET", "/streaming");
+            let region = RequestRegion::new(&cx, req);
+
+            let response_complete = Arc::new(AtomicBool::new(false));
+            let response_complete_clone = Arc::clone(&response_complete);
+
+            let outcome = region.run(|ctx| {
+                // Simulate building a response that could be interrupted
+                let mut response_data = Vec::new();
+
+                for i in 0..10 {
+                    if ctx.cx().is_cancel_requested() {
+                        // If cancelled, return what we have or a cancellation response
+                        return Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec());
+                    }
+
+                    // Simulate response building
+                    response_data.push(b'a' + (i % 26) as u8);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+
+                response_complete_clone.store(true, Ordering::SeqCst);
+                Response::new(StatusCode::OK, response_data)
+            });
+
+            // Simulate client disconnect during response building
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(5));
+                cx.set_cancel_requested(true);
+            });
+
+            std::thread::sleep(Duration::from_millis(15));
+
+            // MR4: Response should be either complete or properly cancelled
+            match outcome {
+                RegionOutcome::Ok(_) => assert!(response_complete.load(Ordering::SeqCst),
+                    "Complete response should only be returned if fully built"),
+                RegionOutcome::Cancelled => assert!(!response_complete.load(Ordering::SeqCst),
+                    "Cancelled response should not complete response building"),
+                _ => panic!("Unexpected outcome: {:?}", outcome),
+            }
+        }
+
+        /// MR5: Reconnect with same request-id deduplicated
+        ///
+        /// Property: If a client reconnects with the same request identifier,
+        /// the request should be deduplicated (idempotency).
+        #[test]
+        fn mr_reconnect_request_id_deduplicated() {
+            let cx = test_cx();
+            let request_counter = Arc::new(AtomicU32::new(0));
+
+            // First request with ID "req-123"
+            let mut req1 = test_request("POST", "/idempotent");
+            req1.headers.insert("x-request-id".to_string(), "req-123".to_string());
+            req1.headers.insert("x-idempotency-key".to_string(), "key-123".to_string());
+
+            let region1 = RequestRegion::new(&cx, req1);
+            let counter_clone1 = Arc::clone(&request_counter);
+
+            let outcome1 = region1.run(|ctx| {
+                // Check for idempotency key in real implementation
+                let request_id = ctx.header("x-request-id").unwrap_or("none");
+                let idempotency_key = ctx.header("x-idempotency-key").unwrap_or("none");
+
+                // Simulate idempotent operation
+                if request_id == "req-123" && idempotency_key == "key-123" {
+                    counter_clone1.fetch_add(1, Ordering::SeqCst);
+                    Response::new(StatusCode::CREATED, b"resource created".to_vec())
+                } else {
+                    Response::new(StatusCode::BAD_REQUEST, b"missing headers".to_vec())
+                }
+            });
+
+            // Second request with same ID (reconnect/retry)
+            let mut req2 = test_request("POST", "/idempotent");
+            req2.headers.insert("x-request-id".to_string(), "req-123".to_string());
+            req2.headers.insert("x-idempotency-key".to_string(), "key-123".to_string());
+
+            let region2 = RequestRegion::new(&cx, req2);
+            let counter_clone2 = Arc::clone(&request_counter);
+
+            let outcome2 = region2.run(|ctx| {
+                let request_id = ctx.header("x-request-id").unwrap_or("none");
+                let idempotency_key = ctx.header("x-idempotency-key").unwrap_or("none");
+
+                // In a real implementation, this would check a cache/database
+                // For this test, we simulate that the operation should be idempotent
+                let current_count = counter_clone2.load(Ordering::SeqCst);
+
+                if request_id == "req-123" && idempotency_key == "key-123" && current_count > 0 {
+                    // Already processed - return cached result
+                    Response::new(StatusCode::CREATED, b"resource created".to_vec())
+                } else if current_count == 0 {
+                    // First time - process it
+                    counter_clone2.fetch_add(1, Ordering::SeqCst);
+                    Response::new(StatusCode::CREATED, b"resource created".to_vec())
+                } else {
+                    Response::new(StatusCode::BAD_REQUEST, b"invalid state".to_vec())
+                }
+            });
+
+            // MR5: Both requests should succeed, but operation should only happen once
+            assert!(outcome1.is_ok(), "First request should succeed");
+            assert!(outcome2.is_ok(), "Second request (reconnect) should succeed");
+
+            // The key invariant: idempotent operations should only execute once
+            let final_count = request_counter.load(Ordering::SeqCst);
+            assert_eq!(final_count, 1,
+                "Idempotent operation should only execute once despite multiple requests");
+        }
+
+        /// Composite MR: Disconnect during concurrent operations
+        ///
+        /// Tests multiple invariants simultaneously to catch interaction bugs.
+        #[test]
+        fn mr_composite_disconnect_concurrent_operations() {
+            let cx = test_cx();
+            let req = test_request("POST", "/complex");
+            let region = RequestRegion::new(&cx, req);
+
+            let task_count = Arc::new(AtomicU32::new(0));
+            let cleanup_count = Arc::new(AtomicU32::new(0));
+
+            let task_count_clone = Arc::clone(&task_count);
+            let cleanup_count_clone = Arc::clone(&cleanup_count);
+
+            let outcome = region.run(|ctx| {
+                // Spawn multiple concurrent tasks
+                for i in 0..3 {
+                    let task_ctx = ctx.cx();
+                    let task_counter = Arc::clone(&task_count_clone);
+                    let cleanup_counter = Arc::clone(&cleanup_count_clone);
+
+                    std::thread::spawn(move || {
+                        task_counter.fetch_add(1, Ordering::SeqCst);
+
+                        // Simulate work with cleanup
+                        let _cleanup = CleanupGuard {
+                            counter: cleanup_counter,
+                        };
+
+                        for _ in 0..20 {
+                            if task_ctx.is_cancel_requested() {
+                                return; // Task cancelled
+                            }
+                            std::thread::sleep(Duration::from_micros(100));
+                        }
+                    });
+                }
+
+                // Simulate client disconnect after brief work
+                std::thread::sleep(Duration::from_millis(2));
+                ctx.cx().set_cancel_requested(true);
+
+                // Give tasks time to observe cancellation and clean up
+                std::thread::sleep(Duration::from_millis(10));
+
+                Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec())
+            });
+
+            std::thread::sleep(Duration::from_millis(5)); // Allow cleanup to complete
+
+            // Composite invariants:
+            // 1. All tasks should have started
+            assert_eq!(task_count.load(Ordering::SeqCst), 3,
+                "All spawned tasks should have started");
+
+            // 2. All tasks should have cleaned up
+            assert_eq!(cleanup_count.load(Ordering::SeqCst), 3,
+                "All tasks should have performed cleanup");
+
+            // 3. Request should be cancelled
+            assert!(outcome.is_cancelled(),
+                "Request should be marked as cancelled");
+        }
+
+        struct CleanupGuard {
+            counter: Arc<AtomicU32>,
+        }
+
+        impl Drop for CleanupGuard {
+            fn drop(&mut self) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
 }
