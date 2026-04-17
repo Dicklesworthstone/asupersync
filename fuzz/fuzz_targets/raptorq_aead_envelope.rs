@@ -386,7 +386,7 @@ fn execute_aead_operation(
             kind,
         } => {
             if symbol_data.len() <= MAX_SYMBOL_SIZE {
-                if let Some(key) = harness.get_key(key_index) {
+                if let Some(key) = harness.get_key(key_index).cloned() {
                     let nonce = derive_nonce(nonce_base, esi);
 
                     // Check for nonce reuse if enabled
@@ -397,7 +397,7 @@ fn execute_aead_operation(
                     let symbol_id = create_symbol_id(object_id, sbn, esi);
                     let symbol = Symbol::new(symbol_id, symbol_data, kind.into());
 
-                    match encrypt_symbol_to_envelope(key, nonce, &symbol) {
+                    match encrypt_symbol_to_envelope(&key, nonce, &symbol) {
                         Ok(envelope) => {
                             harness.store_envelope(key_index, envelope);
                         }
@@ -827,7 +827,8 @@ fn test_byte_reordering(envelope: &AeadEnvelope, pattern: ReorderPattern, key: &
             let serialized = reordered_envelope.to_bytes();
             if serialized.len() >= 2 {
                 let mut swapped = serialized;
-                swapped.swap(0, swapped.len() - 1);
+                let last_idx = swapped.len() - 1;
+                swapped.swap(0, last_idx);
 
                 // Try to parse the swapped data
                 let _ = AeadEnvelope::from_bytes(&swapped);
