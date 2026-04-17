@@ -1,0 +1,179 @@
+{
+  "artifact_id": "raptorq-performance-budgets-v1",
+  "schema_version": "raptorq-performance-budgets-v1",
+  "track_bead_id": "asupersync-2cyx5",
+  "parent_track_bead_id": "asupersync-2c9j7",
+  "external_ref": "bd-83wox",
+  "generated_at_utc": "2026-04-17T06:45:00Z",
+  "description": "Explicit performance budgets, SLO workloads, and CI regression thresholds for RaptorQ implementation",
+  "budget_enforcement": {
+    "ci_gate_enabled": true,
+    "failure_action": "block_merge",
+    "warning_escalation_threshold": 3,
+    "baseline_refresh_interval_days": 7
+  },
+  "workload_budgets": {
+    "RQ-G1-ENC-SMALL": {
+      "description": "Encode small block (K=32, no repair)",
+      "primary_metric": "median_ns",
+      "hard_budget_ns": 50000,
+      "operational_budget_ns": 45000,
+      "regression_threshold_percent": 15.0,
+      "target_p95_ns": 75000,
+      "target_p99_ns": 100000
+    },
+    "RQ-G1-DEC-SOURCE": {
+      "description": "Decode source-only symbols (K=32, 0% repair)",
+      "primary_metric": "median_ns",
+      "hard_budget_ns": 30000,
+      "operational_budget_ns": 25000,
+      "regression_threshold_percent": 20.0,
+      "target_p95_ns": 50000,
+      "target_p99_ns": 75000
+    },
+    "RQ-G1-DEC-REPAIR": {
+      "description": "Decode with repair symbols (K=32, 20% repair)",
+      "primary_metric": "median_ns",
+      "hard_budget_ns": 120000,
+      "operational_budget_ns": 100000,
+      "regression_threshold_percent": 25.0,
+      "target_p95_ns": 180000,
+      "target_p99_ns": 250000
+    },
+    "RQ-G1-GF256-ADDMUL": {
+      "description": "GF(256) arithmetic kernel hotspot",
+      "primary_metric": "median_ns",
+      "hard_budget_ns": 1000,
+      "operational_budget_ns": 800,
+      "regression_threshold_percent": 10.0,
+      "target_p95_ns": 1500,
+      "target_p99_ns": 2000
+    },
+    "RQ-G1-SOLVER-MARKOWITZ": {
+      "description": "Matrix solver Markowitz pivot selection",
+      "primary_metric": "median_ns",
+      "hard_budget_ns": 5000,
+      "operational_budget_ns": 4000,
+      "regression_threshold_percent": 30.0,
+      "target_p95_ns": 8000,
+      "target_p99_ns": 12000
+    },
+    "RQ-G1-PIPE-64K": {
+      "description": "Pipeline throughput 64K blocks",
+      "primary_metric": "throughput_mbps",
+      "hard_budget_mbps": 800.0,
+      "operational_budget_mbps": 1000.0,
+      "regression_threshold_percent": 15.0,
+      "target_p5_mbps": 850.0,
+      "target_p1_mbps": 750.0
+    },
+    "RQ-G1-PIPE-256K": {
+      "description": "Pipeline throughput 256K blocks",
+      "primary_metric": "throughput_mbps",
+      "hard_budget_mbps": 1200.0,
+      "operational_budget_mbps": 1500.0,
+      "regression_threshold_percent": 15.0,
+      "target_p5_mbps": 1300.0,
+      "target_p1_mbps": 1100.0
+    },
+    "RQ-G1-PIPE-1M": {
+      "description": "Pipeline throughput 1M blocks",
+      "primary_metric": "throughput_mbps",
+      "hard_budget_mbps": 2000.0,
+      "operational_budget_mbps": 2400.0,
+      "regression_threshold_percent": 12.0,
+      "target_p5_mbps": 2100.0,
+      "target_p1_mbps": 1800.0
+    },
+    "RQ-G1-E2E-RANDOM-LOWLOSS": {
+      "description": "E2E random loss 5% scenario",
+      "primary_metric": "decode_success_rate",
+      "hard_budget_rate": 0.99,
+      "operational_budget_rate": 0.995,
+      "regression_threshold_percent": 1.0,
+      "secondary_metric_budget_ns": 200000
+    },
+    "RQ-G1-E2E-RANDOM-HIGHLOSS": {
+      "description": "E2E random loss 25% scenario",
+      "primary_metric": "decode_success_rate",
+      "hard_budget_rate": 0.95,
+      "operational_budget_rate": 0.98,
+      "regression_threshold_percent": 2.0,
+      "secondary_metric_budget_ns": 500000
+    },
+    "RQ-G1-E2E-BURST-LATE": {
+      "description": "E2E burst loss with late repair",
+      "primary_metric": "decode_success_rate",
+      "hard_budget_rate": 0.90,
+      "operational_budget_rate": 0.95,
+      "regression_threshold_percent": 3.0,
+      "secondary_metric_budget_ns": 800000
+    }
+  },
+  "slo_definitions": {
+    "encode_latency_p95": {
+      "metric": "RQ-G1-ENC-SMALL.p95_ns",
+      "threshold": 75000,
+      "measurement_window_samples": 1000,
+      "violation_threshold_percent": 5.0
+    },
+    "decode_latency_p99": {
+      "metric": "RQ-G1-DEC-SOURCE.p99_ns",
+      "threshold": 75000,
+      "measurement_window_samples": 1000,
+      "violation_threshold_percent": 2.0
+    },
+    "pipeline_throughput_p5": {
+      "metric": "RQ-G1-PIPE-1M.p5_mbps",
+      "threshold": 2100.0,
+      "measurement_window_samples": 100,
+      "violation_threshold_percent": 10.0
+    },
+    "e2e_reliability": {
+      "metric": "RQ-G1-E2E-RANDOM-LOWLOSS.decode_success_rate",
+      "threshold": 0.995,
+      "measurement_window_samples": 10000,
+      "violation_threshold_percent": 0.5
+    }
+  },
+  "ci_gate_configuration": {
+    "runner_script": "scripts/run_raptorq_perf_gates.sh",
+    "benchmark_command": "rch exec -- cargo bench --bench raptorq_benchmark",
+    "measurement_samples": 50,
+    "warmup_iterations": 10,
+    "timeout_seconds": 1800,
+    "baseline_comparison_enabled": true,
+    "baseline_artifact_path": "baselines/raptorq_baseline_latest.json",
+    "report_output_path": "artifacts/raptorq_perf_gate_report.json",
+    "ndjson_log_path": "artifacts/raptorq_perf_gate_events.ndjson"
+  },
+  "reproducibility_requirements": {
+    "deterministic_seed": 424242,
+    "fixed_thread_count": 1,
+    "isolated_cpu_cores": true,
+    "memory_allocation_tracking": true,
+    "structured_logging_schema": "raptorq-perf-event-v1"
+  },
+  "rollback_policy": {
+    "automatic_rollback_triggers": [
+      "hard_budget_violation",
+      "consecutive_operational_budget_violations_3"
+    ],
+    "manual_override_required_for": [
+      "slo_violation_above_10_percent",
+      "regression_above_50_percent"
+    ],
+    "rollback_command": "git revert HEAD && rch exec -- cargo test --test raptorq_perf_invariants",
+    "verification_command": "rch exec -- scripts/run_raptorq_perf_gates.sh --verify-rollback"
+  },
+  "governance_integration": {
+    "decision_record_requirement": "Every budget change requires entry in raptorq_optimization_decision_records_v1.json",
+    "approval_threshold": "P1_performance_regression",
+    "review_period_days": 3,
+    "evidence_artifacts_required": [
+      "benchmark_comparison_report",
+      "regression_root_cause_analysis",
+      "rollback_rehearsal_log"
+    ]
+  }
+}

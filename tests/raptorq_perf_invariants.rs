@@ -5491,7 +5491,7 @@ fn h2_closure_packet_dependency_status_alignment() {
         .expect("residual_risk_register must retain the open Track-G blocker risk");
     assert_eq!(
         risk_status, "open",
-        "RQ-H2-R2 must remain open while final Track-G / Track-E convergence is unfinished"
+        "RQ-H2-R2 must remain open while Track-G governance synchronization is incomplete"
     );
     assert_eq!(
         owner_bead_id, "asupersync-2cyx5",
@@ -5499,12 +5499,12 @@ fn h2_closure_packet_dependency_status_alignment() {
     );
     assert_eq!(
         upstream_active_leaf_bead_ids,
-        &BTreeSet::from([String::from("asupersync-36m6p")]),
-        "RQ-H2-R2 must machine-link the active upstream Track-E blocker"
+        &BTreeSet::new(),
+        "RQ-H2-R2 upstream blockers should be empty since Track-E is completed"
     );
     assert!(
-        mitigation.contains("Track-G can transition from in_progress to closed."),
-        "RQ-H2-R2 mitigation must preserve the live Track-G in_progress handoff"
+        mitigation.contains("Complete Track-G governance synchronization"),
+        "RQ-H2-R2 mitigation must reflect that Track-E is complete and Track-G needs final sync"
     );
     let (_, mitigation, _, upstream_active_leaf_bead_ids) = risks_by_id
         .get("RQ-H2-R1")
@@ -6687,4 +6687,256 @@ fn f6_benchmark_covers_regime_observability() {
             "f6: benchmark must emit regime observability field: {required}"
         );
     }
+}
+
+// ============================================================================
+// Track-G Performance Governance Tests
+// ============================================================================
+
+const RAPTORQ_PERFORMANCE_BUDGETS_V1: &str = include_str!("../artifacts/raptorq_performance_budgets_v1.json");
+const RAPTORQ_PERF_GATES_SCRIPT: &str = include_str!("../scripts/run_raptorq_perf_gates.sh");
+
+/// G1 performance budgets schema and workload coverage validation.
+#[test]
+fn g1_performance_budgets_schema_and_coverage() {
+    let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_PERFORMANCE_BUDGETS_V1)
+        .expect("performance budgets artifact must be valid JSON");
+
+    // Schema validation
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some("raptorq-performance-budgets-v1"),
+        "performance budgets schema version mismatch"
+    );
+    assert_eq!(
+        artifact["track_bead_id"].as_str(),
+        Some("asupersync-2cyx5"),
+        "performance budgets must be anchored to Track-G bead"
+    );
+
+    // Workload budget coverage
+    let workload_budgets = artifact["workload_budgets"]
+        .as_object()
+        .expect("workload_budgets must be an object");
+
+    let required_workloads = [
+        "RQ-G1-ENC-SMALL",
+        "RQ-G1-DEC-SOURCE",
+        "RQ-G1-DEC-REPAIR",
+        "RQ-G1-GF256-ADDMUL",
+        "RQ-G1-SOLVER-MARKOWITZ",
+        "RQ-G1-PIPE-64K",
+        "RQ-G1-PIPE-256K",
+        "RQ-G1-PIPE-1M",
+        "RQ-G1-E2E-RANDOM-LOWLOSS",
+        "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "RQ-G1-E2E-BURST-LATE",
+    ];
+
+    for workload in &required_workloads {
+        assert!(
+            workload_budgets.contains_key(*workload),
+            "missing required workload budget: {workload}"
+        );
+
+        let budget = &workload_budgets[*workload];
+        assert!(budget["primary_metric"].is_string(),
+                "workload {workload} missing primary_metric");
+        assert!(budget["hard_budget_ns"].is_number() || budget["hard_budget_mbps"].is_number() || budget["hard_budget_rate"].is_number(),
+                "workload {workload} missing hard budget threshold");
+        assert!(budget["regression_threshold_percent"].is_number(),
+                "workload {workload} missing regression_threshold_percent");
+    }
+
+    // SLO definitions validation
+    let slo_definitions = artifact["slo_definitions"]
+        .as_object()
+        .expect("slo_definitions must be an object");
+
+    let required_slos = [
+        "encode_latency_p95",
+        "decode_latency_p99",
+        "pipeline_throughput_p5",
+        "e2e_reliability",
+    ];
+
+    for slo in &required_slos {
+        assert!(
+            slo_definitions.contains_key(*slo),
+            "missing required SLO definition: {slo}"
+        );
+
+        let slo_def = &slo_definitions[*slo];
+        assert!(slo_def["metric"].is_string(), "SLO {slo} missing metric");
+        assert!(slo_def["threshold"].is_number(), "SLO {slo} missing threshold");
+        assert!(slo_def["measurement_window_samples"].is_number(),
+                "SLO {slo} missing measurement_window_samples");
+    }
+
+    // CI gate configuration validation
+    let ci_gate_config = artifact["ci_gate_configuration"]
+        .as_object()
+        .expect("ci_gate_configuration must be an object");
+
+    assert_eq!(
+        ci_gate_config["runner_script"].as_str(),
+        Some("scripts/run_raptorq_perf_gates.sh"),
+        "CI gate must reference the correct runner script"
+    );
+    assert!(ci_gate_config["measurement_samples"].as_u64().unwrap_or(0) >= 10,
+            "CI gate must have sufficient measurement samples");
+    assert!(ci_gate_config["timeout_seconds"].as_u64().unwrap_or(0) >= 300,
+            "CI gate must have reasonable timeout");
+
+    // Reproducibility requirements validation
+    let repro_reqs = artifact["reproducibility_requirements"]
+        .as_object()
+        .expect("reproducibility_requirements must be an object");
+
+    assert_eq!(
+        repro_reqs["deterministic_seed"].as_u64(),
+        Some(424242),
+        "reproducibility must use deterministic seed 424242"
+    );
+    assert_eq!(
+        repro_reqs["fixed_thread_count"].as_u64(),
+        Some(1),
+        "reproducibility must use single thread for consistency"
+    );
+}
+
+/// G1 performance gate script validation and self-test capability.
+#[test]
+fn g1_performance_gates_script_validation() {
+    // Validate script structure and key components
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("run_performance_gates"),
+        "performance gates script must define run_performance_gates function"
+    );
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("check_all_budgets"),
+        "performance gates script must implement budget checking"
+    );
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("verify_rollback_integrity"),
+        "performance gates script must support rollback verification"
+    );
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("generate_gate_report"),
+        "performance gates script must generate structured reports"
+    );
+
+    // Validate required modes
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains(r#"mode="${1:-full}""#),
+        "script must support mode parameter"
+    );
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("smoke"),
+        "script must support smoke test mode"
+    );
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("verify-rollback"),
+        "script must support rollback verification mode"
+    );
+
+    // Validate deterministic environment setup
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("RAPTORQ_PERF_SEED=424242"),
+        "script must set deterministic seed for reproducibility"
+    );
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("RUST_TEST_THREADS=1"),
+        "script must enforce single-threaded execution"
+    );
+
+    // Validate output artifacts
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("raptorq_perf_gate_report.json"),
+        "script must generate structured JSON report"
+    );
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("raptorq_perf_gate_events.ndjson"),
+        "script must generate NDJSON event log for structured logging"
+    );
+
+    // Validate integration with governance framework
+    assert!(
+        RAPTORQ_PERF_GATES_SCRIPT.contains("asupersync-2cyx5"),
+        "script must reference Track-G bead in documentation"
+    );
+}
+
+/// G1 governance integration: performance budgets and CI gates integration test.
+#[test]
+fn g1_governance_integration_validation() {
+    let budget_artifact: serde_json::Value = serde_json::from_str(RAPTORQ_PERFORMANCE_BUDGETS_V1)
+        .expect("performance budgets artifact must be valid JSON");
+
+    // Validate governance integration
+    let governance = budget_artifact["governance_integration"]
+        .as_object()
+        .expect("governance_integration must be present");
+
+    assert!(
+        governance["decision_record_requirement"]
+            .as_str()
+            .unwrap_or("")
+            .contains("raptorq_optimization_decision_records_v1.json"),
+        "governance must require decision record entries for budget changes"
+    );
+
+    assert!(
+        governance["evidence_artifacts_required"]
+            .as_array()
+            .expect("evidence_artifacts_required must be an array")
+            .len() >= 3,
+        "governance must require sufficient evidence artifacts"
+    );
+
+    // Validate rollback policy
+    let rollback_policy = budget_artifact["rollback_policy"]
+        .as_object()
+        .expect("rollback_policy must be present");
+
+    assert!(
+        rollback_policy["automatic_rollback_triggers"]
+            .as_array()
+            .expect("automatic_rollback_triggers must be an array")
+            .len() >= 2,
+        "rollback policy must define automatic triggers"
+    );
+
+    assert!(
+        rollback_policy["rollback_command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("git revert"),
+        "rollback policy must specify git revert command"
+    );
+
+    assert!(
+        rollback_policy["verification_command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("run_raptorq_perf_gates.sh --verify-rollback"),
+        "rollback policy must specify verification command using performance gates"
+    );
+
+    // Validate budget enforcement
+    let budget_enforcement = budget_artifact["budget_enforcement"]
+        .as_object()
+        .expect("budget_enforcement must be present");
+
+    assert_eq!(
+        budget_enforcement["ci_gate_enabled"].as_bool(),
+        Some(true),
+        "CI gate must be enabled for budget enforcement"
+    );
+
+    assert_eq!(
+        budget_enforcement["failure_action"].as_str(),
+        Some("block_merge"),
+        "budget violations must block merge"
+    );
 }
