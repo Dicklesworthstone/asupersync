@@ -1,0 +1,1 @@
+very long text that exceeds typical buffer sizes and should test capacity growth mechanisms

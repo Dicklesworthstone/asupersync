@@ -123,6 +123,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "codec_round_trip"
+path = "fuzz_targets/codec_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_gf256_operations"
 path = "fuzz_targets/gf256_operations.rs"
 test = false
