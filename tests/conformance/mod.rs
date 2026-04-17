@@ -10,8 +10,10 @@ pub mod h1_rfc9112;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
 // pub mod hpack_rfc7541;
+pub mod kafka_record_batch_v2;
 // pub mod mysql_auth_switch;
-// pub mod obligation_invariants;
+pub mod mysql_stmt_prepare_execute;
+pub mod obligation_invariants;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
@@ -21,7 +23,9 @@ pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel
 // pub use h2_rfc7540::{H2ConformanceHarness, H2ConformanceResult};
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 // pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
+pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult, TestCategory as KafkaTestCategory};
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
+pub use mysql_stmt_prepare_execute::{MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -71,6 +75,11 @@ pub enum TestCategory {
     StateMachine,
     PluginNegotiation,
     SecurityValidation,
+    ParameterTypes,
+    NullBitmap,
+    LongData,
+    CursorFlags,
+    BinaryResultSet,
 }
 
 // Unified conformance test result
