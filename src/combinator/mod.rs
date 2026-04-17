@@ -30,6 +30,8 @@ pub mod map_reduce;
 pub mod pipeline;
 pub mod quorum;
 pub mod race;
+#[cfg(test)]
+pub mod race_metamorphic;
 pub mod rate_limit;
 pub mod retry;
 pub mod select;
