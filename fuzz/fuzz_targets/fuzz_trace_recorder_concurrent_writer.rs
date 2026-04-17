@@ -355,12 +355,14 @@ fn test_record_truncation_frame_boundary(_config: &TraceRecorderConcurrentConfig
             // All events should be well-formed (no corruption from truncation)
             match event {
                 asupersync::trace::replay::ReplayEvent::TaskScheduled { task, .. } => {
-                    // CompactTaskId doesn't have index() method, just check it exists
-                    assert!(task.raw() > 0);
+                    // CompactTaskId has unpack() method
+                    let (index, _gen) = task.unpack();
+                    assert!(index > 0);
                 }
                 asupersync::trace::replay::ReplayEvent::TaskCompleted { task, .. } => {
-                    // CompactTaskId doesn't have index() method, just check it exists
-                    assert!(task.raw() > 0);
+                    // CompactTaskId has unpack() method
+                    let (index, _gen) = task.unpack();
+                    assert!(index > 0);
                 }
                 _ => {} // Other events are fine
             }
@@ -369,7 +371,7 @@ fn test_record_truncation_frame_boundary(_config: &TraceRecorderConcurrentConfig
 }
 
 /// Test 4: Reader falls behind → lagged subscriber semantics
-fn test_reader_lag_semantics(config: &TraceRecorderConcurrentConfig) {
+fn test_reader_lag_semantics(_config: &TraceRecorderConcurrentConfig) {
     let recorder_config = RecorderConfig::enabled()
         .with_capacity(1000)
         .with_max_memory(50000);
@@ -402,7 +404,7 @@ fn test_reader_lag_semantics(config: &TraceRecorderConcurrentConfig) {
     let reader_handle = thread::spawn(move || {
         let mut snapshots = Vec::new();
         while snapshots.len() < 10 && !stop_flag_reader.load(Ordering::Relaxed) {
-            if let Ok(mut r) = recorder_reader.try_lock() {
+            if let Ok(r) = recorder_reader.try_lock() {
                 if let Some(snapshot) = r.snapshot() {
                     snapshots.push(snapshot.events.len());
                 }
