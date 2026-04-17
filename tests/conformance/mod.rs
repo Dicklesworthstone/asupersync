@@ -17,6 +17,7 @@ pub mod tls_0rtt_replay_rfc8446;
 pub mod cancel_dag_determinism;
 pub mod obligation_lifecycle_metamorphic;
 pub mod trace_replay_idempotency_metamorphic;
+pub mod race_loser_drain_metamorphic;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod postgres_logical_replication;
@@ -40,6 +41,7 @@ pub use tls_0rtt_replay_rfc8446::{Tls0RttConformanceHarness, Tls0RttConformanceR
 pub use cancel_dag_determinism::{CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory};
 pub use obligation_lifecycle_metamorphic::{ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult, TestCategory as ObligationLifecycleTestCategory};
 pub use trace_replay_idempotency_metamorphic::{TraceReplayIdempotencyMetamorphicHarness, TraceReplayIdempotencyMetamorphicResult, TestCategory as TraceReplayTestCategory};
+pub use race_loser_drain_metamorphic::{RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult, TestCategory as RaceLoserDrainTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -141,6 +143,12 @@ pub enum TestCategory {
     TruncationHandling,
     EpochBoundaryOrdering,
     CrossRegionJoining,
+    // Race loser-drain metamorphic categories
+    RaceCommutativity,
+    LoserCancellation,
+    BudgetExhaustion,
+    FinalizerInvocation,
+    RegionQuiescence,
 }
 
 // Unified conformance test result
@@ -404,6 +412,41 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         results.extend(trace_replay_results);
     }
 
+    // Race Loser-Drain Metamorphic conformance
+    #[cfg(feature = "deterministic-mode")]
+    {
+        let race_loser_drain_harness = RaceLoserDrainMetamorphicHarness::new();
+        let race_loser_drain_results: Vec<ConformanceTestResult> = race_loser_drain_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    race_loser_drain_metamorphic::TestCategory::RaceCommutativity => TestCategory::RaceCommutativity,
+                    race_loser_drain_metamorphic::TestCategory::LoserCancellation => TestCategory::LoserCancellation,
+                    race_loser_drain_metamorphic::TestCategory::BudgetExhaustion => TestCategory::BudgetExhaustion,
+                    race_loser_drain_metamorphic::TestCategory::FinalizerInvocation => TestCategory::FinalizerInvocation,
+                    race_loser_drain_metamorphic::TestCategory::RegionQuiescence => TestCategory::RegionQuiescence,
+                },
+                requirement_level: match r.requirement_level {
+                    race_loser_drain_metamorphic::RequirementLevel::Must => RequirementLevel::Must,
+                    race_loser_drain_metamorphic::RequirementLevel::Should => RequirementLevel::Should,
+                    race_loser_drain_metamorphic::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    race_loser_drain_metamorphic::TestVerdict::Pass => TestVerdict::Pass,
+                    race_loser_drain_metamorphic::TestVerdict::Fail => TestVerdict::Fail,
+                    race_loser_drain_metamorphic::TestVerdict::Skipped => TestVerdict::Skipped,
+                    race_loser_drain_metamorphic::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(race_loser_drain_results);
+    }
+
     // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
     /*
     let hpack_harness = HpackConformanceHarness::new();
@@ -609,6 +652,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "Observability trace replay idempotency: replay(record(execution)) ≡ execution, byte-identical replay-of-replay, truncation handling"
+                },
+                "race_loser_drain_metamorphic": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "Race loser-drain with budget exhaustion: race(a,b) commutativity, loser cancellation, budget exhaustion handling, finalizer invocation, O(1) quiescence"
                 },
                 "websocket_rfc6455": {
                     "status": "implemented",
@@ -980,6 +1028,99 @@ mod tests {
         // Verify proptest completed full iteration counts
         let proptest_results = results.iter()
             .filter(|r| r.description.contains("replay") || r.description.contains("idempotency"))
+            .count();
+
+        assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
+    }
+
+    #[test]
+    #[cfg(feature = "deterministic-mode")]
+    fn test_race_loser_drain_metamorphic_conformance_integration() {
+        let race_loser_drain_harness = RaceLoserDrainMetamorphicHarness::new();
+        let results = race_loser_drain_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "Race loser-drain metamorphic conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&race_loser_drain_metamorphic::TestCategory::RaceCommutativity),
+            "Should test race commutativity"
+        );
+        assert!(
+            categories.contains(&race_loser_drain_metamorphic::TestCategory::LoserCancellation),
+            "Should test loser cancellation"
+        );
+        assert!(
+            categories.contains(&race_loser_drain_metamorphic::TestCategory::BudgetExhaustion),
+            "Should test budget exhaustion handling"
+        );
+        assert!(
+            categories.contains(&race_loser_drain_metamorphic::TestCategory::FinalizerInvocation),
+            "Should test finalizer invocation"
+        );
+        assert!(
+            categories.contains(&race_loser_drain_metamorphic::TestCategory::RegionQuiescence),
+            "Should test region quiescence"
+        );
+
+        // Verify we have appropriate requirement levels
+        let must_tests = results.iter()
+            .filter(|r| r.requirement_level == race_loser_drain_metamorphic::RequirementLevel::Must)
+            .count();
+
+        assert!(must_tests > 0, "Should have MUST requirements for race loser-drain");
+
+        // Verify comprehensive metamorphic test coverage
+        assert!(results.len() >= 12, "Should have comprehensive metamorphic test coverage");
+
+        // Verify test execution completed without panic
+        for result in &results {
+            if let Some(ref error) = result.error_message {
+                if error.contains("panicked") {
+                    panic!("Test {} panicked: {}", result.test_id, error);
+                }
+            }
+        }
+
+        // Verify we have all 5 core metamorphic relations
+        let core_tests = [
+            "mr_race_commutativity",
+            "mr_loser_cancellation",
+            "mr_budget_exhaustion",
+            "mr_finalizer_invocation",
+            "mr_region_quiescence",
+        ];
+
+        for core_test in &core_tests {
+            assert!(
+                results.iter().any(|r| r.test_id == *core_test),
+                "Missing core metamorphic relation: {}",
+                core_test
+            );
+        }
+
+        // Verify we have additional composite metamorphic relations
+        let additional_tests = [
+            "mr_deterministic_winner_selection",
+            "mr_loser_drain_ordering",
+            "mr_cancellation_reason_propagation",
+            "mr_polling_order_invariance",
+        ];
+
+        for additional_test in &additional_tests {
+            assert!(
+                results.iter().any(|r| r.test_id == *additional_test),
+                "Missing additional metamorphic relation: {}",
+                additional_test
+            );
+        }
+
+        // Verify proptest completed full iteration counts
+        let proptest_results = results.iter()
+            .filter(|r| r.description.contains("race") || r.description.contains("loser") || r.description.contains("drain"))
             .count();
 
         assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
