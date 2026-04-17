@@ -27,6 +27,8 @@ pub mod obligation_invariants;
 // pub mod websocket_rfc6455;
 pub mod websocket_extension_negotiation_rfc6455;
 pub mod grpc_trailer_forwarding_rfc9113;
+#[cfg(feature = "quic")]
+pub mod quic_connection_migration_rfc9000;
 
 // Re-export main conformance test functionality
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
@@ -48,6 +50,8 @@ pub use race_loser_drain_metamorphic::{RaceLoserDrainMetamorphicHarness, RaceLos
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 pub use websocket_extension_negotiation_rfc6455::{WsExtensionConformanceHarness, WsConformanceResult as WsExtensionConformanceResult, TestCategory as WsExtensionTestCategory};
 pub use grpc_trailer_forwarding_rfc9113::{GrpcTrailerConformanceHarness, GrpcConformanceResult as GrpcTrailerConformanceResult, TestCategory as GrpcTrailerTestCategory};
+#[cfg(feature = "quic")]
+pub use quic_connection_migration_rfc9000::{QuicConnectionMigrationConformanceHarness, QuicConnectionMigrationConformanceResult, TestCategory as QuicConnectionMigrationTestCategory};
 
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -146,6 +150,14 @@ pub enum TestCategory {
     IntegrityValidation,
     ClientProcessing,
     ServerProcessing,
+    // QUIC connection migration categories
+    PathValidation,
+    ConnectionIdRetirement,
+    AntiAmplificationLimits,
+    NatRebindingDetection,
+    ConcurrentMigration,
+    PathFailoverHandling,
+    ConnectionMigrationSecurity,
     // TLS 1.3 0-RTT categories
     PreSharedKeyExtension,
     TicketAgeObfuscation,
@@ -335,6 +347,43 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         })
         .collect();
     results.extend(quic_results);
+
+    // QUIC Connection Migration RFC 9000 conformance
+    #[cfg(feature = "quic")]
+    {
+        let quic_migration_harness = QuicConnectionMigrationConformanceHarness::new();
+        let quic_migration_results: Vec<ConformanceTestResult> = quic_migration_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    quic_connection_migration_rfc9000::TestCategory::PathValidation => TestCategory::PathValidation,
+                    quic_connection_migration_rfc9000::TestCategory::ConnectionIdRetirement => TestCategory::ConnectionIdRetirement,
+                    quic_connection_migration_rfc9000::TestCategory::AntiAmplificationLimits => TestCategory::AntiAmplificationLimits,
+                    quic_connection_migration_rfc9000::TestCategory::NatRebindingDetection => TestCategory::NatRebindingDetection,
+                    quic_connection_migration_rfc9000::TestCategory::ConcurrentMigration => TestCategory::ConcurrentMigration,
+                    quic_connection_migration_rfc9000::TestCategory::PathFailoverHandling => TestCategory::PathFailoverHandling,
+                    quic_connection_migration_rfc9000::TestCategory::ConnectionMigrationSecurity => TestCategory::ConnectionMigrationSecurity,
+                },
+                requirement_level: match r.requirement_level {
+                    quic_connection_migration_rfc9000::RequirementLevel::Must => RequirementLevel::Must,
+                    quic_connection_migration_rfc9000::RequirementLevel::Should => RequirementLevel::Should,
+                    quic_connection_migration_rfc9000::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    quic_connection_migration_rfc9000::TestVerdict::Pass => TestVerdict::Pass,
+                    quic_connection_migration_rfc9000::TestVerdict::Fail => TestVerdict::Fail,
+                    quic_connection_migration_rfc9000::TestVerdict::Skipped => TestVerdict::Skipped,
+                    quic_connection_migration_rfc9000::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(quic_migration_results);
+    }
 
     // TLS 1.3 0-RTT Replay Protection RFC 8446 conformance
     #[cfg(feature = "tls")]
@@ -771,6 +820,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "coverage": "systematic",
                     "reference": "RFC 9000 Section 17.2.5 QUIC Retry packet conformance"
                 },
+                "quic_connection_migration_rfc9000": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 9000 Section 9 QUIC connection migration conformance"
+                },
                 "tls_0rtt_replay_rfc8446": {
                     "status": "implemented",
                     "coverage": "systematic",
@@ -1046,6 +1100,93 @@ mod tests {
         if !failures.is_empty() {
             panic!("QUIC conformance tests failed: {:#?}", failures);
         }
+    }
+
+    #[test]
+    #[cfg(feature = "quic")]
+    fn test_quic_connection_migration_conformance_integration() {
+        use quic_connection_migration_rfc9000::{QuicConnectionMigrationConformanceHarness};
+
+        let quic_migration_harness = QuicConnectionMigrationConformanceHarness::new();
+        let results = quic_migration_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "QUIC connection migration conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&quic_connection_migration_rfc9000::TestCategory::PathValidation),
+            "Should test path validation with PATH_CHALLENGE/PATH_RESPONSE"
+        );
+        assert!(
+            categories.contains(&quic_connection_migration_rfc9000::TestCategory::ConnectionIdRetirement),
+            "Should test connection ID retirement after migration"
+        );
+        assert!(
+            categories.contains(&quic_connection_migration_rfc9000::TestCategory::AntiAmplificationLimits),
+            "Should test anti-amplification limits on unverified paths"
+        );
+        assert!(
+            categories.contains(&quic_connection_migration_rfc9000::TestCategory::NatRebindingDetection),
+            "Should test NAT rebinding detection via source address change"
+        );
+        assert!(
+            categories.contains(&quic_connection_migration_rfc9000::TestCategory::ConcurrentMigration),
+            "Should test concurrent path migration from both endpoints"
+        );
+
+        // Verify all tests pass
+        let failures: Vec<_> = results.iter()
+            .filter(|r| r.verdict == quic_connection_migration_rfc9000::TestVerdict::Fail)
+            .collect();
+
+        if !failures.is_empty() {
+            panic!("QUIC connection migration conformance tests failed: {:#?}", failures);
+        }
+
+        // Verify we have the expected number of test cases (15+ as per bead requirements)
+        assert!(
+            results.len() >= 15,
+            "Should have at least 15 QUIC connection migration conformance test cases, got {}",
+            results.len()
+        );
+
+        // Verify coverage of all 5 bead requirements
+        let test_ids: std::collections::HashSet<_> = results.iter()
+            .map(|r| r.test_id.as_str())
+            .collect();
+
+        // Requirement 1: path validation with PATH_CHALLENGE/PATH_RESPONSE
+        assert!(
+            test_ids.contains("quic_path_challenge_response_exchange"),
+            "Missing PATH_CHALLENGE/PATH_RESPONSE exchange test"
+        );
+
+        // Requirement 2: retire old connection ID after migration
+        assert!(
+            test_ids.contains("quic_connection_id_retirement_after_migration"),
+            "Missing connection ID retirement test"
+        );
+
+        // Requirement 3: anti-amplification limit on unverified paths
+        assert!(
+            test_ids.contains("quic_anti_amplification_limit_enforcement"),
+            "Missing anti-amplification limit test"
+        );
+
+        // Requirement 4: NAT rebinding detected via source address change
+        assert!(
+            test_ids.contains("quic_nat_rebinding_detection"),
+            "Missing NAT rebinding detection test"
+        );
+
+        // Requirement 5: concurrent path migration from both endpoints
+        assert!(
+            test_ids.contains("quic_concurrent_path_migration_both_endpoints"),
+            "Missing concurrent path migration test"
+        );
     }
 
     #[test]
