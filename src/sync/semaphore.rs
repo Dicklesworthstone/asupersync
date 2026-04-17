@@ -1710,4 +1710,410 @@ mod tests {
         crate::assert_with_log!(strong == 1, "arc count", 1usize, strong);
         crate::test_complete!("owned_permit_forget_leaks_permits_but_not_arc");
     }
+
+    // =========================================================================
+    // Metamorphic fairness tests (bead asupersync-79xgip)
+    // =========================================================================
+
+    /// MR1: No permit underflow - permit count never goes negative
+    /// Property: available_permits() >= 0 always holds, regardless of concurrent
+    /// acquire/release/cancel operations.
+    #[test]
+    fn metamorphic_no_permit_underflow() {
+        init_test("metamorphic_no_permit_underflow");
+        let _cx = test_cx();
+        let sem = Semaphore::new(3);
+
+        // Initial state check
+        let initial = sem.available_permits();
+        crate::assert_with_log!(initial >= 0, "initial permits non-negative", true, initial >= 0);
+
+        // Acquire permits up to limit
+        let p1 = sem.try_acquire(1).expect("acquire 1");
+        let p2 = sem.try_acquire(2).expect("acquire 2");
+        let remaining = sem.available_permits();
+        crate::assert_with_log!(remaining >= 0, "after acquiring all permits", true, remaining >= 0);
+        crate::assert_with_log!(remaining == 0, "exactly 0 permits remaining", 0usize, remaining);
+
+        // Try to acquire more - should fail, not underflow
+        let overflow = sem.try_acquire(1);
+        crate::assert_with_log!(overflow.is_err(), "acquire overflow fails", true, overflow.is_err());
+        let still_zero = sem.available_permits();
+        crate::assert_with_log!(still_zero >= 0, "no underflow after failed acquire", true, still_zero >= 0);
+        crate::assert_with_log!(still_zero == 0, "permits still zero", 0usize, still_zero);
+
+        // Set up async acquire that will be cancelled
+        let cancel_cx = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 8)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 8)),
+            crate::types::Budget::INFINITE,
+        );
+        let mut fut = sem.acquire(&cancel_cx, 1);
+        let pending = poll_once(&mut fut).is_none();
+        crate::assert_with_log!(pending, "acquire waits when no permits", true, pending);
+
+        // Cancel the waiting acquisition
+        cancel_cx.set_cancel_requested(true);
+        let result = poll_once(&mut fut);
+        crate::assert_with_log!(result.is_some(), "cancellation completes", true, result.is_some());
+
+        // Permit count should still be non-negative after cancellation
+        let after_cancel = sem.available_permits();
+        crate::assert_with_log!(after_cancel >= 0, "permits non-negative after cancel", true, after_cancel >= 0);
+        crate::assert_with_log!(after_cancel == 0, "permits unchanged by cancel", 0usize, after_cancel);
+
+        // Release permits and verify no underflow
+        drop(p1);
+        let after_drop1 = sem.available_permits();
+        crate::assert_with_log!(after_drop1 >= 0, "no underflow after drop 1", true, after_drop1 >= 0);
+        crate::assert_with_log!(after_drop1 == 1, "one permit released", 1usize, after_drop1);
+
+        drop(p2);
+        let after_drop2 = sem.available_permits();
+        crate::assert_with_log!(after_drop2 >= 0, "no underflow after drop 2", true, after_drop2 >= 0);
+        crate::assert_with_log!(after_drop2 == 3, "all permits released", 3usize, after_drop2);
+
+        crate::test_complete!("metamorphic_no_permit_underflow");
+    }
+
+    /// MR2: Cancel preserves permit count - cancelling an acquisition doesn't
+    /// affect the available permit count, since permits are only decremented
+    /// on successful acquisition.
+    #[test]
+    fn metamorphic_cancel_preserves_permit_count() {
+        init_test("metamorphic_cancel_preserves_permit_count");
+        let sem = Semaphore::new(2);
+
+        // Hold one permit, leaving one available
+        let _held = sem.try_acquire(1).expect("acquire 1");
+        let before_cancel = sem.available_permits();
+        crate::assert_with_log!(before_cancel == 1, "one permit available", 1usize, before_cancel);
+
+        // Create multiple cancel contexts for concurrent cancellation test
+        let cancel_cx1 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 9)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 9)),
+            crate::types::Budget::INFINITE,
+        );
+        let cancel_cx2 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 10)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 10)),
+            crate::types::Budget::INFINITE,
+        );
+
+        // Start multiple waiters
+        let mut fut1 = sem.acquire(&cancel_cx1, 1);
+        let mut fut2 = sem.acquire(&cancel_cx2, 1);
+
+        // First waiter should acquire immediately
+        let result1 = poll_once(&mut fut1);
+        crate::assert_with_log!(result1.is_some(), "first waiter acquires", true, result1.is_some());
+
+        // Second waiter should block
+        let pending2 = poll_once(&mut fut2).is_none();
+        crate::assert_with_log!(pending2, "second waiter blocks", true, pending2);
+
+        // Permit count should be zero now
+        let after_acquire = sem.available_permits();
+        crate::assert_with_log!(after_acquire == 0, "no permits after full acquisition", 0usize, after_acquire);
+
+        // Cancel the blocked waiter
+        cancel_cx2.set_cancel_requested(true);
+        let result2 = poll_once(&mut fut2);
+        crate::assert_with_log!(result2.is_some(), "cancellation completes", true, result2.is_some());
+
+        // Permit count should be unchanged by cancellation
+        let after_cancel = sem.available_permits();
+        crate::assert_with_log!(after_cancel == 0, "permits unchanged by cancel", 0usize, after_cancel);
+
+        // Transform: add permits then cancel more waiters - count should only
+        // reflect successful operations, not cancelled ones
+        sem.add_permits(3);
+        let after_add = sem.available_permits();
+        crate::assert_with_log!(after_add == 3, "permits added successfully", 3usize, after_add);
+
+        // Start more waiters and cancel them
+        let cancel_cx3 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 11)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 11)),
+            crate::types::Budget::INFINITE,
+        );
+        let mut fut3 = sem.acquire(&cancel_cx3, 2);
+        let result3 = poll_once(&mut fut3);
+        crate::assert_with_log!(result3.is_some(), "large acquire succeeds", true, result3.is_some());
+
+        let remaining = sem.available_permits();
+        crate::assert_with_log!(remaining == 1, "one permit left after large acquire", 1usize, remaining);
+
+        crate::test_complete!("metamorphic_cancel_preserves_permit_count");
+    }
+
+    /// MR3: FIFO order with concurrent cancellation - when some waiters are
+    /// cancelled, remaining waiters should still be served in FIFO order.
+    /// Property: order(service_without_cancellation) ⊆ order(service_with_cancellation)
+    #[test]
+    fn metamorphic_fifo_order_under_cancellation() {
+        init_test("metamorphic_fifo_order_under_cancellation");
+        let sem = Semaphore::new(0); // Start empty to force queueing
+
+        // Create contexts for ordered waiters
+        let cx1 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 12)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 12)),
+            crate::types::Budget::INFINITE,
+        );
+        let cx2 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 13)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 13)),
+            crate::types::Budget::INFINITE,
+        );
+        let cx3 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 14)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 14)),
+            crate::types::Budget::INFINITE,
+        );
+        let cx4 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 15)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 15)),
+            crate::types::Budget::INFINITE,
+        );
+
+        // Queue waiters in order: 1, 2, 3, 4
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let mut fut3 = sem.acquire(&cx3, 1);
+        let mut fut4 = sem.acquire(&cx4, 1);
+
+        // All should be pending
+        crate::assert_with_log!(poll_once(&mut fut1).is_none(), "fut1 pending", true, true);
+        crate::assert_with_log!(poll_once(&mut fut2).is_none(), "fut2 pending", true, true);
+        crate::assert_with_log!(poll_once(&mut fut3).is_none(), "fut3 pending", true, true);
+        crate::assert_with_log!(poll_once(&mut fut4).is_none(), "fut4 pending", true, true);
+
+        // Cancel waiters 2 and 4 (middle cancellations)
+        cx2.set_cancel_requested(true);
+        cx4.set_cancel_requested(true);
+
+        let result2 = poll_once(&mut fut2);
+        let result4 = poll_once(&mut fut4);
+        crate::assert_with_log!(result2.is_some(), "fut2 cancelled", true, result2.is_some());
+        crate::assert_with_log!(result4.is_some(), "fut4 cancelled", true, result4.is_some());
+
+        // Add permits one at a time - should wake remaining waiters in FIFO order
+        sem.add_permits(1);
+        let result1_first = poll_once(&mut fut1);
+        crate::assert_with_log!(result1_first.is_some(), "fut1 wakes first", true, result1_first.is_some());
+
+        // fut3 should still be waiting
+        crate::assert_with_log!(poll_once(&mut fut3).is_none(), "fut3 still pending", true, true);
+
+        sem.add_permits(1);
+        let result3_second = poll_once(&mut fut3);
+        crate::assert_with_log!(result3_second.is_some(), "fut3 wakes second", true, result3_second.is_some());
+
+        // Transform: Test that FIFO order is preserved even with permit count variations
+        let sem2 = Semaphore::new(0);
+
+        // Create 6 contexts outside the loop to avoid lifetime issues
+        let contexts = vec![
+            Cx::new(
+                crate::types::RegionId::from_arena(ArenaIndex::new(0, 16)),
+                crate::types::TaskId::from_arena(ArenaIndex::new(0, 16)),
+                crate::types::Budget::INFINITE,
+            ),
+            Cx::new(
+                crate::types::RegionId::from_arena(ArenaIndex::new(0, 17)),
+                crate::types::TaskId::from_arena(ArenaIndex::new(0, 17)),
+                crate::types::Budget::INFINITE,
+            ),
+            Cx::new(
+                crate::types::RegionId::from_arena(ArenaIndex::new(0, 18)),
+                crate::types::TaskId::from_arena(ArenaIndex::new(0, 18)),
+                crate::types::Budget::INFINITE,
+            ),
+            Cx::new(
+                crate::types::RegionId::from_arena(ArenaIndex::new(0, 19)),
+                crate::types::TaskId::from_arena(ArenaIndex::new(0, 19)),
+                crate::types::Budget::INFINITE,
+            ),
+            Cx::new(
+                crate::types::RegionId::from_arena(ArenaIndex::new(0, 20)),
+                crate::types::TaskId::from_arena(ArenaIndex::new(0, 20)),
+                crate::types::Budget::INFINITE,
+            ),
+            Cx::new(
+                crate::types::RegionId::from_arena(ArenaIndex::new(0, 21)),
+                crate::types::TaskId::from_arena(ArenaIndex::new(0, 21)),
+                crate::types::Budget::INFINITE,
+            ),
+        ];
+
+        let mut futures = Vec::new();
+        for ctx in &contexts {
+            futures.push(sem2.acquire(ctx, 1));
+        }
+
+        // All should be pending
+        for (i, fut) in futures.iter_mut().enumerate() {
+            crate::assert_with_log!(poll_once(fut).is_none(), &format!("waiter {} pending", i), true, true);
+        }
+
+        // Cancel odd-indexed waiters (1, 3, 5)
+        contexts[1].set_cancel_requested(true);
+        contexts[3].set_cancel_requested(true);
+        contexts[5].set_cancel_requested(true);
+
+        let result1 = poll_once(&mut futures[1]);
+        let result3 = poll_once(&mut futures[3]);
+        let result5 = poll_once(&mut futures[5]);
+        crate::assert_with_log!(result1.is_some(), "waiter 1 cancelled", true, result1.is_some());
+        crate::assert_with_log!(result3.is_some(), "waiter 3 cancelled", true, result3.is_some());
+        crate::assert_with_log!(result5.is_some(), "waiter 5 cancelled", true, result5.is_some());
+
+        // Add permits and verify FIFO order: 0, then 2, then 4
+        sem2.add_permits(1);
+        let result0 = poll_once(&mut futures[0]);
+        crate::assert_with_log!(result0.is_some(), "waiter 0 wakes first", true, result0.is_some());
+        crate::assert_with_log!(poll_once(&mut futures[2]).is_none(), "waiter 2 still pending", true, true);
+        crate::assert_with_log!(poll_once(&mut futures[4]).is_none(), "waiter 4 still pending", true, true);
+
+        sem2.add_permits(1);
+        let result2 = poll_once(&mut futures[2]);
+        crate::assert_with_log!(result2.is_some(), "waiter 2 wakes second", true, result2.is_some());
+        crate::assert_with_log!(poll_once(&mut futures[4]).is_none(), "waiter 4 still pending", true, true);
+
+        sem2.add_permits(1);
+        let result4_final = poll_once(&mut futures[4]);
+        crate::assert_with_log!(result4_final.is_some(), "waiter 4 wakes third", true, result4_final.is_some());
+
+        crate::test_complete!("metamorphic_fifo_order_under_cancellation");
+    }
+
+    /// MR4: try_acquire non-blocking behavior - try_acquire should never block
+    /// regardless of semaphore state, available permits, or concurrent operations.
+    /// Property: try_acquire is always O(1) and immediate
+    #[test]
+    fn metamorphic_try_acquire_never_blocks() {
+        init_test("metamorphic_try_acquire_never_blocks");
+
+        // Test across different initial states
+        let test_states = [
+            (0, "zero permits"),
+            (1, "one permit"),
+            (5, "multiple permits"),
+            (100, "many permits"),
+        ];
+
+        for (initial_permits, desc) in test_states {
+            let sem = Semaphore::new(initial_permits);
+
+            // try_acquire should be immediate regardless of success/failure
+            let start_time = std::time::Instant::now();
+            let result1 = sem.try_acquire(1);
+            let elapsed1 = start_time.elapsed();
+
+            // Should complete very quickly (< 1ms in practice, but allow 10ms for CI)
+            let quick1 = elapsed1.as_millis() < 10;
+            crate::assert_with_log!(
+                quick1,
+                &format!("try_acquire quick on {}", desc),
+                true,
+                quick1
+            );
+
+            if initial_permits > 0 {
+                crate::assert_with_log!(result1.is_ok(), &format!("try_acquire succeeds on {}", desc), true, result1.is_ok());
+            }
+
+            // try_acquire should be immediate even when acquiring all permits
+            if initial_permits > 1 {
+                let start_time = std::time::Instant::now();
+                let _result_all = sem.try_acquire(initial_permits.saturating_sub(1));
+                let elapsed_all = start_time.elapsed();
+
+                let quick_all = elapsed_all.as_millis() < 10;
+                crate::assert_with_log!(
+                    quick_all,
+                    &format!("try_acquire_all quick on {}", desc),
+                    true,
+                    quick_all
+                );
+            }
+
+            // try_acquire should be immediate even when overcommitting
+            let start_time = std::time::Instant::now();
+            let result_over = sem.try_acquire(initial_permits + 10);
+            let elapsed_over = start_time.elapsed();
+
+            let quick_over = elapsed_over.as_millis() < 10;
+            crate::assert_with_log!(
+                quick_over,
+                &format!("try_acquire_over quick on {}", desc),
+                true,
+                quick_over
+            );
+            crate::assert_with_log!(
+                result_over.is_err(),
+                &format!("try_acquire_over fails on {}", desc),
+                true,
+                result_over.is_err()
+            );
+        }
+
+        // Transform: test try_acquire behavior during concurrent async operations
+        let sem = Semaphore::new(1);
+        let cx = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 17)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 17)),
+            crate::types::Budget::INFINITE,
+        );
+
+        // Hold the permit with async acquire
+        let _permit = sem.try_acquire(1).expect("initial acquire");
+
+        // Start a waiting async acquire
+        let mut fut = sem.acquire(&cx, 1);
+        crate::assert_with_log!(poll_once(&mut fut).is_none(), "async acquire waits", true, true);
+
+        // try_acquire should still be immediate even with waiters
+        let start_time = std::time::Instant::now();
+        let result_with_waiter = sem.try_acquire(1);
+        let elapsed_with_waiter = start_time.elapsed();
+
+        let quick_with_waiter = elapsed_with_waiter.as_millis() < 10;
+        crate::assert_with_log!(
+            quick_with_waiter,
+            "try_acquire quick with waiters",
+            true,
+            quick_with_waiter
+        );
+        crate::assert_with_log!(
+            result_with_waiter.is_err(),
+            "try_acquire fails with waiters",
+            true,
+            result_with_waiter.is_err()
+        );
+
+        // Transform: test try_acquire on closed semaphore
+        sem.close();
+        let start_time = std::time::Instant::now();
+        let result_closed = sem.try_acquire(1);
+        let elapsed_closed = start_time.elapsed();
+
+        let quick_closed = elapsed_closed.as_millis() < 10;
+        crate::assert_with_log!(
+            quick_closed,
+            "try_acquire quick when closed",
+            true,
+            quick_closed
+        );
+        crate::assert_with_log!(
+            result_closed.is_err(),
+            "try_acquire fails when closed",
+            true,
+            result_closed.is_err()
+        );
+
+        crate::test_complete!("metamorphic_try_acquire_never_blocks");
+    }
 }
