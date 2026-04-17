@@ -24,6 +24,10 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 > 461 commits since v0.2.8 | [compare](https://github.com/Dicklesworthstone/asupersync/compare/v0.2.8...v0.2.9)
 
+### Breaking changes
+
+- **`ObjectParams.source_blocks` widened from `u8` to `u16`** ([`37f5b1b2`](https://github.com/Dicklesworthstone/asupersync/commit/37f5b1b2), [#30](https://github.com/Dicklesworthstone/asupersync/issues/30)). `u8` capped source blocks at 255; the protocol needs up to 256. The change applies to both the public field and the `ObjectParams::new(...)` constructor parameter. Downstream consumers using caret constraints on `0.2.x` must update call sites to pass `u16`. Retroactively documented — this was the kind of source-breaking change that should have shipped in `0.3.0`; going forward, public signature width changes get a minor version bump.
+
 ### FABRIC Messaging Engine
 
 The largest area of post-v0.2.8 development: a brokerless subject-oriented messaging system with session typing, obligation-backed delivery, and evidence-native decision planes.
