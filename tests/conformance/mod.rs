@@ -25,6 +25,7 @@ pub mod obligation_invariants;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
+pub mod websocket_extension_negotiation_rfc6455;
 
 // Re-export main conformance test functionality
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
@@ -44,6 +45,7 @@ pub use obligation_lifecycle_metamorphic::{ObligationLifecycleMetamorphicHarness
 pub use trace_replay_idempotency_metamorphic::{TraceReplayIdempotencyMetamorphicHarness, TraceReplayIdempotencyMetamorphicResult, TestCategory as TraceReplayTestCategory};
 pub use race_loser_drain_metamorphic::{RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult, TestCategory as RaceLoserDrainTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
+pub use websocket_extension_negotiation_rfc6455::{WsExtensionConformanceHarness, WsConformanceResult as WsExtensionConformanceResult, TestCategory as WsExtensionTestCategory};
 
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -101,6 +103,14 @@ pub enum TestCategory {
     Masking,
     Fragmentation,
     DataFrames,
+    // WebSocket extension negotiation categories
+    ExtensionHeaderProcessing,
+    PermessageDeflateNegotiation,
+    UnknownExtensionHandling,
+    MultipleExtensionComposition,
+    ParameterMismatchHandling,
+    ExtensionSecurity,
+    ExtensionOrdering,
     // MySQL categories
     PacketFormat,
     AuthAlgorithm,
@@ -558,9 +568,43 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
     results.extend(h2_results);
     */
 
+    // WebSocket Extension Negotiation RFC 6455 + RFC 7692 conformance
+    let ws_ext_harness = WsExtensionConformanceHarness::new();
+    let ws_ext_results: Vec<ConformanceTestResult> = ws_ext_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                websocket_extension_negotiation_rfc6455::TestCategory::ExtensionHeaderProcessing => TestCategory::ExtensionHeaderProcessing,
+                websocket_extension_negotiation_rfc6455::TestCategory::PermessageDeflateNegotiation => TestCategory::PermessageDeflateNegotiation,
+                websocket_extension_negotiation_rfc6455::TestCategory::UnknownExtensionHandling => TestCategory::UnknownExtensionHandling,
+                websocket_extension_negotiation_rfc6455::TestCategory::MultipleExtensionComposition => TestCategory::MultipleExtensionComposition,
+                websocket_extension_negotiation_rfc6455::TestCategory::ParameterMismatchHandling => TestCategory::ParameterMismatchHandling,
+                websocket_extension_negotiation_rfc6455::TestCategory::ExtensionSecurity => TestCategory::ExtensionSecurity,
+                websocket_extension_negotiation_rfc6455::TestCategory::ExtensionOrdering => TestCategory::ExtensionOrdering,
+            },
+            requirement_level: match r.requirement_level {
+                websocket_extension_negotiation_rfc6455::RequirementLevel::Must => RequirementLevel::Must,
+                websocket_extension_negotiation_rfc6455::RequirementLevel::Should => RequirementLevel::Should,
+                websocket_extension_negotiation_rfc6455::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                websocket_extension_negotiation_rfc6455::TestVerdict::Pass => TestVerdict::Pass,
+                websocket_extension_negotiation_rfc6455::TestVerdict::Fail => TestVerdict::Fail,
+                websocket_extension_negotiation_rfc6455::TestVerdict::Skipped => TestVerdict::Skipped,
+                websocket_extension_negotiation_rfc6455::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(ws_ext_results);
+
     // Additional conformance suites will be added here:
     // - gRPC conformance
-    // - WebSocket RFC 6455
+    // - WebSocket RFC 6455 (close frames)
     // - Codec framing
     // - MySQL AuthSwitch
 
@@ -712,7 +756,12 @@ pub fn generate_compliance_report() -> serde_json::Value {
                 "websocket_rfc6455": {
                     "status": "implemented",
                     "coverage": "systematic",
-                    "reference": "RFC 6455 WebSocket specification requirements"
+                    "reference": "RFC 6455 WebSocket close frame specification requirements"
+                },
+                "websocket_extension_negotiation_rfc6455": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 6455 Section 9 + RFC 7692 WebSocket extension negotiation conformance"
                 },
                 "codec_framing": {
                     "status": "implemented",
@@ -1270,6 +1319,98 @@ mod tests {
             .count();
 
         assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
+    }
+
+    #[test]
+    fn test_ws_extension_conformance_integration() {
+        let ws_ext_harness = WsExtensionConformanceHarness::new();
+        let results = ws_ext_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "WebSocket extension conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ExtensionHeaderProcessing),
+            "Should test extension header processing"
+        );
+        assert!(
+            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::PermessageDeflateNegotiation),
+            "Should test permessage-deflate negotiation"
+        );
+        assert!(
+            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::UnknownExtensionHandling),
+            "Should test unknown extension handling"
+        );
+        assert!(
+            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::MultipleExtensionComposition),
+            "Should test multiple extension composition"
+        );
+        assert!(
+            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ParameterMismatchHandling),
+            "Should test parameter mismatch handling"
+        );
+        assert!(
+            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ExtensionSecurity),
+            "Should test extension security requirements"
+        );
+        assert!(
+            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ExtensionOrdering),
+            "Should test extension ordering preservation"
+        );
+
+        // Verify all tests pass
+        let failures: Vec<_> = results.iter()
+            .filter(|r| r.verdict == websocket_extension_negotiation_rfc6455::TestVerdict::Fail)
+            .collect();
+
+        if !failures.is_empty() {
+            panic!("WebSocket extension conformance tests failed: {:#?}", failures);
+        }
+
+        // Verify we have the expected number of test cases (14 as per the bead requirements)
+        assert!(
+            results.len() >= 14,
+            "Should have at least 14 WebSocket extension conformance test cases, got {}",
+            results.len()
+        );
+
+        // Verify coverage of all 5 bead requirements
+        let test_ids: std::collections::HashSet<_> = results.iter()
+            .map(|r| r.test_id.as_str())
+            .collect();
+
+        // Requirement 1: Sec-WebSocket-Extensions header ordering preserved
+        assert!(
+            test_ids.contains("ws_ext_header_ordering_preserved"),
+            "Missing extension header ordering test"
+        );
+
+        // Requirement 2: permessage-deflate parameter negotiation
+        assert!(
+            test_ids.contains("ws_ext_permessage_deflate_server_max_window_bits"),
+            "Missing permessage-deflate negotiation test"
+        );
+
+        // Requirement 3: unknown extension graceful rejection
+        assert!(
+            test_ids.contains("ws_ext_unknown_extension_graceful_rejection"),
+            "Missing unknown extension handling test"
+        );
+
+        // Requirement 4: multiple extensions compose correctly
+        assert!(
+            test_ids.contains("ws_ext_multiple_extensions_compose"),
+            "Missing multiple extension composition test"
+        );
+
+        // Requirement 5: client/server parameter mismatch handled per RFC
+        assert!(
+            test_ids.contains("ws_ext_parameter_mismatch_handling"),
+            "Missing parameter mismatch handling test"
+        );
     }
 
     #[test]
