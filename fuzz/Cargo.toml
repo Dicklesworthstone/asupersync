@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["tls", "postgres"] }
+asupersync = { path = "..", features = ["tls", "postgres", "kafka"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
@@ -286,6 +286,13 @@ bench = false
 [[bin]]
 name = "fuzz_raptorq_symbol_authentication"
 path = "fuzz_targets/raptorq_symbol_authentication.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_kafka_wire_protocol"
+path = "fuzz_targets/kafka_wire_protocol.rs"
 test = false
 doc = false
 bench = false
