@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::sleep;
+use asupersync::lab::{LabConfig, LabRuntime};
 
 use crate::runtime::{ObligationId, RegionId, RuntimeHandle};
 use crate::tests::conformance::obligation_invariants::src::{
@@ -387,19 +388,28 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to create a test runtime
+    fn create_test_runtime() -> LabRuntime {
+        let config = LabConfig::default()
+            .worker_count(2)
+            .trace_capacity(2048)
+            .max_steps(10000);
+        LabRuntime::new(config)
+    }
     use crate::runtime::test_helpers::*;
     use crate::tests::conformance::obligation_invariants::src::invariant_harness::{
         ObligationInvariantHarness, InvariantTestConfig,
     };
 
-    #[tokio::test]
-    async fn test_basic_obligation_lifecycle() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_basic_obligation_lifecycle() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = BasicObligationLifecycleTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -409,14 +419,14 @@ mod tests {
         assert_eq!(result.metrics.regions_closed, 1);
     }
 
-    #[tokio::test]
-    async fn test_nested_obligations() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_nested_obligations() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = NestedObligationTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -426,14 +436,14 @@ mod tests {
         assert_eq!(result.metrics.regions_closed, 3);
     }
 
-    #[tokio::test]
-    async fn test_concurrent_obligations() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_concurrent_obligations() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = ConcurrentObligationTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -441,14 +451,14 @@ mod tests {
         assert_eq!(result.metrics.obligations_resolved, 50);
     }
 
-    #[tokio::test]
-    async fn test_error_path_cleanup() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_error_path_cleanup() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = ErrorPathCleanupTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());

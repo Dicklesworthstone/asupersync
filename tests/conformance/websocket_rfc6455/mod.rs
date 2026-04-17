@@ -35,7 +35,7 @@ pub struct WsConformanceResult {
 }
 
 /// WebSocket conformance test categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum TestCategory {
     /// Frame format validation (RFC 6455 Section 5).
     FrameFormat,

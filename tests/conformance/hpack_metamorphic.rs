@@ -83,8 +83,8 @@ mod metamorphic_properties {
     #[test]
     fn mr1_compression_roundtrip_identity() {
         proptest!(|(headers in arb_headers())| {
-            let mut encoder = Encoder::new(4096);
-            let mut decoder = Decoder::new(4096, 8192);
+            let mut encoder = Encoder::new();
+            let mut decoder = Decoder::new();
 
             // Encode headers
             let mut encoded = BytesMut::new();
@@ -119,10 +119,10 @@ mod metamorphic_properties {
                 return Ok(());
             }
 
-            let mut encoder1 = Encoder::new(4096);
-            let mut encoder2 = Encoder::new(4096);
-            let mut decoder1 = Decoder::new(4096, 8192);
-            let mut decoder2 = Decoder::new(4096, 8192);
+            let mut encoder1 = Encoder::new();
+            let mut encoder2 = Encoder::new();
+            let mut decoder1 = Decoder::new();
+            let mut decoder2 = Decoder::new();
 
             // Encode original order
             let mut encoded1 = BytesMut::new();
@@ -161,14 +161,14 @@ mod metamorphic_properties {
             h.iter().any(|header| !header.value.is_empty() || !header.name.is_empty())
         ))| {
             // Create encoders with different Huffman settings
-            let mut encoder_huffman = Encoder::new(4096);
-            encoder_huffman.set_huffman(true);
+            let mut encoder_huffman = Encoder::new();
+            encoder_huffman.set_use_huffman(true);
 
-            let mut encoder_no_huffman = Encoder::new(4096);
-            encoder_no_huffman.set_huffman(false);
+            let mut encoder_no_huffman = Encoder::new();
+            encoder_no_huffman.set_use_huffman(false);
 
-            let mut decoder1 = Decoder::new(4096, 8192);
-            let mut decoder2 = Decoder::new(4096, 8192);
+            let mut decoder1 = Decoder::new();
+            let mut decoder2 = Decoder::new();
 
             // Encode with Huffman
             let mut encoded_huffman = BytesMut::new();
@@ -205,12 +205,12 @@ mod metamorphic_properties {
         ];
 
         // Encoder/decoder with empty dynamic table.
-        let mut encoder_clean = Encoder::new(4096);
-        let mut decoder_clean = Decoder::new(4096, 8192);
+        let mut encoder_clean = Encoder::new();
+        let mut decoder_clean = Decoder::new();
 
         // Encoder/decoder with populated dynamic table.
-        let mut encoder_populated = Encoder::new(4096);
-        let mut decoder_populated = Decoder::new(4096, 8192);
+        let mut encoder_populated = Encoder::new();
+        let mut decoder_populated = Decoder::new();
 
         // Populate dynamic table with some other headers first.
         let populate_headers = vec![
@@ -254,11 +254,11 @@ mod metamorphic_properties {
             let small_table_size = 1024;
             let large_table_size = 4096;
 
-            let mut encoder_small = Encoder::new(small_table_size);
-            let mut decoder_small = Decoder::new(small_table_size, 8192);
+            let mut encoder_small = Encoder::new();
+            let mut decoder_small = Decoder::new();
 
-            let mut encoder_large = Encoder::new(large_table_size);
-            let mut decoder_large = Decoder::new(large_table_size, 8192);
+            let mut encoder_large = Encoder::new();
+            let mut decoder_large = Decoder::new();
 
             // Encode with both table sizes
             let mut encoded_small = BytesMut::new();
@@ -285,11 +285,11 @@ mod metamorphic_properties {
     #[test]
     fn mr6_incremental_vs_batch_encoding_equivalence() {
         proptest!(|(headers in arb_headers().prop_filter("Has headers", |h| !h.is_empty()))| {
-            let mut encoder_batch = Encoder::new(4096);
-            let mut encoder_incremental = Encoder::new(4096);
+            let mut encoder_batch = Encoder::new();
+            let mut encoder_incremental = Encoder::new();
 
-            let mut decoder_batch = Decoder::new(4096, 8192);
-            let mut decoder_incremental = Decoder::new(4096, 8192);
+            let mut decoder_batch = Decoder::new();
+            let mut decoder_incremental = Decoder::new();
 
             // Batch encoding
             let mut encoded_batch = BytesMut::new();
@@ -342,13 +342,13 @@ mod metamorphic_properties {
                 value: value.clone(),
             };
 
-            let mut encoder1 = Encoder::new(4096);
-            let mut encoder2 = Encoder::new(4096);
-            let mut encoder3 = Encoder::new(4096);
+            let mut encoder1 = Encoder::new();
+            let mut encoder2 = Encoder::new();
+            let mut encoder3 = Encoder::new();
 
-            let mut decoder1 = Decoder::new(4096, 8192);
-            let mut decoder2 = Decoder::new(4096, 8192);
-            let mut decoder3 = Decoder::new(4096, 8192);
+            let mut decoder1 = Decoder::new();
+            let mut decoder2 = Decoder::new();
+            let mut decoder3 = Decoder::new();
 
             // Encode all variants
             let mut encoded1 = BytesMut::new();
@@ -398,8 +398,8 @@ mod mutation_validation {
             Header { name: "test".to_string(), value: "original".to_string() }
         ];
 
-        let mut encoder = Encoder::new(4096);
-        let mut decoder = Decoder::new(4096, 8192);
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
 
         let mut encoded = BytesMut::new();
         encoder.encode(&headers, &mut encoded);
@@ -433,8 +433,8 @@ mod mutation_validation {
             Header { name: "test".to_string(), value: "value".to_string() }
         ];
 
-        let mut encoder = Encoder::new(4096);
-        let mut decoder = Decoder::new(4096, 8192);
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
 
         let mut encoded = BytesMut::new();
         encoder.encode(&headers, &mut encoded);
@@ -473,8 +473,8 @@ mod performance_tests {
 
         // Run a subset of MR tests for performance measurement
         for _ in 0..10 {
-            let mut encoder = Encoder::new(4096);
-            let mut decoder = Decoder::new(4096, 8192);
+            let mut encoder = Encoder::new();
+            let mut decoder = Decoder::new();
 
             let mut encoded = BytesMut::new();
             encoder.encode(&large_headers, &mut encoded);

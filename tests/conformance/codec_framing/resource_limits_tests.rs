@@ -33,7 +33,7 @@ fn test_max_frame_size_limit() -> CodecConformanceResult {
             Ok(Some(_)) => Err("Should have rejected oversized frame".to_string()),
             Ok(None) => {
                 // Might need actual data to trigger the check
-                buf.extend(vec![0u8; oversized_length]);
+                buf.extend_from_slice(&vec![0u8; oversized_length]);
                 match codec.decode(&mut buf) {
                     Err(_) => Ok(()),
                     Ok(_) => Err("Should have rejected oversized frame".to_string()),

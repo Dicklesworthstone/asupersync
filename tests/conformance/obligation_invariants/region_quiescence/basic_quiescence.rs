@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::sleep;
+use asupersync::lab::{LabConfig, LabRuntime};
 
 use crate::runtime::{ObligationId, RegionId};
 use crate::tests::conformance::obligation_invariants::src::{
@@ -446,45 +447,54 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to create a test runtime
+    fn create_test_runtime() -> LabRuntime {
+        let config = LabConfig::default()
+            .worker_count(2)
+            .trace_capacity(2048)
+            .max_steps(10000);
+        LabRuntime::new(config)
+    }
     use crate::runtime::test_helpers::*;
     use crate::tests::conformance::obligation_invariants::src::invariant_harness::{
         ObligationInvariantHarness, InvariantTestConfig,
     };
 
-    #[tokio::test]
-    async fn test_basic_quiescence() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_basic_quiescence() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = BasicRegionQuiescenceTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_nested_quiescence() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_nested_quiescence() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = NestedRegionQuiescenceTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_close_with_active_obligations() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_close_with_active_obligations() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = RegionCloseWithActiveObligationsTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         // This is a negative test, so we expect it to pass by detecting the violation
         assert_eq!(result.outcome, TestOutcome::Pass);
@@ -493,14 +503,14 @@ mod tests {
             .any(|v| v.violation_type == InvariantViolationType::RegionQuiescenceViolation));
     }
 
-    #[tokio::test]
-    async fn test_concurrent_closure() {
-        let runtime = create_test_runtime().await;
+    #[test]
+    fn test_concurrent_closure() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         let test = ConcurrentRegionClosureTest;
-        let result = harness.run_test(test).await;
+        let result = harness.run_test(test);
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());

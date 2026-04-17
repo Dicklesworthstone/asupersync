@@ -34,7 +34,7 @@ pub struct H2ConformanceResult {
 }
 
 /// HTTP/2 conformance test categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum TestCategory {
     /// Frame format validation (RFC 7540 Section 4).
     FrameFormat,

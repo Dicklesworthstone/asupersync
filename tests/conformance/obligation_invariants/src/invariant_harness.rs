@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use asupersync::types::{ObligationId, RegionId};
+use asupersync::lab::{LabConfig, LabRuntime};
 use super::obligation_tracker::{ObligationTracker, InvariantViolation, InvariantViolationType};
 
 /// Main harness for running obligation invariant tests
@@ -136,7 +137,7 @@ impl ObligationInvariantHarness {
     }
 
     /// Run a single invariant test
-    pub fn run_test<T: ObligationInvariantTest>(&mut self, test: T) -> InvariantTestResult {
+    pub async fn run_test<T: ObligationInvariantTest>(&mut self, test: T) -> InvariantTestResult {
         let test_name = test.invariant_name().to_string();
 
         if self.config.debug_logging {
@@ -209,7 +210,7 @@ impl ObligationInvariantHarness {
         let suite_start = Instant::now();
 
         for test in tests {
-            let result = self.run_test(test).await;
+            let result = self.run_test(test);
             results.push(result);
         }
 
@@ -245,7 +246,7 @@ impl ObligationInvariantHarness {
                 self.config.clone(),
             );
 
-            let result = harness_clone.run_test(test_clone).await;
+            let result = harness_clone.run_test(test_clone);
 
             // Count violation types
             for violation in &result.violations {
@@ -259,9 +260,9 @@ impl ObligationInvariantHarness {
             iterations: all_results.len(),
             concurrency: 1, // Serial execution
             total_duration: stress_start.elapsed(),
+            peak_metrics: self.calculate_peak_metrics(&all_results),
             results: all_results,
             violation_summary: violation_counts,
-            peak_metrics: self.calculate_peak_metrics(&all_results),
         }
     }
 
@@ -428,11 +429,20 @@ mod tests {
     use super::*;
     use crate::runtime::test_helpers::*;
 
-    #[tokio::test]
-    async fn test_harness_basic_functionality() {
-        let runtime = create_test_runtime().await;
+    /// Helper to create a test runtime
+    fn create_test_runtime() -> LabRuntime {
+        let config = LabConfig::default()
+            .worker_count(2)
+            .trace_capacity(2048)
+            .max_steps(10000);
+        LabRuntime::new(config)
+    }
+
+    #[test]
+    fn test_harness_basic_functionality() {
+        let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
-        let mut harness = ObligationInvariantHarness::new(runtime, config);
+        let mut harness = ObligationInvariantHarness::new(config);
 
         // Simple test that should pass
         struct PassingTest;
@@ -459,7 +469,7 @@ mod tests {
             fn validate_invariant(&self, _tracker: &ObligationTracker) -> bool { true }
         }
 
-        let result = harness.run_test(PassingTest).await;
+        let result = harness.run_test(PassingTest);
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert_eq!(result.test_name, "passing_test");
     }

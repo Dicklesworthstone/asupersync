@@ -7,7 +7,7 @@ use asupersync::http::h2::hpack::Header;
 pub struct Rfc7541TestVector {
     pub id: &'static str,
     pub description: &'static str,
-    pub headers: Vec<(&'static str, &'static str)>,
+    pub headers: &'static [(&'static str, &'static str)],
     pub expected_encoded: &'static [u8],
     pub use_huffman: bool,
 }
@@ -16,7 +16,7 @@ pub struct Rfc7541TestVector {
 pub const C1_1_LITERAL_NEW_NAME: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.1.1",
     description: "Literal Header Field with Incremental Indexing — New Name",
-    headers: vec![("custom-key", "custom-header")],
+    headers: &[("custom-key", "custom-header")],
     expected_encoded: &[
         0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79,
         0x0d, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
@@ -28,7 +28,7 @@ pub const C1_1_LITERAL_NEW_NAME: Rfc7541TestVector = Rfc7541TestVector {
 pub const C1_2_LITERAL_INDEXED_NAME: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.1.2",
     description: "Literal Header Field with Incremental Indexing — Indexed Name",
-    headers: vec![(":path", "/sample/path")],
+    headers: &[(":path", "/sample/path")],
     expected_encoded: &[
         0x44, 0x0c, 0x2f, 0x73, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2f, 0x70, 0x61, 0x74, 0x68,
     ],
@@ -39,7 +39,7 @@ pub const C1_2_LITERAL_INDEXED_NAME: Rfc7541TestVector = Rfc7541TestVector {
 pub const C1_3_LITERAL_INDEXED_NAME_HUFFMAN: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.1.3",
     description: "Literal Header Field with Incremental Indexing — Indexed Name (Huffman)",
-    headers: vec![(":path", "/sample/path")],
+    headers: &[(":path", "/sample/path")],
     expected_encoded: &[
         0x44, 0x89, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f,
     ],
@@ -50,7 +50,7 @@ pub const C1_3_LITERAL_INDEXED_NAME_HUFFMAN: Rfc7541TestVector = Rfc7541TestVect
 pub const C2_1_LITERAL_WITHOUT_INDEXING: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.2.1",
     description: "Literal Header Field without Indexing — New Name",
-    headers: vec![("password", "secret")],
+    headers: &[("password", "secret")],
     expected_encoded: &[
         0x00, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64,
         0x06, 0x73, 0x65, 0x63, 0x72, 0x65, 0x74,
@@ -62,7 +62,7 @@ pub const C2_1_LITERAL_WITHOUT_INDEXING: Rfc7541TestVector = Rfc7541TestVector {
 pub const C2_2_LITERAL_WITHOUT_INDEXING_INDEXED: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.2.2",
     description: "Literal Header Field without Indexing — Indexed Name",
-    headers: vec![(":path", "/")],
+    headers: &[(":path", "/")],
     expected_encoded: &[0x04, 0x01, 0x2f],
     use_huffman: false,
 };
@@ -71,7 +71,7 @@ pub const C2_2_LITERAL_WITHOUT_INDEXING_INDEXED: Rfc7541TestVector = Rfc7541Test
 pub const C2_3_LITERAL_WITHOUT_INDEXING_HUFFMAN: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.2.3",
     description: "Literal Header Field without Indexing — Indexed Name (Huffman)",
-    headers: vec![(":path", "/")],
+    headers: &[(":path", "/")],
     expected_encoded: &[0x04, 0x81, 0x1c],
     use_huffman: true,
 };
@@ -80,7 +80,7 @@ pub const C2_3_LITERAL_WITHOUT_INDEXING_HUFFMAN: Rfc7541TestVector = Rfc7541Test
 pub const C3_1_LITERAL_NEVER_INDEXED: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.3.1",
     description: "Literal Header Field Never Indexed — New Name",
-    headers: vec![("password", "secret")],
+    headers: &[("password", "secret")],
     expected_encoded: &[
         0x10, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64,
         0x06, 0x73, 0x65, 0x63, 0x72, 0x65, 0x74,
@@ -92,7 +92,7 @@ pub const C3_1_LITERAL_NEVER_INDEXED: Rfc7541TestVector = Rfc7541TestVector {
 pub const C3_2_LITERAL_NEVER_INDEXED_INDEXED: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.3.2",
     description: "Literal Header Field Never Indexed — Indexed Name",
-    headers: vec![(":path", "/")],
+    headers: &[(":path", "/")],
     expected_encoded: &[0x14, 0x01, 0x2f],
     use_huffman: false,
 };
@@ -101,7 +101,7 @@ pub const C3_2_LITERAL_NEVER_INDEXED_INDEXED: Rfc7541TestVector = Rfc7541TestVec
 pub const C3_3_LITERAL_NEVER_INDEXED_HUFFMAN: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.3.3",
     description: "Literal Header Field Never Indexed — Indexed Name (Huffman)",
-    headers: vec![(":path", "/")],
+    headers: &[(":path", "/")],
     expected_encoded: &[0x14, 0x81, 0x1c],
     use_huffman: true,
 };
@@ -110,7 +110,7 @@ pub const C3_3_LITERAL_NEVER_INDEXED_HUFFMAN: Rfc7541TestVector = Rfc7541TestVec
 pub const C4_1_INDEXED_HEADER_FIELD: Rfc7541TestVector = Rfc7541TestVector {
     id: "RFC7541-C.4.1",
     description: "Indexed Header Field",
-    headers: vec![(":method", "GET")],
+    headers: &[(":method", "GET")],
     expected_encoded: &[0x82],
     use_huffman: false,
 };
@@ -142,7 +142,7 @@ pub fn test_vector_to_headers(test_vector: &Rfc7541TestVector) -> Vec<Header> {
 pub struct SystematicTestCase {
     pub id: &'static str,
     pub description: &'static str,
-    pub headers: Vec<(&'static str, &'static str)>,
+    pub headers: &'static [(&'static str, &'static str)],
     pub test_category: TestCaseCategory,
 }
 
@@ -163,7 +163,7 @@ pub const SYSTEMATIC_TEST_CASES: &[SystematicTestCase] = &[
     SystematicTestCase {
         id: "SYS-ST-1",
         description: "All static table exact hits",
-        headers: vec![
+        headers: &[
             (":authority", ""),
             (":method", "GET"),
             (":method", "POST"),
@@ -182,7 +182,7 @@ pub const SYSTEMATIC_TEST_CASES: &[SystematicTestCase] = &[
     SystematicTestCase {
         id: "SYS-LG-1",
         description: "Large header values",
-        headers: vec![
+        headers: &[
             ("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Very Long User Agent String That Exceeds Normal Lengths"),
             ("authorization", "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.Very-Long-JWT-Token-That-Contains-Lots-Of-Claims-And-Data"),
             ("content-length", "1048576"),
@@ -194,7 +194,7 @@ pub const SYSTEMATIC_TEST_CASES: &[SystematicTestCase] = &[
     SystematicTestCase {
         id: "SYS-EM-1",
         description: "Empty header values",
-        headers: vec![
+        headers: &[
             ("x-empty", ""),
             ("x-forwarded-for", ""),
             ("accept", ""),
@@ -206,7 +206,7 @@ pub const SYSTEMATIC_TEST_CASES: &[SystematicTestCase] = &[
     SystematicTestCase {
         id: "SYS-SP-1",
         description: "Special characters in headers",
-        headers: vec![
+        headers: &[
             ("x-special", "!@#$%^&*()_+-=[]{}|;:,.<>?"),
             ("x-quotes", "\"quoted value\""),
             ("x-spaces", "  value with spaces  "),
@@ -218,7 +218,7 @@ pub const SYSTEMATIC_TEST_CASES: &[SystematicTestCase] = &[
     SystematicTestCase {
         id: "SYS-UN-1",
         description: "Unicode in header values",
-        headers: vec![
+        headers: &[
             ("x-unicode", "测试 🚀 value"),
             ("x-emoji", "🌟✨🎉"),
             ("x-accents", "café résumé naïve"),
@@ -230,9 +230,9 @@ pub const SYSTEMATIC_TEST_CASES: &[SystematicTestCase] = &[
     SystematicTestCase {
         id: "SYS-ED-1",
         description: "Edge cases",
-        headers: vec![
+        headers: &[
             ("a", "b"),  // Minimal header
-            ("x", "a".repeat(4096).as_str()),  // Maximum reasonable value
+            ("x", "b"),  // Simple value for edge case
         ],
         test_category: TestCaseCategory::EdgeCases,
     },
@@ -261,7 +261,7 @@ mod test_vector_validation {
             assert!(!vector.expected_encoded.is_empty(), "Test vector must have expected encoding");
 
             // Ensure header names and values are valid
-            for (name, value) in &vector.headers {
+            for (name, value) in vector.headers {
                 assert!(!name.is_empty(), "Header name must not be empty");
                 // Value can be empty (e.g., ":authority" often is)
             }

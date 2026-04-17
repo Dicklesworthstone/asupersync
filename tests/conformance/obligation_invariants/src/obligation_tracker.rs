@@ -133,7 +133,7 @@ pub struct InvariantViolation {
 }
 
 /// Types of invariant violations
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InvariantViolationType {
     /// Obligation leak - obligation not properly resolved
     ObligationLeak,

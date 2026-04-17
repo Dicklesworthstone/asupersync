@@ -234,7 +234,7 @@ fn test_encode_decode_round_trip() -> CodecConformanceResult {
 
         // Encode
         let mut buf = BytesMut::new();
-        codec.encode(original, &mut buf)
+        codec.encode(original.to_string(), &mut buf)
             .map_err(|e| format!("Encode failed: {e}"))?;
 
         // Decode

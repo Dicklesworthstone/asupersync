@@ -1,0 +1,35 @@
+[workspace]
+
+[package]
+name = "raptorq-conformance-reporting"
+version = "0.1.0"
+edition = "2021"
+description = "RaptorQ RFC 6330 conformance reporting and maintenance pipeline"
+authors = ["Asupersync Team"]
+
+[[bin]]
+name = "generate_compliance_report"
+path = "bin/generate_compliance_report.rs"
+
+[[bin]]
+name = "check_conformance_regression"
+path = "bin/check_conformance_regression.rs"
+
+[[bin]]
+name = "maintain_fixtures"
+path = "bin/maintain_fixtures.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.0", features = ["derive"] }
+handlebars = "5.0"
+anyhow = "1.0"
+walkdir = "2.0"
+regex = "1.0"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.0"

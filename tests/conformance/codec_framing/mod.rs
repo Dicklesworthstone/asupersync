@@ -149,16 +149,16 @@ impl CodecConformanceHarness {
                 })
             });
 
-            category_stats["total"] = category_stats["total"].as_u64().unwrap() + 1;
+            category_stats["total"] = (category_stats["total"].as_u64().unwrap() + 1).into();
             match result.verdict {
                 TestVerdict::Pass => {
-                    category_stats["passed"] = category_stats["passed"].as_u64().unwrap() + 1;
+                    category_stats["passed"] = (category_stats["passed"].as_u64().unwrap() + 1).into();
                 }
                 TestVerdict::Fail => {
-                    category_stats["failed"] = category_stats["failed"].as_u64().unwrap() + 1;
+                    category_stats["failed"] = (category_stats["failed"].as_u64().unwrap() + 1).into();
                 }
                 TestVerdict::ExpectedFailure => {
-                    category_stats["expected_failures"] = category_stats["expected_failures"].as_u64().unwrap() + 1;
+                    category_stats["expected_failures"] = (category_stats["expected_failures"].as_u64().unwrap() + 1).into();
                 }
                 _ => {}
             }

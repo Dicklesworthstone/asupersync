@@ -49,7 +49,7 @@ fn test_connection_preface() -> H2ConformanceResult {
         // Server MUST send a SETTINGS frame as its first frame
 
         // Invalid preface should result in GOAWAY with PROTOCOL_ERROR
-        let invalid_prefixes = [
+        let invalid_prefixes: &[&[u8]] = &[
             b"PRI * HTTP/1.1\r\n\r\nSM\r\n\r\n", // Wrong HTTP version
             b"GET / HTTP/2.0\r\n\r\nSM\r\n\r\n", // Wrong method
             b"PRI * HTTP/2.0\r\n\r\nXX\r\n\r\n", // Wrong magic string
@@ -80,12 +80,12 @@ fn test_connection_preface() -> H2ConformanceResult {
 fn test_http2_identification() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // HTTP/2 version identification in ALPN
-        let alpn_protocols = [
+        let alpn_protocols: &[&[u8]] = &[
             b"h2", // HTTP/2 over TLS
             b"h2c", // HTTP/2 over cleartext
         ];
 
-        for protocol in &alpn_protocols {
+        for protocol in alpn_protocols {
             // These should be recognized as HTTP/2 protocols
             match *protocol {
                 b"h2" => {
@@ -103,14 +103,14 @@ fn test_http2_identification() -> H2ConformanceResult {
         }
 
         // Invalid or unsupported protocols
-        let invalid_protocols = [
+        let invalid_protocols: &[&[u8]] = &[
             b"http/1.1",
             b"http/2.0", // Should be "h2" not "http/2.0"
             b"h1",
             b"h3", // HTTP/3, not HTTP/2
         ];
 
-        for protocol in &invalid_protocols {
+        for protocol in invalid_protocols {
             // These should not be treated as HTTP/2
             if *protocol == b"h2" || *protocol == b"h2c" {
                 return Err(format!("Invalid protocol {:?} matches valid protocol", protocol));
