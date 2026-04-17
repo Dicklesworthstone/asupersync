@@ -405,3 +405,10 @@ path = "fuzz_targets/framed_codec.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_http1_chunked"
+path = "fuzz_targets/http1_chunked.rs"
+test = false
+doc = false
+bench = false

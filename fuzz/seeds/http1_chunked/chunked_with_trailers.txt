@@ -1,0 +1,13 @@
+POST /api/stream HTTP/1.1
+Host: example.com
+Transfer-Encoding: chunked
+Trailer: Content-MD5, X-Custom-Header
+
+7
+Chunk 1
+8
+Chunk 2!
+0
+Content-MD5: abc123def456
+X-Custom-Header: trailer-value
+

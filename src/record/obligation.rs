@@ -59,6 +59,8 @@ pub enum ObligationKind {
     Lease,
     /// A pending I/O operation.
     IoOp,
+    /// A semaphore permit that must be released.
+    SemaphorePermit,
 }
 
 impl ObligationKind {
@@ -71,6 +73,7 @@ impl ObligationKind {
             Self::Ack => "ack",
             Self::Lease => "lease",
             Self::IoOp => "io_op",
+            Self::SemaphorePermit => "semaphore_permit",
         }
     }
 }
