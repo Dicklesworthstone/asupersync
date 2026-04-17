@@ -2088,8 +2088,13 @@ pub mod backpressure_metamorphic {
     ///
     /// Invariant: total_capacity = queued + reserved + available
     /// This must hold at all times regardless of backpressure state.
-    #[proptest]
-    fn mr1_capacity_conservation_invariant(config: BackpressureTestConfig) {
+    #[test]
+    fn mr1_capacity_conservation_invariant() {
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
+
+        let mut runner = TestRunner::default();
+        runner.run(&backpressure_config_strategy(), |config| {
         let lab = LabRuntime::new(LabConfig::new(config.seed));
         let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
             let (sender, mut receiver) = channel::<u32>(config.capacity);
@@ -2141,14 +2146,21 @@ pub mod backpressure_metamorphic {
         });
 
         result.expect("MR1 capacity conservation test failed");
+            Ok(())
+        }).expect("Property test failed");
     }
 
     /// MR2: FIFO Ordering Preservation
     ///
     /// Property: Messages received in same order as sent, regardless of backpressure.
     /// Even with blocking, eviction, or cancellation, FIFO ordering must be preserved.
-    #[proptest]
-    fn mr2_fifo_ordering_preservation(config: BackpressureTestConfig) {
+    #[test]
+    fn mr2_fifo_ordering_preservation() {
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
+
+        let mut runner = TestRunner::default();
+        runner.run(&backpressure_config_strategy(), |config| {
         let lab = LabRuntime::new(LabConfig::new(config.seed));
         let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
             let (sender, mut receiver) = channel::<u32>(config.capacity);
@@ -2207,14 +2219,21 @@ pub mod backpressure_metamorphic {
         });
 
         result.expect("MR2 FIFO ordering test failed");
+            Ok(())
+        }).expect("Property test failed");
     }
 
     /// MR3: Reserve-Send Equivalence
     ///
     /// Property: reserve().await.send(value) ≃ send(value).await when capacity available.
     /// Both paths should have identical observable effects.
-    #[proptest]
-    fn mr3_reserve_send_equivalence(config: BackpressureTestConfig) {
+    #[test]
+    fn mr3_reserve_send_equivalence() {
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
+
+        let mut runner = TestRunner::default();
+        runner.run(&backpressure_config_strategy(), |config| {
         let lab = LabRuntime::new(LabConfig::new(config.seed));
         let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
             // Path 1: reserve then send
@@ -2271,14 +2290,21 @@ pub mod backpressure_metamorphic {
         });
 
         result.expect("MR3 reserve-send equivalence test failed");
+            Ok(())
+        }).expect("Property test failed");
     }
 
     /// MR4: Cancellation Idempotence
     ///
     /// Property: Cancelling during reserve doesn't leak capacity.
     /// Capacity conservation must hold even with cancellation.
-    #[proptest]
-    fn mr4_cancellation_idempotence(config: BackpressureTestConfig) {
+    #[test]
+    fn mr4_cancellation_idempotence() {
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
+
+        let mut runner = TestRunner::default();
+        runner.run(&backpressure_config_strategy(), |config| {
         if !config.inject_cancellation || config.cancel_probability < 0.1 {
             return Ok(()); // Skip if cancellation not meaningful
         }
@@ -2333,13 +2359,20 @@ pub mod backpressure_metamorphic {
         });
 
         result.expect("MR4 cancellation idempotence test failed");
+            Ok(())
+        }).expect("Property test failed");
     }
 
     /// MR5: Eviction Policy Correctness
     ///
     /// Property: send_evict_oldest removes oldest message while preserving FIFO for remaining.
-    #[proptest]
-    fn mr5_eviction_policy_correctness(config: BackpressureTestConfig) {
+    #[test]
+    fn mr5_eviction_policy_correctness() {
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
+
+        let mut runner = TestRunner::default();
+        runner.run(&backpressure_config_strategy(), |config| {
         if !config.use_eviction || config.capacity < 2 {
             return Ok(()); // Skip if eviction not meaningful
         }
@@ -2386,13 +2419,20 @@ pub mod backpressure_metamorphic {
         });
 
         result.expect("MR5 eviction policy test failed");
+            Ok(())
+        }).expect("Property test failed");
     }
 
     /// MR6: Receiver Drain Correctness
     ///
     /// Property: Dropping receiver unblocks all pending sends with Disconnected.
-    #[proptest]
-    fn mr6_receiver_drain_correctness(config: BackpressureTestConfig) {
+    #[test]
+    fn mr6_receiver_drain_correctness() {
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
+
+        let mut runner = TestRunner::default();
+        runner.run(&backpressure_config_strategy(), |config| {
         let lab = LabRuntime::new(LabConfig::new(config.seed));
         let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
             let (sender, receiver) = channel::<u32>(config.capacity);
@@ -2455,6 +2495,8 @@ pub mod backpressure_metamorphic {
         });
 
         result.expect("MR6 receiver drain test failed");
+            Ok(())
+        }).expect("Property test failed");
     }
 
     /// Composite metamorphic test: All relations together
