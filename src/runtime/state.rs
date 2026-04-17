@@ -8291,11 +8291,11 @@ mod tests {
                 let mut runtime = LabRuntime::new(config);
 
                 // Create a region and immediately close it
-                let region_id = runtime.create_region(None, Budget::default(), None).unwrap();
+                let region_id = runtime.state.create_root_region(Budget::default());
 
                 // First close attempt
                 let first_close_result = {
-                    let state = runtime.state_mut();
+                    let state = &mut runtime.state;
                     let region = state.regions.get_mut(region_id.arena_index()).unwrap();
                     let begin_result = region.begin_close(None);
 
@@ -8312,7 +8312,7 @@ mod tests {
 
                 // Second close attempt (should be idempotent)
                 let second_close_result = {
-                    let state = runtime.state_mut();
+                    let state = &mut runtime.state;
                     let region = state.regions.get_mut(region_id.arena_index()).unwrap();
                     region.complete_close()  // Should return false (already closed)
                 };
@@ -8337,11 +8337,11 @@ mod tests {
                 let config = LabConfig::new(seed).max_steps(1000);
                 let mut runtime = LabRuntime::new(config);
 
-                let region_id = runtime.create_region(None, Budget::default(), None).unwrap();
+                let region_id = runtime.state.create_root_region(Budget::default());
 
                 // Close the region first
                 {
-                    let state = runtime.state_mut();
+                    let state = &mut runtime.state;
                     let region = state.regions.get_mut(region_id.arena_index()).unwrap();
                     let _ = region.begin_close(None);
                     let _ = region.begin_finalize();
@@ -8352,13 +8352,13 @@ mod tests {
 
                 // Attempt to cancel the already-closed region
                 let cancel_reason = match cancel_reason_variant {
-                    0 => CancelReason::ExplicitCancel,
-                    1 => CancelReason::Timeout,
-                    _ => CancelReason::ResourceExhaustion,
+                    0 => CancelReason::default(),
+                    1 => CancelReason::timeout(),
+                    _ => CancelReason::resource_unavailable(),
                 };
 
                 {
-                    let state = runtime.state_mut();
+                    let state = &mut runtime.state;
                     let region = state.regions.get_mut(region_id.arena_index()).unwrap();
                     let _ = region.begin_close(Some(cancel_reason));  // Should be no-op
                 }
@@ -8379,18 +8379,18 @@ mod tests {
                 let config = LabConfig::new(seed).max_steps(2000);
                 let mut runtime = LabRuntime::new(config);
 
-                let parent_id = runtime.create_region(None, Budget::default(), None).unwrap();
+                let parent_id = runtime.state.create_root_region(Budget::default());
                 let mut child_ids = Vec::new();
 
                 // Create child regions
                 for _ in 0..num_children {
-                    let child_id = runtime.create_region(Some(parent_id), Budget::default(), None).unwrap();
+                    let child_id = runtime.state.create_child_region(parent_id, Budget::default()).unwrap();
                     child_ids.push(child_id);
                 }
 
                 // Close all children first
                 for &child_id in &child_ids {
-                    let state = runtime.state_mut();
+                    let state = &mut runtime.state;
                     let child = state.regions.get_mut(child_id.arena_index()).unwrap();
                     let _ = child.begin_close(None);
                     let _ = child.begin_finalize();
@@ -8409,7 +8409,7 @@ mod tests {
 
                 // Now close parent
                 {
-                    let state = runtime.state_mut();
+                    let state = &mut runtime.state;
                     let parent = state.regions.get_mut(parent_id.arena_index()).unwrap();
                     let _ = parent.begin_close(None);
                     let _ = parent.begin_finalize();
@@ -8435,7 +8435,7 @@ mod tests {
                 let config = LabConfig::new(seed).max_steps(3000).worker_count(2);
                 let mut runtime = LabRuntime::new(config);
 
-                let region_id = runtime.create_region(None, Budget::default(), None).unwrap();
+                let region_id = runtime.state.create_root_region(Budget::default());
                 let spawned_tasks = Arc::new(AtomicUsize::new(0));
                 let completed_tasks = Arc::new(AtomicUsize::new(0));
                 let close_attempted = Arc::new(AtomicBool::new(false));
@@ -8510,8 +8510,8 @@ mod tests {
                 let config = LabConfig::new(seed).max_steps(5000);
                 let mut runtime = LabRuntime::new(config);
 
-                let parent_id = runtime.create_region(None, Budget::default(), None).unwrap();
-                let child_id = runtime.create_region(Some(parent_id), Budget::default(), None).unwrap();
+                let parent_id = runtime.state.create_root_region(Budget::default());
+                let child_id = runtime.state.create_child_region(parent_id, Budget::default()).unwrap();
 
                 let mut parent_close_count = 0;
                 let mut child_close_count = 0;
@@ -8522,7 +8522,7 @@ mod tests {
                     match op {
                         0 => {
                             // Close parent (should fail if child not closed)
-                            let state = runtime.state_mut();
+                            let state = &mut runtime.state;
                             if let Some(parent) = state.regions.get_mut(parent_id.arena_index()) {
                                 if parent.begin_close(None) {
                                     let _ = parent.begin_finalize();
@@ -8533,7 +8533,7 @@ mod tests {
                         }
                         1 => {
                             // Close child
-                            let state = runtime.state_mut();
+                            let state = &mut runtime.state;
                             if let Some(child) = state.regions.get_mut(child_id.arena_index()) {
                                 if child.begin_close(None) {
                                     let _ = child.begin_finalize();
@@ -8544,7 +8544,7 @@ mod tests {
                         }
                         2 => {
                             // Cancel parent
-                            let state = runtime.state_mut();
+                            let state = &mut runtime.state;
                             if let Some(parent) = state.regions.get_mut(parent_id.arena_index()) {
                                 let _ = parent.begin_close(Some(CancelReason::ExplicitCancel));
                                 cancel_attempts += 1;
@@ -8552,7 +8552,7 @@ mod tests {
                         }
                         3 => {
                             // Cancel child
-                            let state = runtime.state_mut();
+                            let state = &mut runtime.state;
                             if let Some(child) = state.regions.get_mut(child_id.arena_index()) {
                                 let _ = child.begin_close(Some(CancelReason::ExplicitCancel));
                                 cancel_attempts += 1;

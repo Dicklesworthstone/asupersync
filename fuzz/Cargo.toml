@@ -323,6 +323,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_h2_state_machine"
+path = "fuzz_targets/h2_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_raptorq_aead_envelope"
 path = "fuzz_targets/raptorq_aead_envelope.rs"
 test = false
