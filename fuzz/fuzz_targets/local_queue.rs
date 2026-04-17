@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use asupersync::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::TaskId;
 

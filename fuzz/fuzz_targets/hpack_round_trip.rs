@@ -29,9 +29,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use asupersync::http::h2::{HpackEncoder, HpackDecoder, Header};
 use asupersync::bytes::BytesMut;
+use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum number of headers to generate per test case.
 const MAX_HEADERS: usize = 32;
@@ -55,8 +55,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Extract configuration parameters
     let use_huffman = config_data[0] & 0x01 != 0;
-    let dynamic_table_size = ((config_data[1] as usize) << 8 | config_data[2] as usize)
-        .min(MAX_DYNAMIC_TABLE_SIZE);
+    let dynamic_table_size =
+        ((config_data[1] as usize) << 8 | config_data[2] as usize).min(MAX_DYNAMIC_TABLE_SIZE);
     let num_headers = (config_data[3] as usize % MAX_HEADERS) + 1;
 
     // Create encoder and decoder with matching configuration
@@ -142,10 +142,24 @@ fn generate_header_name(data: &[u8]) -> String {
 
     // Generate header name using common patterns and pseudo-headers
     let templates = [
-        ":method", ":path", ":scheme", ":authority", ":status",
-        "host", "user-agent", "accept", "accept-encoding", "accept-language",
-        "authorization", "cache-control", "content-type", "content-length",
-        "cookie", "x-forwarded-for", "x-custom", "x-test"
+        ":method",
+        ":path",
+        ":scheme",
+        ":authority",
+        ":status",
+        "host",
+        "user-agent",
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "authorization",
+        "cache-control",
+        "content-type",
+        "content-length",
+        "cookie",
+        "x-forwarded-for",
+        "x-custom",
+        "x-test",
     ];
 
     let template_idx = data[0] as usize % templates.len();
@@ -156,7 +170,8 @@ fn generate_header_name(data: &[u8]) -> String {
         let suffix_len = (data[1] & 0x0F) as usize;
         if suffix_len > 0 && data.len() > suffix_len + 1 {
             let suffix_bytes = &data[2..2 + suffix_len.min(data.len() - 2)];
-            let suffix: String = suffix_bytes.iter()
+            let suffix: String = suffix_bytes
+                .iter()
                 .map(|&b| {
                     let c = match b % 36 {
                         0..=25 => (b'a' + (b % 26)) as char,
@@ -189,20 +204,26 @@ fn generate_header_value(data: &[u8]) -> String {
             // HTTP method values
             let methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"];
             methods[data[0] as usize % methods.len()].to_string()
-        },
+        }
         1 => {
             // Status code values
-            let statuses = ["200", "201", "204", "301", "302", "400", "401", "403", "404", "500"];
+            let statuses = [
+                "200", "201", "204", "301", "302", "400", "401", "403", "404", "500",
+            ];
             statuses[data[0] as usize % statuses.len()].to_string()
-        },
+        }
         2 => {
             // Content-Type values
             let content_types = [
-                "text/html", "text/plain", "application/json", "application/xml",
-                "application/octet-stream", "multipart/form-data"
+                "text/html",
+                "text/plain",
+                "application/json",
+                "application/xml",
+                "application/octet-stream",
+                "multipart/form-data",
             ];
             content_types[data[0] as usize % content_types.len()].to_string()
-        },
+        }
         3 => {
             // URL/path values
             if data.len() >= 2 {
@@ -220,7 +241,7 @@ fn generate_header_value(data: &[u8]) -> String {
             } else {
                 "/".to_string()
             }
-        },
+        }
         4 => {
             // Numeric values
             if data.len() >= 4 {
@@ -228,13 +249,13 @@ fn generate_header_value(data: &[u8]) -> String {
                     data.get(0).copied().unwrap_or(0),
                     data.get(1).copied().unwrap_or(0),
                     data.get(2).copied().unwrap_or(0),
-                    data.get(3).copied().unwrap_or(0)
+                    data.get(3).copied().unwrap_or(0),
                 ]);
                 (num % 100000).to_string()
             } else {
                 "0".to_string()
             }
-        },
+        }
         5 => {
             // Base64-like values (test Huffman encoding)
             let b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -242,11 +263,11 @@ fn generate_header_value(data: &[u8]) -> String {
                 .take(16) // Limit length
                 .map(|&b| b64_chars.chars().nth(b as usize % b64_chars.len()).unwrap())
                 .collect()
-        },
+        }
         6 => {
             // Empty value
             String::new()
-        },
+        }
         7 => {
             // ASCII printable characters
             data.iter()
@@ -256,7 +277,7 @@ fn generate_header_value(data: &[u8]) -> String {
                     if c == 127 { '?' } else { c as char }
                 })
                 .collect()
-        },
+        }
         _ => unreachable!(),
     }
 }
@@ -316,20 +337,33 @@ fn round_trip_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder, heade
     };
 
     // Verify round-trip consistency
-    assert_eq!(headers.len(), decoded_headers.len(),
-        "Header count mismatch in round-trip");
+    assert_eq!(
+        headers.len(),
+        decoded_headers.len(),
+        "Header count mismatch in round-trip"
+    );
 
     for (orig, decoded) in headers.iter().zip(decoded_headers.iter()) {
-        assert_eq!(orig.name.to_lowercase(), decoded.name.to_lowercase(),
-            "Header name mismatch: '{}' vs '{}'", orig.name, decoded.name);
-        assert_eq!(orig.value, decoded.value,
+        assert_eq!(
+            orig.name.to_lowercase(),
+            decoded.name.to_lowercase(),
+            "Header name mismatch: '{}' vs '{}'",
+            orig.name,
+            decoded.name
+        );
+        assert_eq!(
+            orig.value, decoded.value,
             "Header value mismatch for '{}': '{}' vs '{}'",
-            orig.name, orig.value, decoded.value);
+            orig.name, orig.value, decoded.value
+        );
     }
 
     // Verify no bytes remaining after decode
-    assert!(encoded_bytes.is_empty() || encoded_bytes.len() <= 4,
-        "Unexpected remaining bytes after decode: {} bytes", encoded_bytes.len());
+    assert!(
+        encoded_bytes.is_empty() || encoded_bytes.len() <= 4,
+        "Unexpected remaining bytes after decode: {} bytes",
+        encoded_bytes.len()
+    );
 }
 
 /// Test multiple encoding rounds to validate dynamic table consistency.
@@ -360,14 +394,25 @@ fn multi_round_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder, head
         let mut encoded_bytes = encoded.freeze();
         if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
             // Verify round-trip consistency
-            assert_eq!(round_headers.len(), decoded_headers.len(),
-                "Round {} header count mismatch", round);
+            assert_eq!(
+                round_headers.len(),
+                decoded_headers.len(),
+                "Round {} header count mismatch",
+                round
+            );
 
             for (orig, decoded) in round_headers.iter().zip(decoded_headers.iter()) {
-                assert_eq!(orig.name.to_lowercase(), decoded.name.to_lowercase(),
-                    "Round {} header name mismatch", round);
-                assert_eq!(orig.value, decoded.value,
-                    "Round {} header value mismatch for '{}'", round, orig.name);
+                assert_eq!(
+                    orig.name.to_lowercase(),
+                    decoded.name.to_lowercase(),
+                    "Round {} header name mismatch",
+                    round
+                );
+                assert_eq!(
+                    orig.value, decoded.value,
+                    "Round {} header value mismatch for '{}'",
+                    round, orig.name
+                );
             }
         }
     }
@@ -378,15 +423,15 @@ fn sensitive_headers_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder
     let sensitive_headers = vec![
         Header {
             name: "authorization".to_string(),
-            value: "Bearer secret_token_12345".to_string()
+            value: "Bearer secret_token_12345".to_string(),
         },
         Header {
             name: "cookie".to_string(),
-            value: "session_id=abc123; auth=xyz789".to_string()
+            value: "session_id=abc123; auth=xyz789".to_string(),
         },
         Header {
             name: "proxy-authorization".to_string(),
-            value: "Basic dXNlcjpwYXNz".to_string()
+            value: "Basic dXNlcjpwYXNz".to_string(),
         },
     ];
 
@@ -401,14 +446,23 @@ fn sensitive_headers_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder
     // Decode and verify
     let mut encoded_bytes = encoded.freeze();
     if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
-        assert_eq!(sensitive_headers.len(), decoded_headers.len(),
-            "Sensitive headers count mismatch");
+        assert_eq!(
+            sensitive_headers.len(),
+            decoded_headers.len(),
+            "Sensitive headers count mismatch"
+        );
 
         for (orig, decoded) in sensitive_headers.iter().zip(decoded_headers.iter()) {
-            assert_eq!(orig.name.to_lowercase(), decoded.name.to_lowercase(),
-                "Sensitive header name mismatch");
-            assert_eq!(orig.value, decoded.value,
-                "Sensitive header value mismatch for '{}'", orig.name);
+            assert_eq!(
+                orig.name.to_lowercase(),
+                decoded.name.to_lowercase(),
+                "Sensitive header name mismatch"
+            );
+            assert_eq!(
+                orig.value, decoded.value,
+                "Sensitive header value mismatch for '{}'",
+                orig.name
+            );
         }
     }
 }
@@ -424,9 +478,18 @@ fn dynamic_table_size_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecode
         decoder.set_allowed_table_size(size);
 
         let test_headers = vec![
-            Header { name: ":method".to_string(), value: "GET".to_string() },
-            Header { name: ":path".to_string(), value: "/test".to_string() },
-            Header { name: "host".to_string(), value: "example.com".to_string() },
+            Header {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            Header {
+                name: ":path".to_string(),
+                value: "/test".to_string(),
+            },
+            Header {
+                name: "host".to_string(),
+                value: "example.com".to_string(),
+            },
         ];
 
         let mut encoded = BytesMut::new();
@@ -438,8 +501,12 @@ fn dynamic_table_size_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecode
 
         let mut encoded_bytes = encoded.freeze();
         if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
-            assert_eq!(test_headers.len(), decoded_headers.len(),
-                "Table size {} header count mismatch", size);
+            assert_eq!(
+                test_headers.len(),
+                decoded_headers.len(),
+                "Table size {} header count mismatch",
+                size
+            );
         }
     }
 }

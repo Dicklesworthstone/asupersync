@@ -37,7 +37,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::security::{AuthKey, AUTH_KEY_SIZE};
+use asupersync::security::{AUTH_KEY_SIZE, AuthKey};
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
@@ -92,10 +92,7 @@ enum AeadOperation {
         kind: SymbolKindChoice,
     },
     /// Decrypt AEAD envelope back to symbol
-    DecryptEnvelope {
-        envelope_index: u8,
-        key_index: u8,
-    },
+    DecryptEnvelope { envelope_index: u8, key_index: u8 },
     /// Test tag boundary conditions
     TagBoundaryTest {
         envelope_index: u8,
@@ -246,7 +243,8 @@ impl AeadEnvelope {
             return Err(AeadEnvelopeError::OversizedEnvelope);
         }
 
-        let magic: [u8; 4] = data[0..4].try_into()
+        let magic: [u8; 4] = data[0..4]
+            .try_into()
             .map_err(|_| AeadEnvelopeError::InvalidMagic)?;
 
         if magic != AEAD_ENVELOPE_MAGIC {
@@ -258,13 +256,15 @@ impl AeadEnvelope {
             return Err(AeadEnvelopeError::UnsupportedVersion);
         }
 
-        let nonce: [u8; NONCE_SIZE] = data[5..5+NONCE_SIZE].try_into()
+        let nonce: [u8; NONCE_SIZE] = data[5..5 + NONCE_SIZE]
+            .try_into()
             .map_err(|_| AeadEnvelopeError::TruncatedNonce)?;
 
         let ciphertext_end = data.len() - TAG_SIZE;
         let ciphertext = data[HEADER_SIZE..ciphertext_end].to_vec();
 
-        let tag: [u8; TAG_SIZE] = data[ciphertext_end..].try_into()
+        let tag: [u8; TAG_SIZE] = data[ciphertext_end..]
+            .try_into()
             .map_err(|_| AeadEnvelopeError::MissingTag)?;
 
         Ok(Self {
@@ -537,7 +537,8 @@ fn decrypt_envelope_to_symbol(
 
     for (i, &byte) in aad.iter().chain(envelope.ciphertext.iter()).enumerate() {
         expected_tag[i % TAG_SIZE] ^= byte;
-        expected_tag[i % TAG_SIZE] = expected_tag[i % TAG_SIZE].wrapping_add(key_bytes[i % AUTH_KEY_SIZE]);
+        expected_tag[i % TAG_SIZE] =
+            expected_tag[i % TAG_SIZE].wrapping_add(key_bytes[i % AUTH_KEY_SIZE]);
     }
 
     // Constant-time tag comparison (simulated)
@@ -739,7 +740,10 @@ fn test_malformed_framing(framing_error: FramingError, key: &AuthKey) {
 
             let parse_result = AeadEnvelope::from_bytes(&bad_envelope_data);
             if version != AEAD_ENVELOPE_VERSION {
-                assert!(matches!(parse_result, Err(AeadEnvelopeError::UnsupportedVersion)));
+                assert!(matches!(
+                    parse_result,
+                    Err(AeadEnvelopeError::UnsupportedVersion)
+                ));
             }
         }
 
@@ -749,7 +753,10 @@ fn test_malformed_framing(framing_error: FramingError, key: &AuthKey) {
                 let bad_envelope_data = vec![0u8; truncated_size];
 
                 let parse_result = AeadEnvelope::from_bytes(&bad_envelope_data);
-                assert!(matches!(parse_result, Err(AeadEnvelopeError::TruncatedEnvelope)));
+                assert!(matches!(
+                    parse_result,
+                    Err(AeadEnvelopeError::TruncatedEnvelope)
+                ));
             }
         }
 
@@ -758,14 +765,20 @@ fn test_malformed_framing(framing_error: FramingError, key: &AuthKey) {
             let bad_envelope_data = vec![0u8; incomplete_size];
 
             let parse_result = AeadEnvelope::from_bytes(&bad_envelope_data);
-            assert!(matches!(parse_result, Err(AeadEnvelopeError::TruncatedEnvelope)));
+            assert!(matches!(
+                parse_result,
+                Err(AeadEnvelopeError::TruncatedEnvelope)
+            ));
         }
 
         FramingError::TruncatedEnvelope(size) => {
             if size < MIN_ENVELOPE_SIZE {
                 let bad_envelope_data = vec![0u8; size];
                 let parse_result = AeadEnvelope::from_bytes(&bad_envelope_data);
-                assert!(matches!(parse_result, Err(AeadEnvelopeError::TruncatedEnvelope)));
+                assert!(matches!(
+                    parse_result,
+                    Err(AeadEnvelopeError::TruncatedEnvelope)
+                ));
             }
         }
 
@@ -773,7 +786,10 @@ fn test_malformed_framing(framing_error: FramingError, key: &AuthKey) {
             if size > MAX_ENVELOPE_SIZE {
                 let bad_envelope_data = vec![0u8; size.min(MAX_ENVELOPE_SIZE * 2)];
                 let parse_result = AeadEnvelope::from_bytes(&bad_envelope_data);
-                assert!(matches!(parse_result, Err(AeadEnvelopeError::OversizedEnvelope)));
+                assert!(matches!(
+                    parse_result,
+                    Err(AeadEnvelopeError::OversizedEnvelope)
+                ));
             }
         }
 
@@ -855,7 +871,8 @@ fn test_byte_reordering(envelope: &AeadEnvelope, pattern: ReorderPattern, key: &
             if !reordered_envelope.ciphertext.is_empty() {
                 // Simple deterministic permutation
                 for i in 0..reordered_envelope.ciphertext.len() {
-                    let j = ((seed as usize).wrapping_mul(i).wrapping_add(i)) % reordered_envelope.ciphertext.len();
+                    let j = ((seed as usize).wrapping_mul(i).wrapping_add(i))
+                        % reordered_envelope.ciphertext.len();
                     reordered_envelope.ciphertext.swap(i, j);
                 }
             }
@@ -884,7 +901,12 @@ fn test_byte_reordering(envelope: &AeadEnvelope, pattern: ReorderPattern, key: &
 }
 
 /// Test nonce reuse detection.
-fn test_nonce_reuse_detection(key: &AuthKey, nonce_base: u64, payload1: Vec<u8>, payload2: Vec<u8>) {
+fn test_nonce_reuse_detection(
+    key: &AuthKey,
+    nonce_base: u64,
+    payload1: Vec<u8>,
+    payload2: Vec<u8>,
+) {
     if payload1.len() > MAX_SYMBOL_SIZE || payload2.len() > MAX_SYMBOL_SIZE {
         return;
     }
@@ -924,14 +946,12 @@ fn validate_harness_invariants(harness: &AeadTestHarness) {
     for (i, envelope_opt) in harness.envelopes.iter().enumerate() {
         if let Some(envelope) = envelope_opt {
             assert_eq!(
-                envelope.magic,
-                AEAD_ENVELOPE_MAGIC,
+                envelope.magic, AEAD_ENVELOPE_MAGIC,
                 "Envelope {} has invalid magic bytes",
                 i
             );
             assert_eq!(
-                envelope.version,
-                AEAD_ENVELOPE_VERSION,
+                envelope.version, AEAD_ENVELOPE_VERSION,
                 "Envelope {} has invalid version",
                 i
             );

@@ -3,10 +3,10 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::proof::DecodeConfig;
 use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::proof::DecodeConfig;
+use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use asupersync::types::ObjectId;
 use std::collections::HashSet;
 
@@ -56,7 +56,9 @@ fn normalize_config(config: &mut FuzzConfig) {
 
     // Normalize subset masks
     config.source_subset_mask.truncate(config.k as usize);
-    config.repair_drop_mask.truncate(config.repair_count as usize);
+    config
+        .repair_drop_mask
+        .truncate(config.repair_count as usize);
 }
 
 /// Generate source data for encoding
@@ -137,8 +139,16 @@ fn create_received_symbol(esi: u32, data: Vec<u8>) -> ReceivedSymbol {
     ReceivedSymbol {
         esi,
         is_source,
-        columns: if is_source { vec![esi as usize] } else { vec![0, 1, 2] }, // Simplified
-        coefficients: if is_source { vec![Gf256::ONE] } else { vec![Gf256::ONE; 3] }, // Simplified
+        columns: if is_source {
+            vec![esi as usize]
+        } else {
+            vec![0, 1, 2]
+        }, // Simplified
+        coefficients: if is_source {
+            vec![Gf256::ONE]
+        } else {
+            vec![Gf256::ONE; 3]
+        }, // Simplified
         data,
     }
 }
@@ -228,7 +238,11 @@ fn test_rank_deficiency_handling(
                 }
                 // Should recover at least partial data
                 if matches < source.len() / 2 {
-                    return Err(format!("Too few recovered symbols match: {}/{}", matches, source.len()));
+                    return Err(format!(
+                        "Too few recovered symbols match: {}/{}",
+                        matches,
+                        source.len()
+                    ));
                 }
             }
         }
@@ -432,11 +446,8 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
 
         if all_symbols.len() >= k {
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let _result = decoder.decode_with_proof(
-                &all_symbols,
-                ObjectId::new_for_test(seed),
-                config.sbn,
-            );
+            let _result =
+                decoder.decode_with_proof(&all_symbols, ObjectId::new_for_test(seed), config.sbn);
             // Allow both success and failure - we're testing for crashes/corruption
         }
     }

@@ -35,9 +35,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::frame::{FrameHeader, parse_frame, FRAME_HEADER_SIZE};
+use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, FrameHeader, parse_frame};
+use libfuzzer_sys::fuzz_target;
 
 /// Frame generation strategies for structured fuzzing
 #[derive(Debug, Clone, Copy)]
@@ -132,9 +132,9 @@ fn fuzz_valid_frame_corruption(data: &[u8]) {
     // Apply corruption based on type
     match corruption_type {
         0 => header.length = header.length.wrapping_add(1), // Length mismatch
-        1 => header.stream_id ^= 0x8000_0000, // Toggle reserved bit
-        2 => header.flags = !header.flags, // Flip all flags
-        3 => header.length = 0xFFFF_FFFF, // Maximum length
+        1 => header.stream_id ^= 0x8000_0000,               // Toggle reserved bit
+        2 => header.flags = !header.flags,                  // Flip all flags
+        3 => header.length = 0xFFFF_FFFF,                   // Maximum length
         4 => header.stream_id = 0, // Force connection-level for stream frames
         _ => header.frame_type = 255, // Unknown frame type
     }
@@ -223,90 +223,121 @@ fn generate_valid_frame(frame_type: u8, payload_data: &[u8]) -> (FrameHeader, By
 // Edge case generators
 
 fn edge_case_empty_frame(frame_type: u8) -> (FrameHeader, Bytes) {
-    let stream_id = if frame_type == 4 || frame_type == 6 || frame_type == 7 { 0 } else { 1 };
-    (FrameHeader {
-        length: 0,
-        frame_type,
-        flags: 0,
-        stream_id,
-    }, Bytes::new())
+    let stream_id = if frame_type == 4 || frame_type == 6 || frame_type == 7 {
+        0
+    } else {
+        1
+    };
+    (
+        FrameHeader {
+            length: 0,
+            frame_type,
+            flags: 0,
+            stream_id,
+        },
+        Bytes::new(),
+    )
 }
 
 fn edge_case_max_frame_size(data: &[u8]) -> (FrameHeader, Bytes) {
     let max_size = 16_777_215u32; // 24-bit max
     let payload_size = data.len().min(max_size as usize);
-    (FrameHeader {
-        length: payload_size as u32,
-        frame_type: 0, // DATA frame
-        flags: 0,
-        stream_id: 1,
-    }, Bytes::copy_from_slice(&data[..payload_size]))
+    (
+        FrameHeader {
+            length: payload_size as u32,
+            frame_type: 0, // DATA frame
+            flags: 0,
+            stream_id: 1,
+        },
+        Bytes::copy_from_slice(&data[..payload_size]),
+    )
 }
 
 fn edge_case_oversized_frame(data: &[u8]) -> (FrameHeader, Bytes) {
-    (FrameHeader {
-        length: 16_777_216, // Exceeds 24-bit max by 1
-        frame_type: 0,
-        flags: 0,
-        stream_id: 1,
-    }, Bytes::copy_from_slice(data))
+    (
+        FrameHeader {
+            length: 16_777_216, // Exceeds 24-bit max by 1
+            frame_type: 0,
+            flags: 0,
+            stream_id: 1,
+        },
+        Bytes::copy_from_slice(data),
+    )
 }
 
 fn edge_case_max_stream_id(frame_type: u8, data: &[u8]) -> (FrameHeader, Bytes) {
-    (FrameHeader {
-        length: data.len() as u32,
-        frame_type,
-        flags: 0,
-        stream_id: 0x7FFF_FFFF, // 31-bit max
-    }, Bytes::copy_from_slice(data))
+    (
+        FrameHeader {
+            length: data.len() as u32,
+            frame_type,
+            flags: 0,
+            stream_id: 0x7FFF_FFFF, // 31-bit max
+        },
+        Bytes::copy_from_slice(data),
+    )
 }
 
 fn edge_case_reserved_stream_id(frame_type: u8, data: &[u8]) -> (FrameHeader, Bytes) {
-    (FrameHeader {
-        length: data.len() as u32,
-        frame_type,
-        flags: 0,
-        stream_id: 0x8000_0001, // Reserved bit set
-    }, Bytes::copy_from_slice(data))
+    (
+        FrameHeader {
+            length: data.len() as u32,
+            frame_type,
+            flags: 0,
+            stream_id: 0x8000_0001, // Reserved bit set
+        },
+        Bytes::copy_from_slice(data),
+    )
 }
 
 fn edge_case_settings_ack_with_data(data: &[u8]) -> (FrameHeader, Bytes) {
-    (FrameHeader {
-        length: data.len() as u32,
-        frame_type: 4, // SETTINGS
-        flags: 0x01, // ACK flag (should have no data)
-        stream_id: 0,
-    }, Bytes::copy_from_slice(data))
+    (
+        FrameHeader {
+            length: data.len() as u32,
+            frame_type: 4, // SETTINGS
+            flags: 0x01,   // ACK flag (should have no data)
+            stream_id: 0,
+        },
+        Bytes::copy_from_slice(data),
+    )
 }
 
 fn edge_case_ping_wrong_size(data: &[u8]) -> (FrameHeader, Bytes) {
     let wrong_size = if data.len() == 8 { 7 } else { data.len() };
-    (FrameHeader {
-        length: wrong_size as u32,
-        frame_type: 6, // PING
-        flags: 0,
-        stream_id: 0,
-    }, Bytes::copy_from_slice(&data[..wrong_size.min(data.len())]))
+    (
+        FrameHeader {
+            length: wrong_size as u32,
+            frame_type: 6, // PING
+            flags: 0,
+            stream_id: 0,
+        },
+        Bytes::copy_from_slice(&data[..wrong_size.min(data.len())]),
+    )
 }
 
 fn edge_case_window_update_zero_increment(_data: &[u8]) -> (FrameHeader, Bytes) {
-    (FrameHeader {
-        length: 4,
-        frame_type: 8, // WINDOW_UPDATE
-        flags: 0,
-        stream_id: 1,
-    }, Bytes::from_static(&[0, 0, 0, 0])) // Zero increment (invalid)
+    (
+        FrameHeader {
+            length: 4,
+            frame_type: 8, // WINDOW_UPDATE
+            flags: 0,
+            stream_id: 1,
+        },
+        Bytes::from_static(&[0, 0, 0, 0]),
+    ) // Zero increment (invalid)
 }
 
 fn edge_case_data_excessive_padding(data: &[u8]) -> (FrameHeader, Bytes) {
     let mut payload = vec![255u8]; // Padding length > payload size
     payload.extend_from_slice(data);
-    (FrameHeader {
-        length: payload.len() as u32,
-        frame_type: 0, // DATA
-        flags: 0x08, // PADDED flag
-        stream_id: 1,
-    }, Bytes::copy_from_slice(&payload))
+    (
+        FrameHeader {
+            length: payload.len() as u32,
+            frame_type: 0, // DATA
+            flags: 0x08,   // PADDED flag
+            stream_id: 1,
+        },
+        Bytes::copy_from_slice(&payload),
+    )
 }
 
 fn edge_case_headers_priority_corruption(data: &[u8]) -> (FrameHeader, Bytes) {
@@ -316,12 +347,15 @@ fn edge_case_headers_priority_corruption(data: &[u8]) -> (FrameHeader, Bytes) {
         data.to_vec()
     };
 
-    (FrameHeader {
-        length: min_data.len() as u32,
-        frame_type: 1, // HEADERS
-        flags: 0x20, // PRIORITY flag (requires 5 bytes of priority data)
-        stream_id: 1,
-    }, Bytes::copy_from_slice(&min_data))
+    (
+        FrameHeader {
+            length: min_data.len() as u32,
+            frame_type: 1, // HEADERS
+            flags: 0x20,   // PRIORITY flag (requires 5 bytes of priority data)
+            stream_id: 1,
+        },
+        Bytes::copy_from_slice(&min_data),
+    )
 }
 
 fn edge_case_priority_self_dependency(_data: &[u8]) -> (FrameHeader, Bytes) {
@@ -335,19 +369,25 @@ fn edge_case_priority_self_dependency(_data: &[u8]) -> (FrameHeader, Bytes) {
         255, // Weight 256 (weight is weight + 1)
     ];
 
-    (FrameHeader {
-        length: 5,
-        frame_type: 2, // PRIORITY
-        flags: 0,
-        stream_id,
-    }, Bytes::copy_from_slice(&payload))
+    (
+        FrameHeader {
+            length: 5,
+            frame_type: 2, // PRIORITY
+            flags: 0,
+            stream_id,
+        },
+        Bytes::copy_from_slice(&payload),
+    )
 }
 
 fn edge_case_continuation_without_headers(data: &[u8]) -> (FrameHeader, Bytes) {
-    (FrameHeader {
-        length: data.len() as u32,
-        frame_type: 9, // CONTINUATION (should only follow HEADERS)
-        flags: 0x04, // END_HEADERS flag
-        stream_id: 1,
-    }, Bytes::copy_from_slice(data))
+    (
+        FrameHeader {
+            length: data.len() as u32,
+            frame_type: 9, // CONTINUATION (should only follow HEADERS)
+            flags: 0x04,   // END_HEADERS flag
+            stream_id: 1,
+        },
+        Bytes::copy_from_slice(data),
+    )
 }

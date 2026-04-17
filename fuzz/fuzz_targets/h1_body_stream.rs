@@ -104,7 +104,9 @@ fn normalize_config(config: &mut H1BodyStreamConfig) {
     // Normalize chunked config if present
     if let Some(ref mut chunked) = config.chunked_config {
         chunked.test_chunks.truncate(20);
-        chunked.raw_chunked_data.truncate(config.limits.max_buffered_bytes);
+        chunked
+            .raw_chunked_data
+            .truncate(config.limits.max_buffered_bytes);
 
         for chunk in &mut chunked.test_chunks {
             // Clamp chunk size to reasonable range
@@ -127,9 +129,11 @@ fn normalize_config(config: &mut H1BodyStreamConfig) {
 
             // Limit trailers
             chunk.trailers.retain(|k, v| {
-                k.len() <= 64 && v.len() <= 256 &&
-                k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') &&
-                v.chars().all(|c| c.is_ascii() && c != '\r' && c != '\n' && c != '\0')
+                k.len() <= 64
+                    && v.len() <= 256
+                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    && v.chars()
+                        .all(|c| c.is_ascii() && c != '\r' && c != '\n' && c != '\0')
             });
             if chunk.trailers.len() > 10 {
                 let keys: Vec<_> = chunk.trailers.keys().take(10).cloned().collect();
@@ -190,7 +194,9 @@ fn test_content_length_validation(config: &H1BodyStreamConfig) -> Result<(), Str
     }
 
     // Validate push sequence against expected size
-    let total_push_size: u64 = config.push_sequence.iter()
+    let total_push_size: u64 = config
+        .push_sequence
+        .iter()
         .map(|p| p.data.len() as u64)
         .sum();
 
@@ -345,9 +351,7 @@ fn test_size_limits(config: &H1BodyStreamConfig) -> Result<(), String> {
     }
 
     // Test max buffered bytes
-    let total_push_size: usize = config.push_sequence.iter()
-        .map(|p| p.data.len())
-        .sum();
+    let total_push_size: usize = config.push_sequence.iter().map(|p| p.data.len()).sum();
 
     if total_push_size > config.limits.max_buffered_bytes {
         // Should trigger buffering limits
@@ -408,8 +412,11 @@ fn fuzz_h1_body_stream(mut config: H1BodyStreamConfig) -> Result<(), String> {
     normalize_config(&mut config);
 
     // Skip degenerate cases
-    if config.push_sequence.is_empty() &&
-       config.chunked_config.as_ref().map_or(true, |c| c.test_chunks.is_empty() && c.raw_chunked_data.is_empty()) {
+    if config.push_sequence.is_empty()
+        && config.chunked_config.as_ref().map_or(true, |c| {
+            c.test_chunks.is_empty() && c.raw_chunked_data.is_empty()
+        })
+    {
         return Ok(());
     }
 

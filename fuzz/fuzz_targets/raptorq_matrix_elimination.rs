@@ -45,10 +45,7 @@ enum SolverTest {
         rhs_data: Vec<Vec<u8>>,
     },
     /// Test with identity matrix (trivial solve)
-    Identity {
-        size: usize,
-        rhs_data: Vec<Vec<u8>>,
-    },
+    Identity { size: usize, rhs_data: Vec<Vec<u8>> },
     /// Test with single pivot elements (sparse matrix)
     SparsePivots {
         rows: usize,
@@ -58,10 +55,7 @@ enum SolverTest {
         rhs_data: Vec<Vec<u8>>,
     },
     /// Test with adversarial pivot sequences (alternating large/small values)
-    AdversarialPivots {
-        size: usize,
-        rhs_data: Vec<Vec<u8>>,
-    },
+    AdversarialPivots { size: usize, rhs_data: Vec<Vec<u8>> },
     /// Test inconsistent systems (overdetermined with contradictions)
     Inconsistent {
         rows: usize,
@@ -177,13 +171,25 @@ fn test_solver_operation(test: SolverTest) {
             for i in 0..deficit {
                 if i + 1 < rows {
                     // Make row i+1 a linear combination of row 0 and row i
-                    let factor1 = Gf256::new(if matrix_data.is_empty() { 1 } else { matrix_data[0] });
-                    let factor2 = Gf256::new(if matrix_data.len() > 1 { matrix_data[1] } else { 1 });
+                    let factor1 = Gf256::new(if matrix_data.is_empty() {
+                        1
+                    } else {
+                        matrix_data[0]
+                    });
+                    let factor2 = Gf256::new(if matrix_data.len() > 1 {
+                        matrix_data[1]
+                    } else {
+                        1
+                    });
 
                     for col in 0..cols {
                         solver.set_coefficient(0, col, Gf256::new(1)); // Ensure row 0 has some content
                         let val1 = Gf256::new(1) * factor1; // Content from row 0
-                        let val2 = Gf256::new(if col < matrix_data.len() { matrix_data[col] } else { 0 }) * factor2;
+                        let val2 = Gf256::new(if col < matrix_data.len() {
+                            matrix_data[col]
+                        } else {
+                            0
+                        }) * factor2;
                         solver.set_coefficient(i + 1, col, val1 + val2);
                     }
                 }
@@ -194,22 +200,30 @@ fn test_solver_operation(test: SolverTest) {
             match result {
                 GaussianResult::Singular { .. } => {
                     // Expected for rank-deficient matrices
-                },
+                }
                 GaussianResult::Solved(_) => {
                     // Might happen if rank deficiency didn't actually occur
-                },
+                }
                 GaussianResult::Inconsistent { .. } => {
                     // Can happen with rank deficiency + inconsistent RHS
-                },
+                }
             }
 
             // Verify solver stats are reasonable
             let stats = solver.stats();
             assert!(stats.swaps <= rows, "Too many row swaps: {}", stats.swaps);
-            assert!(stats.pivot_selections <= rows.max(cols), "Too many pivot selections: {}", stats.pivot_selections);
+            assert!(
+                stats.pivot_selections <= rows.max(cols),
+                "Too many pivot selections: {}",
+                stats.pivot_selections
+            );
         }
 
-        SolverTest::BlockSchur { block_size, matrix_data, rhs_data } => {
+        SolverTest::BlockSchur {
+            block_size,
+            matrix_data,
+            rhs_data,
+        } => {
             let block_size = block_size.min(MAX_ROWS / 2).max(1);
             let total_size = block_size * 2; // 2x2 block structure
 
@@ -251,7 +265,11 @@ fn test_solver_operation(test: SolverTest) {
             drop(result);
         }
 
-        SolverTest::AllZero { rows, cols, rhs_data } => {
+        SolverTest::AllZero {
+            rows,
+            cols,
+            rhs_data,
+        } => {
             let rows = rows.min(MAX_ROWS).max(1);
             let cols = cols.min(MAX_COLS).max(1);
 
@@ -273,13 +291,13 @@ fn test_solver_operation(test: SolverTest) {
             match result {
                 GaussianResult::Singular { .. } => {
                     // Expected - all-zero matrix is singular
-                },
+                }
                 GaussianResult::Inconsistent { .. } => {
                     // Expected if RHS is non-zero
-                },
+                }
                 GaussianResult::Solved(_) => {
                     // Should only happen if RHS is all zero too
-                },
+                }
             }
         }
 
@@ -308,14 +326,20 @@ fn test_solver_operation(test: SolverTest) {
                 GaussianResult::Solved(solution) => {
                     // Identity matrix should always solve cleanly
                     assert_eq!(solution.len(), size, "Solution size mismatch for identity");
-                },
+                }
                 _ => {
                     panic!("Identity matrix should always be solvable");
                 }
             }
         }
 
-        SolverTest::SparsePivots { rows, cols, pivot_positions, pivot_values, rhs_data } => {
+        SolverTest::SparsePivots {
+            rows,
+            cols,
+            pivot_positions,
+            pivot_values,
+            rhs_data,
+        } => {
             let rows = rows.min(MAX_ROWS).max(1);
             let cols = cols.min(MAX_COLS).max(1);
 
@@ -380,7 +404,12 @@ fn test_solver_operation(test: SolverTest) {
             drop(result);
         }
 
-        SolverTest::Inconsistent { rows, cols, matrix_data, rhs_data } => {
+        SolverTest::Inconsistent {
+            rows,
+            cols,
+            matrix_data,
+            rhs_data,
+        } => {
             let rows = rows.min(MAX_ROWS).max(2); // Need at least 2 rows for inconsistency
             let cols = cols.min(MAX_COLS).max(1);
 
@@ -420,13 +449,13 @@ fn test_solver_operation(test: SolverTest) {
             match result {
                 GaussianResult::Inconsistent { .. } => {
                     // Expected for inconsistent systems
-                },
+                }
                 GaussianResult::Singular { .. } => {
                     // Also possible if the inconsistency isn't detected due to randomness
-                },
+                }
                 GaussianResult::Solved(_) => {
                     // Unexpected but possible if inconsistency wasn't actually created
-                },
+                }
             }
         }
     }
@@ -437,25 +466,46 @@ fn test_gf256_boundaries(test: Gf256BoundaryTest) {
         Gf256Operation::EliminationMultiply => {
             // Test GF(256) multiplication during elimination with boundary values
             for &val1 in GF256_BOUNDARY_VALUES {
-                for val2 in test.test_values.iter().take(8) { // Limit iterations
+                for val2 in test.test_values.iter().take(8) {
+                    // Limit iterations
                     let a = Gf256::new(val1);
                     let b = Gf256::new(*val2);
                     let result = a.mul_field(b);
 
                     // Test key properties during elimination
                     if val1 == 0 || *val2 == 0 {
-                        assert_eq!(result.raw(), 0, "Zero multiplication failed: {} * {}", val1, val2);
+                        assert_eq!(
+                            result.raw(),
+                            0,
+                            "Zero multiplication failed: {} * {}",
+                            val1,
+                            val2
+                        );
                     }
                     if val1 == 1 {
-                        assert_eq!(result.raw(), *val2, "Identity multiplication failed: 1 * {}", val2);
+                        assert_eq!(
+                            result.raw(),
+                            *val2,
+                            "Identity multiplication failed: 1 * {}",
+                            val2
+                        );
                     }
                     if *val2 == 1 {
-                        assert_eq!(result.raw(), val1, "Identity multiplication failed: {} * 1", val1);
+                        assert_eq!(
+                            result.raw(),
+                            val1,
+                            "Identity multiplication failed: {} * 1",
+                            val1
+                        );
                     }
 
                     // Test commutativity
                     let reverse = b.mul_field(a);
-                    assert_eq!(result.raw(), reverse.raw(), "Multiplication not commutative");
+                    assert_eq!(
+                        result.raw(),
+                        reverse.raw(),
+                        "Multiplication not commutative"
+                    );
                 }
             }
         }
@@ -492,7 +542,13 @@ fn test_gf256_boundaries(test: Gf256BoundaryTest) {
                     let inv = element.inv();
                     let product = element.mul_field(inv);
 
-                    assert_eq!(product.raw(), 1, "Inversion failed: {} * inv({}) != 1", val, val);
+                    assert_eq!(
+                        product.raw(),
+                        1,
+                        "Inversion failed: {} * inv({}) != 1",
+                        val,
+                        val
+                    );
 
                     // Test boundary cases
                     if val == 1 {
@@ -501,7 +557,13 @@ fn test_gf256_boundaries(test: Gf256BoundaryTest) {
 
                     // Test double inversion
                     let double_inv = inv.inv();
-                    assert_eq!(double_inv.raw(), val, "Double inversion failed: inv(inv({})) != {}", val, val);
+                    assert_eq!(
+                        double_inv.raw(),
+                        val,
+                        "Double inversion failed: inv(inv({})) != {}",
+                        val,
+                        val
+                    );
                 }
             }
         }
@@ -515,11 +577,20 @@ fn test_gf256_boundaries(test: Gf256BoundaryTest) {
 
                 // Test that field operations remain valid near polynomial boundary
                 let squared = element.mul_field(element);
-                let inv = if test_val != 0 { element.inv() } else { Gf256::new(0) };
+                let inv = if test_val != 0 {
+                    element.inv()
+                } else {
+                    Gf256::new(0)
+                };
 
                 if test_val != 0 {
                     let verify = element.mul_field(inv);
-                    assert_eq!(verify.raw(), 1, "Irreducible poly edge inversion failed for {}", test_val);
+                    assert_eq!(
+                        verify.raw(),
+                        1,
+                        "Irreducible poly edge inversion failed for {}",
+                        test_val
+                    );
                 }
 
                 // Test that polynomial reduction works correctly
@@ -544,13 +615,21 @@ fn test_cache_operation(op: CacheOperation) {
         CacheOperation::Miss { key, data } => {
             // Simulate cache miss followed by insertion
             assert!(key < u64::MAX, "Cache key out of bounds");
-            assert!(data.len() <= 1024, "Cache data too large: {} bytes", data.len());
+            assert!(
+                data.len() <= 1024,
+                "Cache data too large: {} bytes",
+                data.len()
+            );
             // Future: test cache miss and insertion logic
         }
 
         CacheOperation::Eviction { keys_to_evict } => {
             // Simulate cache eviction under memory pressure
-            assert!(keys_to_evict.len() <= 100, "Too many keys to evict: {}", keys_to_evict.len());
+            assert!(
+                keys_to_evict.len() <= 100,
+                "Too many keys to evict: {}",
+                keys_to_evict.len()
+            );
             for &key in &keys_to_evict {
                 assert!(key < u64::MAX, "Eviction key out of bounds");
             }
@@ -559,13 +638,17 @@ fn test_cache_operation(op: CacheOperation) {
 
         CacheOperation::AdversarialAccess { access_pattern } => {
             // Simulate adversarial access pattern designed to thrash cache
-            assert!(access_pattern.len() <= 1000, "Access pattern too long: {}", access_pattern.len());
+            assert!(
+                access_pattern.len() <= 1000,
+                "Access pattern too long: {}",
+                access_pattern.len()
+            );
 
             // Check for pathological patterns
             if access_pattern.len() >= 3 {
                 let mut alternating = true;
                 for i in 2..access_pattern.len() {
-                    if access_pattern[i] != access_pattern[i-2] {
+                    if access_pattern[i] != access_pattern[i - 2] {
                         alternating = false;
                         break;
                     }
@@ -585,8 +668,16 @@ fn test_cache_operation(op: CacheOperation) {
 /// Test helper: verify that matrix operations maintain GF(256) field properties
 fn verify_field_invariants(a: Gf256, b: Gf256, c: Gf256) {
     // Commutativity: a + b = b + a, a * b = b * a
-    assert_eq!((a.raw() ^ b.raw()), (b.raw() ^ a.raw()), "Addition not commutative");
-    assert_eq!(a.mul_field(b).raw(), b.mul_field(a).raw(), "Multiplication not commutative");
+    assert_eq!(
+        (a.raw() ^ b.raw()),
+        (b.raw() ^ a.raw()),
+        "Addition not commutative"
+    );
+    assert_eq!(
+        a.mul_field(b).raw(),
+        b.mul_field(a).raw(),
+        "Multiplication not commutative"
+    );
 
     // Associativity: (a + b) + c = a + (b + c), (a * b) * c = a * (b * c)
     let add_left = (a.raw() ^ b.raw()) ^ c.raw();
@@ -595,7 +686,11 @@ fn verify_field_invariants(a: Gf256, b: Gf256, c: Gf256) {
 
     let mul_left = a.mul_field(b).mul_field(c);
     let mul_right = a.mul_field(b.mul_field(c));
-    assert_eq!(mul_left.raw(), mul_right.raw(), "Multiplication not associative");
+    assert_eq!(
+        mul_left.raw(),
+        mul_right.raw(),
+        "Multiplication not associative"
+    );
 
     // Distributivity: a * (b + c) = (a * b) + (a * c)
     let left = a.mul_field(Gf256::new(b.raw() ^ c.raw()));
@@ -615,7 +710,10 @@ mod tests {
         assert!(GF256_BOUNDARY_VALUES.contains(&0x00), "Missing zero");
         assert!(GF256_BOUNDARY_VALUES.contains(&0x01), "Missing one");
         assert!(GF256_BOUNDARY_VALUES.contains(&0xFF), "Missing max");
-        assert!(GF256_BOUNDARY_VALUES.contains(&0x1D), "Missing irreducible poly");
+        assert!(
+            GF256_BOUNDARY_VALUES.contains(&0x1D),
+            "Missing irreducible poly"
+        );
     }
 
     #[test]

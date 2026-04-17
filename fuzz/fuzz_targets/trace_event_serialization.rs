@@ -8,7 +8,7 @@ use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationState}
 use asupersync::trace::distributed::{LamportTime, LogicalTime};
 use asupersync::trace::event::{
     BrowserTraceCategory, BrowserTraceCompatibility, BrowserTraceEventSpec, BrowserTraceSchema,
-    TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION,
+    TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind,
 };
 use asupersync::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
 use std::collections::BTreeMap;

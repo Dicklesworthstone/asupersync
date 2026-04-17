@@ -3,10 +3,12 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::net::websocket::{Frame, Opcode, FrameCodec, Role, ServerHandshake, ClientHandshake};
-use asupersync::util::OsEntropy;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::{Encoder, Decoder};
+use asupersync::codec::{Decoder, Encoder};
+use asupersync::net::websocket::{
+    ClientHandshake, Frame, FrameCodec, Opcode, Role, ServerHandshake,
+};
+use asupersync::util::OsEntropy;
 use std::collections::BTreeMap;
 
 /// Fuzzing parameters for WebSocket permessage-deflate extension.
@@ -107,16 +109,22 @@ struct SizeLimits {
 /// Normalize fuzz configuration to valid ranges
 fn normalize_config(config: &mut WebSocketDeflateConfig) {
     // Clamp window bits to valid range per RFC 7692
-    config.window_config.server_max_window_bits = config.window_config.server_max_window_bits.clamp(8, 15);
-    config.window_config.client_max_window_bits = config.window_config.client_max_window_bits.clamp(8, 15);
+    config.window_config.server_max_window_bits =
+        config.window_config.server_max_window_bits.clamp(8, 15);
+    config.window_config.client_max_window_bits =
+        config.window_config.client_max_window_bits.clamp(8, 15);
 
     // Limit frame sequence length for performance
     config.frame_sequence.truncate(20);
 
     // Normalize size limits
     config.size_limits.max_compressed_size = config.size_limits.max_compressed_size.clamp(1, 65535);
-    config.size_limits.max_decompressed_size = config.size_limits.max_decompressed_size.clamp(1, 1024 * 1024);
-    config.size_limits.max_compression_ratio = config.size_limits.max_compression_ratio.clamp(1, 10000);
+    config.size_limits.max_decompressed_size = config
+        .size_limits
+        .max_decompressed_size
+        .clamp(1, 1024 * 1024);
+    config.size_limits.max_compression_ratio =
+        config.size_limits.max_compression_ratio.clamp(1, 10000);
 
     // Limit extension parameters
     config.extension_params.truncate(10);
@@ -136,7 +144,9 @@ fn normalize_config(config: &mut WebSocketDeflateConfig) {
 
     // Normalize frame payloads
     for frame in &mut config.frame_sequence {
-        frame.payload.truncate(config.size_limits.max_compressed_size as usize);
+        frame
+            .payload
+            .truncate(config.size_limits.max_compressed_size as usize);
     }
 }
 
@@ -148,11 +158,17 @@ fn test_window_size_negotiation(config: &WebSocketDeflateConfig) -> Result<(), S
     let mut extension = String::from("permessage-deflate");
 
     if window_config.server_max_window_bits != 15 {
-        extension.push_str(&format!("; server_max_window_bits={}", window_config.server_max_window_bits));
+        extension.push_str(&format!(
+            "; server_max_window_bits={}",
+            window_config.server_max_window_bits
+        ));
     }
 
     if window_config.client_max_window_bits != 15 {
-        extension.push_str(&format!("; client_max_window_bits={}", window_config.client_max_window_bits));
+        extension.push_str(&format!(
+            "; client_max_window_bits={}",
+            window_config.client_max_window_bits
+        ));
     }
 
     // Test server handshake with window parameters
@@ -163,7 +179,10 @@ fn test_window_size_negotiation(config: &WebSocketDeflateConfig) -> Result<(), S
     headers.insert("host".to_string(), "example.com".to_string());
     headers.insert("upgrade".to_string(), "websocket".to_string());
     headers.insert("connection".to_string(), "Upgrade".to_string());
-    headers.insert("sec-websocket-key".to_string(), "dGhlIHNhbXBsZSBub25jZQ==".to_string());
+    headers.insert(
+        "sec-websocket-key".to_string(),
+        "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+    );
     headers.insert("sec-websocket-version".to_string(), "13".to_string());
     headers.insert("sec-websocket-extensions".to_string(), extension.clone());
 
@@ -238,18 +257,20 @@ fn test_deflate_stream_continuation(config: &WebSocketDeflateConfig) -> Result<(
             Ok(Some(decoded_frame)) => {
                 // Verify RSV1 bit preservation
                 if decoded_frame.rsv1 != frame.rsv1 {
-                    return Err(format!("RSV1 bit mismatch in frame {}: expected {}, got {}",
-                        i, frame.rsv1, decoded_frame.rsv1));
+                    return Err(format!(
+                        "RSV1 bit mismatch in frame {}: expected {}, got {}",
+                        i, frame.rsv1, decoded_frame.rsv1
+                    ));
                 }
 
                 // For compression testing, RSV1 should indicate compressed frames
                 if decoded_frame.rsv1 && decoded_frame.opcode.is_data() {
                     // This frame claims to be compressed - would need decompression here
                 }
-            },
+            }
             Ok(None) => {
                 // Frame incomplete - acceptable
-            },
+            }
             Err(_) => {
                 // Decoding error - acceptable for malformed input
             }
@@ -291,11 +312,11 @@ fn test_rsv1_bit_validation(config: &WebSocketDeflateConfig) -> Result<(), Strin
             match result {
                 Err(_) => {
                     // Expected rejection for invalid RSV bit usage
-                },
+                }
                 Ok(Some(_)) => {
                     // Should have been rejected but wasn't
                     // This might be acceptable if validation is disabled
-                },
+                }
                 Ok(None) => {
                     // Incomplete frame
                 }
@@ -314,7 +335,8 @@ fn test_zip_bomb_protection(config: &WebSocketDeflateConfig) -> Result<(), Strin
         let compressed_size = fuzz_frame.payload.len();
 
         // Simulate decompression size calculation
-        let simulated_decompressed_size = compressed_size.saturating_mul(limits.max_compression_ratio as usize);
+        let simulated_decompressed_size =
+            compressed_size.saturating_mul(limits.max_compression_ratio as usize);
 
         // Check size limits that should be enforced
         if compressed_size > limits.max_compressed_size as usize {
@@ -328,7 +350,9 @@ fn test_zip_bomb_protection(config: &WebSocketDeflateConfig) -> Result<(), Strin
         }
 
         // Test that reasonable frames are accepted
-        if fuzz_frame.rsv1 && fuzz_frame.opcode == FuzzOpcode::Text || fuzz_frame.opcode == FuzzOpcode::Binary {
+        if fuzz_frame.rsv1 && fuzz_frame.opcode == FuzzOpcode::Text
+            || fuzz_frame.opcode == FuzzOpcode::Binary
+        {
             // This would be a compressed data frame in a real implementation
             // For now, just validate the frame structure
             let frame = Frame {
@@ -368,7 +392,10 @@ fn test_extension_parameter_parsing(config: &WebSocketDeflateConfig) -> Result<(
         headers.insert("host".to_string(), "example.com".to_string());
         headers.insert("upgrade".to_string(), "websocket".to_string());
         headers.insert("connection".to_string(), "Upgrade".to_string());
-        headers.insert("sec-websocket-key".to_string(), "dGhlIHNhbXBsZSBub25jZQ==".to_string());
+        headers.insert(
+            "sec-websocket-key".to_string(),
+            "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+        );
         headers.insert("sec-websocket-version".to_string(), "13".to_string());
         headers.insert("sec-websocket-extensions".to_string(), extension);
 

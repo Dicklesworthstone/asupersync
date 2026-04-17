@@ -54,11 +54,11 @@ const MAX_CHUNK_SIZE: usize = 256;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzConfig {
-    framed_buffer_capacity: u16,  // FramedRead buffer capacity
-    use_fragmented_reads: bool,   // Test fragmented async reads
-    test_round_trip: bool,        // Test encode->decode round trips
-    test_eof_handling: bool,      // Test EOF scenarios
-    mock_read_chunk_size: u8,     // Size of chunks for mock reader
+    framed_buffer_capacity: u16, // FramedRead buffer capacity
+    use_fragmented_reads: bool,  // Test fragmented async reads
+    test_round_trip: bool,       // Test encode->decode round trips
+    test_eof_handling: bool,     // Test EOF scenarios
+    mock_read_chunk_size: u8,    // Size of chunks for mock reader
 }
 
 #[derive(Arbitrary, Debug)]
@@ -235,7 +235,8 @@ fn test_bytes_codec_operations(input: &FuzzInput) {
 
             CodecOperation::MultipleSmallOps(ops) => {
                 for small_data in ops {
-                    if small_data.len() <= 64 && buffer.len() + small_data.len() <= MAX_BUFFER_SIZE {
+                    if small_data.len() <= 64 && buffer.len() + small_data.len() <= MAX_BUFFER_SIZE
+                    {
                         buffer.extend_from_slice(small_data);
                         let _ = codec.decode(&mut buffer);
                     }
@@ -249,11 +250,7 @@ fn test_bytes_codec_operations(input: &FuzzInput) {
 }
 
 /// Test BytesCodec encoding and decoding of Bytes.
-fn test_bytes_codec_encode_decode(
-    codec: &mut BytesCodec,
-    buffer: &mut BytesMut,
-    data: Vec<u8>
-) {
+fn test_bytes_codec_encode_decode(codec: &mut BytesCodec, buffer: &mut BytesMut, data: Vec<u8>) {
     let original_len = buffer.len();
     let bytes_data = asupersync::bytes::Bytes::from(data.clone());
 
@@ -276,7 +273,7 @@ fn test_bytes_codec_encode_decode(
 fn test_bytes_codec_encode_decode_mut(
     codec: &mut BytesCodec,
     buffer: &mut BytesMut,
-    data: Vec<u8>
+    data: Vec<u8>,
 ) {
     let original_len = buffer.len();
     let bytes_mut_data = BytesMut::from(&data[..]);
@@ -294,7 +291,7 @@ fn test_bytes_codec_encode_decode_mut(
 fn test_bytes_codec_encode_decode_vec(
     codec: &mut BytesCodec,
     buffer: &mut BytesMut,
-    data: Vec<u8>
+    data: Vec<u8>,
 ) {
     let original_len = buffer.len();
     let data_len = data.len();
@@ -310,11 +307,15 @@ fn test_bytes_codec_encode_decode_vec(
 
 /// Test FramedRead operations with mock async reader.
 fn test_framed_read_operations(input: &FuzzInput) {
-    let chunk_size = (input.config.mock_read_chunk_size as usize).max(1).min(MAX_CHUNK_SIZE);
+    let chunk_size = (input.config.mock_read_chunk_size as usize)
+        .max(1)
+        .min(MAX_CHUNK_SIZE);
     let mock_reader = MockAsyncRead::new(input.framed_read_data.clone(), chunk_size);
     let codec = BytesCodec::new();
 
-    let capacity = (input.config.framed_buffer_capacity as usize).max(64).min(MAX_BUFFER_SIZE);
+    let capacity = (input.config.framed_buffer_capacity as usize)
+        .max(64)
+        .min(MAX_BUFFER_SIZE);
     let mut framed_read = FramedRead::with_capacity(mock_reader, codec, capacity);
 
     // Test basic FramedRead operations
@@ -322,10 +323,11 @@ fn test_framed_read_operations(input: &FuzzInput) {
 
     // Test with blocking reader
     if !input.framed_read_data.is_empty() {
-        let blocking_reader = MockAsyncRead::new(input.framed_read_data.clone(), chunk_size)
-            .with_blocking(true);
+        let blocking_reader =
+            MockAsyncRead::new(input.framed_read_data.clone(), chunk_size).with_blocking(true);
         let blocking_codec = BytesCodec::new();
-        let mut blocking_framed = FramedRead::with_capacity(blocking_reader, blocking_codec, capacity);
+        let mut blocking_framed =
+            FramedRead::with_capacity(blocking_reader, blocking_codec, capacity);
         test_framed_read_basic_ops(&mut blocking_framed);
     }
 }
@@ -413,7 +415,10 @@ fn test_round_trip_properties(input: &FuzzInput) {
     let original_data = asupersync::bytes::Bytes::from(input.initial_data.clone());
 
     // Encode
-    if codec.encode(original_data.clone(), &mut encode_buffer).is_ok() {
+    if codec
+        .encode(original_data.clone(), &mut encode_buffer)
+        .is_ok()
+    {
         // Decode
         if let Ok(Some(decoded)) = codec.decode(&mut encode_buffer) {
             // BytesCodec should preserve data exactly (it's pass-through)

@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 use asupersync::http::h3_native::{
-    qpack_decode_field_section, qpack_plan_to_header_fields, H3NativeError, H3QpackMode,
+    H3NativeError, H3QpackMode, qpack_decode_field_section, qpack_plan_to_header_fields,
 };
 
 /// Structure-aware fuzz input for QPACK operations

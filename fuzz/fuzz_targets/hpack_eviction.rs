@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
+use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
-use asupersync::bytes::{BytesMut, BufMut};
 
 /// Fuzzing parameters for HPACK dynamic table eviction scenarios.
 #[derive(Debug, Clone, Arbitrary)]
@@ -55,10 +55,14 @@ fn normalize_config(config: &mut HpackEvictionConfig) {
         header.name.truncate(256);
         header.value.truncate(1024);
         // Replace invalid characters per RFC 7540 Section 8.1.2
-        header.name = header.name.chars()
+        header.name = header
+            .name
+            .chars()
             .filter(|&c| c.is_ascii() && c != '\0' && c != '\r' && c != '\n')
             .collect();
-        header.value = header.value.chars()
+        header.value = header
+            .value
+            .chars()
             .filter(|&c| c.is_ascii() && c != '\0' && c != '\r' && c != '\n')
             .collect();
     }
@@ -80,7 +84,7 @@ fn test_table_size_updates(config: &HpackEvictionConfig) -> Result<(), String> {
         match decoder.decode(&mut src) {
             Ok(_) => {
                 // Size update was processed successfully
-            },
+            }
             Err(_) => {
                 // Size update may fail if it exceeds allowed size - this is valid
             }
@@ -113,11 +117,14 @@ fn test_header_list_size_eviction(config: &HpackEvictionConfig) -> Result<(), St
     match decoder.decode(&mut src) {
         Ok(headers) => {
             // If successful, verify total size is within limits
-            let total_size: usize = headers.iter()
-                .map(|h| h.size())
-                .sum();
-            assert!(total_size <= small_limit, "Header list exceeds size limit: {} > {}", total_size, small_limit);
-        },
+            let total_size: usize = headers.iter().map(|h| h.size()).sum();
+            assert!(
+                total_size <= small_limit,
+                "Header list exceeds size limit: {} > {}",
+                total_size,
+                small_limit
+            );
+        }
         Err(_) => {
             // Failure is acceptable if headers exceed limit
         }
@@ -132,7 +139,10 @@ fn test_never_indexed_literals(config: &HpackEvictionConfig) -> Result<(), Strin
     decoder.set_max_header_list_size(config.max_header_list_size as usize);
 
     for fuzz_header in &config.headers {
-        if fuzz_header.never_indexed && !fuzz_header.name.is_empty() && !fuzz_header.value.is_empty() {
+        if fuzz_header.never_indexed
+            && !fuzz_header.name.is_empty()
+            && !fuzz_header.value.is_empty()
+        {
             let mut buf = BytesMut::new();
 
             // Never indexed literal header format: 0001xxxx
@@ -147,7 +157,7 @@ fn test_never_indexed_literals(config: &HpackEvictionConfig) -> Result<(), Strin
                     assert_eq!(headers.len(), 1);
                     assert_eq!(headers[0].name, fuzz_header.name);
                     assert_eq!(headers[0].value, fuzz_header.value);
-                },
+                }
                 Err(_) => {
                     // Failure may occur with malformed strings - acceptable
                 }
@@ -169,10 +179,10 @@ fn test_huffman_padding_edge_cases(config: &HpackEvictionConfig) -> Result<(), S
 
     // Test Huffman encoding edge cases per RFC 7541 Section 5.2
     let test_strings = vec![
-        "", // Empty string
-        "a", // Single character
+        "",                 // Empty string
+        "a",                // Single character
         "www-authenticate", // Common header name
-        "🚀", // Unicode (should be encoded as UTF-8 bytes)
+        "🚀",               // Unicode (should be encoded as UTF-8 bytes)
     ];
 
     for test_str in test_strings {
@@ -209,7 +219,7 @@ fn test_invalid_index_references(config: &HpackEvictionConfig) -> Result<(), Str
                 Ok(_) => {
                     // Should not succeed with truly invalid index
                     return Err("Invalid index reference was accepted".to_string());
-                },
+                }
                 Err(_) => {
                     // Expected failure for out-of-bounds index
                 }

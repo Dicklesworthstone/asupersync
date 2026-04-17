@@ -375,3 +375,10 @@ path = "fuzz_targets/trace_event_serialization.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_channel_fault_injection"
+path = "fuzz_targets/channel_fault_injection.rs"
+test = false
+doc = false
+bench = false

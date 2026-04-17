@@ -19,14 +19,14 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
-use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec};
 use asupersync::codec::framed::Framed;
+use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use libfuzzer_sys::fuzz_target;
+use std::collections::VecDeque;
+use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::io::{Result as IoResult, Error as IoError, ErrorKind};
-use std::collections::VecDeque;
 
 /// Structure-aware protocol frame patterns for seeded corpus
 #[derive(Arbitrary, Debug, Clone)]
@@ -199,12 +199,12 @@ impl LengthFieldSize {
 /// Max frame size with enforcement testing values
 #[derive(Arbitrary, Debug)]
 enum MaxFrameSize {
-    Tiny,      // 64 bytes
-    Small,     // 1KB
-    Medium,    // 64KB
-    Large,     // 1MB
-    Huge,      // 8MB (default)
-    Boundary,  // Test boundary values
+    Tiny,     // 64 bytes
+    Small,    // 1KB
+    Medium,   // 64KB
+    Large,    // 1MB
+    Huge,     // 8MB (default)
+    Boundary, // Test boundary values
 }
 
 impl MaxFrameSize {
@@ -516,15 +516,17 @@ fn test_framed_transport(input: &FuzzInput) {
     }
 
     if input.trigger_read_error {
-        transport = transport.with_read_error(
-            IoError::new(ErrorKind::UnexpectedEof, "Triggered error")
-        );
+        transport =
+            transport.with_read_error(IoError::new(ErrorKind::UnexpectedEof, "Triggered error"));
     }
 
     // Create codec
     let codec_builder = LengthDelimitedCodec::builder()
         .length_field_length(input.config.length_field_length.to_usize())
-        .max_frame_length(std::cmp::min(input.config.max_frame_length.to_usize(), 1_000_000));
+        .max_frame_length(std::cmp::min(
+            input.config.max_frame_length.to_usize(),
+            1_000_000,
+        ));
 
     let codec = if input.config.big_endian {
         codec_builder.clone().big_endian().new_codec()
@@ -545,7 +547,8 @@ fn test_framed_transport(input: &FuzzInput) {
                 let _ = test_codec.decode(&mut test_buf);
             }
             FramedOperation::SendData { data } => {
-                if data.len() <= 100_000 { // Reasonable size limit
+                if data.len() <= 100_000 {
+                    // Reasonable size limit
                     // Test encoding data that would be sent
                     let mut encoder = TestEncoder;
                     let mut dst = BytesMut::new();

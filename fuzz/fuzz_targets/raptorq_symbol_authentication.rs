@@ -29,7 +29,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::security::{AuthKey, AuthenticationTag, AuthenticatedSymbol};
+use asupersync::security::{AuthKey, AuthenticatedSymbol, AuthenticationTag};
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 
@@ -63,10 +63,7 @@ enum AuthOperation {
         kind: SymbolKindChoice,
     },
     /// Verify an existing authenticated symbol
-    VerifySymbol {
-        symbol_index: u8,
-        key_index: u8,
-    },
+    VerifySymbol { symbol_index: u8, key_index: u8 },
     /// Modify symbol data and test authentication failure
     CorruptSymbol {
         symbol_index: u8,
@@ -79,14 +76,9 @@ enum AuthOperation {
         tag_modification: TagModification,
     },
     /// Test counter/nonce overflow scenarios
-    CounterOverflowTest {
-        base_esi: u32,
-        overflow_offset: u32,
-    },
+    CounterOverflowTest { base_esi: u32, overflow_offset: u32 },
     /// Test malformed envelope framing
-    MalformedFramingTest {
-        framing_error: FramingError,
-    },
+    MalformedFramingTest { framing_error: FramingError },
     /// Test byte reordering (commutativity test)
     ByteReorderingTest {
         symbol_index: u8,
@@ -260,10 +252,9 @@ fn execute_auth_operation(
             symbol_index,
             key_index,
         } => {
-            if let (Some(auth_symbol), Some(key)) = (
-                harness.get_symbol(symbol_index),
-                harness.get_key(key_index),
-            ) {
+            if let (Some(auth_symbol), Some(key)) =
+                (harness.get_symbol(symbol_index), harness.get_key(key_index))
+            {
                 test_symbol_verification(auth_symbol, key);
             }
         }
@@ -558,11 +549,7 @@ fn test_malformed_framing(framing_error: FramingError) {
             let tag = AuthenticationTag::compute(&key, &symbol);
             let verifies = tag.verify(&key, &symbol);
 
-            assert!(
-                verifies,
-                "Authentication failed with ESI: {}",
-                esi
-            );
+            assert!(verifies, "Authentication failed with ESI: {}", esi);
         }
     }
 }

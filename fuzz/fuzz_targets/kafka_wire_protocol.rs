@@ -31,8 +31,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 use asupersync::messaging::kafka::*;
+use libfuzzer_sys::fuzz_target;
 
 #[cfg(feature = "kafka")]
 use asupersync::messaging::kafka_consumer::*;
@@ -260,9 +260,7 @@ enum KafkaWireProtocolFuzz {
         should_commit: bool,
     },
     /// Configuration validation edge cases
-    ConfigValidation {
-        config: KafkaConfigFuzz,
-    },
+    ConfigValidation { config: KafkaConfigFuzz },
     /// Error response parsing
     ErrorHandling {
         config: KafkaConfigFuzz,
@@ -295,7 +293,7 @@ fn build_producer_config(config: &KafkaConfigFuzz) -> ProducerConfig {
         .enable_idempotence(config.enable_idempotence)
         .acks(config.acks.clone().into())
         .retries(retries)
-        // Note: can't set request_timeout and max_message_size as they're not in the builder pattern
+    // Note: can't set request_timeout and max_message_size as they're not in the builder pattern
 }
 
 /// Build consumer config from fuzzed input.
@@ -319,10 +317,13 @@ fn build_consumer_config(config: &ConsumerConfigFuzz) -> ConsumerConfig {
     // Bound extreme values
     let session_timeout = Duration::from_millis(config.session_timeout_ms.clamp(1000, 300_000));
     let heartbeat_interval = Duration::from_millis(config.heartbeat_interval_ms.clamp(100, 30_000));
-    let auto_commit_interval = Duration::from_millis(config.auto_commit_interval_ms.clamp(100, 60_000));
+    let auto_commit_interval =
+        Duration::from_millis(config.auto_commit_interval_ms.clamp(100, 60_000));
     let max_poll_records = config.max_poll_records.clamp(1, 10_000);
     let fetch_min_bytes = config.fetch_min_bytes.clamp(1, MAX_MESSAGE_SIZE);
-    let fetch_max_bytes = config.fetch_max_bytes.clamp(fetch_min_bytes, MAX_MESSAGE_SIZE);
+    let fetch_max_bytes = config
+        .fetch_max_bytes
+        .clamp(fetch_min_bytes, MAX_MESSAGE_SIZE);
     let fetch_max_wait = Duration::from_millis(config.fetch_max_wait_ms.clamp(0, 30_000));
 
     builder
@@ -385,7 +386,9 @@ fn sanitize_message(msg: &KafkaMessageFuzz) -> KafkaMessageFuzz {
         } else {
             msg.payload.clone()
         },
-        headers: msg.headers.iter()
+        headers: msg
+            .headers
+            .iter()
             .take(MAX_HEADERS)
             .map(|(k, v)| {
                 let key = if k.len() > MAX_STRING_LENGTH {
@@ -419,27 +422,33 @@ async fn fuzz_producer_send(config: &KafkaConfigFuzz, message: &KafkaMessageFuzz
     let sanitized_msg = sanitize_message(message);
 
     // Test basic send
-    let _ = producer.send(
-        cx,
-        &sanitized_msg.topic,
-        sanitized_msg.key.as_deref(),
-        &sanitized_msg.payload,
-        sanitized_msg.partition,
-    ).await;
-
-    // Test send with headers if present
-    if !sanitized_msg.headers.is_empty() {
-        let headers: Vec<(&str, &[u8])> = sanitized_msg.headers.iter()
-            .map(|(k, v)| (k.as_str(), v.as_slice()))
-            .collect();
-
-        let _ = producer.send_with_headers(
+    let _ = producer
+        .send(
             cx,
             &sanitized_msg.topic,
             sanitized_msg.key.as_deref(),
             &sanitized_msg.payload,
-            &headers,
-        ).await;
+            sanitized_msg.partition,
+        )
+        .await;
+
+    // Test send with headers if present
+    if !sanitized_msg.headers.is_empty() {
+        let headers: Vec<(&str, &[u8])> = sanitized_msg
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+
+        let _ = producer
+            .send_with_headers(
+                cx,
+                &sanitized_msg.topic,
+                sanitized_msg.key.as_deref(),
+                &sanitized_msg.payload,
+                &headers,
+            )
+            .await;
     }
 
     // Test flush
@@ -457,22 +466,30 @@ async fn fuzz_producer_batch(config: &KafkaConfigFuzz, messages: &[KafkaMessageF
     };
 
     // Send batch of messages to test batching/compression edge cases
-    for message in messages.iter().take(100) { // Limit batch size
+    for message in messages.iter().take(100) {
+        // Limit batch size
         let sanitized_msg = sanitize_message(message);
-        let _ = producer.send(
-            cx,
-            &sanitized_msg.topic,
-            sanitized_msg.key.as_deref(),
-            &sanitized_msg.payload,
-            sanitized_msg.partition,
-        ).await;
+        let _ = producer
+            .send(
+                cx,
+                &sanitized_msg.topic,
+                sanitized_msg.key.as_deref(),
+                &sanitized_msg.payload,
+                sanitized_msg.partition,
+            )
+            .await;
     }
 
     let _ = producer.flush(cx, Duration::from_millis(1000)).await;
     let _ = producer.close(cx, Duration::from_millis(100)).await;
 }
 
-async fn fuzz_transactional(config: &TransactionalConfigFuzz, messages: &[KafkaMessageFuzz], should_commit: bool, cx: &Cx) {
+async fn fuzz_transactional(
+    config: &TransactionalConfigFuzz,
+    messages: &[KafkaMessageFuzz],
+    should_commit: bool,
+    cx: &Cx,
+) {
     let producer_config = build_producer_config(&config.producer_config);
     let timeout = Duration::from_millis(config.transaction_timeout_ms.clamp(1000, 60_000));
 
@@ -491,14 +508,17 @@ async fn fuzz_transactional(config: &TransactionalConfigFuzz, messages: &[KafkaM
     };
 
     // Send messages within transaction
-    for message in messages.iter().take(50) { // Limit for performance
+    for message in messages.iter().take(50) {
+        // Limit for performance
         let sanitized_msg = sanitize_message(message);
-        let _ = tx.send(
-            cx,
-            &sanitized_msg.topic,
-            sanitized_msg.key.as_deref(),
-            &sanitized_msg.payload,
-        ).await;
+        let _ = tx
+            .send(
+                cx,
+                &sanitized_msg.topic,
+                sanitized_msg.key.as_deref(),
+                &sanitized_msg.payload,
+            )
+            .await;
     }
 
     // Test commit or abort based on fuzz input
@@ -510,7 +530,12 @@ async fn fuzz_transactional(config: &TransactionalConfigFuzz, messages: &[KafkaM
 }
 
 #[cfg(feature = "kafka")]
-async fn fuzz_consumer_poll(config: &ConsumerConfigFuzz, topics: &[String], poll_timeout_ms: u64, cx: &Cx) {
+async fn fuzz_consumer_poll(
+    config: &ConsumerConfigFuzz,
+    topics: &[String],
+    poll_timeout_ms: u64,
+    cx: &Cx,
+) {
     let consumer_config = build_consumer_config(config);
 
     // Test config validation
@@ -522,7 +547,8 @@ async fn fuzz_consumer_poll(config: &ConsumerConfigFuzz, topics: &[String], poll
     };
 
     // Subscribe to topics
-    let sanitized_topics: Vec<String> = topics.iter()
+    let sanitized_topics: Vec<String> = topics
+        .iter()
         .take(MAX_TOPICS)
         .map(|t| sanitize_topic(t))
         .collect();
@@ -539,7 +565,14 @@ async fn fuzz_consumer_poll(config: &ConsumerConfigFuzz, topics: &[String], poll
 }
 
 #[cfg(feature = "kafka")]
-async fn fuzz_consumer_seek_commit(config: &ConsumerConfigFuzz, topic: &str, partition: i32, offset: i64, should_commit: bool, cx: &Cx) {
+async fn fuzz_consumer_seek_commit(
+    config: &ConsumerConfigFuzz,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+    should_commit: bool,
+    cx: &Cx,
+) {
     let consumer_config = build_consumer_config(config);
     let consumer = match KafkaConsumer::new(consumer_config) {
         Ok(c) => c,
@@ -568,11 +601,16 @@ async fn fuzz_config_validation(config: &KafkaConfigFuzz) {
     let _ = KafkaProducer::new(producer_config);
 }
 
-async fn fuzz_error_handling(config: &KafkaConfigFuzz, _simulate_network_error: bool, _malformed_response: &[u8], cx: &Cx) {
+async fn fuzz_error_handling(
+    config: &KafkaConfigFuzz,
+    _simulate_network_error: bool,
+    _malformed_response: &[u8],
+    cx: &Cx,
+) {
     // Test error conditions by providing extreme/invalid configurations
     let extreme_config = KafkaConfigFuzz {
         bootstrap_servers: vec!["invalid:99999".to_string()],
-        retries: 0, // Force quick failure
+        retries: 0,            // Force quick failure
         request_timeout_ms: 1, // Very short timeout
         ..config.clone()
     };
@@ -604,26 +642,46 @@ fuzz_target!(|fuzz_input: KafkaWireProtocolFuzz| {
                 fuzz_producer_batch(&config, &messages, &cx).await;
             }
 
-            KafkaWireProtocolFuzz::TransactionalSend { config, messages, should_commit } => {
+            KafkaWireProtocolFuzz::TransactionalSend {
+                config,
+                messages,
+                should_commit,
+            } => {
                 fuzz_transactional(&config, &messages, should_commit, &cx).await;
             }
 
             #[cfg(feature = "kafka")]
-            KafkaWireProtocolFuzz::ConsumerPoll { config, topics, poll_timeout_ms } => {
+            KafkaWireProtocolFuzz::ConsumerPoll {
+                config,
+                topics,
+                poll_timeout_ms,
+            } => {
                 fuzz_consumer_poll(&config, &topics, poll_timeout_ms, &cx).await;
             }
 
             #[cfg(feature = "kafka")]
-            KafkaWireProtocolFuzz::ConsumerSeekCommit { config, topic, partition, offset, should_commit } => {
-                fuzz_consumer_seek_commit(&config, &topic, partition, offset, should_commit, &cx).await;
+            KafkaWireProtocolFuzz::ConsumerSeekCommit {
+                config,
+                topic,
+                partition,
+                offset,
+                should_commit,
+            } => {
+                fuzz_consumer_seek_commit(&config, &topic, partition, offset, should_commit, &cx)
+                    .await;
             }
 
             KafkaWireProtocolFuzz::ConfigValidation { config } => {
                 fuzz_config_validation(&config).await;
             }
 
-            KafkaWireProtocolFuzz::ErrorHandling { config, simulate_network_error, malformed_response } => {
-                fuzz_error_handling(&config, simulate_network_error, &malformed_response, &cx).await;
+            KafkaWireProtocolFuzz::ErrorHandling {
+                config,
+                simulate_network_error,
+                malformed_response,
+            } => {
+                fuzz_error_handling(&config, simulate_network_error, &malformed_response, &cx)
+                    .await;
             }
         }
     });
