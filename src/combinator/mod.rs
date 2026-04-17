@@ -34,6 +34,8 @@ pub mod race;
 pub mod race_metamorphic;
 #[cfg(test)]
 pub mod bulkhead_metamorphic;
+#[cfg(test)]
+pub mod timeout_metamorphic;
 pub mod rate_limit;
 pub mod retry;
 pub mod select;

@@ -20,11 +20,10 @@
 
 use crate::cx::{Cx, Scope};
 use crate::lab::{LabConfig, LabRuntime};
-use crate::time::{timeout, TimeoutFuture};
-use crate::types::{Budget, CancelReason, Outcome, Time, cancel::CancelKind};
-use crate::util::{DetRng, DetEntropy};
-use proptest::prelude::*;
-use std::future::{ready, Future, pending};
+use crate::time::timeout;
+use crate::types::{CancelReason, Time};
+use futures::future;
+use std::future::{Future, ready};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -111,6 +110,7 @@ impl TimeoutTestConfig {
 }
 
 /// Test operation that can be configured for various timeout scenarios.
+#[derive(Clone)]
 struct TestOperation {
     /// Unique identifier for this operation.
     id: u32,
@@ -362,11 +362,13 @@ mod metamorphic_timeout_nesting {
     /// Property-based test for timeout nesting algebra with random configurations.
     #[test]
     fn test_timeout_nesting_property() {
-        let strategy = (1u64..=100, 1u64..=100, 1u64..=200, 0u64..1000);
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
 
-        proptest::proptest! {
-            #[test]
-            fn timeout_nesting_equivalence((outer_ms, inner_ms, operation_ms, seed) in strategy) {
+        let strategy = (1u64..=100, 1u64..=100, 1u64..=200, 0u64..1000);
+        let mut runner = TestRunner::default();
+
+        runner.run(&strategy, |(outer_ms, inner_ms, operation_ms, seed)| {
                 let config = TimeoutTestConfig::basic(outer_ms, inner_ms, operation_ms, seed);
                 let min_duration = outer_ms.min(inner_ms);
 
@@ -413,8 +415,8 @@ mod metamorphic_timeout_nesting {
                     assert!(nested_completed || single_completed,
                         "At least one approach should complete when operation is much faster than timeout");
                 }
-            }
-        }
+                Ok(())
+            }).unwrap();
     }
 }
 
@@ -519,12 +521,12 @@ mod metamorphic_no_double_cancel {
                 let now = cx.now();
 
                 // Create multiple timeout futures for the same operations
-                let timeout1 = timeout(now, Duration::from_millis(100), operations[0]);
-                let timeout2 = timeout(now, Duration::from_millis(120), operations[1]);
-                let timeout3 = timeout(now, Duration::from_millis(80), operations[2]);
+                let timeout1 = timeout(now, Duration::from_millis(100), operations[0].clone());
+                let timeout2 = timeout(now, Duration::from_millis(120), operations[1].clone());
+                let timeout3 = timeout(now, Duration::from_millis(80), operations[2].clone());
 
                 // Run them concurrently and collect results
-                let results = futures::future::join3(timeout1, timeout2, timeout3).await;
+                let results = future::join3(timeout1, timeout2, timeout3).await;
 
                 // Count outcomes
                 let outcomes = [&results.0, &results.1, &results.2];
