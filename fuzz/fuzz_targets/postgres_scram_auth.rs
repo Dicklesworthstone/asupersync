@@ -1,6 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use asupersync::database::postgres::PgError;
+// Import the actual SCRAM implementation for comprehensive testing
+// Note: ScramAuth is internal, so we'll test through the exposed parser functions
 
 /// SCRAM-SHA-256 message parser for fuzzing PostgreSQL authentication
 struct ScramParser<'a> {
@@ -214,37 +217,141 @@ fn parse_client_final(data: &[u8]) -> Result<(String, String, Vec<u8>), String> 
     Ok((channel_binding.to_string(), nonce, proof))
 }
 
-/// Simple PBKDF2-SHA256 implementation for testing
+/// Real PBKDF2-SHA256 implementation for boundary testing
 fn pbkdf2_sha256_test(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
-    if iterations == 0 || iterations > 100_000 || salt.is_empty() || salt.len() > 64 {
+    if iterations == 0 || iterations > 600_000 || salt.is_empty() || salt.len() > 64 {
         return vec![0u8; 32]; // Return zero bytes for invalid inputs
     }
 
-    // Simplified PBKDF2 - just for parsing validation, not crypto security
-    let mut result = vec![0u8; 32];
-    let mut current = salt.to_vec();
-    current.extend_from_slice(&1u32.to_be_bytes());
+    let mut result = vec![0u8; 32]; // SHA-256 output size
 
-    // Very simple hash mixing - not secure, just for fuzz testing structure
-    for _ in 0..iterations.min(1000) {
-        for (i, &pwd_byte) in password.iter().enumerate() {
-            if i < current.len() {
-                current[i] ^= pwd_byte;
-            }
-        }
+    // PBKDF2 with single block (dkLen <= hLen)
+    // U_1 = HMAC(password, salt || INT(1))
+    let mut salt_with_block = salt.to_vec();
+    salt_with_block.extend_from_slice(&1u32.to_be_bytes());
 
-        // Simple hash function for testing
-        let mut hash = 0u32;
-        for &byte in &current {
-            hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
-        }
+    let mut u = hmac_sha256_test(password, &salt_with_block);
+    result.copy_from_slice(&u);
 
-        for i in 0..result.len() {
-            result[i] ^= (hash >> (i % 4 * 8)) as u8;
+    // U_2 ... U_iterations
+    for _ in 1..iterations {
+        u = hmac_sha256_test(password, &u);
+        for (r, ui) in result.iter_mut().zip(u.iter()) {
+            *r ^= ui;
         }
     }
 
     result
+}
+
+/// Real HMAC-SHA256 implementation for testing
+fn hmac_sha256_test(key: &[u8], data: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
+    const BLOCK_SIZE: usize = 64; // SHA-256 block size
+
+    // Pad or hash key to block size
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hash = Sha256::digest(key);
+        key_block[..32].copy_from_slice(&hash);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    // Inner padding
+    let mut inner = [0x36u8; BLOCK_SIZE];
+    for (i, k) in key_block.iter().enumerate() {
+        inner[i] ^= k;
+    }
+
+    // Outer padding
+    let mut outer = [0x5cu8; BLOCK_SIZE];
+    for (i, k) in key_block.iter().enumerate() {
+        outer[i] ^= k;
+    }
+
+    // HMAC = H(outer || H(inner || data))
+    let mut hasher = Sha256::new();
+    hasher.update(inner);
+    hasher.update(data);
+    let inner_hash = hasher.finalize();
+
+    let mut hasher = Sha256::new();
+    hasher.update(outer);
+    hasher.update(inner_hash);
+    hasher.finalize().to_vec()
+}
+
+/// SHA-256 hash for testing
+fn sha256_test(data: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data).to_vec()
+}
+
+/// Constant-time comparison testing
+fn constant_time_compare_test(a: &[u8], b: &[u8]) -> bool {
+    // Test constant-time comparison logic like the real SCRAM implementation
+    let len_ok = a.len() == b.len();
+    let content_ok = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0;
+    len_ok & content_ok
+}
+
+/// Test nonce concatenation boundary conditions
+fn test_nonce_concatenation(client_nonce: &[u8], server_nonce: &[u8]) -> Result<Vec<u8>, String> {
+    if client_nonce.is_empty() || server_nonce.is_empty() {
+        return Err("Empty nonce".to_string());
+    }
+
+    if client_nonce.len() > 128 || server_nonce.len() > 128 {
+        return Err("Nonce too long".to_string());
+    }
+
+    // Test that server nonce should start with client nonce
+    if !server_nonce.starts_with(client_nonce) {
+        return Err("Server nonce doesn't start with client nonce".to_string());
+    }
+
+    // Concatenate nonces
+    let mut combined = client_nonce.to_vec();
+    combined.extend_from_slice(server_nonce);
+
+    Ok(combined)
+}
+
+/// Test channel binding extension
+fn test_channel_binding(channel_data: &[u8]) -> Result<String, String> {
+    if channel_data.len() > 1024 {
+        return Err("Channel binding data too large".to_string());
+    }
+
+    // Test various channel binding scenarios
+    use base64::Engine;
+
+    // Test empty channel binding (no TLS)
+    let empty_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
+
+    // Test with channel data
+    let mut binding_data = b"n,,".to_vec();
+    binding_data.extend_from_slice(channel_data);
+    let data_binding = base64::engine::general_purpose::STANDARD.encode(&binding_data);
+
+    // Test GS2 header variations
+    let gs2_headers = [
+        "n,,",      // No channel binding
+        "y,,",      // Client supports channel binding but not using it
+        "p=tls-unique,," // Channel binding with TLS unique
+    ];
+
+    for header in &gs2_headers {
+        let _ = base64::engine::general_purpose::STANDARD.encode(header.as_bytes());
+    }
+
+    Ok(data_binding)
 }
 
 /// Test various SCRAM-SHA-256 parsing edge cases

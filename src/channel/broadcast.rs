@@ -1866,4 +1866,406 @@ mod tests {
         // TryRecvError implements Error
         let _ = <TryRecvError as std::error::Error>::source(&errors[0]);
     }
+
+    // =========================================================================
+    // METAMORPHIC TESTING SUITE (asupersync-xpzv2k)
+    // =========================================================================
+
+    /// MR1: Order Preservation (Equivalence Relation)
+    /// All subscribers observe events in broadcast order under no-drop conditions.
+    /// Transformation: Vary number of receivers, timing of subscription
+    /// Relation: All receivers see messages in same FIFO order
+    #[test]
+    fn metamorphic_order_preservation_across_receivers() {
+        init_test("metamorphic_order_preservation_across_receivers");
+        let cx = test_cx();
+
+        // Test various receiver counts and message sequences
+        for num_receivers in 1..=5 {
+            for num_messages in 2..=10 {
+                let (tx, mut receivers) = {
+                    let (tx, rx1) = channel::<i32>(num_messages + 2); // +2 to avoid lag
+                    let mut receivers = vec![rx1];
+                    for _ in 1..num_receivers {
+                        receivers.push(tx.subscribe());
+                    }
+                    (tx, receivers)
+                };
+
+                // Send messages
+                let messages: Vec<i32> = (0..num_messages).collect();
+                for &msg in &messages {
+                    tx.send(&cx, msg).expect("send");
+                }
+
+                // Collect sequences from all receivers
+                let mut sequences = Vec::new();
+                for rx in &mut receivers {
+                    let mut sequence = Vec::new();
+                    for _ in 0..num_messages {
+                        match block_on(rx.recv(&cx)) {
+                            Ok(msg) => sequence.push(msg),
+                            Err(e) => panic!("Unexpected recv error: {:?}", e),
+                        }
+                    }
+                    sequences.push(sequence);
+                }
+
+                // METAMORPHIC RELATION: All sequences must be identical
+                let first_sequence = &sequences[0];
+                for (i, sequence) in sequences.iter().enumerate() {
+                    crate::assert_with_log!(
+                        sequence == first_sequence,
+                        format!("order preservation rx{} vs rx0 ({}rx, {}msg)", i, num_receivers, num_messages),
+                        first_sequence.clone(),
+                        sequence.clone()
+                    );
+                }
+
+                // Verify order matches send order
+                crate::assert_with_log!(
+                    first_sequence == &messages,
+                    format!("order matches send order ({}rx, {}msg)", num_receivers, num_messages),
+                    messages,
+                    first_sequence.clone()
+                );
+            }
+        }
+
+        crate::test_complete!("metamorphic_order_preservation_across_receivers");
+    }
+
+    /// MR2: Lag Behavior Correctness (Domain-Specific Relation)
+    /// Lagged subscribers see Lagged(n) error then resume with correct skip count.
+    /// Transformation: Vary lag amounts and buffer capacities
+    /// Relation: RecvError::Lagged(n) followed by correct post-lag message sequence
+    #[test]
+    fn metamorphic_lag_behavior_correctness() {
+        init_test("metamorphic_lag_behavior_correctness");
+        let cx = test_cx();
+
+        // Test various capacity and overrun scenarios
+        for capacity in 2..=6 {
+            for overrun in 1..=8 {
+                let (tx, mut rx_slow) = channel::<i32>(capacity);
+                let mut rx_fast = tx.subscribe();
+
+                // Send messages up to capacity
+                for i in 0..capacity {
+                    tx.send(&cx, i as i32).expect("send");
+                }
+
+                // Fast receiver consumes all
+                for _ in 0..capacity {
+                    rx_fast.recv(&cx).await.expect("fast recv");
+                }
+
+                // Send overrun messages, causing lag for slow receiver
+                for i in 0..overrun {
+                    tx.send(&cx, (capacity + i) as i32).expect("send overrun");
+                }
+
+                // METAMORPHIC RELATION: Slow receiver gets Lagged(overrun) then correct sequence
+                let lag_result = block_on(rx_slow.recv(&cx));
+                match lag_result {
+                    Err(RecvError::Lagged(n)) => {
+                        crate::assert_with_log!(
+                            n == overrun as u64,
+                            format!("lag count (cap={}, overrun={})", capacity, overrun),
+                            overrun as u64,
+                            n
+                        );
+                    }
+                    other => panic!("Expected Lagged({}) but got: {:?}", overrun, other),
+                }
+
+                // After lag, should receive remaining messages in buffer
+                let remaining_count = std::cmp::min(capacity, overrun);
+                let start_msg = capacity + overrun - remaining_count;
+                for i in 0..remaining_count {
+                    let received = block_on(rx_slow.recv(&cx)).expect("post-lag recv");
+                    let expected = (start_msg + i) as i32;
+                    crate::assert_with_log!(
+                        received == expected,
+                        format!("post-lag message {} (cap={}, overrun={})", i, capacity, overrun),
+                        expected,
+                        received
+                    );
+                }
+            }
+        }
+
+        crate::test_complete!("metamorphic_lag_behavior_correctness");
+    }
+
+    /// MR3: Mid-Stream Subscription Isolation (Inclusive Relation)
+    /// Receivers created mid-stream only see messages sent after subscription.
+    /// Transformation: Vary timing of new receiver creation
+    /// Relation: Early receivers see all messages, late receivers see subset
+    #[test]
+    fn metamorphic_midstream_subscription_isolation() {
+        init_test("metamorphic_midstream_subscription_isolation");
+        let cx = test_cx();
+
+        for total_messages in 5..=15 {
+            for split_point in 1..total_messages {
+                let (tx, mut rx_early) = channel::<i32>(total_messages + 2);
+
+                // Send first batch of messages
+                for i in 0..split_point {
+                    tx.send(&cx, i as i32).expect("send pre");
+                }
+
+                // Create mid-stream receiver
+                let mut rx_late = tx.subscribe();
+
+                // Send second batch of messages
+                for i in split_point..total_messages {
+                    tx.send(&cx, i as i32).expect("send post");
+                }
+
+                // Collect sequences
+                let mut early_sequence = Vec::new();
+                let mut late_sequence = Vec::new();
+
+                for _ in 0..total_messages {
+                    early_sequence.push(block_on(rx_early.recv(&cx)).expect("early recv"));
+                }
+
+                for _ in split_point..total_messages {
+                    late_sequence.push(block_on(rx_late.recv(&cx)).expect("late recv"));
+                }
+
+                // METAMORPHIC RELATION: Late receiver sees subset of early receiver
+                let expected_late: Vec<i32> = (split_point as i32..total_messages as i32).collect();
+                let expected_early: Vec<i32> = (0..total_messages as i32).collect();
+
+                crate::assert_with_log!(
+                    early_sequence == expected_early,
+                    format!("early receiver sees all (split={}/{})", split_point, total_messages),
+                    expected_early,
+                    early_sequence
+                );
+
+                crate::assert_with_log!(
+                    late_sequence == expected_late,
+                    format!("late receiver sees subset (split={}/{})", split_point, total_messages),
+                    expected_late,
+                    late_sequence
+                );
+
+                // Inclusion property: late sequence is suffix of early sequence
+                let early_suffix = &early_sequence[split_point..];
+                crate::assert_with_log!(
+                    late_sequence == early_suffix,
+                    format!("late sequence is suffix of early (split={}/{})", split_point, total_messages),
+                    early_suffix.to_vec(),
+                    late_sequence
+                );
+            }
+        }
+
+        crate::test_complete!("metamorphic_midstream_subscription_isolation");
+    }
+
+    /// MR4: Close Propagation (Equivalence Relation)
+    /// Sender drop propagates Closed error to all active receivers.
+    /// Transformation: Vary number of senders, timing of drops
+    /// Relation: All receivers get Closed when last sender drops
+    #[test]
+    fn metamorphic_close_propagation() {
+        init_test("metamorphic_close_propagation");
+        let cx = test_cx();
+
+        for num_senders in 1..=4 {
+            for num_receivers in 1..=4 {
+                let (tx1, mut receivers) = {
+                    let (tx, rx1) = channel::<i32>(10);
+                    let mut receivers = vec![rx1];
+                    for _ in 1..num_receivers {
+                        receivers.push(tx.subscribe());
+                    }
+                    (tx, receivers)
+                };
+
+                // Create additional senders
+                let mut senders = vec![tx1];
+                for _ in 1..num_senders {
+                    senders.push(senders[0].clone());
+                }
+
+                // Send some messages
+                for i in 0..3 {
+                    senders[i % num_senders].send(&cx, i as i32).expect("send");
+                }
+
+                // Drop all senders except last
+                for _ in 0..num_senders - 1 {
+                    senders.pop();
+                }
+
+                // Receivers should still work
+                for rx in &mut receivers {
+                    for _ in 0..3 {
+                        block_on(rx.recv(&cx)).expect("recv before close");
+                    }
+                }
+
+                // Drop last sender
+                senders.pop();
+                assert!(senders.is_empty());
+
+                // METAMORPHIC RELATION: All receivers get Closed
+                for (i, rx) in receivers.iter_mut().enumerate() {
+                    let result = block_on(rx.recv(&cx));
+                    crate::assert_with_log!(
+                        matches!(result, Err(RecvError::Closed)),
+                        format!("receiver {} closed ({} senders, {} receivers)", i, num_senders, num_receivers),
+                        true,
+                        matches!(result, Err(RecvError::Closed))
+                    );
+                }
+            }
+        }
+
+        crate::test_complete!("metamorphic_close_propagation");
+    }
+
+    /// MR5: Waker Deduplication (Performance Relation)
+    /// Single receiver case should not register duplicate wakers.
+    /// Transformation: Vary polling patterns on single receiver
+    /// Relation: Waker arena size stays minimal (≤ 1) for single receiver
+    #[test]
+    fn metamorphic_waker_deduplication() {
+        init_test("metamorphic_waker_deduplication");
+        let cx = test_cx();
+
+        let (tx, mut rx) = channel::<i32>(10);
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        // Test multiple polling scenarios
+        for scenario in 0..5 {
+            // Clear any existing state
+            if scenario > 0 {
+                drop(rx);
+                rx = tx.subscribe();
+            }
+
+            let mut futures = Vec::new();
+
+            // Create multiple recv futures but only poll one receiver
+            for _ in 0..3 {
+                futures.push(Box::pin(rx.recv(&cx)));
+            }
+
+            // Poll each future once (should register at most 1 waker)
+            for fut in &mut futures {
+                let _ = fut.as_mut().poll(&mut ctx);
+            }
+
+            // METAMORPHIC RELATION: Waker arena should have ≤ 1 entry for single receiver
+            let waker_count = {
+                let inner = tx.channel.inner.lock();
+                inner.wakers.len()
+            };
+
+            crate::assert_with_log!(
+                waker_count <= 1,
+                format!("waker dedup scenario {} (single receiver)", scenario),
+                "≤ 1".to_string(),
+                format!("{}", waker_count)
+            );
+
+            // Send message and verify exactly one wake
+            let wake_count_before = wake_state.wake_count();
+            tx.send(&cx, scenario as i32).expect("send");
+            let wake_count_after = wake_state.wake_count();
+
+            // Should wake exactly once for single receiver
+            let wake_delta = wake_count_after - wake_count_before;
+            crate::assert_with_log!(
+                wake_delta <= 1,
+                format!("wake count scenario {} (single receiver)", scenario),
+                "≤ 1".to_string(),
+                format!("{}", wake_delta)
+            );
+
+            // Cleanup: consume the message
+            drop(futures);
+            block_on(rx.recv(&cx)).expect("cleanup recv");
+        }
+
+        crate::test_complete!("metamorphic_waker_deduplication");
+    }
+
+    /// Composite MR: Order + Lag + Close (MR1 ∘ MR2 ∘ MR4)
+    /// Combined stress test ensuring multiple relations hold simultaneously.
+    #[test]
+    fn metamorphic_composite_stress_test() {
+        init_test("metamorphic_composite_stress_test");
+        let cx = test_cx();
+
+        let (tx, mut rx_fast) = channel::<i32>(4);
+        let mut rx_slow = tx.subscribe();
+        let mut rx_mid = tx.subscribe();
+
+        // Phase 1: Send initial messages (order preservation)
+        let initial_messages = vec![10, 20, 30, 40];
+        for &msg in &initial_messages {
+            tx.send(&cx, msg).expect("send initial");
+        }
+
+        // Fast receiver consumes all
+        let mut fast_sequence = Vec::new();
+        for _ in 0..4 {
+            fast_sequence.push(block_on(rx_fast.recv(&cx)).expect("fast recv"));
+        }
+
+        // Phase 2: Create lag condition
+        for i in 0..6 {
+            tx.send(&cx, 100 + i).expect("send overrun");
+        }
+
+        // Phase 3: Drop all senders (close propagation)
+        drop(tx);
+
+        // COMPOSITE METAMORPHIC RELATIONS:
+
+        // 1. Order preservation: Fast receiver saw messages in order
+        crate::assert_with_log!(
+            fast_sequence == initial_messages,
+            "composite: initial order preserved",
+            initial_messages,
+            fast_sequence
+        );
+
+        // 2. Lag behavior: Slow receiver gets lag error
+        let slow_lag_result = block_on(rx_slow.recv(&cx));
+        let got_lag = matches!(slow_lag_result, Err(RecvError::Lagged(_)));
+        crate::assert_with_log!(
+            got_lag,
+            "composite: slow receiver lagged",
+            true,
+            got_lag
+        );
+
+        // 3. Close propagation: All receivers eventually get closed
+        let mid_close_result = loop {
+            match block_on(rx_mid.recv(&cx)) {
+                Ok(_) => continue, // Consume any buffered messages
+                Err(e) => break e,
+            }
+        };
+
+        crate::assert_with_log!(
+            matches!(mid_close_result, RecvError::Closed),
+            "composite: mid receiver closed",
+            true,
+            matches!(mid_close_result, RecvError::Closed)
+        );
+
+        crate::test_complete!("metamorphic_composite_stress_test");
+    }
 }
