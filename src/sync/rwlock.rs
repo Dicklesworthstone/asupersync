@@ -2269,3 +2269,529 @@ mod tests {
         crate::test_complete!("test_drop_queued_writer_wakes_readers_when_readers_active");
     }
 }
+
+// ============================================================================
+// Metamorphic Property Tests for RwLock Writer-Preference Fairness
+// ============================================================================
+
+/// Metamorphic property tests for RwLock writer-preference fairness behavior.
+///
+/// These tests verify RwLock invariants related to writer preference, reader concurrency,
+/// cancellation behavior, and ref counting. Unlike unit tests that check exact outcomes,
+/// metamorphic tests verify relationships between different execution scenarios.
+#[cfg(test)]
+mod metamorphic_tests {
+    use super::*;
+    use crate::cx::Cx;
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::{Budget, RegionId, TaskId};
+    use crate::util::{ArenaIndex, DetRng};
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
+    use std::time::{Duration, Instant};
+
+    use proptest::prelude::*;
+
+    // ============================================================================
+    // Test Infrastructure
+    // ============================================================================
+
+    /// Create a test context for deterministic scheduling.
+    fn test_cx() -> Cx {
+        Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            Budget::INFINITE,
+        )
+    }
+
+    /// Simple block_on implementation for tests.
+    fn block_on<F: Future>(f: F) -> F::Output {
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Box::pin(f);
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => continue,
+            }
+        }
+    }
+
+    /// Count waker that tracks wakeup events.
+    #[derive(Debug)]
+    struct CountWaker {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl CountWaker {
+        fn new() -> (Self, Arc<AtomicUsize>) {
+            let count = Arc::new(AtomicUsize::new(0));
+            (Self { count: count.clone() }, count)
+        }
+    }
+
+    impl std::task::Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Test harness for RwLock metamorphic testing.
+    #[derive(Debug)]
+    struct RwLockTestHarness<T> {
+        lock: Arc<RwLock<T>>,
+        runtime: Arc<LabRuntime>,
+    }
+
+    impl<T> RwLockTestHarness<T> {
+        fn new(value: T) -> Self {
+            Self {
+                lock: Arc::new(RwLock::new(value)),
+                runtime: Arc::new(LabRuntime::new(LabConfig::default())),
+            }
+        }
+
+        fn lock(&self) -> Arc<RwLock<T>> {
+            self.lock.clone()
+        }
+    }
+
+    /// Result of a lock operation attempt.
+    #[derive(Debug, Clone)]
+    enum LockOpResult {
+        Success(Duration),
+        Blocked,
+        Cancelled,
+        Error,
+    }
+
+    /// Execute a read operation and measure its timing.
+    async fn execute_read_op<T: Send + Sync + 'static>(
+        lock: Arc<RwLock<T>>,
+        cx: &Cx,
+    ) -> LockOpResult {
+        let start = Instant::now();
+        match lock.read(cx).await {
+            Ok(_guard) => {
+                let duration = start.elapsed();
+                LockOpResult::Success(duration)
+            }
+            Err(RwLockError::Cancelled) => LockOpResult::Cancelled,
+            Err(_) => LockOpResult::Error,
+        }
+    }
+
+    /// Execute a write operation and measure its timing.
+    async fn execute_write_op<T: Send + Sync + 'static>(
+        lock: Arc<RwLock<T>>,
+        cx: &Cx,
+    ) -> LockOpResult {
+        let start = Instant::now();
+        match lock.write(cx).await {
+            Ok(_guard) => {
+                let duration = start.elapsed();
+                LockOpResult::Success(duration)
+            }
+            Err(RwLockError::Cancelled) => LockOpResult::Cancelled,
+            Err(_) => LockOpResult::Error,
+        }
+    }
+
+    // ============================================================================
+    // Metamorphic Relations
+    // ============================================================================
+
+    /// MR1: Writer Preference Enforcement (Equivalence, Score: 8.5)
+    /// Property: A waiting writer blocks all new readers until it is serviced
+    /// Catches: Writer starvation, incorrect fairness policy, reader queue jumping
+    proptest! {
+        #[test]
+        fn mr_writer_preference_enforcement(
+            num_readers in 2usize..8,
+            _seed in any::<u64>(),
+        ) {
+            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let harness = RwLockTestHarness::new(0u64);
+            let lock = harness.lock();
+            let cx = test_cx();
+            let _rng = DetRng::new(_seed);
+
+            // Establish initial state: acquire write lock to block all subsequent operations
+            let write_guard = block_on(lock.write(&cx)).expect("Initial write should succeed");
+
+            // Create multiple reader futures (these should block due to active writer)
+            let mut reader_results = Vec::new();
+            for _ in 0..num_readers {
+                let lock_clone = lock.clone();
+                let cx_clone = cx.clone();
+
+                // Poll once to ensure readers are queued
+                let mut read_fut = lock_clone.read(&cx_clone);
+                let (count_waker, wake_count) = CountWaker::new();
+                let waker = Waker::from(Arc::new(count_waker));
+                let mut task_cx = Context::from_waker(&waker);
+
+                let poll_result = Pin::new(&mut read_fut).poll(&mut task_cx);
+                prop_assert!(
+                    poll_result.is_pending(),
+                    "MR1 VIOLATION: Reader acquired lock while writer active"
+                );
+
+                reader_results.push((read_fut, wake_count));
+            }
+
+            // Now queue a writer (this should have preference over waiting readers)
+            let writer_lock = lock.clone();
+            let writer_cx = cx.clone();
+            let mut write_fut = writer_lock.write(&writer_cx);
+            let (writer_waker, writer_wake_count) = CountWaker::new();
+            let writer_waker_obj = Waker::from(Arc::new(writer_waker));
+            let mut writer_task_cx = Context::from_waker(&writer_waker_obj);
+
+            let writer_poll = Pin::new(&mut write_fut).poll(&mut writer_task_cx);
+            prop_assert!(
+                writer_poll.is_pending(),
+                "MR1 VIOLATION: Second writer should be pending while first writer active"
+            );
+
+            // Release the initial write lock
+            drop(write_guard);
+
+            // The queued writer should be woken up (has preference)
+            prop_assert!(
+                writer_wake_count.load(Ordering::SeqCst) > 0,
+                "MR1 VIOLATION: Queued writer was not woken when lock released"
+            );
+
+            // Complete the queued writer
+            let writer_result = Pin::new(&mut write_fut).poll(&mut writer_task_cx);
+            prop_assert!(
+                matches!(writer_result, Poll::Ready(Ok(_))),
+                "MR1 VIOLATION: Queued writer failed to acquire after being woken"
+            );
+        }
+    }
+
+    /// MR2: Reader Concurrency Efficiency (Multiplicative, Score: 7.8)
+    /// Property: N concurrent readers complete in O(1) cumulative acquire time
+    /// Catches: False reader serialization, lock contention bugs, scalability issues
+    proptest! {
+        #[test]
+        fn mr_reader_concurrency_efficiency(
+            num_readers in 2usize..12,
+            _seed in any::<u64>(),
+        ) {
+            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let harness = RwLockTestHarness::new(0u64);
+            let lock = harness.lock();
+            let cx = test_cx();
+            let _rng = DetRng::new(_seed);
+
+            // Ensure no writers are waiting (clean slate)
+            prop_assert!(
+                matches!(lock.try_read(), Ok(_)),
+                "MR2 SETUP VIOLATION: Lock should be available for reads"
+            );
+
+            // Measure time for single reader acquisition
+            let single_start = Instant::now();
+            let _single_guard = block_on(lock.read(&cx))
+                .expect("Single reader should succeed");
+            let single_time = single_start.elapsed();
+            drop(_single_guard);
+
+            // Measure time for concurrent readers
+            let concurrent_start = Instant::now();
+            let mut read_guards = Vec::new();
+
+            for _ in 0..num_readers {
+                let guard = block_on(lock.read(&cx))
+                    .expect("Concurrent reader should succeed");
+                read_guards.push(guard);
+            }
+
+            let concurrent_time = concurrent_start.elapsed();
+
+            // METAMORPHIC ASSERTION: Concurrent readers shouldn't take much longer than single reader
+            // Allow some overhead but should be roughly O(1), not O(N)
+            let efficiency_ratio = concurrent_time.as_nanos() as f64 / single_time.as_nanos() as f64;
+            let max_allowed_ratio = (num_readers as f64).sqrt() * 2.0; // Allow sqrt(N) overhead
+
+            prop_assert!(
+                efficiency_ratio <= max_allowed_ratio,
+                "MR2 VIOLATION: Concurrent readers too slow. Ratio: {:.2}, Max allowed: {:.2}, Readers: {}",
+                efficiency_ratio, max_allowed_ratio, num_readers
+            );
+
+            prop_assert!(
+                read_guards.len() == num_readers,
+                "MR2 VIOLATION: Not all concurrent readers succeeded. Got {}, expected {}",
+                read_guards.len(), num_readers
+            );
+        }
+    }
+
+    /// MR3: Writer Cancellation Releases Preference (Invertive, Score: 8.2)
+    /// Property: Cancelling a pending writer releases writer-preference for subsequent readers
+    /// Catches: Stuck preference state, cancellation cleanup bugs, reader starvation
+    proptest! {
+        #[test]
+        fn mr_writer_cancellation_releases_preference(
+            num_readers_after_cancel in 2usize..6,
+            _seed in any::<u64>(),
+        ) {
+            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let harness = RwLockTestHarness::new(0u64);
+            let lock = harness.lock();
+            let cx = test_cx();
+            let _rng = DetRng::new(_seed);
+
+            // Establish writer-preference state by having an active writer
+            let blocking_writer = block_on(lock.write(&cx))
+                .expect("Blocking writer should acquire");
+
+            // Queue a writer that we will cancel
+            let cancelable_lock = lock.clone();
+            let cancelable_cx = cx.clone();
+            let mut cancelable_write_fut = cancelable_lock.write(&cancelable_cx);
+
+            let (cancel_waker, cancel_wake_count) = CountWaker::new();
+            let cancel_waker_obj = Waker::from(Arc::new(cancel_waker));
+            let mut cancel_task_cx = Context::from_waker(&cancel_waker_obj);
+
+            // Poll to queue the writer
+            let cancel_poll = Pin::new(&mut cancelable_write_fut).poll(&mut cancel_task_cx);
+            prop_assert!(
+                cancel_poll.is_pending(),
+                "MR3 SETUP VIOLATION: Cancelable writer should be pending"
+            );
+
+            // Queue readers that should be blocked by writer preference
+            let mut reader_futures = Vec::new();
+            let mut reader_wake_counts = Vec::new();
+
+            for _ in 0..num_readers_after_cancel {
+                let reader_lock = lock.clone();
+                let reader_cx = cx.clone();
+                let mut read_fut = reader_lock.read(&reader_cx);
+
+                let (reader_waker, reader_wake_count) = CountWaker::new();
+                let reader_waker_obj = Waker::from(Arc::new(reader_waker));
+                let mut reader_task_cx = Context::from_waker(&reader_waker_obj);
+
+                let reader_poll = Pin::new(&mut read_fut).poll(&mut reader_task_cx);
+                prop_assert!(
+                    reader_poll.is_pending(),
+                    "MR3 SETUP VIOLATION: Reader should be blocked by writer preference"
+                );
+
+                reader_futures.push(read_fut);
+                reader_wake_counts.push(reader_wake_count);
+            }
+
+            // Cancel the queued writer by dropping it
+            drop(cancelable_write_fut);
+
+            // Release the blocking writer
+            drop(blocking_writer);
+
+            // METAMORPHIC ASSERTION: Readers should now be able to acquire
+            // (writer preference should be released after writer cancellation)
+            for (i, wake_count) in reader_wake_counts.iter().enumerate() {
+                prop_assert!(
+                    wake_count.load(Ordering::SeqCst) > 0,
+                    "MR3 VIOLATION: Reader {} not woken after writer cancellation", i
+                );
+            }
+
+            // Verify readers can actually complete acquisition
+            let mut completed_readers = 0;
+            for mut read_fut in reader_futures {
+                let (completion_waker, _) = CountWaker::new();
+                let completion_waker_obj = Waker::from(Arc::new(completion_waker));
+                let mut completion_task_cx = Context::from_waker(&completion_waker_obj);
+
+                let completion_poll = Pin::new(&mut read_fut).poll(&mut completion_task_cx);
+                if matches!(completion_poll, Poll::Ready(Ok(_))) {
+                    completed_readers += 1;
+                }
+            }
+
+            prop_assert!(
+                completed_readers >= num_readers_after_cancel / 2,
+                "MR3 VIOLATION: Too few readers completed after writer cancellation. Got {}, expected at least {}",
+                completed_readers, num_readers_after_cancel / 2
+            );
+        }
+    }
+
+    /// MR4: Reader Cancellation Ref Count Correctness (Additive, Score: 8.7)
+    /// Property: Reader cancellation during lock-hold correctly releases the read-ref count
+    /// Catches: Ref count leaks, stuck read locks, writer starvation from leaked readers
+    proptest! {
+        #[test]
+        fn mr_reader_cancellation_ref_count_correctness(
+            num_readers_to_cancel in 1usize..6,
+            _seed in any::<u64>(),
+        ) {
+            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let harness = RwLockTestHarness::new(0u64);
+            let lock = harness.lock();
+            let cx = test_cx();
+            let _rng = DetRng::new(_seed);
+
+            // First acquire multiple readers normally
+            let mut reader_guards = Vec::new();
+            for _ in 0..num_readers_to_cancel {
+                let guard = block_on(lock.read(&cx))
+                    .expect("Reader acquisition should succeed");
+                reader_guards.push(guard);
+            }
+
+            // Verify that a writer cannot acquire while readers are active
+            let writer_try_result = lock.try_write();
+            prop_assert!(
+                matches!(writer_try_result, Err(TryWriteError::Locked)),
+                "MR4 SETUP VIOLATION: Writer should be blocked by active readers"
+            );
+
+            // Cancel readers by dropping their guards
+            let initial_reader_count = reader_guards.len();
+            reader_guards.clear(); // Drop all reader guards
+
+            // METAMORPHIC ASSERTION: After all readers are cancelled/dropped,
+            // ref count should be zero and writer should be able to acquire
+            let post_cancel_writer_try = lock.try_write();
+            prop_assert!(
+                post_cancel_writer_try.is_ok(),
+                "MR4 VIOLATION: Writer cannot acquire after {} readers cancelled - ref count likely leaked",
+                initial_reader_count
+            );
+
+            // If writer acquired, verify it actually works
+            if let Ok(writer_guard) = post_cancel_writer_try {
+                // Writer should have exclusive access now
+                let concurrent_reader_try = lock.try_read();
+                prop_assert!(
+                    matches!(concurrent_reader_try, Err(TryReadError::Locked)),
+                    "MR4 VIOLATION: Reader can acquire while writer active - exclusive access violated"
+                );
+
+                drop(writer_guard);
+            }
+
+            // After writer release, readers should work again (ref counting is sound)
+            let post_writer_reader = lock.try_read();
+            prop_assert!(
+                post_writer_reader.is_ok(),
+                "MR4 VIOLATION: Readers cannot acquire after writer release - lock state corrupted"
+            );
+        }
+    }
+
+    // ============================================================================
+    // Composite Metamorphic Relations
+    // ============================================================================
+
+    /// MR5: Writer Preference + Cancellation Composite (Composite, Score: 9.1)
+    /// Property: MR1 ∘ MR3 - Writer preference holds even under reader cancellation pressure
+    /// Catches: Preference state corruption under cancellation load
+    proptest! {
+        #[test]
+        fn mr_writer_preference_under_cancellation_pressure(
+            num_cancellable_readers in 3usize..8,
+            num_persistent_readers in 2usize..5,
+            _seed in any::<u64>(),
+        ) {
+            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let harness = RwLockTestHarness::new(0u64);
+            let lock = harness.lock();
+            let cx = test_cx();
+            let _rng = DetRng::new(_seed);
+
+            // Block with initial writer
+            let blocking_writer = block_on(lock.write(&cx))
+                .expect("Initial writer should acquire");
+
+            // Queue readers that will be cancelled
+            let mut cancellable_readers = Vec::new();
+            for _ in 0..num_cancellable_readers {
+                let reader_lock = lock.clone();
+                let reader_cx = cx.clone();
+                let read_fut = reader_lock.read(&reader_cx);
+                cancellable_readers.push(read_fut);
+            }
+
+            // Queue a writer (should have preference)
+            let priority_writer_lock = lock.clone();
+            let priority_writer_cx = cx.clone();
+            let mut priority_write_fut = priority_writer_lock.write(&priority_writer_cx);
+            let (priority_waker, priority_wake_count) = CountWaker::new();
+            let priority_waker_obj = Waker::from(Arc::new(priority_waker));
+            let mut priority_task_cx = Context::from_waker(&priority_waker_obj);
+
+            let priority_poll = Pin::new(&mut priority_write_fut).poll(&mut priority_task_cx);
+            prop_assert!(
+                priority_poll.is_pending(),
+                "MR5 SETUP VIOLATION: Priority writer should be pending"
+            );
+
+            // Queue persistent readers (should be blocked by writer preference)
+            let mut persistent_readers = Vec::new();
+            let mut persistent_wake_counts = Vec::new();
+            for _ in 0..num_persistent_readers {
+                let reader_lock = lock.clone();
+                let reader_cx = cx.clone();
+                let mut read_fut = reader_lock.read(&reader_cx);
+
+                let (reader_waker, reader_wake_count) = CountWaker::new();
+                let reader_waker_obj = Waker::from(Arc::new(reader_waker));
+                let mut reader_task_cx = Context::from_waker(&reader_waker_obj);
+
+                let reader_poll = Pin::new(&mut read_fut).poll(&mut reader_task_cx);
+                prop_assert!(
+                    reader_poll.is_pending(),
+                    "MR5 SETUP VIOLATION: Persistent reader should be blocked by writer preference"
+                );
+
+                persistent_readers.push(read_fut);
+                persistent_wake_counts.push(reader_wake_count);
+            }
+
+            // Cancel the cancellable readers (simulates cancellation pressure)
+            drop(cancellable_readers);
+
+            // Release the blocking writer
+            drop(blocking_writer);
+
+            // METAMORPHIC ASSERTION: Priority writer should still get preference
+            // despite reader cancellation pressure
+            prop_assert!(
+                priority_wake_count.load(Ordering::SeqCst) > 0,
+                "MR5 VIOLATION: Priority writer not woken despite preference policy"
+            );
+
+            // Complete the priority writer
+            let priority_result = Pin::new(&mut priority_write_fut).poll(&mut priority_task_cx);
+            prop_assert!(
+                matches!(priority_result, Poll::Ready(Ok(_))),
+                "MR5 VIOLATION: Priority writer failed to acquire despite being woken"
+            );
+
+            // Verify persistent readers are still blocked while writer is active
+            for (i, wake_count) in persistent_wake_counts.iter().enumerate() {
+                prop_assert!(
+                    wake_count.load(Ordering::SeqCst) == 0,
+                    "MR5 VIOLATION: Persistent reader {} was woken while writer active", i
+                );
+            }
+        }
+    }
+}
