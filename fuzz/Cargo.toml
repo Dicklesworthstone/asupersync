@@ -317,3 +317,10 @@ path = "fuzz_targets/raptorq_aead_envelope.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_raptorq_matrix_elimination"
+path = "fuzz_targets/raptorq_matrix_elimination.rs"
+test = false
+doc = false
+bench = false
