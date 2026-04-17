@@ -26,6 +26,7 @@ pub mod obligation_invariants;
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
 pub mod websocket_extension_negotiation_rfc6455;
+pub mod grpc_trailer_forwarding_rfc9113;
 
 // Re-export main conformance test functionality
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
@@ -46,6 +47,7 @@ pub use trace_replay_idempotency_metamorphic::{TraceReplayIdempotencyMetamorphic
 pub use race_loser_drain_metamorphic::{RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult, TestCategory as RaceLoserDrainTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 pub use websocket_extension_negotiation_rfc6455::{WsExtensionConformanceHarness, WsConformanceResult as WsExtensionConformanceResult, TestCategory as WsExtensionTestCategory};
+pub use grpc_trailer_forwarding_rfc9113::{GrpcTrailerConformanceHarness, GrpcConformanceResult as GrpcTrailerConformanceResult, TestCategory as GrpcTrailerTestCategory};
 
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -111,6 +113,14 @@ pub enum TestCategory {
     ParameterMismatchHandling,
     ExtensionSecurity,
     ExtensionOrdering,
+    // gRPC trailer forwarding categories
+    StatusTrailerPlacement,
+    MessageEncoding,
+    TrailerOnlyResponses,
+    RstStreamHandling,
+    TimeoutHeaderParsing,
+    Http2FrameOrdering,
+    ErrorResponseHandling,
     // MySQL categories
     PacketFormat,
     AuthAlgorithm,
@@ -602,8 +612,41 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         .collect();
     results.extend(ws_ext_results);
 
+    // gRPC Trailer Forwarding RFC 9113 + grpc-go parity conformance
+    let grpc_trailer_harness = GrpcTrailerConformanceHarness::new();
+    let grpc_trailer_results: Vec<ConformanceTestResult> = grpc_trailer_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                grpc_trailer_forwarding_rfc9113::TestCategory::StatusTrailerPlacement => TestCategory::StatusTrailerPlacement,
+                grpc_trailer_forwarding_rfc9113::TestCategory::MessageEncoding => TestCategory::MessageEncoding,
+                grpc_trailer_forwarding_rfc9113::TestCategory::TrailerOnlyResponses => TestCategory::TrailerOnlyResponses,
+                grpc_trailer_forwarding_rfc9113::TestCategory::RstStreamHandling => TestCategory::RstStreamHandling,
+                grpc_trailer_forwarding_rfc9113::TestCategory::TimeoutHeaderParsing => TestCategory::TimeoutHeaderParsing,
+                grpc_trailer_forwarding_rfc9113::TestCategory::Http2FrameOrdering => TestCategory::Http2FrameOrdering,
+                grpc_trailer_forwarding_rfc9113::TestCategory::ErrorResponseHandling => TestCategory::ErrorResponseHandling,
+            },
+            requirement_level: match r.requirement_level {
+                grpc_trailer_forwarding_rfc9113::RequirementLevel::Must => RequirementLevel::Must,
+                grpc_trailer_forwarding_rfc9113::RequirementLevel::Should => RequirementLevel::Should,
+                grpc_trailer_forwarding_rfc9113::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                grpc_trailer_forwarding_rfc9113::TestVerdict::Pass => TestVerdict::Pass,
+                grpc_trailer_forwarding_rfc9113::TestVerdict::Fail => TestVerdict::Fail,
+                grpc_trailer_forwarding_rfc9113::TestVerdict::Skipped => TestVerdict::Skipped,
+                grpc_trailer_forwarding_rfc9113::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(grpc_trailer_results);
+
     // Additional conformance suites will be added here:
-    // - gRPC conformance
     // - WebSocket RFC 6455 (close frames)
     // - Codec framing
     // - MySQL AuthSwitch
@@ -762,6 +805,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "RFC 6455 Section 9 + RFC 7692 WebSocket extension negotiation conformance"
+                },
+                "grpc_trailer_forwarding_rfc9113": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 9113 HTTP/2 + gRPC specification trailer forwarding conformance"
                 },
                 "codec_framing": {
                     "status": "implemented",
@@ -1410,6 +1458,98 @@ mod tests {
         assert!(
             test_ids.contains("ws_ext_parameter_mismatch_handling"),
             "Missing parameter mismatch handling test"
+        );
+    }
+
+    #[test]
+    fn test_grpc_trailer_conformance_integration() {
+        let grpc_trailer_harness = GrpcTrailerConformanceHarness::new();
+        let results = grpc_trailer_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "gRPC trailer conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::StatusTrailerPlacement),
+            "Should test status trailer placement"
+        );
+        assert!(
+            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::MessageEncoding),
+            "Should test message encoding"
+        );
+        assert!(
+            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::TrailerOnlyResponses),
+            "Should test trailer-only responses"
+        );
+        assert!(
+            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::RstStreamHandling),
+            "Should test RST_STREAM handling"
+        );
+        assert!(
+            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::TimeoutHeaderParsing),
+            "Should test timeout header parsing"
+        );
+        assert!(
+            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::Http2FrameOrdering),
+            "Should test HTTP/2 frame ordering"
+        );
+        assert!(
+            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::ErrorResponseHandling),
+            "Should test error response handling"
+        );
+
+        // Verify all tests pass
+        let failures: Vec<_> = results.iter()
+            .filter(|r| r.verdict == grpc_trailer_forwarding_rfc9113::TestVerdict::Fail)
+            .collect();
+
+        if !failures.is_empty() {
+            panic!("gRPC trailer conformance tests failed: {:#?}", failures);
+        }
+
+        // Verify we have the expected number of test cases (15 as implemented)
+        assert!(
+            results.len() >= 14,
+            "Should have at least 14 gRPC trailer conformance test cases, got {}",
+            results.len()
+        );
+
+        // Verify coverage of all 5 bead requirements
+        let test_ids: std::collections::HashSet<_> = results.iter()
+            .map(|r| r.test_id.as_str())
+            .collect();
+
+        // Requirement 1: grpc-status in trailers (not headers)
+        assert!(
+            test_ids.contains("grpc_status_trailers_not_headers"),
+            "Missing grpc-status trailer placement test"
+        );
+
+        // Requirement 2: grpc-message base64-encoded for non-ASCII
+        assert!(
+            test_ids.contains("grpc_message_base64_encoding_non_ascii"),
+            "Missing grpc-message encoding test"
+        );
+
+        // Requirement 3: trailer-only responses for errors before any DATA
+        assert!(
+            test_ids.contains("trailer_only_response_immediate_errors"),
+            "Missing trailer-only response test"
+        );
+
+        // Requirement 4: RST_STREAM with NO_ERROR after trailers
+        assert!(
+            test_ids.contains("rst_stream_no_error_after_trailers"),
+            "Missing RST_STREAM handling test"
+        );
+
+        // Requirement 5: grpc-timeout header parsing
+        assert!(
+            test_ids.contains("grpc_timeout_header_parsing_all_units"),
+            "Missing grpc-timeout parsing test"
         );
     }
 
