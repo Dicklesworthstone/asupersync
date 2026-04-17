@@ -259,6 +259,30 @@ struct ChannelFlowState {
     backpressure_start_time: Option<Time>,
 }
 
+fn new_task_flow_state() -> TaskFlowState {
+    TaskFlowState {
+        blocked_channels: HashSet::new(),
+        first_block_time: None,
+        block_count: 0,
+        total_blocked_time_ms: 0,
+        pending_permits: HashSet::new(),
+        is_cancelled: false,
+        cancel_time: None,
+    }
+}
+
+fn new_channel_flow_state() -> ChannelFlowState {
+    ChannelFlowState {
+        active_controls: HashSet::new(),
+        blocked_tasks: HashSet::new(),
+        available_capacity: None,
+        max_queue_depth: 0,
+        backpressure_active: false,
+        backpressure_consumers: HashSet::new(),
+        backpressure_start_time: None,
+    }
+}
+
 /// Detailed violation report with context.
 #[derive(Debug, Clone)]
 pub struct FlowControlViolationReport {
@@ -510,15 +534,10 @@ impl FlowControlMonitor {
     fn update_state_from_event(&mut self, event: &FlowControlEvent) {
         match event {
             FlowControlEvent::ProducerBlocked { channel_id, task_id, reason, timestamp, .. } => {
-                let task_state = self.task_states.entry(*task_id).or_insert_with(|| TaskFlowState {
-                    blocked_channels: HashSet::new(),
-                    first_block_time: None,
-                    block_count: 0,
-                    total_blocked_time_ms: 0,
-                    pending_permits: HashSet::new(),
-                    is_cancelled: false,
-                    cancel_time: None,
-                });
+                let task_state = self
+                    .task_states
+                    .entry(*task_id)
+                    .or_insert_with(new_task_flow_state);
 
                 task_state.blocked_channels.insert(*channel_id);
                 if task_state.first_block_time.is_none() {
@@ -526,15 +545,10 @@ impl FlowControlMonitor {
                 }
                 task_state.block_count += 1;
 
-                let channel_state = self.channel_states.entry(*channel_id).or_insert_with(|| ChannelFlowState {
-                    active_controls: HashSet::new(),
-                    blocked_tasks: HashSet::new(),
-                    available_capacity: None,
-                    max_queue_depth: 0,
-                    backpressure_active: false,
-                    backpressure_consumers: HashSet::new(),
-                    backpressure_start_time: None,
-                });
+                let channel_state = self
+                    .channel_states
+                    .entry(*channel_id)
+                    .or_insert_with(new_channel_flow_state);
 
                 channel_state.active_controls.insert(*reason);
                 channel_state.blocked_tasks.insert(*task_id);
@@ -567,15 +581,10 @@ impl FlowControlMonitor {
             }
 
             FlowControlEvent::BackpressureApplied { channel_id, consumer_task, queue_depth, timestamp } => {
-                let channel_state = self.channel_states.entry(*channel_id).or_insert_with(|| ChannelFlowState {
-                    active_controls: HashSet::new(),
-                    blocked_tasks: HashSet::new(),
-                    available_capacity: None,
-                    max_queue_depth: 0,
-                    backpressure_active: false,
-                    backpressure_consumers: HashSet::new(),
-                    backpressure_start_time: None,
-                });
+                let channel_state = self
+                    .channel_states
+                    .entry(*channel_id)
+                    .or_insert_with(new_channel_flow_state);
 
                 channel_state.backpressure_active = true;
                 channel_state.backpressure_consumers.insert(*consumer_task);
@@ -597,16 +606,68 @@ impl FlowControlMonitor {
                 }
             }
 
-            FlowControlEvent::ReserveBlocked { channel_id, task_id, permit_id, .. } => {
-                if let Some(task_state) = self.task_states.get_mut(task_id) {
-                    task_state.pending_permits.insert(*permit_id);
+            FlowControlEvent::ReserveBlocked { channel_id, task_id, permit_id, timestamp, .. } => {
+                let task_state = self
+                    .task_states
+                    .entry(*task_id)
+                    .or_insert_with(new_task_flow_state);
+                task_state.pending_permits.insert(*permit_id);
+                task_state.blocked_channels.insert(*channel_id);
+                if task_state.first_block_time.is_none() {
+                    task_state.first_block_time = Some(*timestamp);
                 }
+
+                let channel_state = self
+                    .channel_states
+                    .entry(*channel_id)
+                    .or_insert_with(new_channel_flow_state);
+                channel_state.blocked_tasks.insert(*task_id);
+
                 self.deadlock_detector.add_dependency(*task_id, *channel_id);
             }
 
-            FlowControlEvent::ReserveUnblocked { channel_id, task_id, permit_id, .. } => {
+            FlowControlEvent::ReserveUnblocked {
+                channel_id,
+                task_id,
+                permit_id,
+                blocked_duration_ms,
+                ..
+            } => {
                 if let Some(task_state) = self.task_states.get_mut(task_id) {
                     task_state.pending_permits.remove(permit_id);
+                    task_state.blocked_channels.remove(channel_id);
+                    task_state.total_blocked_time_ms += blocked_duration_ms;
+                    if task_state.blocked_channels.is_empty() {
+                        task_state.first_block_time = None;
+                    }
+                }
+
+                if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
+                    channel_state.blocked_tasks.remove(task_id);
+                }
+                self.deadlock_detector.remove_dependency(*task_id, *channel_id);
+
+                if *blocked_duration_ms > self.stats.max_block_time_ms {
+                    self.stats.max_block_time_ms = *blocked_duration_ms;
+                }
+            }
+
+            FlowControlEvent::AbortDueToFlowControl {
+                channel_id,
+                task_id,
+                permit_id,
+                ..
+            } => {
+                if let Some(task_state) = self.task_states.get_mut(task_id) {
+                    task_state.pending_permits.remove(permit_id);
+                    task_state.blocked_channels.remove(channel_id);
+                    if task_state.blocked_channels.is_empty() {
+                        task_state.first_block_time = None;
+                    }
+                }
+
+                if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
+                    channel_state.blocked_tasks.remove(task_id);
                 }
                 self.deadlock_detector.remove_dependency(*task_id, *channel_id);
             }
@@ -641,6 +702,12 @@ impl FlowControlMonitor {
 
         // Check for indefinite blocking
         self.check_indefinite_blocking(current_time);
+
+        // Check for cancelled tasks that stayed blocked under flow control.
+        self.check_cancellation_unblock_failures(current_time);
+
+        // Check reserve/commit/abort atomicity for two-phase sends.
+        self.check_atomicity(event, current_time);
     }
 
     /// Checks for producer starvation.
@@ -697,6 +764,107 @@ impl FlowControlMonitor {
                     }
                 }
             }
+        }
+    }
+
+    fn check_cancellation_unblock_failures(&mut self, current_time: Time) {
+        let cancellation_threshold_ns = self.config.deadlock_detection_threshold_s * 1_000_000_000;
+
+        for (&task_id, task_state) in &self.task_states {
+            let Some(cancel_time) = task_state.cancel_time else {
+                continue;
+            };
+
+            if !task_state.is_cancelled || task_state.blocked_channels.is_empty() {
+                continue;
+            }
+
+            let time_since_cancel_ns =
+                current_time.as_nanos().saturating_sub(cancel_time.as_nanos());
+            if time_since_cancel_ns < cancellation_threshold_ns {
+                continue;
+            }
+
+            for &channel_id in &task_state.blocked_channels {
+                if let Some(channel_state) = self.channel_states.get(&channel_id) {
+                    for &flow_control_type in &channel_state.active_controls {
+                        self.record_violation(
+                            FlowControlViolation::CancellationUnblockFailure {
+                                channel_id,
+                                cancelled_task: task_id,
+                                flow_control_type,
+                                time_since_cancel_s: time_since_cancel_ns / 1_000_000_000,
+                                timestamp: current_time,
+                            },
+                            current_time,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_atomicity(&mut self, event: &FlowControlEvent, current_time: Time) {
+        match event {
+            FlowControlEvent::CommitFlowControlled {
+                channel_id,
+                task_id,
+                permit_id,
+                ..
+            } => {
+                let has_pending_permit = self
+                    .task_states
+                    .get(task_id)
+                    .is_some_and(|task_state| task_state.pending_permits.contains(permit_id));
+
+                if !has_pending_permit {
+                    self.record_violation(
+                        FlowControlViolation::AtomicityViolation {
+                            channel_id: *channel_id,
+                            task_id: *task_id,
+                            permit_id: *permit_id,
+                            violation_type:
+                                "commit_flow_controlled_without_pending_reserve".to_string(),
+                            timestamp: current_time,
+                        },
+                        current_time,
+                    );
+                }
+            }
+            FlowControlEvent::AbortDueToFlowControl {
+                channel_id,
+                task_id,
+                permit_id,
+                ..
+            } => {
+                let saw_reserve_block = self.events.iter().rev().any(|past_event| {
+                    matches!(
+                        past_event,
+                        FlowControlEvent::ReserveBlocked {
+                            channel_id: past_channel_id,
+                            task_id: past_task_id,
+                            permit_id: past_permit_id,
+                            ..
+                        } if past_channel_id == channel_id
+                            && past_task_id == task_id
+                            && past_permit_id == permit_id
+                    )
+                });
+
+                if !saw_reserve_block {
+                    self.record_violation(
+                        FlowControlViolation::AtomicityViolation {
+                            channel_id: *channel_id,
+                            task_id: *task_id,
+                            permit_id: *permit_id,
+                            violation_type: "abort_without_pending_reserve".to_string(),
+                            timestamp: current_time,
+                        },
+                        current_time,
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1000,5 +1168,170 @@ mod tests {
 
         let stats = monitor.stats();
         assert_eq!(stats.max_block_time_ms, 500);
+    }
+
+    #[test]
+    fn test_reserve_blocked_creates_task_and_channel_state() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let now = Time::from_nanos(1_000);
+        let task_id = TaskId::new_for_test(7, 0);
+        let channel_id = 99;
+        let permit_id = 1234;
+
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: now,
+        });
+
+        let stats = monitor.stats();
+        assert_eq!(stats.tasks_currently_blocked, 1);
+
+        let task_state = monitor.task_states.get(&task_id).expect("task state");
+        assert!(task_state.pending_permits.contains(&permit_id));
+        assert!(task_state.blocked_channels.contains(&channel_id));
+        assert_eq!(task_state.first_block_time, Some(now));
+
+        let channel_state = monitor
+            .channel_states
+            .get(&channel_id)
+            .expect("channel state");
+        assert!(channel_state.blocked_tasks.contains(&task_id));
+    }
+
+    #[test]
+    fn test_reserve_unblocked_clears_blocked_state() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(8, 0);
+        let channel_id = 77;
+        let permit_id = 4321;
+
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: Time::from_nanos(1_000),
+        });
+        monitor.record_event(FlowControlEvent::ReserveUnblocked {
+            channel_id,
+            task_id,
+            permit_id,
+            blocked_duration_ms: 5,
+            timestamp: Time::from_nanos(2_000),
+        });
+
+        let stats = monitor.stats();
+        assert_eq!(stats.tasks_currently_blocked, 0);
+
+        let task_state = monitor.task_states.get(&task_id).expect("task state");
+        assert!(task_state.pending_permits.is_empty());
+        assert!(task_state.blocked_channels.is_empty());
+        assert!(task_state.first_block_time.is_none());
+
+        let channel_state = monitor
+            .channel_states
+            .get(&channel_id)
+            .expect("channel state");
+        assert!(channel_state.blocked_tasks.is_empty());
+    }
+
+    #[test]
+    fn test_commit_without_pending_reserve_reports_atomicity_violation() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(9, 0);
+        let channel_id = 55;
+        let permit_id = 808;
+        let now = Time::from_nanos(10_000);
+
+        monitor.record_event(FlowControlEvent::CommitFlowControlled {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: now,
+        });
+
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::AtomicityViolation {
+                channel_id: violation_channel,
+                task_id: violation_task,
+                permit_id: violation_permit,
+                violation_type,
+                ..
+            } if *violation_channel == channel_id
+                && *violation_task == task_id
+                && *violation_permit == permit_id
+                && violation_type == "commit_flow_controlled_without_pending_reserve"
+        )));
+    }
+
+    #[test]
+    fn test_abort_without_pending_reserve_reports_atomicity_violation() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(10, 0);
+        let channel_id = 66;
+        let permit_id = 909;
+        let now = Time::from_nanos(20_000);
+
+        monitor.record_event(FlowControlEvent::AbortDueToFlowControl {
+            channel_id,
+            task_id,
+            permit_id,
+            timeout_reason: "timed out".to_string(),
+            timestamp: now,
+        });
+
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::AtomicityViolation {
+                channel_id: violation_channel,
+                task_id: violation_task,
+                permit_id: violation_permit,
+                violation_type,
+                ..
+            } if *violation_channel == channel_id
+                && *violation_task == task_id
+                && *violation_permit == permit_id
+                && violation_type == "abort_without_pending_reserve"
+        )));
+    }
+
+    #[test]
+    fn test_cancelled_task_still_blocked_reports_unblock_failure() {
+        let mut config = FlowControlConfig::default();
+        config.deadlock_detection_threshold_s = 1;
+
+        let mut monitor = FlowControlMonitor::new(config);
+        let task_id = TaskId::new_for_test(11, 0);
+        let channel_id = 77;
+
+        monitor.record_event(FlowControlEvent::ProducerBlocked {
+            channel_id,
+            task_id,
+            reason: FlowControlType::ConsumerBackpressure,
+            timestamp: Time::from_nanos(1_000_000_000),
+        });
+        monitor.record_task_cancel(task_id, Time::from_nanos(2_000_000_000));
+        monitor.record_event(FlowControlEvent::BackpressureApplied {
+            channel_id,
+            consumer_task: TaskId::new_for_test(12, 0),
+            queue_depth: 4,
+            timestamp: Time::from_nanos(4_000_000_000),
+        });
+
+        assert!(monitor.violations().iter().any(|report| matches!(
+            &report.violation,
+            FlowControlViolation::CancellationUnblockFailure {
+                channel_id: violation_channel,
+                cancelled_task,
+                flow_control_type,
+                time_since_cancel_s,
+                ..
+            } if *violation_channel == channel_id
+                && *cancelled_task == task_id
+                && *flow_control_type == FlowControlType::ConsumerBackpressure
+                && *time_since_cancel_s == 2
+        )));
     }
 }
