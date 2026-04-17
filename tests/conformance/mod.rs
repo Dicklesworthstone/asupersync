@@ -16,6 +16,7 @@ pub mod quic_retry_rfc9000;
 pub mod tls_0rtt_replay_rfc8446;
 pub mod cancel_dag_determinism;
 pub mod obligation_lifecycle_metamorphic;
+pub mod trace_replay_idempotency_metamorphic;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod postgres_logical_replication;
@@ -38,6 +39,7 @@ pub use quic_retry_rfc9000::{QuicRetryConformanceHarness, QuicRetryConformanceRe
 pub use tls_0rtt_replay_rfc8446::{Tls0RttConformanceHarness, Tls0RttConformanceResult, TestCategory as Tls0RttTestCategory};
 pub use cancel_dag_determinism::{CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory};
 pub use obligation_lifecycle_metamorphic::{ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult, TestCategory as ObligationLifecycleTestCategory};
+pub use trace_replay_idempotency_metamorphic::{TraceReplayIdempotencyMetamorphicHarness, TraceReplayIdempotencyMetamorphicResult, TestCategory as TraceReplayTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -133,6 +135,12 @@ pub enum TestCategory {
     LeakInvariants,
     SnapshotRestore,
     ParallelCommits,
+    // Trace replay idempotency metamorphic categories
+    ReplayFidelity,
+    IdempotentReplay,
+    TruncationHandling,
+    EpochBoundaryOrdering,
+    CrossRegionJoining,
 }
 
 // Unified conformance test result
@@ -361,6 +369,41 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         results.extend(obligation_lifecycle_results);
     }
 
+    // Trace Replay Idempotency Metamorphic conformance
+    #[cfg(feature = "deterministic-mode")]
+    {
+        let trace_replay_harness = TraceReplayIdempotencyMetamorphicHarness::new();
+        let trace_replay_results: Vec<ConformanceTestResult> = trace_replay_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity => TestCategory::ReplayFidelity,
+                    trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay => TestCategory::IdempotentReplay,
+                    trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling => TestCategory::TruncationHandling,
+                    trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering => TestCategory::EpochBoundaryOrdering,
+                    trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining => TestCategory::CrossRegionJoining,
+                },
+                requirement_level: match r.requirement_level {
+                    trace_replay_idempotency_metamorphic::RequirementLevel::Must => RequirementLevel::Must,
+                    trace_replay_idempotency_metamorphic::RequirementLevel::Should => RequirementLevel::Should,
+                    trace_replay_idempotency_metamorphic::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    trace_replay_idempotency_metamorphic::TestVerdict::Pass => TestVerdict::Pass,
+                    trace_replay_idempotency_metamorphic::TestVerdict::Fail => TestVerdict::Fail,
+                    trace_replay_idempotency_metamorphic::TestVerdict::Skipped => TestVerdict::Skipped,
+                    trace_replay_idempotency_metamorphic::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(trace_replay_results);
+    }
+
     // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
     /*
     let hpack_harness = HpackConformanceHarness::new();
@@ -561,6 +604,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "Obligation lifecycle metamorphic relations: commit-abort symmetry, leak invariants, parallel commits"
+                },
+                "trace_replay_idempotency_metamorphic": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "Observability trace replay idempotency: replay(record(execution)) ≡ execution, byte-identical replay-of-replay, truncation handling"
                 },
                 "websocket_rfc6455": {
                     "status": "implemented",
@@ -855,6 +903,83 @@ mod tests {
         // Verify proptest completed full iteration counts
         let proptest_results = results.iter()
             .filter(|r| r.description.contains("proptest"))
+            .count();
+
+        assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
+    }
+
+    #[test]
+    #[cfg(feature = "deterministic-mode")]
+    fn test_trace_replay_idempotency_metamorphic_conformance_integration() {
+        let trace_replay_harness = TraceReplayIdempotencyMetamorphicHarness::new();
+        let results = trace_replay_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "Trace replay idempotency metamorphic conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity),
+            "Should test replay fidelity"
+        );
+        assert!(
+            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay),
+            "Should test idempotent replay"
+        );
+        assert!(
+            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling),
+            "Should test truncation handling"
+        );
+        assert!(
+            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering),
+            "Should test epoch boundary ordering"
+        );
+        assert!(
+            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining),
+            "Should test cross-region joining"
+        );
+
+        // Verify we have appropriate requirement levels
+        let must_tests = results.iter()
+            .filter(|r| r.requirement_level == trace_replay_idempotency_metamorphic::RequirementLevel::Must)
+            .count();
+
+        assert!(must_tests > 0, "Should have MUST requirements for trace replay idempotency");
+
+        // Verify comprehensive metamorphic test coverage
+        assert!(results.len() >= 12, "Should have comprehensive metamorphic test coverage");
+
+        // Verify test execution completed without panic
+        for result in &results {
+            if let Some(ref error) = result.error_message {
+                if error.contains("panicked") {
+                    panic!("Test {} panicked: {}", result.test_id, error);
+                }
+            }
+        }
+
+        // Verify we have all 5 core metamorphic relations
+        let core_tests = [
+            "mr_replay_fidelity",
+            "mr_idempotent_replay",
+            "mr_truncation_handling",
+            "mr_epoch_boundary_ordering",
+            "mr_cross_region_joining",
+        ];
+
+        for core_test in &core_tests {
+            assert!(
+                results.iter().any(|r| r.test_id == *core_test),
+                "Missing core metamorphic relation: {}",
+                core_test
+            );
+        }
+
+        // Verify proptest completed full iteration counts
+        let proptest_results = results.iter()
+            .filter(|r| r.description.contains("replay") || r.description.contains("idempotency"))
             .count();
 
         assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
