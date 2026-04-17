@@ -464,3 +464,10 @@ path = "fuzz_targets/fuzz_trace_recorder_concurrent_writer.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_obligation_ledger"
+path = "fuzz_targets/obligation_ledger.rs"
+test = false
+doc = false
+bench = false
