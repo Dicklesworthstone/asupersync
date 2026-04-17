@@ -331,3 +331,10 @@ path = "fuzz_targets/local_queue.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_qpack_decode"
+path = "fuzz_targets/qpack_decode.rs"
+test = false
+doc = false
+bench = false
