@@ -38,6 +38,7 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 // ============================================================================
 // Error Types
