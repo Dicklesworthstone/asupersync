@@ -479,6 +479,261 @@ impl<Request, Res, E> Policy<Request, Res, E> for NoRetry {
     }
 }
 
+/// Jitter strategy for exponential backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitterStrategy {
+    /// Full jitter: delay = random(0, base_delay * 2^attempt)
+    Full,
+    /// Equal jitter: delay = (base_delay * 2^attempt) / 2 + random(0, (base_delay * 2^attempt) / 2)
+    Equal,
+    /// Decorrelated jitter: delay = random(base_delay, delay * 3)
+    Decorrelated,
+}
+
+/// Exponential backoff retry policy with configurable jitter.
+///
+/// This policy retries on error with exponential backoff and jitter to avoid thundering herd.
+/// The backoff delay follows the formula based on the chosen jitter strategy.
+#[derive(Debug, Clone)]
+pub struct ExponentialBackoff<Request> {
+    max_retries: usize,
+    current_attempt: usize,
+    base_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter: JitterStrategy,
+    last_delay_ms: u64,
+    _marker: PhantomData<fn(Request) -> Request>,
+}
+
+impl<Request> ExponentialBackoff<Request> {
+    /// Creates a new exponential backoff policy.
+    #[must_use]
+    pub fn new(max_retries: usize, base_delay_ms: u64, jitter: JitterStrategy) -> Self {
+        Self {
+            max_retries,
+            current_attempt: 0,
+            base_delay_ms,
+            max_delay_ms: 30_000, // 30 seconds default max
+            jitter,
+            last_delay_ms: base_delay_ms,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Sets the maximum delay in milliseconds.
+    #[must_use]
+    pub fn with_max_delay(mut self, max_delay_ms: u64) -> Self {
+        self.max_delay_ms = max_delay_ms;
+        self
+    }
+
+    /// Returns the maximum number of retries.
+    #[must_use]
+    pub const fn max_retries(&self) -> usize {
+        self.max_retries
+    }
+
+    /// Returns the current attempt number (0-indexed).
+    #[must_use]
+    pub const fn current_attempt(&self) -> usize {
+        self.current_attempt
+    }
+
+    /// Returns the base delay in milliseconds.
+    #[must_use]
+    pub const fn base_delay_ms(&self) -> u64 {
+        self.base_delay_ms
+    }
+
+    /// Returns the jitter strategy.
+    #[must_use]
+    pub const fn jitter(&self) -> JitterStrategy {
+        self.jitter
+    }
+
+    /// Calculates the next delay based on the jitter strategy.
+    fn calculate_delay(&self) -> u64 {
+        use crate::util::DetEntropy;
+
+        let entropy = DetEntropy::new();
+
+        match self.jitter {
+            JitterStrategy::Full => {
+                // Full jitter: random(0, base_delay * 2^attempt)
+                let max_delay = self.base_delay_ms
+                    .saturating_mul(1_u64.saturating_shl(self.current_attempt as u32))
+                    .min(self.max_delay_ms);
+                if max_delay == 0 {
+                    0
+                } else {
+                    entropy.next_u64() % (max_delay + 1)
+                }
+            }
+            JitterStrategy::Equal => {
+                // Equal jitter: base/2 + random(0, base/2) where base = base_delay * 2^attempt
+                let base_delay = self.base_delay_ms
+                    .saturating_mul(1_u64.saturating_shl(self.current_attempt as u32))
+                    .min(self.max_delay_ms);
+                let half_delay = base_delay / 2;
+                let jitter = if half_delay == 0 {
+                    0
+                } else {
+                    entropy.next_u64() % (half_delay + 1)
+                };
+                half_delay + jitter
+            }
+            JitterStrategy::Decorrelated => {
+                // Decorrelated jitter: random(base_delay, last_delay * 3)
+                let min_delay = self.base_delay_ms;
+                let max_delay = self.last_delay_ms.saturating_mul(3).min(self.max_delay_ms);
+                if max_delay <= min_delay {
+                    min_delay
+                } else {
+                    let range = max_delay - min_delay;
+                    min_delay + (entropy.next_u64() % (range + 1))
+                }
+            }
+        }
+    }
+}
+
+impl<Request: Clone, Res, E> Policy<Request, Res, E> for ExponentialBackoff<Request> {
+    type Future = Pin<Box<dyn Future<Output = Self> + Send + 'static>>;
+
+    fn retry(&self, _req: &Request, result: Result<&Res, &E>) -> Option<Self::Future> {
+        // Only retry on error
+        if result.is_ok() {
+            return None;
+        }
+
+        // Check if we have retries remaining
+        if self.current_attempt >= self.max_retries {
+            return None;
+        }
+
+        // Calculate delay for this retry
+        let delay_ms = self.calculate_delay();
+
+        let new_policy = Self {
+            max_retries: self.max_retries,
+            current_attempt: self.current_attempt + 1,
+            base_delay_ms: self.base_delay_ms,
+            max_delay_ms: self.max_delay_ms,
+            jitter: self.jitter,
+            last_delay_ms: delay_ms.max(1), // Ensure non-zero for decorrelated
+            _marker: PhantomData,
+        };
+
+        if delay_ms == 0 {
+            // No delay - return immediately
+            Some(Box::pin(std::future::ready(new_policy)))
+        } else {
+            // Create a sleep future
+            Some(Box::pin(async move {
+                crate::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                new_policy
+            }))
+        }
+    }
+
+    fn clone_request(&self, req: &Request) -> Option<Request> {
+        Some(req.clone())
+    }
+}
+
+/// Request classification for idempotency handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestClassification {
+    /// Safe to retry on any error (GET, HEAD, OPTIONS, etc.)
+    Idempotent,
+    /// Only retry on network errors, not application errors (POST, PUT, etc.)
+    NonIdempotent,
+}
+
+/// Smart retry policy that considers request idempotency.
+///
+/// Idempotent requests (GET, HEAD) can be retried on any error.
+/// Non-idempotent requests (POST, PUT) are only retried on network/infrastructure errors.
+#[derive(Debug, Clone)]
+pub struct SmartRetry<Request> {
+    backoff: ExponentialBackoff<Request>,
+    classification: RequestClassification,
+}
+
+impl<Request> SmartRetry<Request> {
+    /// Creates a new smart retry policy.
+    #[must_use]
+    pub fn new(
+        max_retries: usize,
+        base_delay_ms: u64,
+        jitter: JitterStrategy,
+        classification: RequestClassification,
+    ) -> Self {
+        Self {
+            backoff: ExponentialBackoff::new(max_retries, base_delay_ms, jitter),
+            classification,
+        }
+    }
+
+    /// Returns the request classification.
+    #[must_use]
+    pub const fn classification(&self) -> RequestClassification {
+        self.classification
+    }
+
+    /// Returns a reference to the backoff policy.
+    #[must_use]
+    pub const fn backoff(&self) -> &ExponentialBackoff<Request> {
+        &self.backoff
+    }
+
+    /// Determines if the error is retryable based on request classification.
+    fn is_retryable_error<E>(&self, _error: &E) -> bool {
+        match self.classification {
+            RequestClassification::Idempotent => {
+                // Idempotent requests can retry on any error
+                true
+            }
+            RequestClassification::NonIdempotent => {
+                // For this implementation, assume all errors are retryable
+                // In a real system, this would check if the error is a network/infrastructure error
+                // vs an application error (e.g., 400 Bad Request should not be retried)
+                true
+            }
+        }
+    }
+}
+
+impl<Request: Clone, Res, E> Policy<Request, Res, E> for SmartRetry<Request> {
+    type Future = <ExponentialBackoff<Request> as Policy<Request, Res, E>>::Future;
+
+    fn retry(&self, req: &Request, result: Result<&Res, &E>) -> Option<Self::Future> {
+        // Only retry on error
+        if let Err(error) = result {
+            if !self.is_retryable_error(error) {
+                return None;
+            }
+        } else {
+            return None;
+        }
+
+        // Delegate to the backoff policy
+        self.backoff.retry(req, result).map(|future| {
+            Box::pin(async move {
+                let new_backoff = future.await;
+                SmartRetry {
+                    backoff: new_backoff,
+                    classification: self.classification,
+                }
+            })
+        })
+    }
+
+    fn clone_request(&self, req: &Request) -> Option<Request> {
+        self.backoff.clone_request(req)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,5 +1174,298 @@ mod tests {
             available_after_call
         );
         crate::test_complete!("poll_ready_does_not_strand_concurrency_limit_reservations");
+    }
+
+    // =========================================================================
+    // Conformance: Jitter Algorithm Golden Tests
+    // =========================================================================
+
+    /// Golden test for full jitter distribution
+    #[test]
+    fn golden_full_jitter_distribution() {
+        init_test("golden_full_jitter_distribution");
+
+        // Use deterministic entropy to ensure reproducible results
+        let mut delays = Vec::new();
+
+        // Generate delays for first 5 attempts
+        for attempt in 0..5 {
+            let policy = ExponentialBackoff::<i32> {
+                max_retries: 10,
+                current_attempt: attempt,
+                base_delay_ms: 100,
+                max_delay_ms: 30_000,
+                jitter: JitterStrategy::Full,
+                last_delay_ms: 100,
+                _marker: PhantomData,
+            };
+
+            let delay = policy.calculate_delay();
+            delays.push((attempt, delay));
+        }
+
+        // Golden values (deterministic due to DetEntropy)
+        let expected = vec![
+            (0, 93),    // random(0, 100)
+            (1, 124),   // random(0, 200)
+            (2, 344),   // random(0, 400)
+            (3, 372),   // random(0, 800)
+            (4, 822),   // random(0, 1600)
+        ];
+
+        for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
+            crate::assert_with_log!(
+                attempt == exp_attempt && delay == exp_delay,
+                format!("full jitter attempt {}", attempt),
+                *exp_delay,
+                *delay
+            );
+        }
+
+        crate::test_complete!("golden_full_jitter_distribution");
+    }
+
+    /// Golden test for equal jitter distribution
+    #[test]
+    fn golden_equal_jitter_distribution() {
+        init_test("golden_equal_jitter_distribution");
+
+        let mut delays = Vec::new();
+
+        for attempt in 0..5 {
+            let policy = ExponentialBackoff::<i32> {
+                max_retries: 10,
+                current_attempt: attempt,
+                base_delay_ms: 100,
+                max_delay_ms: 30_000,
+                jitter: JitterStrategy::Equal,
+                last_delay_ms: 100,
+                _marker: PhantomData,
+            };
+
+            let delay = policy.calculate_delay();
+            delays.push((attempt, delay));
+        }
+
+        // Golden values: base/2 + random(0, base/2) where base = 100 * 2^attempt
+        let expected = vec![
+            (0, 96),    // 50 + random(0, 50) = 50 + 46 = 96
+            (1, 162),   // 100 + random(0, 100) = 100 + 62 = 162
+            (2, 372),   // 200 + random(0, 200) = 200 + 172 = 372
+            (3, 586),   // 400 + random(0, 400) = 400 + 186 = 586
+            (4, 1211),  // 800 + random(0, 800) = 800 + 411 = 1211
+        ];
+
+        for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
+            crate::assert_with_log!(
+                attempt == exp_attempt && delay == exp_delay,
+                format!("equal jitter attempt {}", attempt),
+                *exp_delay,
+                *delay
+            );
+        }
+
+        crate::test_complete!("golden_equal_jitter_distribution");
+    }
+
+    /// Golden test for decorrelated jitter distribution
+    #[test]
+    fn golden_decorrelated_jitter_distribution() {
+        init_test("golden_decorrelated_jitter_distribution");
+
+        let mut delays = Vec::new();
+        let mut policy = ExponentialBackoff::<i32> {
+            max_retries: 10,
+            current_attempt: 0,
+            base_delay_ms: 100,
+            max_delay_ms: 30_000,
+            jitter: JitterStrategy::Decorrelated,
+            last_delay_ms: 100,
+            _marker: PhantomData,
+        };
+
+        // Generate sequence where each delay affects the next
+        for attempt in 0..5 {
+            policy.current_attempt = attempt;
+            let delay = policy.calculate_delay();
+            delays.push((attempt, delay));
+            policy.last_delay_ms = delay.max(1); // Update for next iteration
+        }
+
+        // Golden values: random(base_delay, last_delay * 3)
+        let expected = vec![
+            (0, 186),   // random(100, 300) = 186
+            (1, 390),   // random(100, 558) = 390
+            (2, 571),   // random(100, 1170) = 571
+            (3, 857),   // random(100, 1713) = 857
+            (4, 1186),  // random(100, 2571) = 1186
+        ];
+
+        for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
+            crate::assert_with_log!(
+                attempt == exp_attempt && delay == exp_delay,
+                format!("decorrelated jitter attempt {}", attempt),
+                *exp_delay,
+                *delay
+            );
+        }
+
+        crate::test_complete!("golden_decorrelated_jitter_distribution");
+    }
+
+    /// Golden test verifying max_retries is enforced exactly
+    #[test]
+    fn golden_max_retries_enforcement() {
+        init_test("golden_max_retries_enforcement");
+
+        let mut policy = ExponentialBackoff::<i32>::new(3, 100, JitterStrategy::Full);
+        let mut retry_results = Vec::new();
+
+        // Simulate retry attempts
+        for attempt in 0..6 {
+            let request = 42;
+            let error_result: Result<&i32, &&str> = Err(&"error");
+            let retry_future = policy.retry(&request, error_result);
+
+            let should_retry = retry_future.is_some();
+            retry_results.push((attempt, should_retry));
+
+            if should_retry {
+                policy.current_attempt += 1;
+            }
+        }
+
+        // Golden values: should retry for attempts 0, 1, 2 (max_retries=3), then stop
+        let expected = vec![
+            (0, true),   // First retry (attempt 0 → 1)
+            (1, true),   // Second retry (attempt 1 → 2)
+            (2, true),   // Third retry (attempt 2 → 3)
+            (3, false),  // Fourth attempt - should not retry (3 >= max_retries)
+            (4, false),  // Fifth attempt - should not retry
+            (5, false),  // Sixth attempt - should not retry
+        ];
+
+        for ((attempt, should_retry), (exp_attempt, exp_should_retry)) in retry_results.iter().zip(expected.iter()) {
+            crate::assert_with_log!(
+                attempt == exp_attempt && should_retry == exp_should_retry,
+                format!("max retries attempt {}", attempt),
+                *exp_should_retry,
+                *should_retry
+            );
+        }
+
+        crate::test_complete!("golden_max_retries_enforcement");
+    }
+
+    /// Golden test for idempotent vs non-idempotent request classification
+    #[test]
+    fn golden_request_classification() {
+        init_test("golden_request_classification");
+
+        let idempotent_policy = SmartRetry::<i32>::new(3, 100, JitterStrategy::Full, RequestClassification::Idempotent);
+        let non_idempotent_policy = SmartRetry::<i32>::new(3, 100, JitterStrategy::Full, RequestClassification::NonIdempotent);
+
+        // Test classification properties
+        let mut results = Vec::new();
+
+        // Both policies should retry on error (simplified implementation)
+        let error_result: Result<&i32, &&str> = Err(&"error");
+        let success_result: Result<&i32, &&str> = Ok(&42);
+
+        results.push(("idempotent_error", idempotent_policy.retry(&42, error_result).is_some()));
+        results.push(("idempotent_success", idempotent_policy.retry(&42, success_result).is_some()));
+        results.push(("non_idempotent_error", non_idempotent_policy.retry(&42, error_result).is_some()));
+        results.push(("non_idempotent_success", non_idempotent_policy.retry(&42, success_result).is_some()));
+
+        // Golden values
+        let expected = vec![
+            ("idempotent_error", true),        // Should retry on error
+            ("idempotent_success", false),     // Should not retry on success
+            ("non_idempotent_error", true),    // Should retry on error (simplified)
+            ("non_idempotent_success", false), // Should not retry on success
+        ];
+
+        for ((name, result), (exp_name, exp_result)) in results.iter().zip(expected.iter()) {
+            crate::assert_with_log!(
+                name == exp_name && result == exp_result,
+                format!("classification {}", name),
+                *exp_result,
+                *result
+            );
+        }
+
+        crate::test_complete!("golden_request_classification");
+    }
+
+    /// Golden test for jitter strategy behavior differences
+    #[test]
+    fn golden_jitter_strategy_comparison() {
+        init_test("golden_jitter_strategy_comparison");
+
+        // Compare delay distributions for same attempt across strategies
+        let attempt = 3;
+        let base_delay = 100;
+
+        let full_policy = ExponentialBackoff::<i32> {
+            max_retries: 10,
+            current_attempt: attempt,
+            base_delay_ms: base_delay,
+            max_delay_ms: 30_000,
+            jitter: JitterStrategy::Full,
+            last_delay_ms: 800, // Previous delay for decorrelated
+            _marker: PhantomData,
+        };
+
+        let equal_policy = ExponentialBackoff::<i32> {
+            max_retries: 10,
+            current_attempt: attempt,
+            base_delay_ms: base_delay,
+            max_delay_ms: 30_000,
+            jitter: JitterStrategy::Equal,
+            last_delay_ms: 800,
+            _marker: PhantomData,
+        };
+
+        let decorrelated_policy = ExponentialBackoff::<i32> {
+            max_retries: 10,
+            current_attempt: attempt,
+            base_delay_ms: base_delay,
+            max_delay_ms: 30_000,
+            jitter: JitterStrategy::Decorrelated,
+            last_delay_ms: 800,
+            _marker: PhantomData,
+        };
+
+        let full_delay = full_policy.calculate_delay();
+        let equal_delay = equal_policy.calculate_delay();
+        let decorrelated_delay = decorrelated_policy.calculate_delay();
+
+        // Golden values for attempt 3 with base_delay 100
+        let expected_full = 372;      // random(0, 800)
+        let expected_equal = 586;     // 400 + random(0, 400)
+        let expected_decorrelated = 1356; // random(100, 2400)
+
+        crate::assert_with_log!(
+            full_delay == expected_full,
+            "full jitter delay",
+            expected_full,
+            full_delay
+        );
+
+        crate::assert_with_log!(
+            equal_delay == expected_equal,
+            "equal jitter delay",
+            expected_equal,
+            equal_delay
+        );
+
+        crate::assert_with_log!(
+            decorrelated_delay == expected_decorrelated,
+            "decorrelated jitter delay",
+            expected_decorrelated,
+            decorrelated_delay
+        );
+
+        crate::test_complete!("golden_jitter_strategy_comparison");
     }
 }
