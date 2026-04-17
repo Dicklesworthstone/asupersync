@@ -1933,4 +1933,262 @@ mod tests {
     fn waker_that_increments(counter: Arc<AtomicU64>) -> Waker {
         Arc::new(CounterWaker { counter }).into()
     }
+
+    // =============================================================================
+    // CONFORMANCE TESTS: Timer Driver Integration
+    // =============================================================================
+
+    #[test]
+    fn conformance_timer_driver_precision_wall_clock() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("conformance_timer_driver_precision_wall_clock");
+
+        // Test timer precision with wall clock time source
+        let wall_clock = Arc::new(WallClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(wall_clock.clone()));
+        let handle = TimerDriverHandle::new(driver);
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Test short timer (within level 0)
+        let short_duration = Duration::from_millis(5);
+        let start_time = wall_clock.now();
+
+        let timer_id = handle.sleep(short_duration, waker_that_increments(counter.clone()));
+
+        // Busy wait for timer to fire (this is a test, so it's acceptable)
+        let timeout = start_time.saturating_add_duration(Duration::from_millis(100));
+        while wall_clock.now() < timeout && counter.load(Ordering::SeqCst) == 0 {
+            handle.poll_expired();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let end_time = wall_clock.now();
+        let elapsed = end_time.saturating_duration_since(start_time);
+
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) > 0,
+            "wall clock timer fired",
+            true,
+            counter.load(Ordering::SeqCst) > 0
+        );
+
+        // Timer should fire within reasonable precision (allowing for OS scheduling)
+        let tolerance = Duration::from_millis(10); // 10ms tolerance for wall clock
+        crate::assert_with_log!(
+            elapsed <= short_duration + tolerance,
+            &format!("timer precision within tolerance: {:?} <= {:?}", elapsed, short_duration + tolerance),
+            true,
+            elapsed <= short_duration + tolerance
+        );
+
+        crate::test_complete!("conformance_timer_driver_precision_wall_clock");
+    }
+
+    #[test]
+    fn conformance_timer_driver_virtual_clock() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("conformance_timer_driver_virtual_clock");
+
+        // Test timer behavior with virtual clock (deterministic time)
+        let virtual_clock = Arc::new(VirtualClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(virtual_clock.clone()));
+        let handle = TimerDriverHandle::new(driver);
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Register multiple timers with virtual clock
+        let durations = [
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            Duration::from_millis(500),
+        ];
+
+        let mut timer_ids = Vec::new();
+        for duration in &durations {
+            let timer_id = handle.sleep(*duration, waker_that_increments(counter.clone()));
+            timer_ids.push(timer_id);
+        }
+
+        // Advance virtual time precisely and check firing
+        let advance_steps = [
+            Duration::from_millis(15),  // Should fire first timer
+            Duration::from_millis(60),  // Should fire second timer
+            Duration::from_millis(110), // Should fire third timer
+            Duration::from_millis(510), // Should fire fourth timer
+        ];
+
+        let mut expected_fired = 0;
+        for advance_duration in &advance_steps {
+            virtual_clock.advance(*advance_duration);
+            handle.poll_expired();
+
+            expected_fired += 1;
+            let actual_fired = counter.load(Ordering::SeqCst);
+
+            crate::assert_with_log!(
+                actual_fired == expected_fired,
+                &format!("virtual time advance fired correct number: {} at {:?}",
+                        actual_fired, advance_duration),
+                expected_fired,
+                actual_fired
+            );
+        }
+
+        crate::test_complete!("conformance_timer_driver_virtual_clock");
+    }
+
+    #[test]
+    fn conformance_timer_driver_concurrent_registrations() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("conformance_timer_driver_concurrent_registrations");
+
+        // Test concurrent timer registrations with driver handle
+        let virtual_clock = Arc::new(VirtualClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(virtual_clock.clone()));
+        let handle = TimerDriverHandle::new(driver);
+
+        const TIMER_COUNT: usize = 1000;
+        let counters: Vec<_> = (0..TIMER_COUNT).map(|_| Arc::new(AtomicU64::new(0))).collect();
+
+        // Register many timers concurrently
+        let mut timer_ids = Vec::new();
+        for (i, counter) in counters.iter().enumerate() {
+            let duration = Duration::from_millis(10 + (i as u64 % 100)); // Varying durations
+            let timer_id = handle.sleep(duration, waker_that_increments(counter.clone()));
+            timer_ids.push(timer_id);
+        }
+
+        crate::assert_with_log!(
+            handle.pending_count() == TIMER_COUNT,
+            "all timers registered",
+            TIMER_COUNT,
+            handle.pending_count()
+        );
+
+        // Advance time to fire all timers
+        virtual_clock.advance(Duration::from_millis(200));
+        handle.poll_expired();
+
+        let fired_count = counters.iter()
+            .map(|c| if c.load(Ordering::SeqCst) > 0 { 1 } else { 0 })
+            .sum::<usize>();
+
+        crate::assert_with_log!(
+            fired_count == TIMER_COUNT,
+            "all timers fired",
+            TIMER_COUNT,
+            fired_count
+        );
+
+        crate::assert_with_log!(
+            handle.pending_count() == 0,
+            "no pending timers after firing",
+            0usize,
+            handle.pending_count()
+        );
+
+        crate::test_complete!("conformance_timer_driver_concurrent_registrations");
+    }
+
+    #[test]
+    fn conformance_timer_driver_cancellation_cleanup() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("conformance_timer_driver_cancellation_cleanup");
+
+        // Test timer cancellation through driver handle
+        let virtual_clock = Arc::new(VirtualClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(virtual_clock.clone()));
+        let handle = TimerDriverHandle::new(driver);
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Register timer and immediately cancel
+        let timer_id = handle.sleep(Duration::from_millis(100), waker_that_increments(counter.clone()));
+        crate::assert_with_log!(handle.pending_count() == 1, "timer registered", 1usize, handle.pending_count());
+
+        let cancelled = handle.cancel(timer_id);
+        crate::assert_with_log!(cancelled, "timer cancelled", true, cancelled);
+
+        crate::assert_with_log!(
+            handle.pending_count() == 0,
+            "timer removed from pending",
+            0usize,
+            handle.pending_count()
+        );
+
+        // Advance past deadline - cancelled timer should not fire
+        virtual_clock.advance(Duration::from_millis(200));
+        handle.poll_expired();
+
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) == 0,
+            "cancelled timer did not fire",
+            0u64,
+            counter.load(Ordering::SeqCst)
+        );
+
+        // Double cancellation should return false
+        let double_cancel = handle.cancel(timer_id);
+        crate::assert_with_log!(
+            !double_cancel,
+            "double cancel returns false",
+            false,
+            double_cancel
+        );
+
+        crate::test_complete!("conformance_timer_driver_cancellation_cleanup");
+    }
+
+    #[test]
+    fn conformance_timer_driver_browser_clock_monotonic() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("conformance_timer_driver_browser_clock_monotonic");
+
+        // Test browser clock maintains monotonicity
+        let config = BrowserClockConfig::default();
+        let mut browser_clock = BrowserClock::new(config);
+
+        let driver = Arc::new(TimerDriver::with_clock(Arc::new(browser_clock.clone())));
+        let handle = TimerDriverHandle::new(driver);
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Simulate host time samples including regression (negative delta)
+        let host_samples = [0.0, 10.0, 20.0, 15.0, 30.0]; // 15.0 is regression
+
+        let mut last_time = Time::ZERO;
+        for &sample_ms in &host_samples {
+            browser_clock.observe_host_time(sample_ms);
+            let current_time = browser_clock.now();
+
+            // Time should never go backward
+            crate::assert_with_log!(
+                current_time >= last_time,
+                &format!("monotonic time: {:?} >= {:?} at sample {sample_ms}",
+                        current_time, last_time),
+                true,
+                current_time >= last_time
+            );
+
+            last_time = current_time;
+        }
+
+        // Register a timer and verify it works with browser clock
+        let timer_id = handle.sleep(Duration::from_millis(5), waker_that_increments(counter.clone()));
+
+        // Advance browser clock
+        browser_clock.observe_host_time(50.0);
+        handle.poll_expired();
+
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) > 0,
+            "timer fired with browser clock",
+            true,
+            counter.load(Ordering::SeqCst) > 0
+        );
+
+        crate::test_complete!("conformance_timer_driver_browser_clock_monotonic");
+    }
 }

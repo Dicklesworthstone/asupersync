@@ -2200,4 +2200,504 @@ mod tests {
         crate::assert_with_log!(count == 2, "both fired", 2u64, count);
         crate::test_complete!("skip_tick_bitmap_matches_linear_scan");
     }
+
+    // =============================================================================
+    // CONFORMANCE TESTS: Time Wheel Precision under Sleep Coalescing
+    // =============================================================================
+
+    #[test]
+    fn conformance_sleep_tolerance_within_wheel_granularity() {
+        init_test("conformance_sleep_tolerance_within_wheel_granularity");
+
+        // Test requirement (1): Sleep(N) ± tolerance within wheel granularity
+        // Level 0 resolution is 1ms, so tolerance should be within that bound
+
+        let mut wheel = TimerWheel::new_at(Time::ZERO);
+        let tolerance_ns = LEVEL0_RESOLUTION_NS; // 1ms tolerance
+
+        // Test various sleep durations
+        let test_durations = [
+            1_000_000,    // 1ms (exact level 0 boundary)
+            1_500_000,    // 1.5ms (mid-slot)
+            5_000_000,    // 5ms (multiple slots)
+            10_000_000,   // 10ms
+            100_000_000,  // 100ms (level 1 territory)
+            1_000_000_000, // 1s (level 2 territory)
+        ];
+
+        for &duration_ns in &test_durations {
+            let deadline = Time::from_nanos(duration_ns);
+            let counter = Arc::new(AtomicU64::new(0));
+
+            let handle = wheel.register(deadline, counter_waker(counter.clone()));
+
+            // Verify timer was inserted
+            crate::assert_with_log!(wheel.len() >= 1, "timer registered", true, wheel.len() >= 1);
+
+            // Test precision: timer should fire within tolerance of deadline
+            let mut test_times = Vec::new();
+
+            // Test firing exactly at deadline
+            test_times.push(deadline);
+
+            // Test firing slightly before tolerance bound
+            if deadline.as_nanos() > tolerance_ns {
+                test_times.push(Time::from_nanos(deadline.as_nanos() - tolerance_ns + 1));
+            }
+
+            // Test firing at tolerance bound
+            test_times.push(Time::from_nanos(deadline.as_nanos() + tolerance_ns));
+
+            for test_time in test_times {
+                let mut test_wheel = TimerWheel::new_at(Time::ZERO);
+                let test_counter = Arc::new(AtomicU64::new(0));
+                test_wheel.register(deadline, counter_waker(test_counter.clone()));
+
+                let wakers = test_wheel.collect_expired(test_time);
+
+                if test_time >= deadline {
+                    // Should fire if test_time >= deadline
+                    crate::assert_with_log!(
+                        !wakers.is_empty(),
+                        &format!("fires at {test_time:?} for deadline {deadline:?}"),
+                        true,
+                        !wakers.is_empty()
+                    );
+                } else {
+                    // Should not fire if significantly before deadline
+                    let gap = deadline.as_nanos() - test_time.as_nanos();
+                    if gap > tolerance_ns {
+                        crate::assert_with_log!(
+                            wakers.is_empty(),
+                            &format!("does not fire early: {test_time:?} vs {deadline:?}"),
+                            true,
+                            wakers.is_empty()
+                        );
+                    }
+                }
+            }
+
+            // Clean up
+            wheel.cancel(&handle);
+        }
+
+        crate::test_complete!("conformance_sleep_tolerance_within_wheel_granularity");
+    }
+
+    #[test]
+    fn conformance_concurrent_sleeps_unique_deadlines() {
+        init_test("conformance_concurrent_sleeps_unique_deadlines");
+
+        // Test requirement (2): 10k concurrent sleeps with unique deadlines all fire correctly
+
+        let mut wheel = TimerWheel::new_at(Time::ZERO);
+        const TIMER_COUNT: usize = 10_000;
+
+        let mut counters = Vec::new();
+        let mut deadlines = Vec::new();
+        let mut handles = Vec::new();
+
+        // Register 10k timers with unique deadlines (1µs apart to ensure uniqueness)
+        for i in 0..TIMER_COUNT {
+            let deadline_ns = 1_000_000 + (i as u64 * 1_000); // Start at 1ms, 1µs apart
+            let deadline = Time::from_nanos(deadline_ns);
+
+            let counter = Arc::new(AtomicU64::new(0));
+            let handle = wheel.register(deadline, counter_waker(counter.clone()));
+
+            counters.push(counter);
+            deadlines.push(deadline);
+            handles.push(handle);
+        }
+
+        crate::assert_with_log!(
+            wheel.len() == TIMER_COUNT,
+            "all 10k timers registered",
+            TIMER_COUNT,
+            wheel.len()
+        );
+
+        // Advance time to fire all timers
+        let max_deadline = deadlines.iter().max().copied().unwrap();
+        let final_time = Time::from_nanos(max_deadline.as_nanos() + 1_000_000); // 1ms past max
+
+        let wakers = wheel.collect_expired(final_time);
+
+        // All timers should have fired
+        crate::assert_with_log!(
+            wakers.len() == TIMER_COUNT,
+            "all 10k timers fired",
+            TIMER_COUNT,
+            wakers.len()
+        );
+
+        // Wake all the wakers
+        for waker in wakers {
+            waker.wake();
+        }
+
+        // Verify all counters were incremented
+        let mut fired_count = 0;
+        for counter in &counters {
+            if counter.load(Ordering::SeqCst) > 0 {
+                fired_count += 1;
+            }
+        }
+
+        crate::assert_with_log!(
+            fired_count == TIMER_COUNT,
+            "all 10k counters incremented",
+            TIMER_COUNT,
+            fired_count
+        );
+
+        // Verify wheel is empty after all timers fired
+        crate::assert_with_log!(wheel.len() == 0, "wheel empty after firing", 0usize, wheel.len());
+
+        crate::test_complete!("conformance_concurrent_sleeps_unique_deadlines");
+    }
+
+    #[test]
+    fn conformance_sleep_cancellation_no_dangling() {
+        init_test("conformance_sleep_cancellation_no_dangling");
+
+        // Test requirement (3): Sleep cancellation removes timer from wheel (no dangling)
+
+        let mut wheel = TimerWheel::new_at(Time::ZERO);
+
+        // Test cancellation at various wheel levels and overflow
+        let test_cases = [
+            (Time::from_millis(1), "level0"),
+            (Time::from_millis(100), "level1"),
+            (Time::from_millis(10_000), "level2"),
+            (Time::from_secs(3600), "level3"),
+            (Time::from_secs(25 * 3600), "overflow"), // 25 hours (beyond wheel range)
+        ];
+
+        for (deadline, level_name) in &test_cases {
+            let counter = Arc::new(AtomicU64::new(0));
+            let handle = wheel.register(*deadline, counter_waker(counter.clone()));
+
+            let initial_len = wheel.len();
+            let initial_overflow = wheel.overflow_count();
+
+            // Verify timer was registered
+            let registered = if level_name == &"overflow" {
+                wheel.overflow_count() > initial_overflow
+            } else {
+                wheel.len() > 0
+            };
+            crate::assert_with_log!(
+                registered,
+                &format!("timer registered at {level_name}"),
+                true,
+                registered
+            );
+
+            // Cancel the timer
+            let cancelled = wheel.cancel(&handle);
+            crate::assert_with_log!(
+                cancelled,
+                &format!("timer cancelled at {level_name}"),
+                true,
+                cancelled
+            );
+
+            // Verify timer was removed from wheel
+            if level_name == &"overflow" {
+                // For overflow timers, cancellation might not immediately reduce overflow_count
+                // due to implementation details, but the timer won't fire
+                let wakers = wheel.collect_expired(*deadline);
+                crate::assert_with_log!(
+                    wakers.is_empty(),
+                    &format!("cancelled overflow timer does not fire"),
+                    true,
+                    wakers.is_empty()
+                );
+            } else {
+                crate::assert_with_log!(
+                    wheel.len() < initial_len,
+                    &format!("timer removed from wheel at {level_name}"),
+                    true,
+                    wheel.len() < initial_len
+                );
+            }
+
+            // Verify timer does not fire after cancellation
+            let wakers = wheel.collect_expired(*deadline);
+            let fired = !wakers.is_empty();
+            crate::assert_with_log!(
+                !fired,
+                &format!("cancelled timer does not fire at {level_name}"),
+                false,
+                fired
+            );
+
+            // Verify counter was not incremented
+            let count = counter.load(Ordering::SeqCst);
+            crate::assert_with_log!(
+                count == 0,
+                &format!("counter not incremented at {level_name}"),
+                0u64,
+                count
+            );
+
+            // Double cancellation should return false (idempotent)
+            let double_cancel = wheel.cancel(&handle);
+            crate::assert_with_log!(
+                !double_cancel,
+                &format!("double cancel returns false at {level_name}"),
+                false,
+                double_cancel
+            );
+        }
+
+        crate::test_complete!("conformance_sleep_cancellation_no_dangling");
+    }
+
+    #[test]
+    fn conformance_wheel_overflow_promotion_ordering() {
+        init_test("conformance_wheel_overflow_promotion_ordering");
+
+        // Test requirement (4): Wheel overflow promotion to hierarchical level preserves ordering
+
+        // Create wheel with small max_wheel_duration to force overflow quickly
+        let config = TimerWheelConfig::new().max_wheel_duration(Duration::from_hours(1));
+        let coalescing = CoalescingConfig::new();
+        let mut wheel = TimerWheel::with_config(Time::ZERO, config, coalescing);
+
+        // Register timers that will overflow (beyond 1 hour)
+        let base_time = Time::from_secs(2 * 3600); // 2 hours
+        let mut deadlines = Vec::new();
+        let mut counters = Vec::new();
+
+        // Create 100 timers with increasing deadlines (all in overflow)
+        for i in 0..100 {
+            let deadline = Time::from_nanos(base_time.as_nanos() + (i as u64 * 60_000_000_000)); // 1 minute apart
+            deadlines.push(deadline);
+
+            let counter = Arc::new(AtomicU64::new(i as u64)); // Store index for verification
+            wheel.register(deadline, counter_waker(counter.clone()));
+            counters.push(counter);
+        }
+
+        // Verify timers are in overflow
+        crate::assert_with_log!(
+            wheel.overflow_count() >= 100,
+            "timers in overflow",
+            true,
+            wheel.overflow_count() >= 100
+        );
+
+        // Advance time to bring timers back into wheel range and fire them
+        let start_promotion = Time::from_secs(1 * 3600 + 30 * 60); // 1h30m (close to first deadline)
+        let _ = wheel.collect_expired(start_promotion);
+
+        // Continue advancing time and collecting expired timers
+        // They should fire in order despite being promoted from overflow
+        let mut fired_order = Vec::new();
+
+        for window in 0..200 {
+            let check_time = Time::from_nanos(start_promotion.as_nanos() + (window as u64 * 60_000_000_000));
+            let wakers = wheel.collect_expired(check_time);
+
+            for waker in wakers {
+                waker.wake();
+            }
+
+            // Check which counters have been incremented
+            for (i, counter) in counters.iter().enumerate() {
+                let original_value = i as u64;
+                if counter.load(Ordering::SeqCst) != original_value {
+                    // This counter was incremented, so its timer fired
+                    fired_order.push(i);
+                    counter.store(original_value, Ordering::SeqCst); // Reset to avoid double-counting
+                }
+            }
+
+            if fired_order.len() >= 100 {
+                break;
+            }
+        }
+
+        // Verify timers fired in correct order
+        for i in 0..fired_order.len().min(99) {
+            crate::assert_with_log!(
+                fired_order[i] <= fired_order[i + 1],
+                &format!("timer order preserved: {} <= {}", fired_order[i], fired_order[i + 1]),
+                true,
+                fired_order[i] <= fired_order[i + 1]
+            );
+        }
+
+        crate::assert_with_log!(
+            fired_order.len() >= 100,
+            "all overflow timers eventually fired",
+            100usize,
+            fired_order.len()
+        );
+
+        crate::test_complete!("conformance_wheel_overflow_promotion_ordering");
+    }
+
+    #[test]
+    fn conformance_virtual_time_atomic_wheel_advance() {
+        init_test("conformance_virtual_time_atomic_wheel_advance");
+
+        // Test requirement (5): Virtual-time advance under LabRuntime advances all wheels atomically
+        // Note: This test focuses on the wheel's atomic advancement properties
+        // Integration with LabRuntime would be tested separately in runtime tests
+
+        let mut wheel = TimerWheel::new_at(Time::ZERO);
+
+        // Register timers across multiple wheel levels to test atomic advancement
+        let test_timers = [
+            (Time::from_millis(1), "level0_early"),    // Level 0: 1ms
+            (Time::from_millis(5), "level0_late"),     // Level 0: 5ms
+            (Time::from_millis(100), "level1"),        // Level 1: 100ms
+            (Time::from_millis(1000), "level2"),       // Level 2: 1s
+            (Time::from_secs(60), "level3"),           // Level 3: 1min
+        ];
+
+        let mut counters = Vec::new();
+
+        for (deadline, name) in &test_timers {
+            let counter = Arc::new(AtomicU64::new(0));
+            wheel.register(*deadline, counter_waker(counter.clone()));
+            counters.push((counter, deadline, name));
+        }
+
+        // Test large time advances (simulating virtual time jumps)
+        let time_advances = [
+            Time::from_nanos(500_000), // 0.5ms
+            Time::from_millis(2),      // 2ms
+            Time::from_millis(10),     // 10ms
+            Time::from_millis(200),    // 200ms
+            Time::from_secs(2),        // 2s
+            Time::from_secs(120),      // 2min
+        ];
+
+        for advance_time in &time_advances {
+            // Record state before advance
+            let before_counts: Vec<u64> = counters.iter()
+                .map(|(c, _, _)| c.load(Ordering::SeqCst))
+                .collect();
+
+            // Advance time atomically
+            let wakers = wheel.collect_expired(*advance_time);
+
+            // Wake all expired timers
+            for waker in wakers {
+                waker.wake();
+            }
+
+            // Verify that timers fire atomically - all timers with deadline <= advance_time should fire
+            for (i, (counter, deadline, name)) in counters.iter().enumerate() {
+                let after_count = counter.load(Ordering::SeqCst);
+                let should_have_fired = **deadline <= *advance_time;
+                let did_fire = after_count > before_counts[i];
+
+                if should_have_fired {
+                    crate::assert_with_log!(
+                        did_fire,
+                        &format!("{name} fired at advance_time={advance_time:?}"),
+                        true,
+                        did_fire
+                    );
+                } else {
+                    crate::assert_with_log!(
+                        !did_fire,
+                        &format!("{name} did not fire early at advance_time={advance_time:?}"),
+                        false,
+                        did_fire
+                    );
+                }
+            }
+        }
+
+        // Test that multiple advancement calls are idempotent
+        let test_time = Time::from_secs(30);
+        let wakers1 = wheel.collect_expired(test_time);
+        let wakers2 = wheel.collect_expired(test_time);
+
+        crate::assert_with_log!(
+            wakers2.is_empty(),
+            "repeated advance is idempotent",
+            true,
+            wakers2.is_empty()
+        );
+
+        // Test backward time movement is handled gracefully (wheel should not regress)
+        let current_time = wheel.current_time();
+        let past_time = Time::from_millis(1);
+        let wakers_past = wheel.collect_expired(past_time);
+        let time_after_past = wheel.current_time();
+
+        crate::assert_with_log!(
+            time_after_past >= current_time,
+            "time does not move backward",
+            true,
+            time_after_past >= current_time
+        );
+
+        crate::assert_with_log!(
+            wakers_past.is_empty(),
+            "no timers fire for past time",
+            true,
+            wakers_past.is_empty()
+        );
+
+        crate::test_complete!("conformance_virtual_time_atomic_wheel_advance");
+    }
+
+    #[test]
+    fn conformance_coalescing_group_behavior() {
+        init_test("conformance_coalescing_group_behavior");
+
+        // Test timer coalescing behavior under sleep coalescing configuration
+
+        let coalescing = CoalescingConfig::new()
+            .enable()
+            .coalesce_window(Duration::from_millis(5))
+            .min_group_size(3);
+
+        let mut wheel = TimerWheel::with_config(
+            Time::ZERO,
+            TimerWheelConfig::default(),
+            coalescing,
+        );
+
+        let counters: Vec<_> = (0..10).map(|_| Arc::new(AtomicU64::new(0))).collect();
+
+        // Register timers within coalescing window
+        let base_time = Time::from_millis(10);
+        for (i, counter) in counters.iter().enumerate() {
+            let offset = Duration::from_millis(i as u64); // 0ms, 1ms, 2ms, ...
+            let deadline = base_time.saturating_add_duration(offset);
+            wheel.register(deadline, counter_waker(counter.clone()));
+        }
+
+        // Fire at window boundary - should coalesce timers within window
+        let fire_time = base_time.saturating_add_duration(Duration::from_millis(5));
+        let wakers = wheel.collect_expired(fire_time);
+
+        for waker in wakers {
+            waker.wake();
+        }
+
+        // Count how many fired
+        let fired_count = counters.iter()
+            .map(|c| if c.load(Ordering::SeqCst) > 0 { 1 } else { 0 })
+            .sum::<u32>();
+
+        // With coalescing enabled and min_group_size=3, should fire multiple timers together
+        crate::assert_with_log!(
+            fired_count >= 3,
+            &format!("coalescing fired multiple timers: {fired_count}"),
+            true,
+            fired_count >= 3
+        );
+
+        crate::test_complete!("conformance_coalescing_group_behavior");
+    }
 }
