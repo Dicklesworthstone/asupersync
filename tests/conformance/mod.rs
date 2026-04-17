@@ -9,6 +9,7 @@ pub mod h2_stream_state_machine_rfc7540;
 pub mod h3_rfc9114;
 pub mod hpack_metamorphic;
 pub mod hpack_rfc7541;
+pub mod mysql_auth_switch;
 pub mod obligation_invariants;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
@@ -18,6 +19,7 @@ pub mod websocket_rfc6455;
 pub use h2_rfc7540::{H2ConformanceHarness, H2ConformanceResult};
 pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
+pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
 pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -54,6 +56,12 @@ pub enum TestCategory {
     Masking,
     Fragmentation,
     DataFrames,
+    // MySQL categories
+    PacketFormat,
+    AuthAlgorithm,
+    StateMachine,
+    PluginNegotiation,
+    SecurityValidation,
 }
 
 // Unified conformance test result
@@ -193,8 +201,40 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         .collect();
     results.extend(codec_results);
 
+    // MySQL AuthSwitch conformance
+    let mysql_harness = MySqlAuthConformanceHarness::new();
+    let mysql_results: Vec<ConformanceTestResult> = mysql_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                mysql_auth_switch::TestCategory::PacketFormat => TestCategory::PacketFormat,
+                mysql_auth_switch::TestCategory::AuthAlgorithm => TestCategory::AuthAlgorithm,
+                mysql_auth_switch::TestCategory::StateMachine => TestCategory::StateMachine,
+                mysql_auth_switch::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
+                mysql_auth_switch::TestCategory::PluginNegotiation => TestCategory::PluginNegotiation,
+                mysql_auth_switch::TestCategory::SecurityValidation => TestCategory::SecurityValidation,
+            },
+            requirement_level: match r.requirement_level {
+                mysql_auth_switch::RequirementLevel::Must => RequirementLevel::Must,
+                mysql_auth_switch::RequirementLevel::Should => RequirementLevel::Should,
+                mysql_auth_switch::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                mysql_auth_switch::TestVerdict::Pass => TestVerdict::Pass,
+                mysql_auth_switch::TestVerdict::Fail => TestVerdict::Fail,
+                mysql_auth_switch::TestVerdict::Skipped => TestVerdict::Skipped,
+                mysql_auth_switch::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.notes,
+            execution_time_ms: r.elapsed_ms,
+        })
+        .collect();
+    results.extend(mysql_results);
+
     // Additional conformance suites will be added here:
-    // - WebSocket RFC 6455 conformance
     // - gRPC conformance
 
     results
@@ -306,6 +346,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "Length-delimited, line-delimited, and byte-stream codecs"
+                },
+                "mysql_auth_switch": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "MySQL Client/Server Protocol authentication mechanisms"
                 }
             }
         }
