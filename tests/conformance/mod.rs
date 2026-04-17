@@ -5,6 +5,7 @@
 
 pub mod codec_framing;
 pub mod h2_rfc7540;
+pub mod h2_stream_state_machine_rfc7540;
 pub mod h3_rfc9114;
 pub mod hpack_metamorphic;
 pub mod hpack_rfc7541;
