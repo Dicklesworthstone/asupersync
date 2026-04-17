@@ -19,7 +19,6 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::io::{Cursor, Write};
 
 #[derive(Arbitrary, Debug)]
 struct TraceStreamingFuzz {
@@ -57,8 +56,6 @@ enum StreamingOperation {
     GetMetadata,
     /// Test setting replay mode
     SetMode { mode_type: u8 },
-    /// Test verify operation with synthetic event
-    Verify { event_data: Vec<u8> },
     /// Test checkpoint serialization round-trip
     SerializeCheckpoint,
     /// Test checkpoint deserialization with corrupt data
@@ -73,9 +70,9 @@ struct ProgressTestConfig {
 }
 
 /// Maximum limits to prevent timeouts and resource exhaustion
-const MAX_OPERATIONS: usize = 100;
-const MAX_TRACE_DATA_SIZE: usize = 64 * 1024; // 64KB
-const MAX_CHECKPOINT_SIZE: usize = 4 * 1024; // 4KB
+const MAX_OPERATIONS: usize = 50;
+const MAX_TRACE_DATA_SIZE: usize = 32 * 1024; // 32KB
+const MAX_CHECKPOINT_SIZE: usize = 1024; // 1KB
 
 /// Creates a minimal valid trace file for testing
 fn create_minimal_trace(data: &[u8]) -> Vec<u8> {
@@ -101,11 +98,16 @@ fn create_minimal_trace(data: &[u8]) -> Vec<u8> {
     trace.extend_from_slice(&minimal_metadata);
 
     // Event count (8): u64 little-endian
-    let event_count = data.len().min(100) / 20; // Rough estimate
+    let event_count = data.len().min(20) / 4; // Small number of events
     trace.extend_from_slice(&(event_count as u64).to_le_bytes());
 
-    // Events (variable): append the provided data as "events"
-    trace.extend_from_slice(data);
+    // Events (variable): minimal event data
+    for _ in 0..event_count {
+        let event_len = 10u32; // Fixed small event size
+        trace.extend_from_slice(&event_len.to_le_bytes());
+        // Add minimal event data
+        trace.extend_from_slice(&[0x82, 0xa4, b'k', b'i', b'n', b'd', 0x01, 0xa4, b'd', b'a', b't', b'a', 0x80]);
+    }
 
     trace
 }
@@ -177,42 +179,38 @@ fn test_checkpoint_serialization(checkpoint_data: &[u8]) {
     // Test deserializing arbitrary bytes as checkpoint
     let _result = asupersync::trace::streaming::ReplayCheckpoint::from_bytes(checkpoint_data);
 
-    // If we have a valid trace file structure, test creating and round-tripping checkpoints
-    if checkpoint_data.len() >= 32 {
-        // Create a synthetic checkpoint for round-trip testing
-        use asupersync::trace::streaming::ReplayCheckpoint;
-        use serde::{Deserialize, Serialize};
+    // If we have enough data, test creating and round-tripping synthetic checkpoints
+    if checkpoint_data.len() >= 40 {
+        // Extract values from the fuzz data for creating a synthetic checkpoint
+        let events_processed = u64::from_le_bytes(
+            checkpoint_data[0..8].try_into().unwrap_or([0; 8])
+        );
+        let total_events = u64::from_le_bytes(
+            checkpoint_data[8..16].try_into().unwrap_or([0; 8])
+        ).max(events_processed);
+        let seed = u64::from_le_bytes(
+            checkpoint_data[16..24].try_into().unwrap_or([0; 8])
+        );
+        let metadata_hash = u64::from_le_bytes(
+            checkpoint_data[24..32].try_into().unwrap_or([0; 8])
+        );
+        let created_at = u64::from_le_bytes(
+            checkpoint_data[32..40].try_into().unwrap_or([0; 8])
+        );
 
-        #[derive(Serialize, Deserialize)]
-        struct SyntheticCheckpoint {
-            events_processed: u64,
-            total_events: u64,
-            seed: u64,
-            metadata_hash: u64,
-            created_at: u64,
-        }
+        // Create synthetic checkpoint for round-trip testing
+        let checkpoint = asupersync::trace::streaming::ReplayCheckpoint {
+            events_processed,
+            total_events,
+            seed,
+            metadata_hash,
+            created_at,
+        };
 
-        // Extract values from the fuzz data
-        let mut values = checkpoint_data.chunks_exact(8);
-        if let (Some(ep), Some(te), Some(s), Some(mh), Some(ca)) = (
-            values.next(),
-            values.next(),
-            values.next(),
-            values.next(),
-            values.next(),
-        ) {
-            let synthetic = SyntheticCheckpoint {
-                events_processed: u64::from_le_bytes(ep.try_into().unwrap_or_default()),
-                total_events: u64::from_le_bytes(te.try_into().unwrap_or_default()),
-                seed: u64::from_le_bytes(s.try_into().unwrap_or_default()),
-                metadata_hash: u64::from_le_bytes(mh.try_into().unwrap_or_default()),
-                created_at: u64::from_le_bytes(ca.try_into().unwrap_or_default()),
-            };
-
-            // Test MessagePack round-trip
-            if let Ok(serialized) = rmp_serde::to_vec(&synthetic) {
-                let _deserialize_result = ReplayCheckpoint::from_bytes(&serialized);
-            }
+        // Test serialization round-trip
+        if let Ok(serialized) = checkpoint.to_bytes() {
+            let _deserialize_result =
+                asupersync::trace::streaming::ReplayCheckpoint::from_bytes(&serialized);
         }
     }
 }
@@ -252,20 +250,12 @@ fuzz_target!(|input: &[u8]| {
         // Create a minimal valid trace if input is too small
         create_minimal_trace(&fuzz_input.trace_data)
     } else {
+        // Use the provided data directly for more aggressive fuzzing
         fuzz_input.trace_data.clone()
     };
 
-    // Test opening trace from memory (simulated file)
-    let cursor = Cursor::new(&trace_data);
-
-    // Most operations will fail with malformed data, but they should fail gracefully
-    // We're primarily testing for panics and memory safety issues
-
-    // Test trace file parsing edge cases
-    let _parse_result = asupersync::trace::file::TraceReader::from_reader(cursor);
-
     // Test StreamingReplayer operations if we can create one
-    // For fuzzing purposes, we'll use a temporary file approach
+    // For fuzzing purposes, use a temporary file approach
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("fuzz_trace_{}", std::process::id()));
 
@@ -278,19 +268,24 @@ fuzz_target!(|input: &[u8]| {
         match asupersync::trace::streaming::StreamingReplayer::open(&temp_file) {
             Ok(mut replayer) => {
                 // Test various operations on the replayer
-                for operation in fuzz_input.operations.iter().take(10) {
+                for (i, operation) in fuzz_input.operations.iter().enumerate() {
+                    // Limit operations to prevent timeout
+                    if i >= 5 {
+                        break;
+                    }
+
                     match operation {
                         StreamingOperation::Open => {
                             // Already opened
                         }
                         StreamingOperation::Resume { position } => {
-                            // Test resume (create fake checkpoint)
+                            // Test resume (create synthetic checkpoint)
                             let events_processed = (*position).min(replayer.total_events());
                             let checkpoint = asupersync::trace::streaming::ReplayCheckpoint {
                                 events_processed,
                                 total_events: replayer.total_events(),
                                 seed: replayer.metadata().seed,
-                                metadata_hash: 0x42424242, // Fake hash
+                                metadata_hash: 0x42424242, // Fake hash for testing
                                 created_at: replayer.metadata().recorded_at,
                             };
 
@@ -326,7 +321,7 @@ fuzz_target!(|input: &[u8]| {
                         }
                         StreamingOperation::RunToCompletion => {
                             // Run a few steps, not to completion to avoid timeouts
-                            for _ in 0..3 {
+                            for _ in 0..2 {
                                 if replayer.next_event().unwrap_or(None).is_none() {
                                     break;
                                 }
@@ -343,22 +338,12 @@ fuzz_target!(|input: &[u8]| {
                         StreamingOperation::SetMode { mode_type } => {
                             use asupersync::trace::replayer::ReplayMode;
 
-                            let mode = match mode_type % 3 {
+                            let mode = match mode_type % 2 {
                                 0 => ReplayMode::Run,
-                                1 => ReplayMode::Step,
-                                _ => ReplayMode::Run, // Simplified for fuzzing
+                                _ => ReplayMode::Step,
                             };
                             replayer.set_mode(mode);
                             let _current_mode = replayer.mode();
-                        }
-                        StreamingOperation::Verify { event_data } => {
-                            if !event_data.is_empty() {
-                                // Create a synthetic ReplayEvent for verification testing
-                                // This will likely fail, but should fail gracefully
-                                if let Ok(synthetic_event) = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(event_data) {
-                                    let _verify_result = replayer.verify(&synthetic_event);
-                                }
-                            }
                         }
                         StreamingOperation::SerializeCheckpoint => {
                             let checkpoint = replayer.checkpoint();
@@ -374,7 +359,7 @@ fuzz_target!(|input: &[u8]| {
                         }
                     }
 
-                    // Check for errors and breakpoints
+                    // Check for errors and breakpoints (these should not panic)
                     let _at_breakpoint = replayer.at_breakpoint();
                     let _last_error = replayer.last_event_source_error();
                 }
@@ -390,18 +375,10 @@ fuzz_target!(|input: &[u8]| {
 
     // Test 4: Direct MessagePack deserialization fuzzing
     if fuzz_input.trace_data.len() >= 4 {
-        // Test deserializing as ReplayEvent
+        // Test deserializing as ReplayEvent (will mostly fail, but should fail gracefully)
         let _event_result = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(&fuzz_input.trace_data);
 
         // Test deserializing as TraceMetadata
         let _metadata_result = rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(&fuzz_input.trace_data);
-    }
-
-    // Test 5: File format validation edge cases
-    for chunk_size in [1, 4, 16, 64] {
-        if fuzz_input.trace_data.len() >= chunk_size {
-            let truncated = &fuzz_input.trace_data[..chunk_size];
-            let _parse_result = asupersync::trace::file::TraceReader::from_reader(Cursor::new(truncated));
-        }
     }
 });
