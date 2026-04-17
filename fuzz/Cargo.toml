@@ -11,13 +11,14 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["tls", "postgres", "kafka"] }
+asupersync = { path = "..", features = ["tls", "postgres", "kafka", "test-internals"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
 # Optional: for structured fuzzing
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 prost = "0.13"
 futures = "0.3"
 
@@ -364,6 +365,13 @@ bench = false
 [[bin]]
 name = "fuzz_h1_body_stream"
 path = "fuzz_targets/h1_body_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_event_serialization"
+path = "fuzz_targets/trace_event_serialization.rs"
 test = false
 doc = false
 bench = false

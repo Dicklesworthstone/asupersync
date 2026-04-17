@@ -1,0 +1,29 @@
+{
+  "events": [
+    {
+      "version": 1,
+      "seq": 1,
+      "time": {"nanos": 1000000},
+      "logical_time": {"process_id": 1, "sequence": 1},
+      "kind": "Spawn",
+      "data": {
+        "Task": {
+          "task": 123,
+          "region": 456
+        }
+      }
+    }
+  ],
+  "browser_schema": null,
+  "serialization_tests": {
+    "test_json": true,
+    "test_invalid_utf8": false,
+    "test_large_values": false,
+    "test_malformed_enums": false
+  },
+  "version_tests": {
+    "future_versions": [],
+    "past_versions": [],
+    "invalid_versions": []
+  }
+}
