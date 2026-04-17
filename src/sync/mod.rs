@@ -59,3 +59,5 @@ pub use semaphore::{
     AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError,
 };
 mod mutex_deadlock_test;
+#[cfg(test)]
+mod mutex_metamorphic;
