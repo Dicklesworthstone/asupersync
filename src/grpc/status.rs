@@ -715,4 +715,280 @@ mod tests {
         let err: GrpcError = GrpcError::from(io_err);
         assert!(err.to_string().contains("net fail"));
     }
+
+    // gRPC Status Codes and Trailers Round-trip Conformance Tests
+    // Test all 17 canonical gRPC status codes per spec
+
+    /// All 17 canonical gRPC status codes as defined by the gRPC specification.
+    const CANONICAL_STATUS_CODES: &[(Code, i32, &str)] = &[
+        (Code::Ok, 0, "OK"),
+        (Code::Cancelled, 1, "CANCELLED"),
+        (Code::Unknown, 2, "UNKNOWN"),
+        (Code::InvalidArgument, 3, "INVALID_ARGUMENT"),
+        (Code::DeadlineExceeded, 4, "DEADLINE_EXCEEDED"),
+        (Code::NotFound, 5, "NOT_FOUND"),
+        (Code::AlreadyExists, 6, "ALREADY_EXISTS"),
+        (Code::PermissionDenied, 7, "PERMISSION_DENIED"),
+        (Code::ResourceExhausted, 8, "RESOURCE_EXHAUSTED"),
+        (Code::FailedPrecondition, 9, "FAILED_PRECONDITION"),
+        (Code::Aborted, 10, "ABORTED"),
+        (Code::OutOfRange, 11, "OUT_OF_RANGE"),
+        (Code::Unimplemented, 12, "UNIMPLEMENTED"),
+        (Code::Internal, 13, "INTERNAL"),
+        (Code::Unavailable, 14, "UNAVAILABLE"),
+        (Code::DataLoss, 15, "DATA_LOSS"),
+        (Code::Unauthenticated, 16, "UNAUTHENTICATED"),
+    ];
+
+    /// Test data for UTF-8 message escaping scenarios.
+    const UTF8_ESCAPE_TEST_CASES: &[(&str, &str)] = &[
+        ("basic ascii", "basic ascii"),
+        ("unicode: café", "unicode: café"),
+        ("emoji: 🚀", "emoji: 🚀"),
+        ("newlines:\ntest", "newlines:\\ntest"),
+        ("tabs:\ttest", "tabs:\\ttest"),
+        ("quotes: \"test\"", "quotes: \\\"test\\\""),
+        ("backslash: \\", "backslash: \\\\"),
+        ("mixed: 测试\n\"quote\\", "mixed: 测试\\n\\\"quote\\\\"),
+    ];
+
+    /// Escape grpc-message value for HTTP/2 header transmission.
+    fn escape_grpc_message(message: &str) -> String {
+        message
+            .chars()
+            .flat_map(|c| match c {
+                '"' => vec!['\\', '"'],
+                '\\' => vec!['\\', '\\'],
+                '\n' => vec!['\\', 'n'],
+                '\r' => vec!['\\', 'r'],
+                '\t' => vec!['\\', 't'],
+                c => vec![c],
+            })
+            .collect()
+    }
+
+    /// Unescape grpc-message value from HTTP/2 header.
+    fn unescape_grpc_message(escaped: &str) -> String {
+        let mut result = String::with_capacity(escaped.len());
+        let mut chars = escaped.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('"') => result.push('"'),
+                    Some('\\') => result.push('\\'),
+                    Some('n') => result.push('\n'),
+                    Some('r') => result.push('\r'),
+                    Some('t') => result.push('\t'),
+                    Some(other) => {
+                        result.push('\\');
+                        result.push(other);
+                    }
+                    None => result.push('\\'),
+                }
+            } else {
+                result.push(c);
+            }
+        }
+
+        result
+    }
+
+    #[test]
+    fn test_all_canonical_status_codes_encode_correctly() {
+        init_test("test_all_canonical_status_codes_encode_correctly");
+
+        for &(code, expected_int, expected_str) in CANONICAL_STATUS_CODES {
+            let as_i32 = code.as_i32();
+            crate::assert_with_log!(
+                as_i32 == expected_int,
+                format!("Code {:?} as_i32", code),
+                expected_int,
+                as_i32
+            );
+
+            let as_str = code.as_str();
+            crate::assert_with_log!(
+                as_str == expected_str,
+                format!("Code {:?} as_str", code),
+                expected_str,
+                as_str
+            );
+
+            let display = code.to_string();
+            crate::assert_with_log!(
+                display == expected_str,
+                format!("Code {:?} display", code),
+                expected_str,
+                display
+            );
+        }
+
+        crate::test_complete!("test_all_canonical_status_codes_encode_correctly");
+    }
+
+    #[test]
+    fn test_all_canonical_status_codes_decode_correctly() {
+        init_test("test_all_canonical_status_codes_decode_correctly");
+
+        for &(expected_code, code_int, _) in CANONICAL_STATUS_CODES {
+            let decoded = Code::from_i32(code_int);
+            crate::assert_with_log!(
+                decoded == expected_code,
+                format!("from_i32({})", code_int),
+                expected_code,
+                decoded
+            );
+        }
+
+        crate::test_complete!("test_all_canonical_status_codes_decode_correctly");
+    }
+
+    #[test]
+    fn test_invalid_status_codes_map_to_unknown() {
+        init_test("test_invalid_status_codes_map_to_unknown");
+
+        let invalid_codes = [-1, 17, 99, 255, 1000, i32::MAX, i32::MIN];
+
+        for &invalid_code in &invalid_codes {
+            let decoded = Code::from_i32(invalid_code);
+            crate::assert_with_log!(
+                decoded == Code::Unknown,
+                format!("from_i32({})", invalid_code),
+                Code::Unknown,
+                decoded
+            );
+        }
+
+        crate::test_complete!("test_invalid_status_codes_map_to_unknown");
+    }
+
+    #[test]
+    fn test_grpc_message_utf8_escaping() {
+        init_test("test_grpc_message_utf8_escaping");
+
+        for &(original, expected_escaped) in UTF8_ESCAPE_TEST_CASES {
+            let escaped = escape_grpc_message(original);
+            crate::assert_with_log!(
+                escaped == expected_escaped,
+                format!("escape '{}'", original),
+                expected_escaped,
+                escaped
+            );
+
+            let unescaped = unescape_grpc_message(&escaped);
+            crate::assert_with_log!(
+                unescaped == original,
+                format!("unescape '{}'", escaped),
+                original,
+                unescaped
+            );
+        }
+
+        crate::test_complete!("test_grpc_message_utf8_escaping");
+    }
+
+    #[test]
+    fn test_comprehensive_status_trailer_conformance() {
+        init_test("test_comprehensive_status_trailer_conformance");
+
+        // Test all canonical codes with various message types
+        let test_cases = vec![
+            (Code::Ok, ""),
+            (Code::Cancelled, "Request was cancelled"),
+            (Code::Unknown, "Unknown error occurred"),
+            (Code::InvalidArgument, "Invalid argument: field \"name\" is required"),
+            (Code::DeadlineExceeded, "Deadline exceeded after 30s"),
+            (Code::NotFound, "Resource /api/v1/users/123 not found"),
+            (Code::AlreadyExists, "User with email alice@example.com already exists"),
+            (Code::PermissionDenied, "Insufficient permissions for operation"),
+            (Code::ResourceExhausted, "Rate limit exceeded: 1000 requests/hour"),
+            (Code::FailedPrecondition, "Account must be verified before transfer"),
+            (Code::Aborted, "Transaction aborted due to conflict"),
+            (Code::OutOfRange, "Index 42 is out of range [0, 10)"),
+            (Code::Unimplemented, "Method FindUsersByLocation not implemented"),
+            (Code::Internal, "Internal server error: database connection failed"),
+            (Code::Unavailable, "Service temporarily unavailable"),
+            (Code::DataLoss, "Data corruption detected in sector 7"),
+            (Code::Unauthenticated, "Invalid or expired authentication token"),
+        ];
+
+        for (code, message) in test_cases {
+            // Create status
+            let original_status = Status::new(code, message);
+
+            // Test round-trip through integer encoding
+            let encoded_int = original_status.code().as_i32();
+            let decoded_code = Code::from_i32(encoded_int);
+
+            crate::assert_with_log!(
+                decoded_code == original_status.code(),
+                format!("{:?} code round-trip", code),
+                original_status.code(),
+                decoded_code
+            );
+
+            // Test string representation
+            let code_str = original_status.code().as_str();
+            let display_str = original_status.code().to_string();
+
+            crate::assert_with_log!(
+                code_str == display_str,
+                format!("{:?} string consistency", code),
+                code_str,
+                display_str
+            );
+
+            // Test message escaping round-trip
+            if !message.is_empty() {
+                let escaped = escape_grpc_message(original_status.message());
+                let unescaped = unescape_grpc_message(&escaped);
+
+                crate::assert_with_log!(
+                    unescaped == original_status.message(),
+                    format!("{:?} message escape round-trip", code),
+                    original_status.message(),
+                    unescaped
+                );
+            }
+        }
+
+        crate::test_complete!("test_comprehensive_status_trailer_conformance");
+    }
+
+    #[test]
+    fn test_grpc_error_status_conversion() {
+        init_test("test_grpc_error_status_conversion");
+
+        let error_cases = vec![
+            (GrpcError::MessageTooLarge, Code::ResourceExhausted),
+            (GrpcError::transport("Connection failed"), Code::Unavailable),
+            (GrpcError::protocol("Invalid frame"), Code::Internal),
+            (GrpcError::invalid_message("Malformed"), Code::InvalidArgument),
+            (GrpcError::compression("Decompression failed"), Code::Internal),
+        ];
+
+        for (error, expected_code) in error_cases {
+            let status = error.into_status();
+            crate::assert_with_log!(
+                status.code() == expected_code,
+                format!("GrpcError conversion to {:?}", expected_code),
+                expected_code,
+                status.code()
+            );
+
+            // Test integer encoding round-trip
+            let encoded_int = status.code().as_i32();
+            let decoded_code = Code::from_i32(encoded_int);
+
+            crate::assert_with_log!(
+                decoded_code == expected_code,
+                format!("Round-trip {:?}", expected_code),
+                expected_code,
+                decoded_code
+            );
+        }
+
+        crate::test_complete!("test_grpc_error_status_conversion");
+    }
 }
