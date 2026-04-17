@@ -4,8 +4,8 @@
 
 use super::*;
 use asupersync::bytes::BytesMut;
-use asupersync::net::websocket::{Frame, Opcode, FrameCodec, apply_mask};
 use asupersync::codec::{Decoder, Encoder};
+use asupersync::net::websocket::{Frame, FrameCodec, Opcode, apply_mask};
 
 /// Run all frame format conformance tests.
 pub fn run_framing_tests() -> Vec<WsConformanceResult> {
@@ -35,7 +35,8 @@ fn test_frame_header_format() -> WsConformanceResult {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&[0x81, 0x00]); // FIN=1, opcode=1 (text), length=0
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Failed to decode minimal frame: {}", e))?
             .ok_or("Expected frame from minimal header")?;
 
@@ -126,7 +127,7 @@ fn test_reserved_bits() -> WsConformanceResult {
         // Test frame with reserved bits set (should be accepted but noted)
         let frame = Frame {
             fin: true,
-            rsv1: true,  // Extension may use this
+            rsv1: true, // Extension may use this
             rsv2: false,
             rsv3: false,
             opcode: Opcode::Text,
@@ -215,17 +216,21 @@ fn test_payload_length_encoding() -> WsConformanceResult {
             let mut codec = FrameCodec::new();
             let mut buf = BytesMut::new();
 
-            codec.encode(frame.clone(), &mut buf)
+            codec
+                .encode(frame.clone(), &mut buf)
                 .map_err(|e| format!("Failed to encode {}: {}", description, e))?;
 
-            let decoded = codec.decode(&mut buf)
+            let decoded = codec
+                .decode(&mut buf)
                 .map_err(|e| format!("Failed to decode {}: {}", description, e))?
                 .ok_or_else(|| format!("Expected frame for {}", description))?;
 
             if decoded.payload.len() != *payload_size {
                 return Err(format!(
                     "{}: payload length mismatch, expected {}, got {}",
-                    description, payload_size, decoded.payload.len()
+                    description,
+                    payload_size,
+                    decoded.payload.len()
                 ));
             }
         }
@@ -318,7 +323,7 @@ fn test_control_frame_constraints() -> WsConformanceResult {
         for opcode in &control_opcodes {
             // Control frames must have FIN=1
             let frame_without_fin = Frame {
-                fin: false,  // Invalid for control frames
+                fin: false, // Invalid for control frames
                 rsv1: false,
                 rsv2: false,
                 rsv3: false,
@@ -461,11 +466,11 @@ fn test_frame_size_limits() -> WsConformanceResult {
         // but practical implementations have smaller limits
 
         let size_boundaries = [
-            125,      // 7-bit length boundary
-            126,      // 16-bit length starts
-            127,      // Edge case
-            65535,    // 16-bit length boundary
-            65536,    // 64-bit length starts
+            125,   // 7-bit length boundary
+            126,   // 16-bit length starts
+            127,   // Edge case
+            65535, // 16-bit length boundary
+            65536, // 64-bit length starts
         ];
 
         for size in &size_boundaries {
@@ -485,7 +490,8 @@ fn test_frame_size_limits() -> WsConformanceResult {
             if frame.payload.len() != *size {
                 return Err(format!(
                     "Frame size not preserved: expected {}, got {}",
-                    size, frame.payload.len()
+                    size,
+                    frame.payload.len()
                 ));
             }
         }

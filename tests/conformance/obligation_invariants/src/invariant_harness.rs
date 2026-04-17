@@ -10,10 +10,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-
-use asupersync::types::{ObligationId, RegionId};
+use super::obligation_tracker::{InvariantViolation, InvariantViolationType, ObligationTracker};
 use asupersync::lab::{LabConfig, LabRuntime};
-use super::obligation_tracker::{ObligationTracker, InvariantViolation, InvariantViolationType};
+use asupersync::types::{ObligationId, RegionId};
 
 /// Main harness for running obligation invariant tests
 pub struct ObligationInvariantHarness {
@@ -168,7 +167,8 @@ impl ObligationInvariantHarness {
             if test.is_negative_test() {
                 // Negative test should detect expected violations
                 let expected = test.expected_violations();
-                let detected_types: Vec<_> = post_violations.iter()
+                let detected_types: Vec<_> = post_violations
+                    .iter()
                     .map(|v| v.violation_type.clone())
                     .collect();
 
@@ -233,7 +233,10 @@ impl ObligationInvariantHarness {
         let test_name = test.invariant_name().to_string();
 
         if self.config.debug_logging {
-            println!("Running stress test: {} ({} iterations)", test_name, iterations);
+            println!(
+                "Running stress test: {} ({} iterations)",
+                test_name, iterations
+            );
         }
 
         let stress_start = Instant::now();
@@ -243,15 +246,15 @@ impl ObligationInvariantHarness {
         // Run tests serially for simplicity
         for _ in 0..iterations {
             let test_clone = test.clone();
-            let mut harness_clone = ObligationInvariantHarness::new(
-                self.config.clone(),
-            );
+            let mut harness_clone = ObligationInvariantHarness::new(self.config.clone());
 
             let result = harness_clone.run_test(test_clone).await;
 
             // Count violation types
             for violation in &result.violations {
-                *violation_counts.entry(violation.violation_type.clone()).or_insert(0) += 1;
+                *violation_counts
+                    .entry(violation.violation_type.clone())
+                    .or_insert(0) += 1;
             }
             all_results.push(result);
         }
@@ -275,9 +278,18 @@ impl ObligationInvariantHarness {
     /// Calculate test suite summary statistics
     fn calculate_summary(&self, results: &[InvariantTestResult]) -> TestSuiteSummary {
         let total = results.len();
-        let passed = results.iter().filter(|r| r.outcome == TestOutcome::Pass).count();
-        let failed = results.iter().filter(|r| r.outcome == TestOutcome::Fail).count();
-        let timeouts = results.iter().filter(|r| r.outcome == TestOutcome::Timeout).count();
+        let passed = results
+            .iter()
+            .filter(|r| r.outcome == TestOutcome::Pass)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.outcome == TestOutcome::Fail)
+            .count();
+        let timeouts = results
+            .iter()
+            .filter(|r| r.outcome == TestOutcome::Timeout)
+            .count();
         let errors = total - passed - failed - timeouts;
 
         let total_violations: usize = results.iter().map(|r| r.violations.len()).sum();
@@ -289,7 +301,11 @@ impl ObligationInvariantHarness {
             timeouts,
             errors,
             total_violations,
-            success_rate: if total > 0 { passed as f64 / total as f64 } else { 0.0 },
+            success_rate: if total > 0 {
+                passed as f64 / total as f64
+            } else {
+                0.0
+            },
         }
     }
 
@@ -298,16 +314,28 @@ impl ObligationInvariantHarness {
         let mut peak = TestMetrics::default();
 
         for result in results {
-            peak.obligations_created = peak.obligations_created.max(result.metrics.obligations_created);
-            peak.obligations_resolved = peak.obligations_resolved.max(result.metrics.obligations_resolved);
+            peak.obligations_created = peak
+                .obligations_created
+                .max(result.metrics.obligations_created);
+            peak.obligations_resolved = peak
+                .obligations_resolved
+                .max(result.metrics.obligations_resolved);
             peak.regions_created = peak.regions_created.max(result.metrics.regions_created);
             peak.regions_closed = peak.regions_closed.max(result.metrics.regions_closed);
-            peak.resources_allocated = peak.resources_allocated.max(result.metrics.resources_allocated);
+            peak.resources_allocated = peak
+                .resources_allocated
+                .max(result.metrics.resources_allocated);
             peak.resources_freed = peak.resources_freed.max(result.metrics.resources_freed);
-            peak.cancellation_events = peak.cancellation_events.max(result.metrics.cancellation_events);
-            peak.peak_active_obligations = peak.peak_active_obligations.max(result.metrics.peak_active_obligations);
+            peak.cancellation_events = peak
+                .cancellation_events
+                .max(result.metrics.cancellation_events);
+            peak.peak_active_obligations = peak
+                .peak_active_obligations
+                .max(result.metrics.peak_active_obligations);
 
-            if let (Some(existing), Some(new)) = (peak.peak_memory_usage, result.metrics.peak_memory_usage) {
+            if let (Some(existing), Some(new)) =
+                (peak.peak_memory_usage, result.metrics.peak_memory_usage)
+            {
                 peak.peak_memory_usage = Some(existing.max(new));
             } else if result.metrics.peak_memory_usage.is_some() {
                 peak.peak_memory_usage = result.metrics.peak_memory_usage;
@@ -389,9 +417,17 @@ impl fmt::Display for TestOutcome {
 
 impl fmt::Display for TestSuiteSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Tests: {}, Passed: {}, Failed: {}, Timeouts: {}, Errors: {}, Success Rate: {:.1}%, Violations: {}",
-               self.total_tests, self.passed, self.failed, self.timeouts, self.errors,
-               self.success_rate * 100.0, self.total_violations)
+        write!(
+            f,
+            "Tests: {}, Passed: {}, Failed: {}, Timeouts: {}, Errors: {}, Success Rate: {:.1}%, Violations: {}",
+            self.total_tests,
+            self.passed,
+            self.failed,
+            self.timeouts,
+            self.errors,
+            self.success_rate * 100.0,
+            self.total_violations
+        )
     }
 }
 
@@ -407,9 +443,15 @@ macro_rules! invariant_test {
         struct InvariantTestImpl;
 
         impl ObligationInvariantTest for InvariantTestImpl {
-            fn invariant_name(&self) -> &str { $name }
-            fn test_category(&self) -> InvariantTestCategory { $category }
-            fn description(&self) -> &str { $desc }
+            fn invariant_name(&self) -> &str {
+                $name
+            }
+            fn test_category(&self) -> InvariantTestCategory {
+                $category
+            }
+            fn description(&self) -> &str {
+                $desc
+            }
 
             fn run_test<'a>(
                 &'a self,
@@ -448,13 +490,20 @@ mod tests {
         // Simple test that should pass
         struct PassingTest;
         impl ObligationInvariantTest for PassingTest {
-            fn invariant_name(&self) -> &str { "passing_test" }
-            fn test_category(&self) -> InvariantTestCategory { InvariantTestCategory::NoLeakValidation }
-            fn description(&self) -> &str { "A test that should pass" }
+            fn invariant_name(&self) -> &str {
+                "passing_test"
+            }
+            fn test_category(&self) -> InvariantTestCategory {
+                InvariantTestCategory::NoLeakValidation
+            }
+            fn description(&self) -> &str {
+                "A test that should pass"
+            }
 
-            fn run_test<'a>(&'a self, _ctx: &'a ObligationTestContext)
-                -> Pin<Box<dyn Future<Output = InvariantTestResult> + Send + 'a>>
-            {
+            fn run_test<'a>(
+                &'a self,
+                _ctx: &'a ObligationTestContext,
+            ) -> Pin<Box<dyn Future<Output = InvariantTestResult> + Send + 'a>> {
                 Box::pin(async move {
                     InvariantTestResult {
                         test_name: "passing_test".to_string(),
@@ -467,7 +516,9 @@ mod tests {
                 })
             }
 
-            fn validate_invariant(&self, _tracker: &ObligationTracker) -> bool { true }
+            fn validate_invariant(&self, _tracker: &ObligationTracker) -> bool {
+                true
+            }
         }
 
         // Use futures executor to run async test in sync context

@@ -1,7 +1,7 @@
 //! Resource limits conformance tests.
 
 use super::*;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, LengthDelimitedCodec, LinesCodec};
 
 /// Run all resource limits tests.
@@ -92,7 +92,8 @@ fn test_memory_usage_bounds() -> CodecConformanceResult {
             buf.put_u32(data.len() as u32);
             buf.extend_from_slice(data.as_bytes());
 
-            let _frame = codec.decode(&mut buf)
+            let _frame = codec
+                .decode(&mut buf)
                 .map_err(|e| format!("Decode {} failed: {e}", i))?
                 .ok_or_else(|| format!("Expected frame {}", i))?;
         }
@@ -121,7 +122,8 @@ fn test_buffer_growth_limits() -> CodecConformanceResult {
         buf.put_u32(5 * 1024 * 1024); // 5MB frame
 
         // Should not error until we actually try to read 5MB of data
-        let result = codec.decode(&mut buf)
+        let result = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?;
 
         match result {

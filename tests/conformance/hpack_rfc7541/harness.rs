@@ -121,7 +121,8 @@ impl HpackConformanceHarness {
     pub fn decode_headers(&self, encoded: &[u8]) -> Result<Vec<Header>, String> {
         let mut decoder = Decoder::new();
         let mut src = Bytes::copy_from_slice(encoded);
-        decoder.decode(&mut src)
+        decoder
+            .decode(&mut src)
             .map_err(|e| format!("Decode error: {e}"))
     }
 
@@ -184,15 +185,21 @@ impl Default for HpackConformanceHarness {
 struct StaticTableTest;
 
 impl ConformanceTest for StaticTableTest {
-    fn id(&self) -> &str { "RFC7541-AppA-1" }
+    fn id(&self) -> &str {
+        "RFC7541-AppA-1"
+    }
 
     fn description(&self) -> &str {
         "Static table entries match RFC 7541 Appendix A"
     }
 
-    fn category(&self) -> TestCategory { TestCategory::StaticTable }
+    fn category(&self) -> TestCategory {
+        TestCategory::StaticTable
+    }
 
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test that static table lookups work correctly
@@ -222,7 +229,9 @@ impl ConformanceTest for StaticTableTest {
                 requirement_level: self.requirement_level(),
                 verdict: TestVerdict::Fail,
                 error_message: Some(format!(
-                    "Expected static index 2 (0x82), got: {:02x?}", encoded)),
+                    "Expected static index 2 (0x82), got: {:02x?}",
+                    encoded
+                )),
                 execution_time_ms: 0,
             }
         }
@@ -236,15 +245,21 @@ impl ConformanceTest for StaticTableTest {
 struct DynamicTableEvictionTest;
 
 impl ConformanceTest for DynamicTableEvictionTest {
-    fn id(&self) -> &str { "RFC7541-4.1-1" }
+    fn id(&self) -> &str {
+        "RFC7541-4.1-1"
+    }
 
     fn description(&self) -> &str {
         "Dynamic table evicts oldest entries when size limit exceeded"
     }
 
-    fn category(&self) -> TestCategory { TestCategory::DynamicTable }
+    fn category(&self) -> TestCategory {
+        TestCategory::DynamicTable
+    }
 
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test dynamic table eviction by adding entries that exceed table size
@@ -282,15 +297,21 @@ impl ConformanceTest for DynamicTableEvictionTest {
 struct DynamicTableSizeUpdateTest;
 
 impl ConformanceTest for DynamicTableSizeUpdateTest {
-    fn id(&self) -> &str { "RFC7541-4.2-1" }
+    fn id(&self) -> &str {
+        "RFC7541-4.2-1"
+    }
 
     fn description(&self) -> &str {
         "Dynamic table size update emitted when size changes"
     }
 
-    fn category(&self) -> TestCategory { TestCategory::DynamicTable }
+    fn category(&self) -> TestCategory {
+        TestCategory::DynamicTable
+    }
 
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Note: This test would require access to encoder internals
@@ -315,15 +336,21 @@ impl ConformanceTest for DynamicTableSizeUpdateTest {
 struct HuffmanRoundTripTest;
 
 impl ConformanceTest for HuffmanRoundTripTest {
-    fn id(&self) -> &str { "RFC7541-AppB-1" }
+    fn id(&self) -> &str {
+        "RFC7541-AppB-1"
+    }
 
     fn description(&self) -> &str {
         "Huffman encoding/decoding preserves header values"
     }
 
-    fn category(&self) -> TestCategory { TestCategory::Huffman }
+    fn category(&self) -> TestCategory {
+        TestCategory::Huffman
+    }
 
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         let test_headers = vec![
@@ -393,21 +420,27 @@ impl ConformanceTest for HuffmanRoundTripTest {
 struct IndexedHeaderFieldTest;
 
 impl ConformanceTest for IndexedHeaderFieldTest {
-    fn id(&self) -> &str { "RFC7541-6.1-1" }
+    fn id(&self) -> &str {
+        "RFC7541-6.1-1"
+    }
 
     fn description(&self) -> &str {
         "Indexed header field representation for static table hits"
     }
 
-    fn category(&self) -> TestCategory { TestCategory::Indexing }
+    fn category(&self) -> TestCategory {
+        TestCategory::Indexing
+    }
 
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test that common static table entries use indexed representation
         let headers = vec![
-            Header::new(":method", "GET"),  // Index 2
-            Header::new(":path", "/"),      // Index 4
+            Header::new(":method", "GET"),   // Index 2
+            Header::new(":path", "/"),       // Index 4
             Header::new(":scheme", "https"), // Index 7
         ];
 
@@ -417,7 +450,9 @@ impl ConformanceTest for IndexedHeaderFieldTest {
         if encoded.len() >= 3 &&
            encoded[0] & 0x80 == 0x80 &&  // Indexed field
            encoded[1] & 0x80 == 0x80 &&  // Indexed field
-           encoded[2] & 0x80 == 0x80 {   // Indexed field
+           encoded[2] & 0x80 == 0x80
+        {
+            // Indexed field
             ConformanceTestResult {
                 test_id: self.id().to_string(),
                 description: self.description().to_string(),
@@ -436,7 +471,8 @@ impl ConformanceTest for IndexedHeaderFieldTest {
                 verdict: TestVerdict::Fail,
                 error_message: Some(format!(
                     "Expected indexed field patterns, got: {:02x?}",
-                    &encoded[..std::cmp::min(encoded.len(), 10)])),
+                    &encoded[..std::cmp::min(encoded.len(), 10)]
+                )),
                 execution_time_ms: 0,
             }
         }
@@ -446,15 +482,21 @@ impl ConformanceTest for IndexedHeaderFieldTest {
 struct LiteralHeaderFieldTest;
 
 impl ConformanceTest for LiteralHeaderFieldTest {
-    fn id(&self) -> &str { "RFC7541-6.2-1" }
+    fn id(&self) -> &str {
+        "RFC7541-6.2-1"
+    }
 
     fn description(&self) -> &str {
         "Literal header field representation for custom headers"
     }
 
-    fn category(&self) -> TestCategory { TestCategory::Indexing }
+    fn category(&self) -> TestCategory {
+        TestCategory::Indexing
+    }
 
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test custom headers that should use literal representation
@@ -467,17 +509,15 @@ impl ConformanceTest for LiteralHeaderFieldTest {
         let decoded = harness.decode_headers(&encoded);
 
         match decoded {
-            Ok(decoded_headers) if decoded_headers == headers => {
-                ConformanceTestResult {
-                    test_id: self.id().to_string(),
-                    description: self.description().to_string(),
-                    category: self.category(),
-                    requirement_level: self.requirement_level(),
-                    verdict: TestVerdict::Pass,
-                    error_message: None,
-                    execution_time_ms: 0,
-                }
-            }
+            Ok(decoded_headers) if decoded_headers == headers => ConformanceTestResult {
+                test_id: self.id().to_string(),
+                description: self.description().to_string(),
+                category: self.category(),
+                requirement_level: self.requirement_level(),
+                verdict: TestVerdict::Pass,
+                error_message: None,
+                execution_time_ms: 0,
+            },
             Ok(_) => ConformanceTestResult {
                 test_id: self.id().to_string(),
                 description: self.description().to_string(),
@@ -495,7 +535,7 @@ impl ConformanceTest for LiteralHeaderFieldTest {
                 verdict: TestVerdict::Fail,
                 error_message: Some(format!("Decoding failed: {e}")),
                 execution_time_ms: 0,
-            }
+            },
         }
     }
 }
@@ -507,10 +547,18 @@ impl ConformanceTest for LiteralHeaderFieldTest {
 struct ContextSynchronizationTest;
 
 impl ConformanceTest for ContextSynchronizationTest {
-    fn id(&self) -> &str { "RFC7541-4.3-1" }
-    fn description(&self) -> &str { "Context synchronization between encoder/decoder" }
-    fn category(&self) -> TestCategory { TestCategory::Context }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &str {
+        "RFC7541-4.3-1"
+    }
+    fn description(&self) -> &str {
+        "Context synchronization between encoder/decoder"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Context
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Placeholder - would need stateful encoder/decoder pairs
@@ -529,17 +577,25 @@ impl ConformanceTest for ContextSynchronizationTest {
 struct MalformedInputTest;
 
 impl ConformanceTest for MalformedInputTest {
-    fn id(&self) -> &str { "RFC7541-Err-1" }
-    fn description(&self) -> &str { "Malformed input handling" }
-    fn category(&self) -> TestCategory { TestCategory::ErrorHandling }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &str {
+        "RFC7541-Err-1"
+    }
+    fn description(&self) -> &str {
+        "Malformed input handling"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::ErrorHandling
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test various malformed inputs
         let malformed_inputs = vec![
             vec![0xff, 0xff, 0xff, 0xff], // Invalid patterns
             vec![0x80],                   // Incomplete indexed field
-            vec![0x40, 0x00],            // Invalid string length
+            vec![0x40, 0x00],             // Invalid string length
         ];
 
         let mut errors_handled = 0;
@@ -576,10 +632,18 @@ impl ConformanceTest for MalformedInputTest {
 struct HeaderRoundTripTest;
 
 impl ConformanceTest for HeaderRoundTripTest {
-    fn id(&self) -> &str { "RFC7541-RT-1" }
-    fn description(&self) -> &str { "Header encoding/decoding round-trip integrity" }
-    fn category(&self) -> TestCategory { TestCategory::RoundTrip }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &str {
+        "RFC7541-RT-1"
+    }
+    fn description(&self) -> &str {
+        "Header encoding/decoding round-trip integrity"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::RoundTrip
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         let test_cases = vec![
@@ -597,24 +661,28 @@ impl ConformanceTest for HeaderRoundTripTest {
             let encoded = harness.encode_headers(&headers, false);
             match harness.decode_headers(&encoded) {
                 Ok(decoded) if decoded == headers => continue,
-                Ok(_) => return ConformanceTestResult {
-                    test_id: self.id().to_string(),
-                    description: self.description().to_string(),
-                    category: self.category(),
-                    requirement_level: self.requirement_level(),
-                    verdict: TestVerdict::Fail,
-                    error_message: Some("Round-trip headers don't match".to_string()),
-                    execution_time_ms: 0,
-                },
-                Err(e) => return ConformanceTestResult {
-                    test_id: self.id().to_string(),
-                    description: self.description().to_string(),
-                    category: self.category(),
-                    requirement_level: self.requirement_level(),
-                    verdict: TestVerdict::Fail,
-                    error_message: Some(format!("Round-trip failed: {e}")),
-                    execution_time_ms: 0,
-                },
+                Ok(_) => {
+                    return ConformanceTestResult {
+                        test_id: self.id().to_string(),
+                        description: self.description().to_string(),
+                        category: self.category(),
+                        requirement_level: self.requirement_level(),
+                        verdict: TestVerdict::Fail,
+                        error_message: Some("Round-trip headers don't match".to_string()),
+                        execution_time_ms: 0,
+                    };
+                }
+                Err(e) => {
+                    return ConformanceTestResult {
+                        test_id: self.id().to_string(),
+                        description: self.description().to_string(),
+                        category: self.category(),
+                        requirement_level: self.requirement_level(),
+                        verdict: TestVerdict::Fail,
+                        error_message: Some(format!("Round-trip failed: {e}")),
+                        execution_time_ms: 0,
+                    };
+                }
             }
         }
 

@@ -162,11 +162,7 @@ impl ObligationTracker {
     }
 
     /// Track creation of a new obligation
-    pub fn track_obligation_creation(
-        &self,
-        obligation_id: ObligationId,
-        parent_region: RegionId,
-    ) {
+    pub fn track_obligation_creation(&self, obligation_id: ObligationId, parent_region: RegionId) {
         let mut inner = self.inner.lock().unwrap();
 
         let metadata = ObligationMetadata {
@@ -201,8 +197,11 @@ impl ObligationTracker {
                     obligation_id: Some(obligation_id),
                     region_id: Some(metadata.parent_region),
                     detection_time: Instant::now(),
-                    description: format!("Obligation {} resolved with {} uncleaned resources",
-                                       obligation_id.0, metadata.resources.len()),
+                    description: format!(
+                        "Obligation {} resolved with {} uncleaned resources",
+                        obligation_id.0,
+                        metadata.resources.len()
+                    ),
                     stack_trace: None,
                 };
                 inner.invariant_violations.push(violation);
@@ -212,7 +211,11 @@ impl ObligationTracker {
             inner.active_obligations.remove(&obligation_id);
 
             // Remove from parent region
-            if let Some(region) = inner.region_hierarchy.regions.get_mut(&metadata.parent_region) {
+            if let Some(region) = inner
+                .region_hierarchy
+                .regions
+                .get_mut(&metadata.parent_region)
+            {
                 region.obligations.remove(&obligation_id);
             }
         }
@@ -227,7 +230,9 @@ impl ObligationTracker {
 
             // Mark cancel token as cancelled
             if let Some(ref token) = metadata.cancel_token {
-                token.is_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                token
+                    .is_cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
 
             // Propagate cancellation to children
@@ -256,11 +261,16 @@ impl ObligationTracker {
 
         // Update parent-child relationships
         if let Some(parent) = parent_region {
-            inner.region_hierarchy.parent_child_map
+            inner
+                .region_hierarchy
+                .parent_child_map
                 .entry(parent)
                 .or_default()
                 .insert(region_id);
-            inner.region_hierarchy.child_parent_map.insert(region_id, parent);
+            inner
+                .region_hierarchy
+                .child_parent_map
+                .insert(region_id, parent);
         }
     }
 
@@ -280,8 +290,10 @@ impl ObligationTracker {
                     obligation_id: None,
                     region_id: Some(region_id),
                     detection_time: Instant::now(),
-                    description: format!("Region {} close initiated with {} active obligations",
-                                       region_id.0, active_count),
+                    description: format!(
+                        "Region {} close initiated with {} active obligations",
+                        region_id.0, active_count
+                    ),
                     stack_trace: None,
                 };
                 inner.invariant_violations.push(violation);
@@ -303,8 +315,11 @@ impl ObligationTracker {
                     obligation_id: None,
                     region_id: Some(region_id),
                     detection_time: Instant::now(),
-                    description: format!("Region {} closed with {} unresolved obligations",
-                                       region_id.0, region.obligations.len()),
+                    description: format!(
+                        "Region {} closed with {} unresolved obligations",
+                        region_id.0,
+                        region.obligations.len()
+                    ),
                     stack_trace: None,
                 };
                 inner.invariant_violations.push(violation);
@@ -323,34 +338,46 @@ impl ObligationTracker {
         // Update resource tracker
         match resource {
             ResourceHandle::FileDescriptor(fd) => {
-                inner.resource_tracker.file_descriptors
+                inner
+                    .resource_tracker
+                    .file_descriptors
                     .entry(obligation_id)
                     .or_default()
                     .insert(fd);
-            },
+            }
             ResourceHandle::MemoryAllocation(ptr) => {
-                inner.resource_tracker.memory_allocations
+                inner
+                    .resource_tracker
+                    .memory_allocations
                     .entry(obligation_id)
                     .or_default()
                     .insert(ptr);
-            },
+            }
             ResourceHandle::WakerRegistration(handle) => {
-                inner.resource_tracker.waker_registrations
+                inner
+                    .resource_tracker
+                    .waker_registrations
                     .entry(obligation_id)
                     .or_default()
                     .insert(handle);
-            },
+            }
             ResourceHandle::NetworkConnection(handle) => {
-                inner.resource_tracker.network_connections
+                inner
+                    .resource_tracker
+                    .network_connections
                     .entry(obligation_id)
                     .or_default()
                     .insert(handle);
-            },
+            }
         }
     }
 
     /// Track resource deallocation for an obligation
-    pub fn track_resource_deallocation(&self, obligation_id: ObligationId, resource: ResourceHandle) {
+    pub fn track_resource_deallocation(
+        &self,
+        obligation_id: ObligationId,
+        resource: ResourceHandle,
+    ) {
         let mut inner = self.inner.lock().unwrap();
 
         if let Some(metadata) = inner.active_obligations.get_mut(&obligation_id) {
@@ -360,25 +387,41 @@ impl ObligationTracker {
         // Update resource tracker
         match resource {
             ResourceHandle::FileDescriptor(fd) => {
-                if let Some(fds) = inner.resource_tracker.file_descriptors.get_mut(&obligation_id) {
+                if let Some(fds) = inner
+                    .resource_tracker
+                    .file_descriptors
+                    .get_mut(&obligation_id)
+                {
                     let _: bool = fds.remove(&fd);
                 }
-            },
+            }
             ResourceHandle::MemoryAllocation(ptr) => {
-                if let Some(ptrs) = inner.resource_tracker.memory_allocations.get_mut(&obligation_id) {
+                if let Some(ptrs) = inner
+                    .resource_tracker
+                    .memory_allocations
+                    .get_mut(&obligation_id)
+                {
                     let _: bool = ptrs.remove(&ptr);
                 }
-            },
+            }
             ResourceHandle::WakerRegistration(handle) => {
-                if let Some(wakers) = inner.resource_tracker.waker_registrations.get_mut(&obligation_id) {
+                if let Some(wakers) = inner
+                    .resource_tracker
+                    .waker_registrations
+                    .get_mut(&obligation_id)
+                {
                     let _: bool = wakers.remove(&handle);
                 }
-            },
+            }
             ResourceHandle::NetworkConnection(handle) => {
-                if let Some(conns) = inner.resource_tracker.network_connections.get_mut(&obligation_id) {
+                if let Some(conns) = inner
+                    .resource_tracker
+                    .network_connections
+                    .get_mut(&obligation_id)
+                {
                     let _: bool = conns.remove(&handle);
                 }
-            },
+            }
         }
     }
 
@@ -427,16 +470,22 @@ impl ObligationTracker {
 
         // Check for obligation leaks
         for (obligation_id, metadata) in &inner.active_obligations {
-            if matches!(metadata.state, ObligationState::Active | ObligationState::Resolving) {
+            if matches!(
+                metadata.state,
+                ObligationState::Active | ObligationState::Resolving
+            ) {
                 let age = metadata.creation_time.elapsed();
-                if age > std::time::Duration::from_secs(30) { // Configurable timeout
+                if age > std::time::Duration::from_secs(30) {
+                    // Configurable timeout
                     violations.push(InvariantViolation {
                         violation_type: InvariantViolationType::ObligationLeak,
                         obligation_id: Some(*obligation_id),
                         region_id: Some(metadata.parent_region),
                         detection_time: Instant::now(),
-                        description: format!("Obligation {} active for {:?}, potential leak",
-                                           obligation_id.0, age),
+                        description: format!(
+                            "Obligation {} active for {:?}, potential leak",
+                            obligation_id.0, age
+                        ),
                         stack_trace: None,
                     });
                 }
@@ -445,16 +494,21 @@ impl ObligationTracker {
 
         // Check for resource leaks
         for (obligation_id, metadata) in &inner.active_obligations {
-            if matches!(metadata.state, ObligationState::Resolved | ObligationState::Cancelled)
-                && !metadata.resources.is_empty()
+            if matches!(
+                metadata.state,
+                ObligationState::Resolved | ObligationState::Cancelled
+            ) && !metadata.resources.is_empty()
             {
                 violations.push(InvariantViolation {
                     violation_type: InvariantViolationType::ResourceLeak,
                     obligation_id: Some(*obligation_id),
                     region_id: Some(metadata.parent_region),
                     detection_time: Instant::now(),
-                    description: format!("Obligation {} has {} leaked resources after completion",
-                                       obligation_id.0, metadata.resources.len()),
+                    description: format!(
+                        "Obligation {} has {} leaked resources after completion",
+                        obligation_id.0,
+                        metadata.resources.len()
+                    ),
                     stack_trace: None,
                 });
             }

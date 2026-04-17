@@ -53,7 +53,7 @@ fn test_connection_preface() -> H2ConformanceResult {
             b"PRI * HTTP/1.1\r\n\r\nSM\r\n\r\n", // Wrong HTTP version
             b"GET / HTTP/2.0\r\n\r\nSM\r\n\r\n", // Wrong method
             b"PRI * HTTP/2.0\r\n\r\nXX\r\n\r\n", // Wrong magic string
-            b"PRI * HTTP/2.0\r\n\r\n", // Truncated
+            b"PRI * HTTP/2.0\r\n\r\n",           // Truncated
         ];
 
         for (i, invalid_preface) in invalid_prefixes.iter().enumerate() {
@@ -81,7 +81,7 @@ fn test_http2_identification() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // HTTP/2 version identification in ALPN
         let alpn_protocols: &[&[u8]] = &[
-            b"h2", // HTTP/2 over TLS
+            b"h2",  // HTTP/2 over TLS
             b"h2c", // HTTP/2 over cleartext
         ];
 
@@ -113,7 +113,10 @@ fn test_http2_identification() -> H2ConformanceResult {
         for protocol in invalid_protocols {
             // These should not be treated as HTTP/2
             if *protocol == b"h2" || *protocol == b"h2c" {
-                return Err(format!("Invalid protocol {:?} matches valid protocol", protocol));
+                return Err(format!(
+                    "Invalid protocol {:?} matches valid protocol",
+                    protocol
+                ));
             }
         }
 
@@ -169,29 +172,28 @@ fn test_connection_header_processing() -> H2ConformanceResult {
         }
 
         // Pseudo-headers that ARE required in HTTP/2
-        let required_pseudo_headers = [
-            ":method",
-            ":path",
-            ":scheme",
-            ":authority",
-        ];
+        let required_pseudo_headers = [":method", ":path", ":scheme", ":authority"];
 
         for pseudo_header in &required_pseudo_headers {
             // These must be present in HTTP/2 request headers
             if !pseudo_header.starts_with(':') {
-                return Err(format!("Pseudo-header {} must start with ':'", pseudo_header));
+                return Err(format!(
+                    "Pseudo-header {} must start with ':'",
+                    pseudo_header
+                ));
             }
         }
 
         // Response pseudo-headers
-        let response_pseudo_headers = [
-            ":status",
-        ];
+        let response_pseudo_headers = [":status"];
 
         for pseudo_header in &response_pseudo_headers {
             // These must be present in HTTP/2 response headers
             if !pseudo_header.starts_with(':') {
-                return Err(format!("Response pseudo-header {} must start with ':'", pseudo_header));
+                return Err(format!(
+                    "Response pseudo-header {} must start with ':'",
+                    pseudo_header
+                ));
             }
         }
 
@@ -223,7 +225,8 @@ fn test_connection_upgrade_from_http1() -> H2ConformanceResult {
             match *header_name {
                 "Connection" => {
                     // Must include "Upgrade" and "HTTP2-Settings" tokens
-                    if !header_value.contains("Upgrade") || !header_value.contains("HTTP2-Settings") {
+                    if !header_value.contains("Upgrade") || !header_value.contains("HTTP2-Settings")
+                    {
                         return Err(format!(
                             "Connection header missing required tokens: {}",
                             header_value
@@ -254,7 +257,8 @@ fn test_connection_upgrade_from_http1() -> H2ConformanceResult {
         }
 
         // Successful upgrade response
-        let upgrade_response = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n";
+        let upgrade_response =
+            "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n";
 
         // After successful upgrade:
         // - Client sends HTTP/2 connection preface
@@ -305,8 +309,8 @@ fn test_prior_knowledge_connection() -> H2ConformanceResult {
         ];
 
         let server_sequence = [
-            "settings_frame",     // Server settings
-            "settings_ack",       // ACK of client settings
+            "settings_frame", // Server settings
+            "settings_ack",   // ACK of client settings
         ];
 
         // Validate sequence order
@@ -428,9 +432,9 @@ fn test_goaway_frame_processing() -> H2ConformanceResult {
 
         let goaway_test_cases = [
             // (last_stream_id, error_code, has_debug_data)
-            (0u32, 0u32, false), // No streams processed, graceful shutdown
-            (5u32, 0u32, false), // Last stream 5, graceful shutdown
-            (100u32, 1u32, true), // Last stream 100, protocol error with debug
+            (0u32, 0u32, false),       // No streams processed, graceful shutdown
+            (5u32, 0u32, false),       // Last stream 5, graceful shutdown
+            (100u32, 1u32, true),      // Last stream 100, protocol error with debug
             (0x7FFFFFFF, 2u32, false), // Maximum stream ID, internal error
         ];
 
@@ -464,10 +468,11 @@ fn test_goaway_frame_processing() -> H2ConformanceResult {
         // Multiple GOAWAY frames are allowed
         let goaway_sequence = [100u32, 50u32, 25u32, 0u32];
         for i in 1..goaway_sequence.len() {
-            if goaway_sequence[i] > goaway_sequence[i-1] {
+            if goaway_sequence[i] > goaway_sequence[i - 1] {
                 return Err(format!(
                     "GOAWAY last stream ID cannot increase: {} > {}",
-                    goaway_sequence[i], goaway_sequence[i-1]
+                    goaway_sequence[i],
+                    goaway_sequence[i - 1]
                 ));
             }
         }
@@ -498,7 +503,11 @@ fn test_connection_error_handling() -> H2ConformanceResult {
             (4u32, "SETTINGS_TIMEOUT", "SETTINGS ACK not received"),
             (5u32, "STREAM_CLOSED", "Frame received for closed stream"),
             (6u32, "FRAME_SIZE_ERROR", "Frame size constraints violated"),
-            (9u32, "COMPRESSION_ERROR", "HPACK compression state corrupted"),
+            (
+                9u32,
+                "COMPRESSION_ERROR",
+                "HPACK compression state corrupted",
+            ),
             (10u32, "CONNECT_ERROR", "TCP connection broken for CONNECT"),
             (11u32, "ENHANCE_CALM", "Excessive load or resource usage"),
             (12u32, "INADEQUATE_SECURITY", "TLS requirements not met"),

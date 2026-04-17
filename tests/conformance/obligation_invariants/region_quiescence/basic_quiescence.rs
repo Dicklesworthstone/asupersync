@@ -8,16 +8,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::time::sleep;
 use asupersync::lab::{LabConfig, LabRuntime};
+use tokio::time::sleep;
 
 use crate::runtime::{ObligationId, RegionId};
 use crate::tests::conformance::obligation_invariants::src::{
     invariant_harness::{
-        ObligationInvariantTest, InvariantTestCategory, ObligationTestContext, InvariantTestResult,
-        TestOutcome, TestMetrics,
+        InvariantTestCategory, InvariantTestResult, ObligationInvariantTest, ObligationTestContext,
+        TestMetrics, TestOutcome,
     },
-    obligation_tracker::{ObligationTracker, InvariantViolationType},
+    obligation_tracker::{InvariantViolationType, ObligationTracker},
 };
 
 /// Test basic region quiescence - region waits for obligations
@@ -52,7 +52,8 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
             // Create obligations
             let obligation_ids: Vec<_> = (0..5).map(|i| ObligationId(500 + i)).collect();
             for &obligation_id in &obligation_ids {
-                ctx.tracker.track_obligation_creation(obligation_id, region_id);
+                ctx.tracker
+                    .track_obligation_creation(obligation_id, region_id);
                 metrics.obligations_created += 1;
             }
 
@@ -79,13 +80,12 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
 
             let active_count = ctx.tracker.active_obligation_count();
 
-            let outcome = if not_quiescent_initially &&
-                           is_quiescent_after_resolution &&
-                           active_count == 0 {
-                TestOutcome::Pass
-            } else {
-                TestOutcome::Fail
-            };
+            let outcome =
+                if not_quiescent_initially && is_quiescent_after_resolution && active_count == 0 {
+                    TestOutcome::Pass
+                } else {
+                    TestOutcome::Fail
+                };
 
             InvariantTestResult {
                 test_name: self.invariant_name().to_string(),
@@ -135,8 +135,10 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
             // Create child regions
             let child_region1 = RegionId(601);
             let child_region2 = RegionId(602);
-            ctx.tracker.track_region_creation(child_region1, Some(parent_region));
-            ctx.tracker.track_region_creation(child_region2, Some(parent_region));
+            ctx.tracker
+                .track_region_creation(child_region1, Some(parent_region));
+            ctx.tracker
+                .track_region_creation(child_region2, Some(parent_region));
             metrics.regions_created += 2;
 
             // Create obligations in different regions
@@ -144,9 +146,12 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
             let child1_obligation = ObligationId(601);
             let child2_obligation = ObligationId(602);
 
-            ctx.tracker.track_obligation_creation(parent_obligation, parent_region);
-            ctx.tracker.track_obligation_creation(child1_obligation, child_region1);
-            ctx.tracker.track_obligation_creation(child2_obligation, child_region2);
+            ctx.tracker
+                .track_obligation_creation(parent_obligation, parent_region);
+            ctx.tracker
+                .track_obligation_creation(child1_obligation, child_region1);
+            ctx.tracker
+                .track_obligation_creation(child2_obligation, child_region2);
             metrics.obligations_created += 3;
             metrics.peak_active_obligations = 3;
 
@@ -187,9 +192,15 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
             ctx.tracker.track_region_close_completion(parent_region);
             metrics.regions_closed += 1;
 
-            let outcome = if parent_not_quiescent && child1_not_quiescent && child2_not_quiescent &&
-                           child1_quiescent && child2_quiescent && parent_still_not_quiescent &&
-                           parent_still_has_obligation && parent_finally_quiescent {
+            let outcome = if parent_not_quiescent
+                && child1_not_quiescent
+                && child2_not_quiescent
+                && child1_quiescent
+                && child2_quiescent
+                && parent_still_not_quiescent
+                && parent_still_has_obligation
+                && parent_finally_quiescent
+            {
                 TestOutcome::Pass
             } else {
                 TestOutcome::Fail
@@ -243,7 +254,8 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
             // Create obligations but don't resolve them
             for i in 0..3 {
                 let obligation_id = ObligationId(700 + i);
-                ctx.tracker.track_obligation_creation(obligation_id, region_id);
+                ctx.tracker
+                    .track_obligation_creation(obligation_id, region_id);
                 metrics.obligations_created += 1;
             }
 
@@ -254,7 +266,8 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
 
             // Check if quiescence violation was detected
             let violations = ctx.tracker.get_invariant_violations();
-            let has_quiescence_violation = violations.iter()
+            let has_quiescence_violation = violations
+                .iter()
                 .any(|v| v.violation_type == InvariantViolationType::RegionQuiescenceViolation);
 
             // Clean up by resolving obligations
@@ -288,9 +301,11 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         // For this negative test, we expect violations to be present
-        !tracker.has_active_obligations() &&
-        tracker.get_invariant_violations().iter()
-            .any(|v| v.violation_type == InvariantViolationType::RegionQuiescenceViolation)
+        !tracker.has_active_obligations()
+            && tracker
+                .get_invariant_violations()
+                .iter()
+                .any(|v| v.violation_type == InvariantViolationType::RegionQuiescenceViolation)
     }
 
     fn expected_violations(&self) -> Vec<InvariantViolationType> {
@@ -343,8 +358,12 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
 
             for (region_idx, &region_id) in region_ids.iter().enumerate() {
                 for obligation_idx in 0..num_obligations_per_region {
-                    let obligation_id = ObligationId::new_for_test((800 + region_idx * 100 + obligation_idx) as u32, 0);
-                    ctx.tracker.track_obligation_creation(obligation_id, region_id);
+                    let obligation_id = ObligationId::new_for_test(
+                        (800 + region_idx * 100 + obligation_idx) as u32,
+                        0,
+                    );
+                    ctx.tracker
+                        .track_obligation_creation(obligation_id, region_id);
                     all_obligations.push((obligation_id, region_id));
                     metrics.obligations_created += 1;
                 }
@@ -388,7 +407,9 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
             metrics.regions_closed = metrics.regions_created;
 
             // Validate final state
-            let all_quiescent = region_ids.iter().all(|&id| ctx.tracker.is_region_quiescent(id));
+            let all_quiescent = region_ids
+                .iter()
+                .all(|&id| ctx.tracker.is_region_quiescent(id));
             let no_active_obligations = ctx.tracker.active_obligation_count() == 0;
 
             let outcome = if all_quiescent && no_active_obligations {
@@ -431,7 +452,7 @@ mod tests {
     }
     use crate::runtime::test_helpers::*;
     use crate::tests::conformance::obligation_invariants::src::invariant_harness::{
-        ObligationInvariantHarness, InvariantTestConfig,
+        InvariantTestConfig, ObligationInvariantHarness,
     };
 
     #[test]
@@ -472,8 +493,12 @@ mod tests {
         // This is a negative test, so we expect it to pass by detecting the violation
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(!result.violations.is_empty());
-        assert!(result.violations.iter()
-            .any(|v| v.violation_type == InvariantViolationType::RegionQuiescenceViolation));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| v.violation_type == InvariantViolationType::RegionQuiescenceViolation)
+        );
     }
 
     #[test]

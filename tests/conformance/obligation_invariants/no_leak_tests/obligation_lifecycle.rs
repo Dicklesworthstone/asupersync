@@ -8,14 +8,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::time::sleep;
 use asupersync::lab::{LabConfig, LabRuntime};
+use tokio::time::sleep;
 
 use crate::runtime::{ObligationId, RegionId, RuntimeHandle};
 use crate::tests::conformance::obligation_invariants::src::{
     invariant_harness::{
-        ObligationInvariantTest, InvariantTestCategory, ObligationTestContext, InvariantTestResult,
-        TestOutcome, TestMetrics,
+        InvariantTestCategory, InvariantTestResult, ObligationInvariantTest, ObligationTestContext,
+        TestMetrics, TestOutcome,
     },
     obligation_tracker::ObligationTracker,
 };
@@ -54,7 +54,8 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
                 let obligation_id = ObligationId(i);
 
                 // Track obligation creation
-                ctx.tracker.track_obligation_creation(obligation_id, region_id);
+                ctx.tracker
+                    .track_obligation_creation(obligation_id, region_id);
                 metrics.obligations_created += 1;
 
                 // Simulate some work
@@ -128,8 +129,10 @@ impl ObligationInvariantTest for NestedObligationTest {
             // Create nested regions
             let child_region1 = RegionId(101);
             let child_region2 = RegionId(102);
-            ctx.tracker.track_region_creation(child_region1, Some(parent_region));
-            ctx.tracker.track_region_creation(child_region2, Some(parent_region));
+            ctx.tracker
+                .track_region_creation(child_region1, Some(parent_region));
+            ctx.tracker
+                .track_region_creation(child_region2, Some(parent_region));
             metrics.regions_created += 2;
 
             // Create obligations in different regions
@@ -137,9 +140,12 @@ impl ObligationInvariantTest for NestedObligationTest {
             let child1_obligation = ObligationId(201);
             let child2_obligation = ObligationId(202);
 
-            ctx.tracker.track_obligation_creation(parent_obligation, parent_region);
-            ctx.tracker.track_obligation_creation(child1_obligation, child_region1);
-            ctx.tracker.track_obligation_creation(child2_obligation, child_region2);
+            ctx.tracker
+                .track_obligation_creation(parent_obligation, parent_region);
+            ctx.tracker
+                .track_obligation_creation(child1_obligation, child_region1);
+            ctx.tracker
+                .track_obligation_creation(child2_obligation, child_region2);
             metrics.obligations_created += 3;
 
             metrics.peak_active_obligations = ctx.tracker.active_obligation_count();
@@ -171,12 +177,16 @@ impl ObligationInvariantTest for NestedObligationTest {
             metrics.regions_closed += 1;
 
             let final_active_count = ctx.tracker.active_obligation_count();
-            let all_quiescent = ctx.tracker.is_region_quiescent(parent_region) &&
-                               ctx.tracker.is_region_quiescent(child_region1) &&
-                               ctx.tracker.is_region_quiescent(child_region2);
+            let all_quiescent = ctx.tracker.is_region_quiescent(parent_region)
+                && ctx.tracker.is_region_quiescent(child_region1)
+                && ctx.tracker.is_region_quiescent(child_region2);
 
-            let outcome = if final_active_count == 0 && all_quiescent &&
-                            child1_quiescent && child2_quiescent && parent_not_quiescent {
+            let outcome = if final_active_count == 0
+                && all_quiescent
+                && child1_quiescent
+                && child2_quiescent
+                && parent_not_quiescent
+            {
                 TestOutcome::Pass
             } else {
                 TestOutcome::Fail
@@ -335,7 +345,8 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
             // Create obligations, some will "fail"
             for i in 0..20 {
                 let obligation_id = ObligationId(400 + i);
-                ctx.tracker.track_obligation_creation(obligation_id, region_id);
+                ctx.tracker
+                    .track_obligation_creation(obligation_id, region_id);
                 metrics.obligations_created += 1;
 
                 if i % 3 == 0 {
@@ -396,7 +407,7 @@ mod tests {
     }
     use crate::runtime::test_helpers::*;
     use crate::tests::conformance::obligation_invariants::src::invariant_harness::{
-        ObligationInvariantHarness, InvariantTestConfig,
+        InvariantTestConfig, ObligationInvariantHarness,
     };
 
     #[test]

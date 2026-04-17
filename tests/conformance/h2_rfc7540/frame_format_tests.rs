@@ -4,7 +4,7 @@
 
 use super::*;
 use asupersync::bytes::BytesMut;
-use asupersync::http::h2::frame::{FrameHeader, FrameType, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};
+use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, FrameHeader, FrameType, MAX_FRAME_SIZE};
 
 /// Run all frame format conformance tests.
 pub fn run_frame_format_tests() -> Vec<H2ConformanceResult> {
@@ -27,7 +27,10 @@ fn test_frame_header_size() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Frame header must be exactly 9 bytes
         if FRAME_HEADER_SIZE != 9 {
-            return Err(format!("Frame header size is {} bytes, must be 9", FRAME_HEADER_SIZE));
+            return Err(format!(
+                "Frame header size is {} bytes, must be 9",
+                FRAME_HEADER_SIZE
+            ));
         }
 
         // Test parsing with insufficient bytes
@@ -129,7 +132,10 @@ fn test_frame_type_validation() -> H2ConformanceResult {
                     }
                 }
                 None => {
-                    return Err(format!("Failed to parse known frame type 0x{:02x}", byte_val));
+                    return Err(format!(
+                        "Failed to parse known frame type 0x{:02x}",
+                        byte_val
+                    ));
                 }
             }
         }
@@ -213,16 +219,25 @@ fn test_frame_header_encoding() -> H2ConformanceResult {
         let test_cases = [
             // (length, type, flags, stream_id, expected_bytes)
             (
-                0x000001u32, 0x01u8, 0x05u8, 0x00000007u32,
-                [0x00, 0x00, 0x01, 0x01, 0x05, 0x00, 0x00, 0x00, 0x07]
+                0x000001u32,
+                0x01u8,
+                0x05u8,
+                0x00000007u32,
+                [0x00, 0x00, 0x01, 0x01, 0x05, 0x00, 0x00, 0x00, 0x07],
             ),
             (
-                0x001000u32, 0x04u8, 0x01u8, 0x80000001u32,
-                [0x00, 0x10, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x01] // Reserved bit ignored
+                0x001000u32,
+                0x04u8,
+                0x01u8,
+                0x80000001u32,
+                [0x00, 0x10, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x01], // Reserved bit ignored
             ),
             (
-                0xFFFFFFu32, 0x07u8, 0xFFu8, 0x7FFFFFFFu32,
-                [0xFF, 0xFF, 0xFF, 0x07, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF]
+                0xFFFFFFu32,
+                0x07u8,
+                0xFFu8,
+                0x7FFFFFFFu32,
+                [0xFF, 0xFF, 0xFF, 0x07, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF],
             ),
         ];
 
@@ -255,7 +270,9 @@ fn test_frame_header_encoding() -> H2ConformanceResult {
             if header.stream_id != (*stream_id & 0x7FFFFFFF) {
                 return Err(format!(
                     "Test case {}: stream_id {} != expected {}",
-                    i, header.stream_id, (*stream_id & 0x7FFFFFFF)
+                    i,
+                    header.stream_id,
+                    (*stream_id & 0x7FFFFFFF)
                 ));
             }
         }
@@ -285,8 +302,12 @@ fn test_unknown_frame_types() -> H2ConformanceResult {
             buf.extend_from_slice(&[*unknown_type, 0x00]); // Unknown type, no flags
             buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // Stream ID 1
 
-            let header = FrameHeader::parse(&mut buf)
-                .map_err(|e| format!("Should parse unknown frame type 0x{:02x}: {}", unknown_type, e))?;
+            let header = FrameHeader::parse(&mut buf).map_err(|e| {
+                format!(
+                    "Should parse unknown frame type 0x{:02x}: {}",
+                    unknown_type, e
+                )
+            })?;
 
             // Header should parse successfully
             if header.frame_type != *unknown_type {

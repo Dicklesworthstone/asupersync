@@ -4,7 +4,7 @@
 //! our HPACK implementation against known reference outputs.
 
 use super::fixtures::{FixtureComparisonResult, FixtureLoader, HpackFixture};
-use super::harness::{ConformanceTestResult, TestCategory, TestVerdict, RequirementLevel};
+use super::harness::{ConformanceTestResult, RequirementLevel, TestCategory, TestVerdict};
 use super::test_vectors::*;
 use asupersync::http::h2::hpack::Header;
 use std::time::Instant;
@@ -62,9 +62,7 @@ impl HpackDifferentialTester {
         let error_message = if verdict == TestVerdict::Fail {
             Some(format!(
                 "Encoding mismatch for {}: expected {:02x?}, got {:02x?}",
-                test_vector.description,
-                test_vector.expected_encoded,
-                our_encoded
+                test_vector.description, test_vector.expected_encoded, our_encoded
             ))
         } else {
             None
@@ -85,7 +83,8 @@ impl HpackDifferentialTester {
     fn test_against_fixture(&self, fixture: &HpackFixture) -> ConformanceTestResult {
         let start_time = Instant::now();
 
-        let headers: Vec<Header> = fixture.input_headers
+        let headers: Vec<Header> = fixture
+            .input_headers
             .iter()
             .map(|(name, value)| Header::new(name.clone(), value.clone()))
             .collect();
@@ -96,15 +95,9 @@ impl HpackDifferentialTester {
         let comparison = compare_against_fixture(fixture, &our_encoded);
 
         let (verdict, error_message) = match comparison {
-            FixtureComparisonResult::ExactMatch => {
-                (TestVerdict::Pass, None)
-            }
-            FixtureComparisonResult::FunctionalEquivalent => {
-                (TestVerdict::Pass, None)
-            }
-            FixtureComparisonResult::Mismatch { reason } => {
-                (TestVerdict::Fail, Some(reason))
-            }
+            FixtureComparisonResult::ExactMatch => (TestVerdict::Pass, None),
+            FixtureComparisonResult::FunctionalEquivalent => (TestVerdict::Pass, None),
+            FixtureComparisonResult::Mismatch { reason } => (TestVerdict::Fail, Some(reason)),
         };
 
         ConformanceTestResult {
@@ -144,13 +137,15 @@ impl HpackDifferentialTester {
 
         let our_decoded = {
             let mut src = Bytes::copy_from_slice(our_encoded);
-            decoder1.decode(&mut src)
+            decoder1
+                .decode(&mut src)
                 .map_err(|e| format!("Failed to decode our output: {e}"))?
         };
 
         let reference_decoded = {
             let mut src = Bytes::copy_from_slice(reference_encoded);
-            decoder2.decode(&mut src)
+            decoder2
+                .decode(&mut src)
                 .map_err(|e| format!("Failed to decode reference output: {e}"))?
         };
 
@@ -180,32 +175,28 @@ impl CrossImplementationTester {
     pub fn test_go_interop(&self) -> Vec<ConformanceTestResult> {
         // Note: This would require setting up Go test harness
         // For now, return placeholder results
-        vec![
-            ConformanceTestResult {
-                test_id: "INTEROP-GO-1".to_string(),
-                description: "Go net/http2 interoperability".to_string(),
-                category: TestCategory::RoundTrip,
-                requirement_level: RequirementLevel::Should,
-                verdict: TestVerdict::ExpectedFailure,
-                error_message: Some("Go interop not implemented yet".to_string()),
-                execution_time_ms: 0,
-            }
-        ]
+        vec![ConformanceTestResult {
+            test_id: "INTEROP-GO-1".to_string(),
+            description: "Go net/http2 interoperability".to_string(),
+            category: TestCategory::RoundTrip,
+            requirement_level: RequirementLevel::Should,
+            verdict: TestVerdict::ExpectedFailure,
+            error_message: Some("Go interop not implemented yet".to_string()),
+            execution_time_ms: 0,
+        }]
     }
 
     /// Test interoperability with nghttp2 HPACK implementation.
     pub fn test_nghttp2_interop(&self) -> Vec<ConformanceTestResult> {
-        vec![
-            ConformanceTestResult {
-                test_id: "INTEROP-NGHTTP2-1".to_string(),
-                description: "nghttp2 HPACK interoperability".to_string(),
-                category: TestCategory::RoundTrip,
-                requirement_level: RequirementLevel::Should,
-                verdict: TestVerdict::ExpectedFailure,
-                error_message: Some("nghttp2 interop not implemented yet".to_string()),
-                execution_time_ms: 0,
-            }
-        ]
+        vec![ConformanceTestResult {
+            test_id: "INTEROP-NGHTTP2-1".to_string(),
+            description: "nghttp2 HPACK interoperability".to_string(),
+            category: TestCategory::RoundTrip,
+            requirement_level: RequirementLevel::Should,
+            verdict: TestVerdict::ExpectedFailure,
+            error_message: Some("nghttp2 interop not implemented yet".to_string()),
+            execution_time_ms: 0,
+        }]
     }
 
     /// Run all cross-implementation tests.
@@ -299,17 +290,13 @@ impl CompressionEfficiencyTester {
         let mut encoder = Encoder::new();
 
         // First occurrence - should be literal
-        let first_headers = vec![
-            Header::new("x-repeated-header", "repeated-value"),
-        ];
+        let first_headers = vec![Header::new("x-repeated-header", "repeated-value")];
         let mut first_dst = BytesMut::new();
         encoder.encode(&first_headers, &mut first_dst);
         let first_size = first_dst.len();
 
         // Second occurrence - should be shorter (indexed)
-        let second_headers = vec![
-            Header::new("x-repeated-header", "repeated-value"),
-        ];
+        let second_headers = vec![Header::new("x-repeated-header", "repeated-value")];
         let mut second_dst = BytesMut::new();
         encoder.encode(&second_headers, &mut second_dst);
         let second_size = second_dst.len();
@@ -318,7 +305,7 @@ impl CompressionEfficiencyTester {
         let verdict = if second_size < first_size {
             TestVerdict::Pass
         } else {
-            TestVerdict::ExpectedFailure  // This might be expected depending on table size limits
+            TestVerdict::ExpectedFailure // This might be expected depending on table size limits
         };
 
         ConformanceTestResult {
@@ -335,8 +322,8 @@ impl CompressionEfficiencyTester {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::fixtures::{FixtureMetadata, HpackFixture};
+    use super::*;
     use chrono::Utc;
 
     #[test]
@@ -355,7 +342,10 @@ mod tests {
 
         // Should either pass or provide meaningful error message
         if result.verdict == TestVerdict::Fail {
-            assert!(result.error_message.is_some(), "Failed test should have error message");
+            assert!(
+                result.error_message.is_some(),
+                "Failed test should have error message"
+            );
         }
     }
 
@@ -377,10 +367,7 @@ mod tests {
             name: "functional_equivalence".to_string(),
             description: "Same headers, non-Huffman reference".to_string(),
             input_headers: vec![(":path".to_string(), "/sample/path".to_string())],
-            expected_encoded: tester.encode_headers(
-                &[Header::new(":path", "/sample/path")],
-                false,
-            ),
+            expected_encoded: tester.encode_headers(&[Header::new(":path", "/sample/path")], false),
             use_huffman: true,
             metadata: FixtureMetadata {
                 generator: "unit-test".to_string(),

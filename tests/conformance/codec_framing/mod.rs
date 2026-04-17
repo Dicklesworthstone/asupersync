@@ -13,12 +13,12 @@
 //! - **Edge Cases**: EOF, empty frames, boundary conditions
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec, LinesCodec, BytesCodec};
+use asupersync::codec::{BytesCodec, Decoder, Encoder, LengthDelimitedCodec, LinesCodec};
 
-pub mod length_delimited_tests;
-pub mod lines_codec_tests;
 pub mod bytes_codec_tests;
 pub mod error_handling_tests;
+pub mod length_delimited_tests;
+pub mod lines_codec_tests;
 pub mod resource_limits_tests;
 
 /// Test result for codec conformance tests.
@@ -117,16 +117,30 @@ impl CodecConformanceHarness {
         let results = self.run_all_tests();
 
         let total = results.len();
-        let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
-        let failed = results.iter().filter(|r| r.verdict == TestVerdict::Fail).count();
-        let skipped = results.iter().filter(|r| r.verdict == TestVerdict::Skipped).count();
-        let expected_failures = results.iter().filter(|r| r.verdict == TestVerdict::ExpectedFailure).count();
+        let passed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Pass)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .count();
+        let skipped = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Skipped)
+            .count();
+        let expected_failures = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::ExpectedFailure)
+            .count();
 
         // MUST clause coverage calculation
-        let must_tests: Vec<_> = results.iter()
+        let must_tests: Vec<_> = results
+            .iter()
             .filter(|r| r.requirement_level == RequirementLevel::Must)
             .collect();
-        let must_passed = must_tests.iter()
+        let must_passed = must_tests
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Pass)
             .count();
         let must_total = must_tests.len();
@@ -152,13 +166,16 @@ impl CodecConformanceHarness {
             category_stats["total"] = (category_stats["total"].as_u64().unwrap() + 1).into();
             match result.verdict {
                 TestVerdict::Pass => {
-                    category_stats["passed"] = (category_stats["passed"].as_u64().unwrap() + 1).into();
+                    category_stats["passed"] =
+                        (category_stats["passed"].as_u64().unwrap() + 1).into();
                 }
                 TestVerdict::Fail => {
-                    category_stats["failed"] = (category_stats["failed"].as_u64().unwrap() + 1).into();
+                    category_stats["failed"] =
+                        (category_stats["failed"].as_u64().unwrap() + 1).into();
                 }
                 TestVerdict::ExpectedFailure => {
-                    category_stats["expected_failures"] = (category_stats["expected_failures"].as_u64().unwrap() + 1).into();
+                    category_stats["expected_failures"] =
+                        (category_stats["expected_failures"].as_u64().unwrap() + 1).into();
                 }
                 _ => {}
             }
@@ -257,12 +274,18 @@ mod tests {
         let results = harness.run_all_tests();
 
         // Should have some test results
-        assert!(!results.is_empty(), "Conformance harness should produce test results");
+        assert!(
+            !results.is_empty(),
+            "Conformance harness should produce test results"
+        );
 
         // Verify all results have required fields
         for result in &results {
             assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-            assert!(!result.description.is_empty(), "Description must not be empty");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
         }
     }
 
@@ -272,10 +295,22 @@ mod tests {
         let report = harness.generate_compliance_report();
 
         // Verify report structure
-        assert!(report["codec_framing_conformance_report"].is_object(), "Report should have main section");
-        assert!(report["codec_framing_conformance_report"]["summary"].is_object(), "Report should have summary");
-        assert!(report["codec_framing_conformance_report"]["must_clause_coverage"].is_object(), "Report should have MUST coverage");
-        assert!(report["codec_framing_conformance_report"]["codecs"].is_object(), "Report should have codec info");
+        assert!(
+            report["codec_framing_conformance_report"].is_object(),
+            "Report should have main section"
+        );
+        assert!(
+            report["codec_framing_conformance_report"]["summary"].is_object(),
+            "Report should have summary"
+        );
+        assert!(
+            report["codec_framing_conformance_report"]["must_clause_coverage"].is_object(),
+            "Report should have MUST coverage"
+        );
+        assert!(
+            report["codec_framing_conformance_report"]["codecs"].is_object(),
+            "Report should have codec info"
+        );
     }
 
     #[test]

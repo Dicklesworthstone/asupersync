@@ -2,7 +2,7 @@
 
 use super::*;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::{Decoder, Encoder, BytesCodec};
+use asupersync::codec::{BytesCodec, Decoder, Encoder};
 
 /// Run all bytes codec tests.
 pub fn run_bytes_codec_tests() -> Vec<CodecConformanceResult> {
@@ -21,7 +21,8 @@ fn test_pass_through_decode() -> CodecConformanceResult {
         let mut codec = BytesCodec::new();
         let mut buf = BytesMut::from(&b"test data"[..]);
 
-        let decoded = codec.decode(&mut buf)
+        let decoded = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected decoded bytes")?;
 
@@ -54,17 +55,22 @@ fn test_encode_decode_round_trip() -> CodecConformanceResult {
 
         // Encode
         let mut buf = BytesMut::new();
-        codec.encode(original.clone(), &mut buf)
+        codec
+            .encode(original.clone(), &mut buf)
             .map_err(|e| format!("Encode failed: {e}"))?;
 
         // Decode
-        let decoded = codec.decode(&mut buf)
+        let decoded = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected decoded bytes")?;
 
         let frozen_decoded = decoded.freeze();
         if frozen_decoded != original {
-            return Err(format!("Round-trip failed: expected {:?}, got {:?}", original, frozen_decoded));
+            return Err(format!(
+                "Round-trip failed: expected {:?}, got {:?}",
+                original, frozen_decoded
+            ));
         }
 
         Ok(())
@@ -85,11 +91,12 @@ fn test_empty_buffer() -> CodecConformanceResult {
         let mut codec = BytesCodec::new();
         let mut buf = BytesMut::new();
 
-        let result = codec.decode(&mut buf)
+        let result = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?;
 
         match result {
-            None => Ok(()), // Expected for empty buffer
+            None => Ok(()),                            // Expected for empty buffer
             Some(bytes) if bytes.is_empty() => Ok(()), // Also acceptable
             Some(bytes) => Err(format!("Expected None or empty, got {:?}", bytes)),
         }
@@ -111,12 +118,17 @@ fn test_large_buffer() -> CodecConformanceResult {
         let large_data = vec![0u8; 1024 * 1024]; // 1MB
         let mut buf = BytesMut::from(&large_data[..]);
 
-        let decoded = codec.decode(&mut buf)
+        let decoded = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected decoded bytes")?;
 
         if decoded.len() != large_data.len() {
-            return Err(format!("Size mismatch: expected {}, got {}", large_data.len(), decoded.len()));
+            return Err(format!(
+                "Size mismatch: expected {}, got {}",
+                large_data.len(),
+                decoded.len()
+            ));
         }
 
         Ok(())

@@ -75,7 +75,10 @@ fn test_settings_frame_format() -> H2ConformanceResult {
         let invalid_lengths = [1, 2, 3, 4, 5, 7, 11, 13, 17];
         for length in &invalid_lengths {
             if length % 6 == 0 {
-                return Err(format!("Invalid length {} should not be multiple of 6", length));
+                return Err(format!(
+                    "Invalid length {} should not be multiple of 6",
+                    length
+                ));
             }
             // These should cause FRAME_SIZE_ERROR
         }
@@ -339,11 +342,7 @@ fn test_settings_application() -> H2ConformanceResult {
         // Settings take effect when ACK is sent (for sender)
         // Settings take effect when received (for receiver)
 
-        let application_sequence = [
-            "receive_settings",
-            "apply_settings",
-            "send_ack",
-        ];
+        let application_sequence = ["receive_settings", "apply_settings", "send_ack"];
 
         for (i, step) in application_sequence.iter().enumerate() {
             match *step {
@@ -406,7 +405,7 @@ fn test_settings_default_values() -> H2ConformanceResult {
 
         let default_values = [
             ("HEADER_TABLE_SIZE", 4096u32),
-            ("ENABLE_PUSH", 1u32), // Push enabled by default
+            ("ENABLE_PUSH", 1u32),                // Push enabled by default
             ("MAX_CONCURRENT_STREAMS", u32::MAX), // Unlimited by default
             ("INITIAL_WINDOW_SIZE", 65535u32),
             ("MAX_FRAME_SIZE", 16384u32),
@@ -494,7 +493,9 @@ fn test_settings_error_handling() -> H2ConformanceResult {
                     // Payload length not multiple of 6
                     // Should cause FRAME_SIZE_ERROR
                     if *expected_error != "FRAME_SIZE_ERROR" {
-                        return Err("Invalid payload length should cause FRAME_SIZE_ERROR".to_string());
+                        return Err(
+                            "Invalid payload length should cause FRAME_SIZE_ERROR".to_string()
+                        );
                     }
                 }
                 "invalid_enable_push" => {
@@ -508,7 +509,9 @@ fn test_settings_error_handling() -> H2ConformanceResult {
                     // INITIAL_WINDOW_SIZE > 2^31-1
                     // Should cause FLOW_CONTROL_ERROR
                     if *expected_error != "FLOW_CONTROL_ERROR" {
-                        return Err("Invalid window size should cause FLOW_CONTROL_ERROR".to_string());
+                        return Err(
+                            "Invalid window size should cause FLOW_CONTROL_ERROR".to_string()
+                        );
                     }
                 }
                 "invalid_frame_size" => {
@@ -570,12 +573,16 @@ fn test_settings_ordering() -> H2ConformanceResult {
                     match *step {
                         "client_preface" => {
                             if client_steps != 1 {
-                                return Err("Client preface should be first client step".to_string());
+                                return Err(
+                                    "Client preface should be first client step".to_string()
+                                );
                             }
                         }
                         "client_settings" => {
                             if client_steps != 2 {
-                                return Err("Client SETTINGS should be second client step".to_string());
+                                return Err(
+                                    "Client SETTINGS should be second client step".to_string()
+                                );
                             }
                         }
                         "client_ack" => {
@@ -592,7 +599,9 @@ fn test_settings_ordering() -> H2ConformanceResult {
                     match *step {
                         "server_settings" => {
                             if server_steps != 1 {
-                                return Err("Server SETTINGS should be first server step".to_string());
+                                return Err(
+                                    "Server SETTINGS should be first server step".to_string()
+                                );
                             }
                         }
                         "server_ack" => {

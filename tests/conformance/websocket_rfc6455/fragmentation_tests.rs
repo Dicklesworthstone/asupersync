@@ -10,5 +10,12 @@ pub fn run_fragmentation_tests() -> Vec<WsConformanceResult> {
 
 fn test_message_fragmentation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| Ok(()));
-    create_test_result("RFC6455-5.4-FRAGMENTATION", "Message fragmentation", TestCategory::Fragmentation, RequirementLevel::Must, result, elapsed)
+    create_test_result(
+        "RFC6455-5.4-FRAGMENTATION",
+        "Message fragmentation",
+        TestCategory::Fragmentation,
+        RequirementLevel::Must,
+        result,
+        elapsed,
+    )
 }

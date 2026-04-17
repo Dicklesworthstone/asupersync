@@ -8,7 +8,7 @@
 //! - Error handling for malformed frames
 
 use super::*;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, LengthDelimitedCodec};
 
 /// Run all length delimited codec tests.
@@ -63,7 +63,8 @@ fn test_basic_frame_decode() -> CodecConformanceResult {
         buf.put_u32(5);
         buf.extend_from_slice(b"hello");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -105,13 +106,17 @@ fn test_basic_frame_encode_decode() -> CodecConformanceResult {
         // Decode it back
         let mut codec = LengthDelimitedCodec::new();
         let mut buf = encoded;
-        let decoded = codec.decode(&mut buf)
+        let decoded = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
         let frozen_decoded = decoded.freeze();
         if frozen_decoded != original_data {
-            return Err(format!("Round-trip failed: expected {:?}, got {:?}", original_data, frozen_decoded));
+            return Err(format!(
+                "Round-trip failed: expected {:?}, got {:?}",
+                original_data, frozen_decoded
+            ));
         }
 
         Ok(())
@@ -140,7 +145,8 @@ fn test_multiple_frames_single_buffer() -> CodecConformanceResult {
         buf.extend_from_slice(b"hello");
 
         // Decode first frame
-        let frame1 = codec.decode(&mut buf)
+        let frame1 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("First decode failed: {e}"))?
             .ok_or("Expected first frame but got None")?;
 
@@ -150,7 +156,8 @@ fn test_multiple_frames_single_buffer() -> CodecConformanceResult {
         }
 
         // Decode second frame
-        let frame2 = codec.decode(&mut buf)
+        let frame2 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Second decode failed: {e}"))?
             .ok_or("Expected second frame but got None")?;
 
@@ -185,7 +192,8 @@ fn test_frame_spanning_multiple_buffers() -> CodecConformanceResult {
 
         // First buffer: partial length field [0x00, 0x00]
         buf.extend_from_slice(&[0x00, 0x00]);
-        let result1 = codec.decode(&mut buf)
+        let result1 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("First decode failed: {e}"))?;
         if result1.is_some() {
             return Err("Should not decode incomplete length field".to_string());
@@ -193,7 +201,8 @@ fn test_frame_spanning_multiple_buffers() -> CodecConformanceResult {
 
         // Second buffer: complete length field [0x00, 0x05]
         buf.extend_from_slice(&[0x00, 0x05]);
-        let result2 = codec.decode(&mut buf)
+        let result2 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Second decode failed: {e}"))?;
         if result2.is_some() {
             return Err("Should not decode without frame data".to_string());
@@ -201,7 +210,8 @@ fn test_frame_spanning_multiple_buffers() -> CodecConformanceResult {
 
         // Third buffer: partial frame data ['h', 'e', 'l']
         buf.extend_from_slice(b"hel");
-        let result3 = codec.decode(&mut buf)
+        let result3 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Third decode failed: {e}"))?;
         if result3.is_some() {
             return Err("Should not decode incomplete frame data".to_string());
@@ -209,7 +219,8 @@ fn test_frame_spanning_multiple_buffers() -> CodecConformanceResult {
 
         // Fourth buffer: complete frame data ['l', 'o']
         buf.extend_from_slice(b"lo");
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Fourth decode failed: {e}"))?
             .ok_or("Expected complete frame")?;
 
@@ -244,7 +255,8 @@ fn test_1_byte_length_field() -> CodecConformanceResult {
         buf.put_u8(3);
         buf.extend_from_slice(b"abc");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -278,7 +290,8 @@ fn test_2_byte_length_field() -> CodecConformanceResult {
         buf.put_u16(5);
         buf.extend_from_slice(b"hello");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -310,7 +323,8 @@ fn test_4_byte_length_field() -> CodecConformanceResult {
         buf.put_u32(4);
         buf.extend_from_slice(b"test");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -345,7 +359,8 @@ fn test_8_byte_length_field() -> CodecConformanceResult {
         buf.put_u64(6);
         buf.extend_from_slice(b"longer");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -377,7 +392,8 @@ fn test_big_endian_length_field() -> CodecConformanceResult {
         buf.extend_from_slice(&[0x01, 0x00, 0x00, 0x05]); // length = 5
         buf.extend_from_slice(b"hello");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -402,16 +418,15 @@ fn test_big_endian_length_field() -> CodecConformanceResult {
 /// Test little-endian length field.
 fn test_little_endian_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        let mut codec = LengthDelimitedCodec::builder()
-            .little_endian()
-            .new_codec();
+        let mut codec = LengthDelimitedCodec::builder().little_endian().new_codec();
         let mut buf = BytesMut::new();
 
         // Little-endian: [0x05, 0x00, 0x00, 0x00] = 5
         buf.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]);
         buf.extend_from_slice(b"hello");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -450,7 +465,8 @@ fn test_length_field_offset() -> CodecConformanceResult {
         buf.put_u32(4); // Length at offset 2
         buf.extend_from_slice(b"test");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -484,7 +500,8 @@ fn test_length_adjustment_positive() -> CodecConformanceResult {
         buf.put_u32(1);
         buf.extend_from_slice(b"hello");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -518,7 +535,8 @@ fn test_length_adjustment_negative() -> CodecConformanceResult {
         buf.put_u32(9);
         buf.extend_from_slice(b"hello");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -556,7 +574,8 @@ fn test_num_skip_bytes() -> CodecConformanceResult {
         buf.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         buf.extend_from_slice(b"hello");
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
@@ -616,7 +635,8 @@ fn test_empty_frame() -> CodecConformanceResult {
         // Empty frame: length = 0, no data
         buf.put_u32(0);
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected empty frame but got None")?;
 
@@ -646,7 +666,8 @@ fn test_zero_length_frame() -> CodecConformanceResult {
         // Zero-length frame
         buf.put_u32(0);
 
-        let frame = codec.decode(&mut buf)
+        let frame = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?;
 
         match frame {
@@ -675,7 +696,8 @@ fn test_incomplete_length_field() -> CodecConformanceResult {
         // Only 3 bytes of 4-byte length field
         buf.extend_from_slice(&[0x00, 0x00, 0x05]);
 
-        let result = codec.decode(&mut buf)
+        let result = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?;
 
         match result {
@@ -704,7 +726,8 @@ fn test_incomplete_frame_data() -> CodecConformanceResult {
         buf.put_u32(10);
         buf.extend_from_slice(b"short"); // Only 5 bytes, need 10
 
-        let result = codec.decode(&mut buf)
+        let result = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?;
 
         match result {
@@ -814,7 +837,8 @@ fn test_eof_with_complete_frame() -> CodecConformanceResult {
         buf.put_u32(4);
         buf.extend_from_slice(b"done");
 
-        let frame = codec.decode_eof(&mut buf)
+        let frame = codec
+            .decode_eof(&mut buf)
             .map_err(|e| format!("decode_eof failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 

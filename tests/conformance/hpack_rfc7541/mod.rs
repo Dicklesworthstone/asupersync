@@ -17,16 +17,15 @@
 //!
 //! Uses test vectors from RFC 7541 Appendix C for systematic validation.
 
-mod harness;
-mod test_vectors;
-mod fixtures;
 mod differential_tests;
 mod error_tests;
+mod fixtures;
+mod harness;
+mod test_vectors;
 
 // Public re-exports for conformance testing
 pub use harness::{
-    HpackConformanceHarness, RequirementLevel, TestVerdict, TestCategory,
-    ConformanceTestResult,
+    ConformanceTestResult, HpackConformanceHarness, RequirementLevel, TestCategory, TestVerdict,
 };
 
 #[cfg(test)]
@@ -44,28 +43,43 @@ mod tests {
             println!("{}", serde_json::to_string(&result).unwrap());
         }
 
-        let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
-        let failed = results.iter().filter(|r| r.verdict == TestVerdict::Fail).count();
-        let xfail = results.iter().filter(|r| r.verdict == TestVerdict::ExpectedFailure).count();
+        let passed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Pass)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .count();
+        let xfail = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::ExpectedFailure)
+            .count();
         let total = results.len();
 
-        println!("\nRFC 7541 HPACK Conformance: {passed}/{total} pass, {failed} fail, {xfail} expected-fail");
+        println!(
+            "\nRFC 7541 HPACK Conformance: {passed}/{total} pass, {failed} fail, {xfail} expected-fail"
+        );
 
         // Assert no unexpected failures
         assert_eq!(failed, 0, "{failed} conformance tests failed unexpectedly");
 
         // Coverage requirement: ≥95% MUST clause coverage
-        let must_tests: Vec<_> = results.iter()
+        let must_tests: Vec<_> = results
+            .iter()
             .filter(|r| r.requirement_level == RequirementLevel::Must)
             .collect();
-        let must_passed = must_tests.iter()
+        let must_passed = must_tests
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Pass)
             .count();
         let must_total = must_tests.len();
         let must_coverage = (must_passed as f64 / must_total as f64) * 100.0;
 
-        assert!(must_coverage >= 95.0,
-            "MUST clause coverage too low: {must_coverage:.1}% (target: ≥95%)");
+        assert!(
+            must_coverage >= 95.0,
+            "MUST clause coverage too low: {must_coverage:.1}% (target: ≥95%)"
+        );
     }
 
     /// Validate test infrastructure is working correctly.
@@ -86,7 +100,10 @@ mod tests {
         assert!(decoded.is_ok(), "Decoding should succeed");
 
         let decoded_headers = decoded.unwrap();
-        assert_eq!(decoded_headers.len(), test_headers.len(),
-            "Decoded header count should match");
+        assert_eq!(
+            decoded_headers.len(),
+            test_headers.len(),
+            "Decoded header count should match"
+        );
     }
 }

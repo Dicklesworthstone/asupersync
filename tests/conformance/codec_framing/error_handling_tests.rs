@@ -75,7 +75,8 @@ fn test_buffer_underflow_handling() -> CodecConformanceResult {
         // Incomplete length field
         buf.extend_from_slice(&[0x00, 0x00]);
 
-        let result = codec.decode(&mut buf)
+        let result = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?;
 
         match result {

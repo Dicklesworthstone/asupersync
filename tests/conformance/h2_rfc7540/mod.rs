@@ -164,24 +164,39 @@ mod tests {
         let results = harness.run_all_tests();
 
         // Should have test results
-        assert!(!results.is_empty(), "Should have HTTP/2 conformance test results");
+        assert!(
+            !results.is_empty(),
+            "Should have HTTP/2 conformance test results"
+        );
 
         // Verify all tests have required fields
         for result in &results {
             assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-            assert!(!result.description.is_empty(), "Description must not be empty");
-            assert!(result.test_id.starts_with("RFC7540"), "Test ID should reference RFC 7540");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
+            assert!(
+                result.test_id.starts_with("RFC7540"),
+                "Test ID should reference RFC 7540"
+            );
         }
 
         // Should have tests for each major category
-        let categories: std::collections::HashSet<_> = results
-            .iter()
-            .map(|r| r.category)
-            .collect();
+        let categories: std::collections::HashSet<_> = results.iter().map(|r| r.category).collect();
 
-        assert!(categories.contains(&TestCategory::FrameFormat), "Should test frame format");
-        assert!(categories.contains(&TestCategory::StreamStates), "Should test stream states");
-        assert!(categories.contains(&TestCategory::Settings), "Should test settings");
+        assert!(
+            categories.contains(&TestCategory::FrameFormat),
+            "Should test frame format"
+        );
+        assert!(
+            categories.contains(&TestCategory::StreamStates),
+            "Should test stream states"
+        );
+        assert!(
+            categories.contains(&TestCategory::Settings),
+            "Should test settings"
+        );
     }
 
     #[test]
@@ -190,22 +205,26 @@ mod tests {
         let results = harness.run_all_tests();
 
         // Should have MUST requirements (critical for compliance)
-        let must_tests: Vec<_> = results.iter()
+        let must_tests: Vec<_> = results
+            .iter()
             .filter(|r| r.requirement_level == RequirementLevel::Must)
             .collect();
 
         assert!(!must_tests.is_empty(), "Should have MUST requirement tests");
 
         // Calculate MUST compliance rate
-        let must_passed = must_tests.iter()
+        let must_passed = must_tests
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Pass)
             .count();
 
         let compliance_rate = (must_passed as f64) / (must_tests.len() as f64) * 100.0;
 
         // RFC compliance requires high MUST coverage
-        assert!(compliance_rate >= 95.0,
+        assert!(
+            compliance_rate >= 95.0,
             "MUST clause compliance rate {:.1}% is below 95% threshold",
-            compliance_rate);
+            compliance_rate
+        );
     }
 }

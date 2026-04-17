@@ -6,14 +6,14 @@
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
+pub mod close_tests;
+pub mod control_frame_tests;
+pub mod error_handling_tests;
+pub mod extension_tests;
+pub mod fragmentation_tests;
 pub mod framing_tests;
 pub mod handshake_tests;
-pub mod control_frame_tests;
-pub mod close_tests;
-pub mod extension_tests;
-pub mod error_handling_tests;
 pub mod masking_tests;
-pub mod fragmentation_tests;
 
 /// Conformance test result for WebSocket RFC 6455.
 #[derive(Debug, Clone, Serialize)]
@@ -172,24 +172,39 @@ mod tests {
         let results = harness.run_all_tests();
 
         // Should have test results
-        assert!(!results.is_empty(), "Should have WebSocket conformance test results");
+        assert!(
+            !results.is_empty(),
+            "Should have WebSocket conformance test results"
+        );
 
         // Verify all tests have required fields
         for result in &results {
             assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-            assert!(!result.description.is_empty(), "Description must not be empty");
-            assert!(result.test_id.starts_with("RFC6455"), "Test ID should reference RFC 6455");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
+            assert!(
+                result.test_id.starts_with("RFC6455"),
+                "Test ID should reference RFC 6455"
+            );
         }
 
         // Should have tests for each major category
-        let categories: std::collections::HashSet<_> = results
-            .iter()
-            .map(|r| r.category)
-            .collect();
+        let categories: std::collections::HashSet<_> = results.iter().map(|r| r.category).collect();
 
-        assert!(categories.contains(&TestCategory::FrameFormat), "Should test frame format");
-        assert!(categories.contains(&TestCategory::Handshake), "Should test handshake");
-        assert!(categories.contains(&TestCategory::ControlFrames), "Should test control frames");
+        assert!(
+            categories.contains(&TestCategory::FrameFormat),
+            "Should test frame format"
+        );
+        assert!(
+            categories.contains(&TestCategory::Handshake),
+            "Should test handshake"
+        );
+        assert!(
+            categories.contains(&TestCategory::ControlFrames),
+            "Should test control frames"
+        );
     }
 
     #[test]
@@ -198,22 +213,26 @@ mod tests {
         let results = harness.run_all_tests();
 
         // Should have MUST requirements (critical for compliance)
-        let must_tests: Vec<_> = results.iter()
+        let must_tests: Vec<_> = results
+            .iter()
             .filter(|r| r.requirement_level == RequirementLevel::Must)
             .collect();
 
         assert!(!must_tests.is_empty(), "Should have MUST requirement tests");
 
         // Calculate MUST compliance rate
-        let must_passed = must_tests.iter()
+        let must_passed = must_tests
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Pass)
             .count();
 
         let compliance_rate = (must_passed as f64) / (must_tests.len() as f64) * 100.0;
 
         // RFC compliance requires high MUST coverage
-        assert!(compliance_rate >= 95.0,
+        assert!(
+            compliance_rate >= 95.0,
             "MUST clause compliance rate {:.1}% is below 95% threshold",
-            compliance_rate);
+            compliance_rate
+        );
     }
 }

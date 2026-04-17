@@ -2,9 +2,9 @@
 //!
 //! This module contains all tests for validating structured concurrency obligation invariants.
 
-pub mod src;
 pub mod no_leak_tests;
 pub mod region_quiescence;
+pub mod src;
 
 // Test implementations
 pub mod cancel_propagation {
@@ -33,17 +33,17 @@ pub mod temporal_safety {
 
 // Re-export main testing infrastructure
 pub use src::{
-    ObligationTracker, ObligationInvariantHarness, ObligationInvariantTest,
-    InvariantTestCategory, InvariantTestConfig, TestOutcome, InvariantTestResult,
+    InvariantTestCategory, InvariantTestConfig, InvariantTestResult, ObligationInvariantHarness,
+    ObligationInvariantTest, ObligationTracker, TestOutcome,
 };
 
 // Re-export specific test implementations
 pub use no_leak_tests::obligation_lifecycle::{
-    BasicObligationLifecycleTest, NestedObligationTest, ConcurrentObligationTest,
-    ErrorPathCleanupTest,
+    BasicObligationLifecycleTest, ConcurrentObligationTest, ErrorPathCleanupTest,
+    NestedObligationTest,
 };
 
 pub use region_quiescence::basic_quiescence::{
-    BasicRegionQuiescenceTest, NestedRegionQuiescenceTest,
-    RegionCloseWithActiveObligationsTest, ConcurrentRegionClosureTest,
+    BasicRegionQuiescenceTest, ConcurrentRegionClosureTest, NestedRegionQuiescenceTest,
+    RegionCloseWithActiveObligationsTest,
 };

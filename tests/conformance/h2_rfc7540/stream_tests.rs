@@ -3,8 +3,8 @@
 //! Tests stream lifecycle and state management requirements from RFC 7540 Section 5.
 
 use super::*;
-use asupersync::http::h2::stream::StreamState;
 use asupersync::http::h2::frame::FrameType;
+use asupersync::http::h2::stream::StreamState;
 
 /// Run all stream conformance tests.
 pub fn run_stream_tests() -> Vec<H2ConformanceResult> {
@@ -29,10 +29,7 @@ fn test_stream_id_requirements() -> H2ConformanceResult {
         let client_streams = [1, 3, 5, 101, 999, 0x7FFFFFFD];
         for stream_id in &client_streams {
             if stream_id % 2 == 0 {
-                return Err(format!(
-                    "Client stream ID {} should be odd",
-                    stream_id
-                ));
+                return Err(format!("Client stream ID {} should be odd", stream_id));
             }
         }
 
@@ -40,10 +37,7 @@ fn test_stream_id_requirements() -> H2ConformanceResult {
         let server_streams = [2, 4, 6, 100, 1000, 0x7FFFFFFE];
         for stream_id in &server_streams {
             if stream_id % 2 != 0 {
-                return Err(format!(
-                    "Server stream ID {} should be even",
-                    stream_id
-                ));
+                return Err(format!("Server stream ID {} should be even", stream_id));
             }
         }
 
@@ -109,23 +103,24 @@ fn test_stream_state_transitions() -> H2ConformanceResult {
             (TestStreamState::Idle, TestStreamState::ReservedLocal),
             (TestStreamState::Idle, TestStreamState::ReservedRemote),
             (TestStreamState::Idle, TestStreamState::HalfClosedRemote),
-
             // From ReservedLocal
-            (TestStreamState::ReservedLocal, TestStreamState::HalfClosedRemote),
+            (
+                TestStreamState::ReservedLocal,
+                TestStreamState::HalfClosedRemote,
+            ),
             (TestStreamState::ReservedLocal, TestStreamState::Closed),
-
             // From ReservedRemote
-            (TestStreamState::ReservedRemote, TestStreamState::HalfClosedLocal),
+            (
+                TestStreamState::ReservedRemote,
+                TestStreamState::HalfClosedLocal,
+            ),
             (TestStreamState::ReservedRemote, TestStreamState::Closed),
-
             // From Open
             (TestStreamState::Open, TestStreamState::HalfClosedLocal),
             (TestStreamState::Open, TestStreamState::HalfClosedRemote),
             (TestStreamState::Open, TestStreamState::Closed),
-
             // From HalfClosedLocal
             (TestStreamState::HalfClosedLocal, TestStreamState::Closed),
-
             // From HalfClosedRemote
             (TestStreamState::HalfClosedRemote, TestStreamState::Closed),
         ];
@@ -162,8 +157,14 @@ fn test_stream_state_transitions() -> H2ConformanceResult {
             (TestStreamState::Closed, TestStreamState::Idle),
             (TestStreamState::HalfClosedLocal, TestStreamState::Open),
             (TestStreamState::HalfClosedRemote, TestStreamState::Open),
-            (TestStreamState::HalfClosedLocal, TestStreamState::HalfClosedRemote),
-            (TestStreamState::HalfClosedRemote, TestStreamState::HalfClosedLocal),
+            (
+                TestStreamState::HalfClosedLocal,
+                TestStreamState::HalfClosedRemote,
+            ),
+            (
+                TestStreamState::HalfClosedRemote,
+                TestStreamState::HalfClosedLocal,
+            ),
         ];
 
         // These transitions should not be allowed
@@ -286,7 +287,10 @@ fn test_stream_priority_inheritance() -> H2ConformanceResult {
         for weight in &valid_weights {
             let encoded_weight = weight - 1; // 1-256 encoded as 0-255
             if encoded_weight > 255 {
-                return Err(format!("Weight {} encodes to {}, max is 255", weight, encoded_weight));
+                return Err(format!(
+                    "Weight {} encodes to {}, max is 255",
+                    weight, encoded_weight
+                ));
             }
         }
 
@@ -302,10 +306,7 @@ fn test_stream_priority_inheritance() -> H2ConformanceResult {
         }
 
         // Exclusive flag behavior
-        let exclusive_flag_tests = [
-            (true, "exclusive dependency"),
-            (false, "shared dependency"),
-        ];
+        let exclusive_flag_tests = [(true, "exclusive dependency"), (false, "shared dependency")];
 
         for (exclusive, description) in &exclusive_flag_tests {
             // Exclusive dependencies become the sole child of their parent
@@ -348,18 +349,50 @@ fn test_end_stream_semantics() -> H2ConformanceResult {
         // END_STREAM semantics for different frame types:
         let end_stream_valid_frames = [
             (FrameType::Data, true, "DATA frame can carry END_STREAM"),
-            (FrameType::Headers, true, "HEADERS frame can carry END_STREAM"),
+            (
+                FrameType::Headers,
+                true,
+                "HEADERS frame can carry END_STREAM",
+            ),
         ];
 
         let end_stream_invalid_frames = [
-            (FrameType::Priority, false, "PRIORITY frame cannot carry END_STREAM"),
-            (FrameType::RstStream, false, "RST_STREAM frame cannot carry END_STREAM"),
-            (FrameType::Settings, false, "SETTINGS frame cannot carry END_STREAM"),
-            (FrameType::PushPromise, false, "PUSH_PROMISE frame cannot carry END_STREAM"),
+            (
+                FrameType::Priority,
+                false,
+                "PRIORITY frame cannot carry END_STREAM",
+            ),
+            (
+                FrameType::RstStream,
+                false,
+                "RST_STREAM frame cannot carry END_STREAM",
+            ),
+            (
+                FrameType::Settings,
+                false,
+                "SETTINGS frame cannot carry END_STREAM",
+            ),
+            (
+                FrameType::PushPromise,
+                false,
+                "PUSH_PROMISE frame cannot carry END_STREAM",
+            ),
             (FrameType::Ping, false, "PING frame cannot carry END_STREAM"),
-            (FrameType::GoAway, false, "GOAWAY frame cannot carry END_STREAM"),
-            (FrameType::WindowUpdate, false, "WINDOW_UPDATE frame cannot carry END_STREAM"),
-            (FrameType::Continuation, false, "CONTINUATION frame cannot carry END_STREAM"),
+            (
+                FrameType::GoAway,
+                false,
+                "GOAWAY frame cannot carry END_STREAM",
+            ),
+            (
+                FrameType::WindowUpdate,
+                false,
+                "WINDOW_UPDATE frame cannot carry END_STREAM",
+            ),
+            (
+                FrameType::Continuation,
+                false,
+                "CONTINUATION frame cannot carry END_STREAM",
+            ),
         ];
 
         // Validate frame types that can use END_STREAM flag
@@ -398,20 +431,22 @@ fn test_stream_identifier_space() -> H2ConformanceResult {
         // Stream IDs must be strictly increasing within each direction
         let client_streams = [1, 3, 5, 7, 11, 13];
         for i in 1..client_streams.len() {
-            if client_streams[i] <= client_streams[i-1] {
+            if client_streams[i] <= client_streams[i - 1] {
                 return Err(format!(
                     "Client stream IDs must be increasing: {} <= {}",
-                    client_streams[i], client_streams[i-1]
+                    client_streams[i],
+                    client_streams[i - 1]
                 ));
             }
         }
 
         let server_streams = [2, 4, 6, 8, 10, 12];
         for i in 1..server_streams.len() {
-            if server_streams[i] <= server_streams[i-1] {
+            if server_streams[i] <= server_streams[i - 1] {
                 return Err(format!(
                     "Server stream IDs must be increasing: {} <= {}",
-                    server_streams[i], server_streams[i-1]
+                    server_streams[i],
+                    server_streams[i - 1]
                 ));
             }
         }
@@ -455,7 +490,7 @@ fn test_stream_creation_order() -> H2ConformanceResult {
         // Valid client stream creation order
         let valid_client_order = [1, 3, 5, 7, 9];
         for i in 1..valid_client_order.len() {
-            if valid_client_order[i] <= valid_client_order[i-1] {
+            if valid_client_order[i] <= valid_client_order[i - 1] {
                 return Err("Valid client order test data is incorrect".to_string());
             }
             // This order should be accepted
@@ -464,7 +499,7 @@ fn test_stream_creation_order() -> H2ConformanceResult {
         // Same rules apply to server streams (even numbers)
         let valid_server_order = [2, 4, 6, 8, 10];
         for i in 1..valid_server_order.len() {
-            if valid_server_order[i] <= valid_server_order[i-1] {
+            if valid_server_order[i] <= valid_server_order[i - 1] {
                 return Err("Valid server order test data is incorrect".to_string());
             }
             // This order should be accepted

@@ -25,7 +25,8 @@ fn test_basic_line_decode() -> CodecConformanceResult {
         let mut codec = LinesCodec::new();
         let mut buf = BytesMut::from("hello\nworld\n");
 
-        let line1 = codec.decode(&mut buf)
+        let line1 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("First decode failed: {e}"))?
             .ok_or("Expected first line")?;
 
@@ -33,7 +34,8 @@ fn test_basic_line_decode() -> CodecConformanceResult {
             return Err(format!("Expected 'hello', got {:?}", line1));
         }
 
-        let line2 = codec.decode(&mut buf)
+        let line2 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Second decode failed: {e}"))?
             .ok_or("Expected second line")?;
 
@@ -59,7 +61,8 @@ fn test_crlf_line_endings() -> CodecConformanceResult {
         let mut codec = LinesCodec::new();
         let mut buf = BytesMut::from("hello\r\nworld\r\n");
 
-        let line1 = codec.decode(&mut buf)
+        let line1 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("First decode failed: {e}"))?
             .ok_or("Expected first line")?;
 
@@ -85,7 +88,8 @@ fn test_lf_line_endings() -> CodecConformanceResult {
         let mut codec = LinesCodec::new();
         let mut buf = BytesMut::from("test\n");
 
-        let line = codec.decode(&mut buf)
+        let line = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected line")?;
 
@@ -112,13 +116,17 @@ fn test_multiple_lines() -> CodecConformanceResult {
         let mut buf = BytesMut::from("line1\nline2\nline3\n");
 
         for i in 1..=3 {
-            let line = codec.decode(&mut buf)
+            let line = codec
+                .decode(&mut buf)
                 .map_err(|e| format!("Decode {} failed: {e}", i))?
                 .ok_or_else(|| format!("Expected line {}", i))?;
 
             let expected = format!("line{}", i);
             if line != expected {
-                return Err(format!("Line {}: expected {:?}, got {:?}", i, expected, line));
+                return Err(format!(
+                    "Line {}: expected {:?}, got {:?}",
+                    i, expected, line
+                ));
             }
         }
 
@@ -141,7 +149,8 @@ fn test_empty_lines() -> CodecConformanceResult {
         let mut buf = BytesMut::from("\n\nhello\n");
 
         // First empty line
-        let line1 = codec.decode(&mut buf)
+        let line1 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("First decode failed: {e}"))?
             .ok_or("Expected first empty line")?;
 
@@ -150,7 +159,8 @@ fn test_empty_lines() -> CodecConformanceResult {
         }
 
         // Second empty line
-        let line2 = codec.decode(&mut buf)
+        let line2 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Second decode failed: {e}"))?
             .ok_or("Expected second empty line")?;
 
@@ -159,7 +169,8 @@ fn test_empty_lines() -> CodecConformanceResult {
         }
 
         // Non-empty line
-        let line3 = codec.decode(&mut buf)
+        let line3 = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Third decode failed: {e}"))?
             .ok_or("Expected third line")?;
 
@@ -212,7 +223,10 @@ fn test_utf8_validation() -> CodecConformanceResult {
 
         match codec.decode(&mut buf) {
             Err(_) => Ok(()), // Expected error for invalid UTF-8
-            Ok(Some(line)) => Err(format!("Should have rejected invalid UTF-8, got: {:?}", line)),
+            Ok(Some(line)) => Err(format!(
+                "Should have rejected invalid UTF-8, got: {:?}",
+                line
+            )),
             Ok(None) => Err("Should have errored, not returned None".to_string()),
         }
     });
@@ -234,16 +248,21 @@ fn test_encode_decode_round_trip() -> CodecConformanceResult {
 
         // Encode
         let mut buf = BytesMut::new();
-        codec.encode(original.to_string(), &mut buf)
+        codec
+            .encode(original.to_string(), &mut buf)
             .map_err(|e| format!("Encode failed: {e}"))?;
 
         // Decode
-        let decoded = codec.decode(&mut buf)
+        let decoded = codec
+            .decode(&mut buf)
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected decoded line")?;
 
         if decoded != original {
-            return Err(format!("Round-trip failed: expected {:?}, got {:?}", original, decoded));
+            return Err(format!(
+                "Round-trip failed: expected {:?}, got {:?}",
+                original, decoded
+            ));
         }
 
         Ok(())
