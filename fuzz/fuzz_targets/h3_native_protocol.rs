@@ -4,10 +4,13 @@ use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 
 use asupersync::http::h3_native::{
-    H3Frame, H3Settings, H3NativeError,
+    H3Frame, H3Settings, H3NativeError, H3QpackMode, QpackFieldPlan,
+    H3RequestHead, H3ResponseHead,
     H3_SETTING_QPACK_MAX_TABLE_CAPACITY, H3_SETTING_MAX_FIELD_SECTION_SIZE,
     H3_SETTING_QPACK_BLOCKED_STREAMS, H3_SETTING_ENABLE_CONNECT_PROTOCOL,
     H3_SETTING_H3_DATAGRAM,
+    qpack_decode_field_section, qpack_decode_request_field_section,
+    qpack_decode_response_field_section,
 };
 
 /// Fuzz input for HTTP/3 native protocol parsing
@@ -19,6 +22,8 @@ struct H3ProtocolFuzz {
     settings_operations: Vec<SettingsOperation>,
     /// Stream type parsing operations
     stream_operations: Vec<StreamOperation>,
+    /// QPACK field section parsing operations
+    qpack_operations: Vec<QpackOperation>,
     /// Edge case testing
     edge_cases: Vec<EdgeCaseOperation>,
 }
@@ -113,6 +118,66 @@ enum StreamOperation {
     },
 }
 
+/// QPACK field section operations
+#[derive(Arbitrary, Debug)]
+enum QpackOperation {
+    /// Parse generic field section
+    ParseFieldSection {
+        payload: Vec<u8>,
+        mode: QpackMode,
+    },
+    /// Parse request field section
+    ParseRequestFieldSection {
+        payload: Vec<u8>,
+        mode: QpackMode,
+    },
+    /// Parse response field section
+    ParseResponseFieldSection {
+        payload: Vec<u8>,
+        mode: QpackMode,
+    },
+    /// Parse field section with specific patterns
+    ParseStructuredFieldSection {
+        field_patterns: Vec<FieldPattern>,
+        mode: QpackMode,
+    },
+    /// Parse malformed QPACK data
+    ParseMalformedQpack {
+        malformed_data: Vec<u8>,
+        mode: QpackMode,
+    },
+}
+
+/// QPACK mode for fuzzing
+#[derive(Arbitrary, Debug)]
+enum QpackMode {
+    StaticOnly,
+    DynamicTableAllowed,
+}
+
+/// Field patterns for structured QPACK fuzzing
+#[derive(Arbitrary, Debug)]
+enum FieldPattern {
+    /// Static index reference
+    StaticIndex {
+        index: u8,
+    },
+    /// Literal with name reference
+    LiteralNameRef {
+        name_index: u8,
+        value: Vec<u8>,
+    },
+    /// Literal with literal name
+    LiteralName {
+        name: Vec<u8>,
+        value: Vec<u8>,
+    },
+    /// Malformed pattern
+    Malformed {
+        data: Vec<u8>,
+    },
+}
+
 /// Edge case testing
 #[derive(Arbitrary, Debug)]
 enum EdgeCaseOperation {
@@ -151,7 +216,8 @@ const MAX_OPERATIONS: usize = 100;
 fuzz_target!(|input: H3ProtocolFuzz| {
     // Limit operations to prevent timeout
     if input.frame_operations.len() + input.settings_operations.len() +
-       input.stream_operations.len() + input.edge_cases.len() > MAX_OPERATIONS {
+       input.stream_operations.len() + input.qpack_operations.len() +
+       input.edge_cases.len() > MAX_OPERATIONS {
         return;
     }
 
@@ -168,6 +234,11 @@ fuzz_target!(|input: H3ProtocolFuzz| {
     // Test stream operations
     for operation in input.stream_operations {
         test_stream_operation(operation);
+    }
+
+    // Test QPACK operations
+    for operation in input.qpack_operations {
+        test_qpack_operation(operation);
     }
 
     // Test edge cases
@@ -337,6 +408,97 @@ fn test_stream_operation(operation: StreamOperation) {
             if stream_type > 0 && stream_type < (1u64 << 62) {
                 // Stream type is in valid range
             }
+        }
+    }
+}
+
+fn test_qpack_operation(operation: QpackOperation) {
+    match operation {
+        QpackOperation::ParseFieldSection { mut payload, mode } => {
+            if payload.len() > MAX_PAYLOAD_SIZE {
+                payload.truncate(MAX_PAYLOAD_SIZE);
+            }
+
+            let h3_mode = convert_qpack_mode(mode);
+
+            // Test generic field section parsing
+            let result = qpack_decode_field_section(&payload, h3_mode);
+
+            match result {
+                Ok(field_plan) => {
+                    // Verify field plan consistency
+                    verify_qpack_field_plan_consistency(&field_plan);
+                }
+                Err(err) => {
+                    // Verify error is reasonable
+                    verify_qpack_error_consistency(&err, &payload);
+                }
+            }
+        }
+
+        QpackOperation::ParseRequestFieldSection { mut payload, mode } => {
+            if payload.len() > MAX_PAYLOAD_SIZE {
+                payload.truncate(MAX_PAYLOAD_SIZE);
+            }
+
+            let h3_mode = convert_qpack_mode(mode);
+
+            // Test request field section parsing
+            let result = qpack_decode_request_field_section(&payload, h3_mode);
+
+            match result {
+                Ok(request_head) => {
+                    // Verify request head consistency
+                    verify_request_head_consistency(&request_head);
+                }
+                Err(err) => {
+                    verify_qpack_error_consistency(&err, &payload);
+                }
+            }
+        }
+
+        QpackOperation::ParseResponseFieldSection { mut payload, mode } => {
+            if payload.len() > MAX_PAYLOAD_SIZE {
+                payload.truncate(MAX_PAYLOAD_SIZE);
+            }
+
+            let h3_mode = convert_qpack_mode(mode);
+
+            // Test response field section parsing
+            let result = qpack_decode_response_field_section(&payload, h3_mode);
+
+            match result {
+                Ok(response_head) => {
+                    // Verify response head consistency
+                    verify_response_head_consistency(&response_head);
+                }
+                Err(err) => {
+                    verify_qpack_error_consistency(&err, &payload);
+                }
+            }
+        }
+
+        QpackOperation::ParseStructuredFieldSection { field_patterns, mode } => {
+            let h3_mode = convert_qpack_mode(mode);
+
+            // Construct QPACK payload from structured patterns
+            let payload = construct_qpack_payload(&field_patterns);
+            if payload.len() <= MAX_PAYLOAD_SIZE {
+                let _ = qpack_decode_field_section(&payload, h3_mode);
+            }
+        }
+
+        QpackOperation::ParseMalformedQpack { mut malformed_data, mode } => {
+            if malformed_data.len() > MAX_PAYLOAD_SIZE {
+                malformed_data.truncate(MAX_PAYLOAD_SIZE);
+            }
+
+            let h3_mode = convert_qpack_mode(mode);
+
+            // Should handle malformed QPACK data gracefully
+            let _ = qpack_decode_field_section(&malformed_data, h3_mode);
+            let _ = qpack_decode_request_field_section(&malformed_data, h3_mode);
+            let _ = qpack_decode_response_field_section(&malformed_data, h3_mode);
         }
     }
 }
@@ -543,4 +705,126 @@ fn encode_varint(value: u64, output: &mut Vec<u8>) {
     // Simple varint encoding
     use asupersync::net::quic_core::encode_varint;
     let _ = encode_varint(value, output);
+}
+
+fn convert_qpack_mode(mode: QpackMode) -> H3QpackMode {
+    match mode {
+        QpackMode::StaticOnly => H3QpackMode::StaticOnly,
+        QpackMode::DynamicTableAllowed => H3QpackMode::DynamicTableAllowed,
+    }
+}
+
+fn verify_qpack_field_plan_consistency(_field_plan: &Vec<QpackFieldPlan>) {
+    // Verify that the field plan is internally consistent
+    // This could check for reasonable field names/values, proper encoding, etc.
+}
+
+fn verify_request_head_consistency(_request_head: &H3RequestHead) {
+    // Verify that the request head is consistent
+    // This could check for valid method, scheme, authority, path, etc.
+}
+
+fn verify_response_head_consistency(_response_head: &H3ResponseHead) {
+    // Verify that the response head is consistent
+    // This could check for valid status code, headers, etc.
+}
+
+fn verify_qpack_error_consistency(err: &H3NativeError, _payload: &[u8]) {
+    match err {
+        H3NativeError::UnexpectedEof => {
+            // Should occur when QPACK payload is truncated
+        }
+        H3NativeError::InvalidFrame(msg) => {
+            // Should describe the QPACK parsing issue
+            assert!(!msg.is_empty(), "QPACK error message should not be empty");
+        }
+        H3NativeError::QpackPolicy(msg) => {
+            // Should describe QPACK policy violations (static-only vs dynamic)
+            assert!(!msg.is_empty(), "QPACK policy error should have message");
+        }
+        _ => {
+            // Other errors are also acceptable for QPACK parsing
+        }
+    }
+}
+
+fn construct_qpack_payload(field_patterns: &[FieldPattern]) -> Vec<u8> {
+    let mut payload = Vec::new();
+
+    // QPACK field section prefix: Required Insert Count (0 for static-only)
+    payload.push(0x00); // RIC = 0, encoded as single byte
+
+    // QPACK field section prefix: S + Delta Base (0 for static-only)
+    payload.push(0x00); // S=0, Delta Base = 0, encoded as single byte
+
+    // Encode field patterns
+    for pattern in field_patterns.iter().take(20) { // Limit to 20 patterns
+        match pattern {
+            FieldPattern::StaticIndex { index } => {
+                // Indexed field line: 1 T Index(6+)
+                // T=1 (static), so first bit is 1, second bit is 1
+                let byte = 0x80 | 0x40 | (index & 0x3F);
+                payload.push(byte);
+                // If index >= 64, need more bytes for varint encoding
+                if *index >= 64 {
+                    encode_varint_continuation((*index as u64) - 64, &mut payload);
+                }
+            }
+            FieldPattern::LiteralNameRef { name_index, value } => {
+                // Literal field line with name reference: 01 N T NameIndex(4+)
+                // N=0 (not never indexed), T=1 (static name)
+                let byte = 0x40 | 0x10 | (name_index & 0x0F);
+                payload.push(byte);
+                if *name_index >= 16 {
+                    encode_varint_continuation((*name_index as u64) - 16, &mut payload);
+                }
+
+                // Value string: H Length(7+) Value
+                // H=0 (not huffman encoded)
+                let value_len = value.len().min(MAX_PAYLOAD_SIZE / 4);
+                let value_byte = (value_len & 0x7F) as u8;
+                payload.push(value_byte);
+                if value_len >= 127 {
+                    encode_varint_continuation((value_len - 127) as u64, &mut payload);
+                }
+                payload.extend_from_slice(&value[..value_len]);
+            }
+            FieldPattern::LiteralName { name, value } => {
+                // Literal field line with literal name: 001 N H NameLen(3+)
+                // N=0, H=0 (not huffman)
+                let name_len = name.len().min(MAX_PAYLOAD_SIZE / 8);
+                let name_byte = 0x20 | ((name_len & 0x07) as u8);
+                payload.push(name_byte);
+                if name_len >= 8 {
+                    encode_varint_continuation((name_len - 8) as u64, &mut payload);
+                }
+                payload.extend_from_slice(&name[..name_len]);
+
+                // Value string
+                let value_len = value.len().min(MAX_PAYLOAD_SIZE / 8);
+                let value_byte = (value_len & 0x7F) as u8;
+                payload.push(value_byte);
+                if value_len >= 127 {
+                    encode_varint_continuation((value_len - 127) as u64, &mut payload);
+                }
+                payload.extend_from_slice(&value[..value_len]);
+            }
+            FieldPattern::Malformed { data } => {
+                // Add malformed data directly
+                let malformed_len = data.len().min(MAX_PAYLOAD_SIZE / 8);
+                payload.extend_from_slice(&data[..malformed_len]);
+            }
+        }
+    }
+
+    payload
+}
+
+fn encode_varint_continuation(mut value: u64, output: &mut Vec<u8>) {
+    // Simple continuation of varint encoding for values that don't fit in the prefix
+    while value >= 128 {
+        output.push((value & 0x7F) as u8 | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
 }
