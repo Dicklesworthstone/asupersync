@@ -769,4 +769,142 @@ mod tests {
         let dbg2 = format!("{err2:?}");
         assert!(dbg2.contains("Inner"), "{dbg2}");
     }
+
+    // =========================================================================
+    // Golden Conformance Tests for Budget Propagation (bead asupersync-w49ewm)
+    // =========================================================================
+    //
+    // These tests validate timeout service conformance with asupersync's
+    // structured concurrency and budget model.
+
+    /// Test: Basic timeout service with custom time source
+    ///
+    /// This test verifies that timeout service works with a custom time source,
+    /// which is the foundation for budget propagation.
+    #[test]
+    fn golden_timeout_with_custom_time_source() {
+        set_test_time(1_000);
+        let mut timeout_service = Timeout::with_time_getter(
+            EchoService,
+            Duration::from_nanos(500),
+            test_time
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Service should be ready
+        assert!(matches!(timeout_service.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        // Call should succeed immediately since EchoService completes immediately
+        let mut future = timeout_service.call(42);
+        let result = Future::poll(Pin::new(&mut future), &mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(42))));
+    }
+
+    /// Test: Timeout with deadline from custom time source
+    ///
+    /// This test verifies that timeout service properly calculates deadline
+    /// based on the custom time source, not wall clock.
+    #[test]
+    fn golden_timeout_deadline_from_custom_time() {
+        set_test_time(2_000);
+        let mut timeout_service = Timeout::with_time_getter(
+            NeverService,
+            Duration::from_nanos(1_000),
+            test_time
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Service should be ready
+        assert!(matches!(timeout_service.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        // Call creates a future with deadline = start_time (2000) + duration (1000) = 3000
+        let future = timeout_service.call(());
+        assert_eq!(future.deadline(), Time::from_nanos(3_000));
+    }
+
+    /// Test: Timeout using TimeoutFuture::poll_with_time for explicit time control
+    ///
+    /// This test verifies that TimeoutFuture can be explicitly controlled with
+    /// poll_with_time, which allows budget propagation to override wall clock.
+    #[test]
+    fn golden_timeout_poll_with_explicit_time() {
+        let mut future = TimeoutFuture::new(pending::<Result<(), ()>>(), Time::from_nanos(5_000));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Before deadline - should be pending
+        let result = future.poll_with_time(Time::from_nanos(3_000), &mut cx);
+        assert!(result.is_pending());
+
+        // At deadline - should timeout
+        let result = future.poll_with_time(Time::from_nanos(5_000), &mut cx);
+        assert!(matches!(result, Poll::Ready(Err(TimeoutError::Elapsed(_)))));
+    }
+
+    /// Test: Timeout after success is no-op
+    ///
+    /// This test verifies that if work completes before the timeout,
+    /// the timeout becomes a no-op and doesn't interfere with the result.
+    #[test]
+    fn golden_timeout_after_success_is_noop() {
+        let mut future = TimeoutFuture::new(ready(Ok::<_, ()>(42)), Time::from_nanos(10_000));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Future should complete immediately even if deadline is far in future
+        let result = future.poll_with_time(Time::from_nanos(1_000), &mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(42))));
+    }
+
+    /// Test: Nested timeout inheritance
+    ///
+    /// This test verifies that when timeouts are nested, the inner timeout
+    /// fires first if it has a shorter duration.
+    #[test]
+    fn golden_nested_timeout_inheritance() {
+        // Create layered timeouts: outer (10ms) > inner (3ms) > never service
+        let inner_timeout = Timeout::with_time_getter(
+            NeverService,
+            Duration::from_millis(3),
+            test_time
+        );
+
+        let mut outer_timeout = Timeout::with_time_getter(
+            inner_timeout,
+            Duration::from_millis(10),
+            test_time
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Both services should be ready
+        assert!(matches!(outer_timeout.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        // Start the nested timeout at time 1000
+        set_test_time(1_000_000_000); // 1000ms in nanos
+        let mut future = outer_timeout.call(());
+        let start_time = test_time();
+
+        // Before inner timeout (at 2.5s) - should be pending
+        set_test_time(start_time.as_nanos() + 2_500_000_000);
+        let result = Future::poll(Pin::new(&mut future), &mut cx);
+        assert!(result.is_pending());
+
+        // After inner timeout (at 3.5s) - inner should have timed out
+        set_test_time(start_time.as_nanos() + 3_500_000_000);
+        let result = Future::poll(Pin::new(&mut future), &mut cx);
+
+        // Should get a timeout error with the inner timeout's deadline
+        match result {
+            Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) => {
+                let expected_inner_deadline = start_time.saturating_add_nanos(3_000_000_000);
+                assert_eq!(elapsed.deadline(), expected_inner_deadline,
+                    "Should timeout at inner deadline (3s), not outer (10s)");
+            }
+            other => panic!("Expected inner timeout, got: {:?}", other),
+        }
+    }
 }
