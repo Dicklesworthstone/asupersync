@@ -19,6 +19,7 @@ arbitrary = { version = "1", features = ["derive"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 prost = "0.13"
+futures = "0.3"
 
 # For SCRAM-SHA-256 parsing
 base64 = "0.22"
@@ -356,6 +357,13 @@ bench = false
 [[bin]]
 name = "fuzz_websocket_deflate"
 path = "fuzz_targets/websocket_deflate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_body_stream"
+path = "fuzz_targets/h1_body_stream.rs"
 test = false
 doc = false
 bench = false
