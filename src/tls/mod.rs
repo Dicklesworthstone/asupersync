@@ -44,6 +44,9 @@ mod error;
 mod stream;
 mod types;
 
+#[cfg(all(test, feature = "tls"))]
+mod record_conformance_tests;
+
 fn timeout_now() -> Time {
     Cx::current()
         .and_then(|current| current.timer_driver())
