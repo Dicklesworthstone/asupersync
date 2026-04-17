@@ -5,8 +5,8 @@
 
 use anyhow::{Context, Result};
 use clap::{Arg, Command};
-use raptorq_conformance_reporting::{
-    maintenance_workflows::{MaintenanceWorkflow, MaintenanceConfig, MaintenanceActionType},
+use raptorq_conformance_reporting::maintenance_workflows::{
+    MaintenanceActionType, MaintenanceConfig, MaintenanceWorkflow,
 };
 use std::path::PathBuf;
 
@@ -150,11 +150,35 @@ fn main() -> Result<()> {
     let workflow = MaintenanceWorkflow::new(config);
 
     match mode.as_str() {
-        "analyze" => run_analyze_mode(&workflow, golden_dir, fixture_dir, output_dir, format, verbose)?,
+        "analyze" => run_analyze_mode(
+            &workflow,
+            golden_dir,
+            fixture_dir,
+            output_dir,
+            format,
+            verbose,
+        )?,
         "health" => run_health_mode(&workflow, golden_dir, fixture_dir, format, verbose)?,
-        "cleanup" => run_cleanup_mode(&workflow, golden_dir, fixture_dir, output_dir, dry_run, verbose)?,
-        "full" => run_full_maintenance(&workflow, golden_dir, fixture_dir, output_dir, dry_run, verbose)?,
-        _ => anyhow::bail!("Invalid mode: {}. Valid options: analyze, health, cleanup, full", mode),
+        "cleanup" => run_cleanup_mode(
+            &workflow,
+            golden_dir,
+            fixture_dir,
+            output_dir,
+            dry_run,
+            verbose,
+        )?,
+        "full" => run_full_maintenance(
+            &workflow,
+            golden_dir,
+            fixture_dir,
+            output_dir,
+            dry_run,
+            verbose,
+        )?,
+        _ => anyhow::bail!(
+            "Invalid mode: {}. Valid options: analyze, health, cleanup, full",
+            mode
+        ),
     }
 
     Ok(())
@@ -199,27 +223,52 @@ fn run_analyze_mode(
             });
 
             let output_path = output_dir.join("file_health_analysis.json");
-            std::fs::create_dir_all(output_dir)
-                .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+            std::fs::create_dir_all(output_dir).with_context(|| {
+                format!(
+                    "Failed to create output directory: {}",
+                    output_dir.display()
+                )
+            })?;
 
             std::fs::write(&output_path, serde_json::to_string_pretty(&analysis_data)?)
-                .with_context(|| format!("Failed to write analysis to: {}", output_path.display()))?;
+                .with_context(|| {
+                    format!("Failed to write analysis to: {}", output_path.display())
+                })?;
 
             println!("📄 Analysis written to: {}", output_path.display());
         }
         "markdown" => {
             let mut markdown = String::new();
             markdown.push_str("# File Health Analysis Report\n\n");
-            markdown.push_str(&format!("Generated: {}\n\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+            markdown.push_str(&format!(
+                "Generated: {}\n\n",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            ));
 
             markdown.push_str("## Summary\n\n");
             markdown.push_str(&format!("- **Total Files:** {}\n", health_statuses.len()));
-            markdown.push_str(&format!("- **Stale Files:** {}\n", health_statuses.iter().filter(|s| s.is_stale).count()));
-            markdown.push_str(&format!("- **Large Files:** {}\n", health_statuses.iter().filter(|s| s.is_large).count()));
-            markdown.push_str(&format!("- **Unhealthy Files:** {}\n", health_statuses.iter().filter(|s| s.health_score < 0.5).count()));
+            markdown.push_str(&format!(
+                "- **Stale Files:** {}\n",
+                health_statuses.iter().filter(|s| s.is_stale).count()
+            ));
+            markdown.push_str(&format!(
+                "- **Large Files:** {}\n",
+                health_statuses.iter().filter(|s| s.is_large).count()
+            ));
+            markdown.push_str(&format!(
+                "- **Unhealthy Files:** {}\n",
+                health_statuses
+                    .iter()
+                    .filter(|s| s.health_score < 0.5)
+                    .count()
+            ));
 
-            let avg_health = health_statuses.iter().map(|s| s.health_score).sum::<f64>() / health_statuses.len() as f64;
-            markdown.push_str(&format!("- **Average Health Score:** {:.2}\n\n", avg_health));
+            let avg_health = health_statuses.iter().map(|s| s.health_score).sum::<f64>()
+                / health_statuses.len() as f64;
+            markdown.push_str(&format!(
+                "- **Average Health Score:** {:.2}\n\n",
+                avg_health
+            ));
 
             markdown.push_str("## Recommendations\n\n");
             for rec in &recommendations {
@@ -227,7 +276,12 @@ fn run_analyze_mode(
             }
             markdown.push_str("\n");
 
-            if !health_statuses.iter().filter(|s| s.health_score < 0.5).collect::<Vec<_>>().is_empty() {
+            if !health_statuses
+                .iter()
+                .filter(|s| s.health_score < 0.5)
+                .collect::<Vec<_>>()
+                .is_empty()
+            {
                 markdown.push_str("## Unhealthy Files\n\n");
                 for status in health_statuses.iter().filter(|s| s.health_score < 0.5) {
                     markdown.push_str(&format!("### {}\n\n", status.path.display()));
@@ -240,11 +294,16 @@ fn run_analyze_mode(
             }
 
             let output_path = output_dir.join("file_health_analysis.md");
-            std::fs::create_dir_all(output_dir)
-                .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+            std::fs::create_dir_all(output_dir).with_context(|| {
+                format!(
+                    "Failed to create output directory: {}",
+                    output_dir.display()
+                )
+            })?;
 
-            std::fs::write(&output_path, markdown)
-                .with_context(|| format!("Failed to write analysis to: {}", output_path.display()))?;
+            std::fs::write(&output_path, markdown).with_context(|| {
+                format!("Failed to write analysis to: {}", output_path.display())
+            })?;
 
             println!("📄 Analysis written to: {}", output_path.display());
         }
@@ -252,11 +311,24 @@ fn run_analyze_mode(
             println!("\n📊 File Health Analysis Results");
             println!("================================");
             println!("Total files analyzed: {}", health_statuses.len());
-            println!("Stale files: {}", health_statuses.iter().filter(|s| s.is_stale).count());
-            println!("Large files: {}", health_statuses.iter().filter(|s| s.is_large).count());
-            println!("Unhealthy files: {}", health_statuses.iter().filter(|s| s.health_score < 0.5).count());
+            println!(
+                "Stale files: {}",
+                health_statuses.iter().filter(|s| s.is_stale).count()
+            );
+            println!(
+                "Large files: {}",
+                health_statuses.iter().filter(|s| s.is_large).count()
+            );
+            println!(
+                "Unhealthy files: {}",
+                health_statuses
+                    .iter()
+                    .filter(|s| s.health_score < 0.5)
+                    .count()
+            );
 
-            let avg_health = health_statuses.iter().map(|s| s.health_score).sum::<f64>() / health_statuses.len() as f64;
+            let avg_health = health_statuses.iter().map(|s| s.health_score).sum::<f64>()
+                / health_statuses.len() as f64;
             println!("Average health score: {:.2}", avg_health);
 
             println!("\n💡 Recommendations:");
@@ -265,20 +337,31 @@ fn run_analyze_mode(
             }
 
             // Show most unhealthy files
-            let mut unhealthy: Vec<_> = health_statuses.iter().filter(|s| s.health_score < 0.7).collect();
+            let mut unhealthy: Vec<_> = health_statuses
+                .iter()
+                .filter(|s| s.health_score < 0.7)
+                .collect();
             unhealthy.sort_by(|a, b| a.health_score.partial_cmp(&b.health_score).unwrap());
 
             if !unhealthy.is_empty() {
                 println!("\n⚠️  Files Needing Attention:");
                 for (i, status) in unhealthy.iter().take(10).enumerate() {
-                    let health_emoji = if status.health_score < 0.3 { "🔴" } else if status.health_score < 0.6 { "🟡" } else { "🟢" };
-                    println!("  {}. {} {} (health: {:.2}, age: {} days, size: {} bytes)",
-                             i + 1,
-                             health_emoji,
-                             status.path.display(),
-                             status.health_score,
-                             status.age_days,
-                             status.size_bytes);
+                    let health_emoji = if status.health_score < 0.3 {
+                        "🔴"
+                    } else if status.health_score < 0.6 {
+                        "🟡"
+                    } else {
+                        "🟢"
+                    };
+                    println!(
+                        "  {}. {} {} (health: {:.2}, age: {} days, size: {} bytes)",
+                        i + 1,
+                        health_emoji,
+                        status.path.display(),
+                        status.health_score,
+                        status.age_days,
+                        status.size_bytes
+                    );
                 }
 
                 if unhealthy.len() > 10 {
@@ -308,8 +391,14 @@ fn run_health_mode(
 
     // Calculate overall health metrics
     let total_files = health_statuses.len();
-    let healthy_files = health_statuses.iter().filter(|s| s.health_score >= 0.7).count();
-    let unhealthy_files = health_statuses.iter().filter(|s| s.health_score < 0.5).count();
+    let healthy_files = health_statuses
+        .iter()
+        .filter(|s| s.health_score >= 0.7)
+        .count();
+    let unhealthy_files = health_statuses
+        .iter()
+        .filter(|s| s.health_score < 0.5)
+        .count();
     let stale_files = health_statuses.iter().filter(|s| s.is_stale).count();
     let large_files = health_statuses.iter().filter(|s| s.is_large).count();
 
@@ -319,7 +408,13 @@ fn run_health_mode(
         1.0
     };
 
-    let health_emoji = if overall_health >= 0.9 { "🟢" } else if overall_health >= 0.7 { "🟡" } else { "🔴" };
+    let health_emoji = if overall_health >= 0.9 {
+        "🟢"
+    } else if overall_health >= 0.7 {
+        "🟡"
+    } else {
+        "🔴"
+    };
 
     match format {
         "json" => {
@@ -336,8 +431,15 @@ fn run_health_mode(
             println!("{}", serde_json::to_string_pretty(&health_report)?);
         }
         _ => {
-            println!("{} Overall Health: {:.1}%", health_emoji, overall_health * 100.0);
-            println!("Files: {} total, {} healthy, {} unhealthy", total_files, healthy_files, unhealthy_files);
+            println!(
+                "{} Overall Health: {:.1}%",
+                health_emoji,
+                overall_health * 100.0
+            );
+            println!(
+                "Files: {} total, {} healthy, {} unhealthy",
+                total_files, healthy_files, unhealthy_files
+            );
 
             if stale_files > 0 {
                 println!("⏰ {} stale files detected", stale_files);
@@ -394,16 +496,24 @@ fn run_cleanup_mode(
         }
     }
 
-    println!("Space reclaimed: {} bytes ({:.1} MB)",
-             result.statistics.space_reclaimed,
-             result.statistics.space_reclaimed as f64 / (1024.0 * 1024.0));
-    println!("Duration: {:.1} seconds", result.statistics.duration_seconds);
+    println!(
+        "Space reclaimed: {} bytes ({:.1} MB)",
+        result.statistics.space_reclaimed,
+        result.statistics.space_reclaimed as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "Duration: {:.1} seconds",
+        result.statistics.duration_seconds
+    );
 
     if verbose {
         println!("\n📋 Detailed Actions:");
         for action in &result.actions_performed {
             let status_emoji = if action.successful { "✅" } else { "❌" };
-            println!("  {} {:?}: {}", status_emoji, action.action_type, action.description);
+            println!(
+                "  {} {:?}: {}",
+                status_emoji, action.action_type, action.description
+            );
 
             if let Some(ref error) = action.error_message {
                 println!("    Error: {}", error);
@@ -422,8 +532,12 @@ fn run_cleanup_mode(
 
     // Save detailed results as JSON
     let results_path = output_dir.join("maintenance_results.json");
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
 
     std::fs::write(&results_path, serde_json::to_string_pretty(&result)?)
         .with_context(|| format!("Failed to write results to: {}", results_path.display()))?;
@@ -472,14 +586,32 @@ fn run_full_maintenance(
 
     let mut report = String::new();
     report.push_str("# Full Maintenance Report\n\n");
-    report.push_str(&format!("Generated: {}\n\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+    report.push_str(&format!(
+        "Generated: {}\n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ));
 
     report.push_str("## Summary\n\n");
-    report.push_str(&format!("- **Files Analyzed:** {}\n", health_statuses.len()));
-    report.push_str(&format!("- **Actions Performed:** {}\n", result.actions_performed.len()));
-    report.push_str(&format!("- **Files Cleaned:** {}\n", result.cleaned_files.len()));
-    report.push_str(&format!("- **Space Reclaimed:** {} bytes\n", result.statistics.space_reclaimed));
-    report.push_str(&format!("- **Duration:** {:.1} seconds\n\n", result.statistics.duration_seconds));
+    report.push_str(&format!(
+        "- **Files Analyzed:** {}\n",
+        health_statuses.len()
+    ));
+    report.push_str(&format!(
+        "- **Actions Performed:** {}\n",
+        result.actions_performed.len()
+    ));
+    report.push_str(&format!(
+        "- **Files Cleaned:** {}\n",
+        result.cleaned_files.len()
+    ));
+    report.push_str(&format!(
+        "- **Space Reclaimed:** {} bytes\n",
+        result.statistics.space_reclaimed
+    ));
+    report.push_str(&format!(
+        "- **Duration:** {:.1} seconds\n\n",
+        result.statistics.duration_seconds
+    ));
 
     report.push_str("## Recommendations\n\n");
     for rec in &recommendations {
@@ -490,9 +622,19 @@ fn run_full_maintenance(
     report.push_str("## Actions Performed\n\n");
     for action in &result.actions_performed {
         report.push_str(&format!("### {:?}\n", action.action_type));
-        report.push_str(&format!("- **Status:** {}\n", if action.successful { "✅ Success" } else { "❌ Failed" }));
+        report.push_str(&format!(
+            "- **Status:** {}\n",
+            if action.successful {
+                "✅ Success"
+            } else {
+                "❌ Failed"
+            }
+        ));
         report.push_str(&format!("- **Description:** {}\n", action.description));
-        report.push_str(&format!("- **Files Affected:** {}\n", action.affected_files.len()));
+        report.push_str(&format!(
+            "- **Files Affected:** {}\n",
+            action.affected_files.len()
+        ));
 
         if let Some(ref error) = action.error_message {
             report.push_str(&format!("- **Error:** {}\n", error));
@@ -506,16 +648,29 @@ fn run_full_maintenance(
     println!("  Report saved to: {}", report_path.display());
 
     // Overall status
-    let success_rate = result.actions_performed.iter().filter(|a| a.successful).count() as f64 /
-                      result.actions_performed.len().max(1) as f64;
+    let success_rate = result
+        .actions_performed
+        .iter()
+        .filter(|a| a.successful)
+        .count() as f64
+        / result.actions_performed.len().max(1) as f64;
 
-    let status_emoji = if success_rate >= 0.9 { "✅" } else if success_rate >= 0.7 { "⚠️" } else { "❌" };
+    let status_emoji = if success_rate >= 0.9 {
+        "✅"
+    } else if success_rate >= 0.7 {
+        "⚠️"
+    } else {
+        "❌"
+    };
 
     println!("\n{} Maintenance Complete", status_emoji);
     println!("Success rate: {:.1}%", success_rate * 100.0);
 
     if !result.errors.is_empty() {
-        println!("⚠️  {} errors encountered - check the detailed report", result.errors.len());
+        println!(
+            "⚠️  {} errors encountered - check the detailed report",
+            result.errors.len()
+        );
     }
 
     Ok(())
@@ -554,9 +709,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let args = vec![
             "maintain_fixtures",
-            "--golden-dir", temp_dir.path().to_str().unwrap(),
-            "--fixture-dir", temp_dir.path().to_str().unwrap(),
-            "--output-dir", temp_dir.path().to_str().unwrap(),
+            "--golden-dir",
+            temp_dir.path().to_str().unwrap(),
+            "--fixture-dir",
+            temp_dir.path().to_str().unwrap(),
+            "--output-dir",
+            temp_dir.path().to_str().unwrap(),
         ];
 
         let matches = app.try_get_matches_from(args);

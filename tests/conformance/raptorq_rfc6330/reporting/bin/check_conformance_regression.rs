@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use clap::{Arg, Command};
 use raptorq_conformance_reporting::{
     coverage_matrix::CoverageMatrixCalculator,
-    regression_detection::{RegressionDetector, RegressionConfig, RegressionSeverity},
+    regression_detection::{RegressionConfig, RegressionDetector, RegressionSeverity},
 };
 use std::path::PathBuf;
 
@@ -117,7 +117,10 @@ fn main() -> Result<()> {
 
     // Validate thresholds
     if max_score_drop < 0.0 || max_score_drop > 1.0 {
-        anyhow::bail!("max-score-drop must be between 0.0 and 1.0, got {}", max_score_drop);
+        anyhow::bail!(
+            "max-score-drop must be between 0.0 and 1.0, got {}",
+            max_score_drop
+        );
     }
     if min_score < 0.0 || min_score > 1.0 {
         anyhow::bail!("min-score must be between 0.0 and 1.0, got {}", min_score);
@@ -147,7 +150,10 @@ fn main() -> Result<()> {
         println!("  Total tests: {}", coverage_matrix.total_tests);
         println!("  Passed tests: {}", coverage_matrix.passed_tests);
         println!("  Failed tests: {}", coverage_matrix.failed_tests);
-        println!("  Current score: {:.1}%", coverage_matrix.overall_conformance_score * 100.0);
+        println!(
+            "  Current score: {:.1}%",
+            coverage_matrix.overall_conformance_score * 100.0
+        );
     }
 
     // Configure regression detection
@@ -161,8 +167,12 @@ fn main() -> Result<()> {
 
     // Find historical snapshots in the baseline directory
     if baseline_dir.exists() {
-        let entries = std::fs::read_dir(baseline_dir)
-            .with_context(|| format!("Failed to read baseline directory: {}", baseline_dir.display()))?;
+        let entries = std::fs::read_dir(baseline_dir).with_context(|| {
+            format!(
+                "Failed to read baseline directory: {}",
+                baseline_dir.display()
+            )
+        })?;
 
         for entry in entries {
             let entry = entry.context("Failed to read directory entry")?;
@@ -174,11 +184,17 @@ fn main() -> Result<()> {
         }
 
         if verbose {
-            println!("📁 Found {} baseline snapshot(s)", regression_config.historical_data_paths.len());
+            println!(
+                "📁 Found {} baseline snapshot(s)",
+                regression_config.historical_data_paths.len()
+            );
         }
     } else {
         if verbose {
-            println!("⚠️  Baseline directory does not exist: {}", baseline_dir.display());
+            println!(
+                "⚠️  Baseline directory does not exist: {}",
+                baseline_dir.display()
+            );
         }
     }
 
@@ -218,14 +234,25 @@ fn main() -> Result<()> {
         "json" => print_json_output(&regression_analysis, output_file, verbose)?,
         "text" => print_text_output(&regression_analysis, output_file, verbose)?,
         "summary" => print_summary_output(&regression_analysis, verbose)?,
-        _ => anyhow::bail!("Invalid format: {}. Valid options: json, text, summary", format),
+        _ => anyhow::bail!(
+            "Invalid format: {}. Valid options: json, text, summary",
+            format
+        ),
     }
 
     // Determine exit code based on results
-    let exit_code = calculate_exit_code(&regression_analysis, &coverage_matrix, min_score, strict_mode);
+    let exit_code = calculate_exit_code(
+        &regression_analysis,
+        &coverage_matrix,
+        min_score,
+        strict_mode,
+    );
 
     if verbose && exit_code != 0 {
-        println!("\n🚨 Exiting with code {} due to conformance issues", exit_code);
+        println!(
+            "\n🚨 Exiting with code {} due to conformance issues",
+            exit_code
+        );
     }
 
     std::process::exit(exit_code);
@@ -263,25 +290,50 @@ fn print_text_output(
     output.push_str("# RaptorQ Conformance Regression Analysis\n\n");
 
     // Overall status
-    let status_emoji = if analysis.has_regressions { "❌" } else { "✅" };
-    output.push_str(&format!("{} **Overall Status:** {}\n\n",
-                            status_emoji,
-                            if analysis.has_regressions { "REGRESSIONS DETECTED" } else { "NO REGRESSIONS" }));
+    let status_emoji = if analysis.has_regressions {
+        "❌"
+    } else {
+        "✅"
+    };
+    output.push_str(&format!(
+        "{} **Overall Status:** {}\n\n",
+        status_emoji,
+        if analysis.has_regressions {
+            "REGRESSIONS DETECTED"
+        } else {
+            "NO REGRESSIONS"
+        }
+    ));
 
     // Scores
     output.push_str("## Conformance Scores\n\n");
-    output.push_str(&format!("- **Current Score:** {:.1}%\n", analysis.current_score * 100.0));
-    output.push_str(&format!("- **Baseline Score:** {:.1}%\n", analysis.baseline_score * 100.0));
+    output.push_str(&format!(
+        "- **Current Score:** {:.1}%\n",
+        analysis.current_score * 100.0
+    ));
+    output.push_str(&format!(
+        "- **Baseline Score:** {:.1}%\n",
+        analysis.baseline_score * 100.0
+    ));
 
-    let change_emoji = if analysis.score_change >= 0.0 { "📈" } else { "📉" };
-    output.push_str(&format!("- **Score Change:** {} {:.1}%\n\n",
-                            change_emoji,
-                            analysis.score_change * 100.0));
+    let change_emoji = if analysis.score_change >= 0.0 {
+        "📈"
+    } else {
+        "📉"
+    };
+    output.push_str(&format!(
+        "- **Score Change:** {} {:.1}%\n\n",
+        change_emoji,
+        analysis.score_change * 100.0
+    ));
 
     // Summary
     if analysis.summary.total_regressions > 0 {
         output.push_str("## Regression Summary\n\n");
-        output.push_str(&format!("- **Total Regressions:** {}\n", analysis.summary.total_regressions));
+        output.push_str(&format!(
+            "- **Total Regressions:** {}\n",
+            analysis.summary.total_regressions
+        ));
 
         // By severity
         if !analysis.summary.by_severity.is_empty() {
@@ -320,12 +372,26 @@ fn print_text_output(
                 RegressionSeverity::Low => "ℹ️",
             };
 
-            output.push_str(&format!("### {} Finding #{} - {:?} {:?}\n\n",
-                                   severity_emoji, i + 1, regression.severity, regression.regression_type));
+            output.push_str(&format!(
+                "### {} Finding #{} - {:?} {:?}\n\n",
+                severity_emoji,
+                i + 1,
+                regression.severity,
+                regression.regression_type
+            ));
             output.push_str(&format!("**Description:** {}\n\n", regression.description));
-            output.push_str(&format!("**Affected Section:** {}\n\n", regression.affected_section));
-            output.push_str(&format!("**Previous Value:** {}\n\n", regression.previous_value));
-            output.push_str(&format!("**Current Value:** {}\n\n", regression.current_value));
+            output.push_str(&format!(
+                "**Affected Section:** {}\n\n",
+                regression.affected_section
+            ));
+            output.push_str(&format!(
+                "**Previous Value:** {}\n\n",
+                regression.previous_value
+            ));
+            output.push_str(&format!(
+                "**Current Value:** {}\n\n",
+                regression.current_value
+            ));
 
             if !regression.remediation_suggestions.is_empty() {
                 output.push_str("**Remediation Suggestions:**\n\n");
@@ -359,20 +425,38 @@ fn print_summary_output(
     _verbose: bool,
 ) -> Result<()> {
     // Compact summary for CI/automated use
-    let status = if analysis.has_regressions { "FAIL" } else { "PASS" };
-    let emoji = if analysis.has_regressions { "❌" } else { "✅" };
+    let status = if analysis.has_regressions {
+        "FAIL"
+    } else {
+        "PASS"
+    };
+    let emoji = if analysis.has_regressions {
+        "❌"
+    } else {
+        "✅"
+    };
 
     println!("{} STATUS: {}", emoji, status);
-    println!("SCORE: {:.1}% (change: {:+.1}%)",
-             analysis.current_score * 100.0,
-             analysis.score_change * 100.0);
+    println!(
+        "SCORE: {:.1}% (change: {:+.1}%)",
+        analysis.current_score * 100.0,
+        analysis.score_change * 100.0
+    );
 
     if analysis.has_regressions {
         println!("REGRESSIONS: {}", analysis.summary.total_regressions);
 
         // Show critical and high severity counts
-        let critical = analysis.summary.by_severity.get(&RegressionSeverity::Critical).unwrap_or(&0);
-        let high = analysis.summary.by_severity.get(&RegressionSeverity::High).unwrap_or(&0);
+        let critical = analysis
+            .summary
+            .by_severity
+            .get(&RegressionSeverity::Critical)
+            .unwrap_or(&0);
+        let high = analysis
+            .summary
+            .by_severity
+            .get(&RegressionSeverity::High)
+            .unwrap_or(&0);
 
         if *critical > 0 {
             println!("CRITICAL: {}", critical);
@@ -398,8 +482,16 @@ fn calculate_exit_code(
     // 0: No issues
 
     if analysis.has_regressions {
-        let critical_count = analysis.summary.by_severity.get(&RegressionSeverity::Critical).unwrap_or(&0);
-        let high_count = analysis.summary.by_severity.get(&RegressionSeverity::High).unwrap_or(&0);
+        let critical_count = analysis
+            .summary
+            .by_severity
+            .get(&RegressionSeverity::Critical)
+            .unwrap_or(&0);
+        let high_count = analysis
+            .summary
+            .by_severity
+            .get(&RegressionSeverity::High)
+            .unwrap_or(&0);
 
         if *critical_count > 0 {
             return 3;
@@ -431,7 +523,9 @@ fn calculate_exit_code(
 mod tests {
     use super::*;
     use raptorq_conformance_reporting::coverage_matrix::CoverageMatrix;
-    use raptorq_conformance_reporting::regression_detection::{RegressionAnalysis, RegressionSummary};
+    use raptorq_conformance_reporting::regression_detection::{
+        RegressionAnalysis, RegressionSummary,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -451,7 +545,8 @@ mod tests {
                 total_regressions: 0,
                 by_severity: HashMap::new(),
                 by_type: HashMap::new(),
-                trend: raptorq_conformance_reporting::regression_detection::ConformanceTrend::Stable,
+                trend:
+                    raptorq_conformance_reporting::regression_detection::ConformanceTrend::Stable,
             },
         };
 
@@ -490,8 +585,10 @@ mod tests {
 
         let args = vec![
             "check_conformance_regression",
-            "--golden-dir", "/tmp/golden",
-            "--baseline-dir", "/tmp/baseline",
+            "--golden-dir",
+            "/tmp/golden",
+            "--baseline-dir",
+            "/tmp/baseline",
         ];
 
         let matches = app.try_get_matches_from(args);

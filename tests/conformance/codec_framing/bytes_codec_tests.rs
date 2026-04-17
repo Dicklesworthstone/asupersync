@@ -25,8 +25,9 @@ fn test_pass_through_decode() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected decoded bytes")?;
 
-        if decoded.freeze() != Bytes::from("test data") {
-            return Err(format!("Expected 'test data', got {:?}", decoded));
+        let frozen = decoded.freeze();
+        if frozen != Bytes::from("test data") {
+            return Err(format!("Expected 'test data', got {:?}", frozen));
         }
 
         if !buf.is_empty() {
@@ -61,8 +62,9 @@ fn test_encode_decode_round_trip() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected decoded bytes")?;
 
-        if decoded.freeze() != original {
-            return Err(format!("Round-trip failed: expected {:?}, got {:?}", original, decoded));
+        let frozen_decoded = decoded.freeze();
+        if frozen_decoded != original {
+            return Err(format!("Round-trip failed: expected {:?}, got {:?}", original, frozen_decoded));
         }
 
         Ok(())

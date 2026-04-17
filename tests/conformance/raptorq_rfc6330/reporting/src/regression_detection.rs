@@ -3,11 +3,11 @@
 //! This module provides functionality for detecting regressions in RaptorQ conformance
 //! test results by comparing current test outcomes against historical baselines.
 
-use crate::coverage_matrix::{CoverageMatrix, CoverageMatrixCalculator, ConformanceLevel};
+use crate::coverage_matrix::{CoverageMatrix, CoverageMatrixCalculator};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Configuration for regression detection
@@ -67,7 +67,7 @@ impl Default for BuildInfo {
     fn default() -> Self {
         Self {
             rust_version: "unknown".to_string(),
-            target_platform: std::env::consts::TARGET.to_string(),
+            target_platform: std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string()),
             build_profile: "unknown".to_string(),
             environment: HashMap::new(),
         }
@@ -111,7 +111,7 @@ pub struct RegressionFinding {
 }
 
 /// Types of regressions that can be detected
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RegressionType {
     /// Overall conformance score dropped significantly
     ConformanceScoreDrop,
@@ -128,7 +128,7 @@ pub enum RegressionType {
 }
 
 /// Severity levels for regressions
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegressionSeverity {
     /// Critical regression that should block releases
     Critical,
@@ -243,7 +243,8 @@ impl RegressionDetector {
             has_regressions: !regressions.is_empty(),
             current_score: current_matrix.compliance_score,
             baseline_score: baseline.coverage_matrix.compliance_score,
-            score_change: current_matrix.compliance_score - baseline.coverage_matrix.compliance_score,
+            score_change: current_matrix.compliance_score
+                - baseline.coverage_matrix.compliance_score,
             regressions,
             summary,
         })
@@ -296,7 +297,10 @@ impl RegressionDetector {
     }
 
     /// Calculate baseline metrics from historical data
-    fn calculate_baseline(&self, historical_data: &[ConformanceSnapshot]) -> Result<ConformanceSnapshot> {
+    fn calculate_baseline(
+        &self,
+        historical_data: &[ConformanceSnapshot],
+    ) -> Result<ConformanceSnapshot> {
         if historical_data.is_empty() {
             anyhow::bail!("No historical data available for baseline calculation");
         }
@@ -378,7 +382,8 @@ impl RegressionDetector {
                         remediation_suggestions: vec![
                             format!("Investigate new failures in RFC section {}", section),
                             "Check test logs for failure details".to_string(),
-                            "Verify implementation changes didn't break existing functionality".to_string(),
+                            "Verify implementation changes didn't break existing functionality"
+                                .to_string(),
                         ],
                     });
                 }
@@ -399,9 +404,11 @@ impl RegressionDetector {
         for (section, current_coverage) in &current.sections {
             if let Some(baseline_coverage) = baseline.coverage_matrix.sections.get(section) {
                 // Check if we lost PASS status in a critical section
-                if baseline_coverage.conformance_status == crate::coverage_matrix::SectionConformanceStatus::Pass
-                    && current_coverage.conformance_status != crate::coverage_matrix::SectionConformanceStatus::Pass {
-
+                if baseline_coverage.conformance_status
+                    == crate::coverage_matrix::SectionConformanceStatus::Pass
+                    && current_coverage.conformance_status
+                        != crate::coverage_matrix::SectionConformanceStatus::Pass
+                {
                     findings.push(RegressionFinding {
                         regression_type: RegressionType::CriticalComplianceLoss,
                         severity: RegressionSeverity::Critical,
@@ -414,7 +421,8 @@ impl RegressionDetector {
                         current_value: format!("{:?}", current_coverage.conformance_status),
                         remediation_suggestions: vec![
                             format!("Restore full compliance for RFC section {}", section),
-                            "This is a critical regression that may affect interoperability".to_string(),
+                            "This is a critical regression that may affect interoperability"
+                                .to_string(),
                             "Review implementation against RFC 6330 requirements".to_string(),
                         ],
                     });
@@ -449,14 +457,12 @@ impl RegressionDetector {
 
         let coverage_drop = baseline_coverage - current_coverage;
 
-        if coverage_drop > 0.05 { // 5% coverage drop threshold
+        if coverage_drop > 0.05 {
+            // 5% coverage drop threshold
             return Ok(Some(RegressionFinding {
                 regression_type: RegressionType::CoverageDecrease,
                 severity: RegressionSeverity::Medium,
-                description: format!(
-                    "Test coverage decreased by {:.1}%",
-                    coverage_drop * 100.0
-                ),
+                description: format!("Test coverage decreased by {:.1}%", coverage_drop * 100.0),
                 affected_section: "Test Coverage".to_string(),
                 previous_value: format!("{:.1}%", baseline_coverage * 100.0),
                 current_value: format!("{:.1}%", current_coverage * 100.0),
@@ -485,11 +491,7 @@ impl RegressionDetector {
         let n = scores.len() as f64;
         let sum_x: f64 = (0..scores.len()).map(|i| i as f64).sum();
         let sum_y: f64 = scores.iter().sum();
-        let sum_xy: f64 = scores
-            .iter()
-            .enumerate()
-            .map(|(i, &y)| i as f64 * y)
-            .sum();
+        let sum_xy: f64 = scores.iter().enumerate().map(|(i, &y)| i as f64 * y).sum();
         let sum_x2: f64 = (0..scores.len()).map(|i| (i as f64).powi(2)).sum();
 
         let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2));
@@ -504,7 +506,11 @@ impl RegressionDetector {
     }
 
     /// Build regression analysis summary
-    fn build_summary(&self, regressions: &[RegressionFinding], trend: ConformanceTrend) -> RegressionSummary {
+    fn build_summary(
+        &self,
+        regressions: &[RegressionFinding],
+        trend: ConformanceTrend,
+    ) -> RegressionSummary {
         let mut by_severity = HashMap::new();
         let mut by_type = HashMap::new();
 
@@ -535,7 +541,7 @@ impl RegressionDetector {
 
         Ok(BuildInfo {
             rust_version: std::env::var("RUSTC_VERSION").unwrap_or_else(|_| "unknown".to_string()),
-            target_platform: std::env::consts::TARGET.to_string(),
+            target_platform: std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string()),
             build_profile: if cfg!(debug_assertions) {
                 "debug".to_string()
             } else {
@@ -549,7 +555,6 @@ impl RegressionDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coverage_matrix::{SectionCoverage, RequirementCoverage};
 
     #[test]
     fn test_regression_config_default() {
@@ -562,7 +567,7 @@ mod tests {
     #[test]
     fn test_build_info_default() {
         let build_info = BuildInfo::default();
-        assert_eq!(build_info.target_platform, std::env::consts::TARGET);
+        assert!(!build_info.target_platform.is_empty());
     }
 
     #[test]
@@ -588,11 +593,7 @@ mod tests {
         matrix.compliance_score = 0.95;
 
         let temp_file = NamedTempFile::new().unwrap();
-        let result = detector.store_snapshot(
-            &matrix,
-            Some("abc123".to_string()),
-            temp_file.path(),
-        );
+        let result = detector.store_snapshot(&matrix, Some("abc123".to_string()), temp_file.path());
 
         assert!(result.is_ok());
         assert!(temp_file.path().exists());

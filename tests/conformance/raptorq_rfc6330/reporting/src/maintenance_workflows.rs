@@ -3,11 +3,11 @@
 //! This module provides automated maintenance workflows for RaptorQ conformance testing,
 //! including fixture cleanup, golden file maintenance, and automated reporting.
 
-use crate::coverage_matrix::{CoverageMatrix, CoverageMatrixCalculator};
-use crate::compliance_report::{ComplianceReportGenerator, ReportFormat};
-use crate::regression_detection::{RegressionDetector, RegressionConfig, ConformanceSnapshot};
+use crate::compliance_report::ComplianceReportGenerator;
+use crate::coverage_matrix::CoverageMatrixCalculator;
+use crate::regression_detection::RegressionDetector;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -170,8 +170,9 @@ impl MaintenanceWorkflow {
         let mut errors = Vec::new();
 
         // Ensure output directory exists
-        std::fs::create_dir_all(output_dir)
-            .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
+        std::fs::create_dir_all(output_dir).with_context(|| {
+            format!("Failed to create output directory {}", output_dir.display())
+        })?;
 
         // 1. Cleanup stale golden files
         match self.cleanup_golden_files(golden_dir) {
@@ -222,7 +223,8 @@ impl MaintenanceWorkflow {
         }
 
         let duration = start_time.elapsed();
-        let statistics = self.calculate_statistics(&actions, &cleaned_files, &updated_files, duration);
+        let statistics =
+            self.calculate_statistics(&actions, &cleaned_files, &updated_files, duration);
 
         Ok(MaintenanceResult {
             timestamp: Utc::now(),
@@ -287,10 +289,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Generate automated maintenance recommendations
-    pub fn generate_recommendations(
-        &self,
-        health_statuses: &[FileHealthStatus],
-    ) -> Vec<String> {
+    pub fn generate_recommendations(&self, health_statuses: &[FileHealthStatus]) -> Vec<String> {
         let mut recommendations = Vec::new();
 
         let stale_files: Vec<_> = health_statuses
@@ -333,7 +332,8 @@ impl MaintenanceWorkflow {
 
         if health_statuses.len() > self.config.max_snapshots_to_keep * 2 {
             recommendations.push(
-                "Consider reducing the number of files in the conformance test directories".to_string()
+                "Consider reducing the number of files in the conformance test directories"
+                    .to_string(),
             );
         }
 
@@ -395,7 +395,10 @@ impl MaintenanceWorkflow {
     }
 
     /// Cleanup stale fixture files
-    fn cleanup_fixture_files(&self, fixture_dir: &Path) -> Result<(MaintenanceAction, Vec<PathBuf>)> {
+    fn cleanup_fixture_files(
+        &self,
+        fixture_dir: &Path,
+    ) -> Result<(MaintenanceAction, Vec<PathBuf>)> {
         let mut cleaned_files = Vec::new();
         let cutoff_date = Utc::now() - Duration::days(self.config.max_fixture_age_days);
 
@@ -461,7 +464,10 @@ impl MaintenanceWorkflow {
     }
 
     /// Cleanup historical snapshots
-    fn cleanup_historical_snapshots(&self, output_dir: &Path) -> Result<(MaintenanceAction, Vec<PathBuf>)> {
+    fn cleanup_historical_snapshots(
+        &self,
+        output_dir: &Path,
+    ) -> Result<(MaintenanceAction, Vec<PathBuf>)> {
         let mut cleaned_files = Vec::new();
         let snapshots_pattern = output_dir.join("snapshots");
 
@@ -482,7 +488,9 @@ impl MaintenanceWorkflow {
         let mut snapshots = Vec::new();
         for entry in WalkDir::new(&snapshots_pattern) {
             let entry = entry.context("Failed to read directory entry")?;
-            if entry.file_type().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
+            if entry.file_type().is_file()
+                && entry.path().extension().and_then(|s| s.to_str()) == Some("json")
+            {
                 let path = entry.path();
                 let metadata = entry.metadata().context("Failed to read file metadata")?;
                 let modified_time: DateTime<Utc> = metadata
@@ -545,10 +553,18 @@ impl MaintenanceWorkflow {
 
         Ok(MaintenanceAction {
             action_type: MaintenanceActionType::ValidateFiles,
-            description: format!("Validated {} files, {} errors found", validated_files.len(), errors.len()),
+            description: format!(
+                "Validated {} files, {} errors found",
+                validated_files.len(),
+                errors.len()
+            ),
             affected_files: validated_files,
             successful: errors.is_empty(),
-            error_message: if errors.is_empty() { None } else { Some(errors.join("; ")) },
+            error_message: if errors.is_empty() {
+                None
+            } else {
+                Some(errors.join("; "))
+            },
         })
     }
 
@@ -562,22 +578,32 @@ impl MaintenanceWorkflow {
 
         let mut report_content = String::new();
         report_content.push_str("# Maintenance Report\n\n");
-        report_content.push_str(&format!("Generated: {}\n\n", Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+        report_content.push_str(&format!(
+            "Generated: {}\n\n",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ));
 
         report_content.push_str("## Actions Performed\n\n");
         for action in actions {
             report_content.push_str(&format!("### {:?}\n", action.action_type));
             report_content.push_str(&format!("- **Description:** {}\n", action.description));
             report_content.push_str(&format!("- **Success:** {}\n", action.successful));
-            report_content.push_str(&format!("- **Files Affected:** {}\n", action.affected_files.len()));
+            report_content.push_str(&format!(
+                "- **Files Affected:** {}\n",
+                action.affected_files.len()
+            ));
             if let Some(ref error) = action.error_message {
                 report_content.push_str(&format!("- **Error:** {}\n", error));
             }
             report_content.push_str("\n");
         }
 
-        std::fs::write(&report_path, report_content)
-            .with_context(|| format!("Failed to write maintenance report to {}", report_path.display()))?;
+        std::fs::write(&report_path, report_content).with_context(|| {
+            format!(
+                "Failed to write maintenance report to {}",
+                report_path.display()
+            )
+        })?;
 
         Ok(MaintenanceAction {
             action_type: MaintenanceActionType::GenerateReport,
@@ -589,7 +615,12 @@ impl MaintenanceWorkflow {
     }
 
     /// Assess the health of a single file
-    fn assess_file_health(&self, path: &Path, size_bytes: u64, age_days: i64) -> Result<FileHealthStatus> {
+    fn assess_file_health(
+        &self,
+        path: &Path,
+        size_bytes: u64,
+        age_days: i64,
+    ) -> Result<FileHealthStatus> {
         let is_stale = age_days > self.config.max_golden_age_days;
         let is_large = size_bytes > self.config.large_file_threshold;
 
@@ -699,7 +730,9 @@ mod tests {
         assert!(!health.is_large);
 
         // Test old, large file (should be unhealthy)
-        let health = workflow.assess_file_health(&path, 20 * 1024 * 1024, 60).unwrap();
+        let health = workflow
+            .assess_file_health(&path, 20 * 1024 * 1024, 60)
+            .unwrap();
         assert!(health.health_score < 0.5);
         assert!(health.is_stale);
         assert!(health.is_large);
@@ -715,7 +748,10 @@ mod tests {
             error_message: None,
         };
 
-        assert_eq!(action.action_type, MaintenanceActionType::CleanupGoldenFiles);
+        assert_eq!(
+            action.action_type,
+            MaintenanceActionType::CleanupGoldenFiles
+        );
         assert!(action.successful);
         assert!(action.error_message.is_none());
     }

@@ -3,12 +3,24 @@
 //! This module generates multi-format conformance reports including Markdown,
 //! JSON, HTML, and SVG badges from coverage matrix data.
 
-use crate::coverage_matrix::{CoverageMatrix, ConformanceLevel, SectionConformanceStatus};
+use crate::coverage_matrix::{ConformanceLevel, CoverageMatrix, SectionConformanceStatus};
 use handlebars::Handlebars;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+
+/// Report output formats
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReportFormat {
+    /// Markdown format for documentation
+    Markdown,
+    /// JSON format for programmatic consumption
+    Json,
+    /// HTML format for web display
+    Html,
+    /// SVG badge format for embedding
+    SvgBadge,
+}
 
 /// Report generation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,9 +36,17 @@ pub struct ReportConfig {
     /// Whether to generate SVG badges
     pub generate_badges: bool,
     /// Custom report title
-    pub report_title: String,
+    pub title: String,
     /// Include historical trend data
     pub include_trends: bool,
+    /// Project name
+    pub project_name: String,
+    /// Project URL
+    pub project_url: String,
+    /// Git commit hash
+    pub commit_hash: Option<String>,
+    /// Template directory for custom templates
+    pub template_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ReportConfig {
@@ -37,8 +57,12 @@ impl Default for ReportConfig {
             generate_json: true,
             generate_html: true,
             generate_badges: true,
-            report_title: "RaptorQ RFC 6330 Conformance Report".to_string(),
+            title: "RaptorQ RFC 6330 Conformance Report".to_string(),
             include_trends: false,
+            project_name: "asupersync".to_string(),
+            project_url: "https://github.com/your-org/asupersync".to_string(),
+            commit_hash: None,
+            template_dir: None,
         }
     }
 }
@@ -88,6 +112,22 @@ impl ComplianceReportGenerator {
         handlebars.register_helper("badge_color", Box::new(badge_color_helper));
 
         Ok(Self { handlebars, config })
+    }
+
+    /// Generate a single report in the specified format
+    pub fn generate_report(
+        &self,
+        matrix: &CoverageMatrix,
+        _regression_analysis: Option<&crate::regression_detection::RegressionAnalysis>,
+        format: ReportFormat,
+    ) -> Result<String, ReportError> {
+        let context = self.create_template_context(matrix);
+        match format {
+            ReportFormat::Markdown => self.generate_markdown_report(&context),
+            ReportFormat::Json => Ok(serde_json::to_string_pretty(matrix)?),
+            ReportFormat::Html => self.generate_html_report(&context),
+            ReportFormat::SvgBadge => self.generate_svg_badge(&context),
+        }
     }
 
     /// Generate all configured report formats
@@ -164,7 +204,10 @@ impl ComplianceReportGenerator {
 
         TemplateContext {
             title: self.config.report_title.clone(),
-            generated_at: matrix.generated_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            generated_at: matrix
+                .generated_at
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string(),
             git_commit: matrix.git_commit.clone().unwrap_or_default(),
             sections,
             overall: OverallData {
@@ -235,11 +278,7 @@ impl ComplianceReportGenerator {
             .count();
         let failing_sections = total_sections - passing_sections;
 
-        let critical_failures = matrix
-            .sections
-            .values()
-            .map(|s| s.failures.len())
-            .sum();
+        let critical_failures = matrix.sections.values().map(|s| s.failures.len()).sum();
 
         let recommendations = self.generate_recommendations(matrix);
 
@@ -291,21 +330,22 @@ impl ComplianceReportGenerator {
         match matrix.conformance_level {
             ConformanceLevel::NonConformant => {
                 recommendations.push(
-                    "Overall conformance is below acceptable threshold - significant work required".to_string()
+                    "Overall conformance is below acceptable threshold - significant work required"
+                        .to_string(),
                 );
             }
             ConformanceLevel::PartiallyConformant => {
                 recommendations.push(
-                    "Improve conformance score to achieve full RFC 6330 compliance".to_string()
+                    "Improve conformance score to achieve full RFC 6330 compliance".to_string(),
                 );
             }
             ConformanceLevel::MostlyConformant => {
-                recommendations.push(
-                    "Close remaining gaps to achieve full conformance status".to_string()
-                );
+                recommendations
+                    .push("Close remaining gaps to achieve full conformance status".to_string());
             }
             ConformanceLevel::FullyConformant => {
-                recommendations.push("Maintain excellent conformance through regression testing".to_string());
+                recommendations
+                    .push("Maintain excellent conformance through regression testing".to_string());
             }
         }
 
@@ -378,10 +418,8 @@ fn percentage_helper(
     out: &mut dyn handlebars::Output,
 ) -> handlebars::HelperResult {
     if let (Some(numerator), Some(denominator)) = (h.param(0), h.param(1)) {
-        if let (Some(num), Some(denom)) = (
-            numerator.value().as_f64(),
-            denominator.value().as_f64(),
-        ) {
+        if let (Some(num), Some(denom)) = (numerator.value().as_f64(), denominator.value().as_f64())
+        {
             if denom > 0.0 {
                 let percentage = (num / denom * 100.0).round();
                 out.write(&format!("{:.0}%", percentage))?;
@@ -589,7 +627,7 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
-const BADGE_TEMPLATE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="180" height="20">
+const BADGE_TEMPLATE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="180" height="20">
   <linearGradient id="b" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>
@@ -608,7 +646,7 @@ const BADGE_TEMPLATE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1
     <text x="135" y="15" fill="#010101" fill-opacity=".3">{{percentage score 1}} Conformant</text>
     <text x="135" y="14">{{percentage score 1}} Conformant</text>
   </g>
-</svg>"#;
+</svg>"##;
 
 const CI_SUMMARY_TEMPLATE: &str = r#"{
   "conformance": {

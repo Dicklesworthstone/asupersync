@@ -23,7 +23,11 @@ mod fixtures;
 mod differential_tests;
 mod error_tests;
 
-use harness::*;
+// Public re-exports for conformance testing
+pub use harness::{
+    HpackConformanceHarness, RequirementLevel, TestVerdict, TestCategory,
+    ConformanceTestResult,
+};
 
 #[cfg(test)]
 mod tests {

@@ -67,8 +67,9 @@ fn test_basic_frame_decode() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         // Buffer should be empty after consuming the frame
@@ -108,8 +109,9 @@ fn test_basic_frame_encode_decode() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if decoded.freeze() != original_data {
-            return Err(format!("Round-trip failed: expected {:?}, got {:?}", original_data, decoded));
+        let frozen_decoded = decoded.freeze();
+        if frozen_decoded != original_data {
+            return Err(format!("Round-trip failed: expected {:?}, got {:?}", original_data, frozen_decoded));
         }
 
         Ok(())
@@ -142,8 +144,9 @@ fn test_multiple_frames_single_buffer() -> CodecConformanceResult {
             .map_err(|e| format!("First decode failed: {e}"))?
             .ok_or("Expected first frame but got None")?;
 
-        if frame1.freeze() != Bytes::from("abc") {
-            return Err(format!("First frame: expected 'abc', got {:?}", frame1));
+        let frozen1 = frame1.freeze();
+        if frozen1 != Bytes::from("abc") {
+            return Err(format!("First frame: expected 'abc', got {:?}", frozen1));
         }
 
         // Decode second frame
@@ -151,8 +154,9 @@ fn test_multiple_frames_single_buffer() -> CodecConformanceResult {
             .map_err(|e| format!("Second decode failed: {e}"))?
             .ok_or("Expected second frame but got None")?;
 
-        if frame2.freeze() != Bytes::from("hello") {
-            return Err(format!("Second frame: expected 'hello', got {:?}", frame2));
+        let frozen2 = frame2.freeze();
+        if frozen2 != Bytes::from("hello") {
+            return Err(format!("Second frame: expected 'hello', got {:?}", frozen2));
         }
 
         // Buffer should be empty
@@ -209,8 +213,9 @@ fn test_frame_spanning_multiple_buffers() -> CodecConformanceResult {
             .map_err(|e| format!("Fourth decode failed: {e}"))?
             .ok_or("Expected complete frame")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         Ok(())
@@ -277,8 +282,9 @@ fn test_2_byte_length_field() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         Ok(())
@@ -308,8 +314,9 @@ fn test_4_byte_length_field() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("test") {
-            return Err(format!("Expected 'test', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("test") {
+            return Err(format!("Expected 'test', got {:?}", frozen));
         }
 
         Ok(())
@@ -342,8 +349,9 @@ fn test_8_byte_length_field() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("longer") {
-            return Err(format!("Expected 'longer', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("longer") {
+            return Err(format!("Expected 'longer', got {:?}", frozen));
         }
 
         Ok(())
@@ -373,8 +381,9 @@ fn test_big_endian_length_field() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         Ok(())
@@ -406,8 +415,9 @@ fn test_little_endian_length_field() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         Ok(())
@@ -444,8 +454,9 @@ fn test_length_field_offset() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("test") {
-            return Err(format!("Expected 'test', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("test") {
+            return Err(format!("Expected 'test', got {:?}", frozen));
         }
 
         Ok(())
@@ -477,8 +488,9 @@ fn test_length_adjustment_positive() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         Ok(())
@@ -510,8 +522,9 @@ fn test_length_adjustment_negative() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         Ok(())
@@ -547,8 +560,9 @@ fn test_num_skip_bytes() -> CodecConformanceResult {
             .map_err(|e| format!("Decode failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("hello") {
-            return Err(format!("Expected 'hello', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("hello") {
+            return Err(format!("Expected 'hello', got {:?}", frozen));
         }
 
         Ok(())
@@ -804,8 +818,9 @@ fn test_eof_with_complete_frame() -> CodecConformanceResult {
             .map_err(|e| format!("decode_eof failed: {e}"))?
             .ok_or("Expected frame but got None")?;
 
-        if frame.freeze() != Bytes::from("done") {
-            return Err(format!("Expected 'done', got {:?}", frame));
+        let frozen = frame.freeze();
+        if frozen != Bytes::from("done") {
+            return Err(format!("Expected 'done', got {:?}", frozen));
         }
 
         Ok(())

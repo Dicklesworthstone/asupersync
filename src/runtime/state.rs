@@ -7,6 +7,10 @@
 //! - Current time
 
 use super::region_table::RegionCreateError;
+use crate::cancel::protocol_state_machines::{
+    CancelProtocolValidator, ValidationLevel as CancelValidationLevel, RegionEvent, TaskEvent,
+    ObligationEvent, RegionContext, TaskContext, ObligationContext, TransitionResult,
+};
 use crate::cx::cx::ObservabilityState;
 use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
@@ -393,6 +397,8 @@ pub struct RuntimeState {
     epoch_tracker: super::epoch_tracker::EpochConsistencyTracker,
     /// State machine transition verifier for runtime entities.
     state_verifier: Arc<super::state_verifier::StateTransitionVerifier>,
+    /// Cancel protocol state machine validator for runtime cancellation compliance.
+    cancel_protocol_validator: Arc<parking_lot::Mutex<CancelProtocolValidator>>,
     /// Cancellation debt accumulation monitor.
     debt_monitor: Arc<crate::observability::CancellationDebtMonitor>,
     /// Resource monitor for graceful degradation.
@@ -441,6 +447,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("finalizer_history_len", &self.finalizer_history.len())
             .field("next_finalizer_id", &self.next_finalizer_id)
             .field("state_verifier", &"<StateTransitionVerifier>")
+            .field("cancel_protocol_validator", &"<CancelProtocolValidator>")
             .field("debt_monitor", &"<CancellationDebtMonitor>")
             .finish()
     }
@@ -491,6 +498,9 @@ impl RuntimeState {
             epoch_tracker: super::epoch_tracker::EpochConsistencyTracker::new(),
             state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
                 super::state_verifier::StateVerifierConfig::default(),
+            )),
+            cancel_protocol_validator: Arc::new(parking_lot::Mutex::new(
+                CancelProtocolValidator::new(CancelValidationLevel::Basic),
             )),
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor: Arc::new(ResourceMonitor::new(MonitorConfig::default())),
@@ -614,6 +624,46 @@ impl RuntimeState {
     #[must_use]
     pub fn state_verifier_stats(&self) -> super::state_verifier::StateVerifierStatsSnapshot {
         self.state_verifier.stats()
+    }
+
+    /// Gets a reference to the cancel protocol validator.
+    #[inline]
+    #[must_use]
+    pub fn cancel_protocol_validator(&self) -> &Arc<parking_lot::Mutex<CancelProtocolValidator>> {
+        &self.cancel_protocol_validator
+    }
+
+    /// Validates a region state transition using the cancel protocol validator.
+    fn validate_region_protocol_transition(
+        &self,
+        region_id: RegionId,
+        event: RegionEvent,
+        context: &RegionContext,
+    ) -> TransitionResult {
+        let mut validator = self.cancel_protocol_validator.lock();
+        validator.validate_region_transition(region_id, event, context)
+    }
+
+    /// Validates a task state transition using the cancel protocol validator.
+    fn validate_task_protocol_transition(
+        &self,
+        task_id: TaskId,
+        event: TaskEvent,
+        context: &TaskContext,
+    ) -> TransitionResult {
+        let mut validator = self.cancel_protocol_validator.lock();
+        validator.validate_task_transition(task_id, event, context)
+    }
+
+    /// Validates an obligation state transition using the cancel protocol validator.
+    fn validate_obligation_protocol_transition(
+        &self,
+        obligation_id: ObligationId,
+        event: ObligationEvent,
+        context: &ObligationContext,
+    ) -> TransitionResult {
+        let mut validator = self.cancel_protocol_validator.lock();
+        validator.validate_obligation_transition(obligation_id, event, context)
     }
 
     /// Sets the blocking pool handle for this runtime.
@@ -2585,11 +2635,41 @@ impl RuntimeState {
                         let no_children = region.child_count() == 0;
                         let no_tasks = region.task_count() == 0;
                         if no_children && no_tasks {
+                            // Validate protocol transition to Finalizing
+                            let context = RegionContext {
+                                active_tasks: region.task_count(),
+                                pending_finalizers: region.finalizer_count() as u32,
+                            };
+                            let validation_result = self.validate_region_protocol_transition(
+                                region_id,
+                                RegionEvent::BeginFinalize,
+                                &context,
+                            );
+                            if matches!(validation_result, TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }) {
+                                eprintln!("Cancel protocol violation during region finalize transition: {validation_result:?}");
+                                // Continue with transition but log violation
+                            }
+
                             region.begin_finalize()
                         } else {
                             if !no_children
                                 && region.state() == crate::record::region::RegionState::Closing
                             {
+                                // Validate protocol transition to Draining
+                                let context = RegionContext {
+                                    active_tasks: region.task_count(),
+                                    pending_finalizers: region.finalizer_count() as u32,
+                                };
+                                let validation_result = self.validate_region_protocol_transition(
+                                    region_id,
+                                    RegionEvent::BeginDrain,
+                                    &context,
+                                );
+                                if matches!(validation_result, TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }) {
+                                    eprintln!("Cancel protocol violation during region drain transition: {validation_result:?}");
+                                    // Continue with transition but log violation
+                                }
+
                                 region.begin_drain();
                             }
                             false

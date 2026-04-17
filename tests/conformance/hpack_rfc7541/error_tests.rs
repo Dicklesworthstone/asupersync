@@ -64,7 +64,7 @@ impl HpackErrorTester {
             description: "Malformed integer encoding rejection".to_string(),
             category: TestCategory::ErrorHandling,
             requirement_level: RequirementLevel::Must,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Malformed integer encodings should be rejected".to_string())
             } else {
@@ -108,7 +108,7 @@ impl HpackErrorTester {
             description: "Malformed string encoding rejection".to_string(),
             category: TestCategory::ErrorHandling,
             requirement_level: RequirementLevel::Must,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Malformed string encodings should be rejected".to_string())
             } else {
@@ -150,7 +150,7 @@ impl HpackErrorTester {
             description: "Invalid index reference rejection".to_string(),
             category: TestCategory::ErrorHandling,
             requirement_level: RequirementLevel::Must,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Invalid index references should be rejected".to_string())
             } else {
@@ -194,7 +194,7 @@ impl HpackErrorTester {
             description: "Malformed Huffman encoding rejection".to_string(),
             category: TestCategory::Huffman,
             requirement_level: RequirementLevel::Should,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Malformed Huffman encodings should be rejected".to_string())
             } else {
@@ -300,7 +300,7 @@ impl HpackErrorTester {
             description: "Incomplete header block rejection".to_string(),
             category: TestCategory::ErrorHandling,
             requirement_level: RequirementLevel::Must,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Incomplete header blocks should be rejected".to_string())
             } else {
@@ -376,7 +376,7 @@ impl HpackErrorTester {
             description: "Invalid Huffman padding rejection".to_string(),
             category: TestCategory::Huffman,
             requirement_level: RequirementLevel::Should,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Invalid Huffman padding should be rejected".to_string())
             } else {
@@ -500,7 +500,7 @@ impl HpackEdgeCaseTester {
             description: "Empty header value handling".to_string(),
             category: TestCategory::RoundTrip,
             requirement_level: RequirementLevel::Must,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Empty header values should be preserved".to_string())
             } else {
@@ -587,7 +587,7 @@ impl HpackEdgeCaseTester {
             description: "Boundary table size handling".to_string(),
             category: TestCategory::DynamicTable,
             requirement_level: RequirementLevel::Should,
-            verdict,
+            verdict: verdict.clone(),
             error_message: if verdict == TestVerdict::Fail {
                 Some("Boundary table sizes should be handled".to_string())
             } else {

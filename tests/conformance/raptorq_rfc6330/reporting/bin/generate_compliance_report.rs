@@ -6,9 +6,9 @@
 use anyhow::{Context, Result};
 use clap::{Arg, Command};
 use raptorq_conformance_reporting::{
-    compliance_report::{ComplianceReportGenerator, ReportFormat, ReportConfig},
+    compliance_report::{ComplianceReportGenerator, ReportConfig, ReportFormat},
     coverage_matrix::CoverageMatrixCalculator,
-    regression_detection::{RegressionDetector, RegressionConfig},
+    regression_detection::{RegressionConfig, RegressionDetector},
 };
 use std::path::PathBuf;
 
@@ -121,8 +121,12 @@ fn main() -> Result<()> {
     }
 
     // Create output directory if it doesn't exist
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
 
     // Create coverage matrix calculator and generate matrix
     let calculator = CoverageMatrixCalculator::new();
@@ -135,8 +139,10 @@ fn main() -> Result<()> {
         println!("  Total tests: {}", coverage_matrix.total_tests);
         println!("  Passed tests: {}", coverage_matrix.passed_tests);
         println!("  Failed tests: {}", coverage_matrix.failed_tests);
-        println!("  Overall conformance score: {:.1}%",
-                 coverage_matrix.overall_conformance_score * 100.0);
+        println!(
+            "  Overall conformance score: {:.1}%",
+            coverage_matrix.overall_conformance_score * 100.0
+        );
     }
 
     // Handle regression analysis if requested
@@ -189,14 +195,17 @@ fn main() -> Result<()> {
             ReportFormat::Markdown,
             ReportFormat::Html,
             ReportFormat::Json,
-            ReportFormat::SvgBadge
+            ReportFormat::SvgBadge,
         ],
         "markdown" => vec![ReportFormat::Markdown],
         "html" => vec![ReportFormat::Html],
         "json" => vec![ReportFormat::Json],
         "svg" => vec![ReportFormat::SvgBadge],
         _ => {
-            anyhow::bail!("Invalid format: {}. Valid options: markdown, html, json, svg, all", format);
+            anyhow::bail!(
+                "Invalid format: {}. Valid options: markdown, html, json, svg, all",
+                format
+            );
         }
     };
 
@@ -209,17 +218,28 @@ fn main() -> Result<()> {
         });
 
         if verbose {
-            println!("Generating {:?} report: {}", report_format, output_file.display());
+            println!(
+                "Generating {:?} report: {}",
+                report_format,
+                output_file.display()
+            );
         }
 
-        match generator.generate_report(&coverage_matrix, regression_analysis.as_ref(), report_format) {
+        match generator.generate_report(
+            &coverage_matrix,
+            regression_analysis.as_ref(),
+            report_format,
+        ) {
             Ok(content) => {
-                std::fs::write(&output_file, content)
-                    .with_context(|| format!("Failed to write report to {}", output_file.display()))?;
+                std::fs::write(&output_file, content).with_context(|| {
+                    format!("Failed to write report to {}", output_file.display())
+                })?;
 
-                println!("✅ Generated {} report: {}",
-                         format!("{:?}", report_format).to_lowercase(),
-                         output_file.display());
+                println!(
+                    "✅ Generated {} report: {}",
+                    format!("{:?}", report_format).to_lowercase(),
+                    output_file.display()
+                );
             }
             Err(e) => {
                 eprintln!("❌ Failed to generate {:?} report: {}", report_format, e);
@@ -251,7 +271,11 @@ fn main() -> Result<()> {
 
     // Final status summary
     let status_emoji = if coverage_matrix.overall_conformance_score >= 0.95 {
-        if regression_analysis.as_ref().map(|r| r.has_regressions).unwrap_or(false) {
+        if regression_analysis
+            .as_ref()
+            .map(|r| r.has_regressions)
+            .unwrap_or(false)
+        {
             "⚠️"
         } else {
             "✅"
@@ -261,7 +285,10 @@ fn main() -> Result<()> {
     };
 
     println!("\n{} Compliance Report Generation Complete", status_emoji);
-    println!("📈 Overall conformance: {:.1}%", coverage_matrix.overall_conformance_score * 100.0);
+    println!(
+        "📈 Overall conformance: {:.1}%",
+        coverage_matrix.overall_conformance_score * 100.0
+    );
 
     if let Some(ref analysis) = regression_analysis {
         if analysis.has_regressions {
@@ -276,14 +303,21 @@ fn main() -> Result<()> {
     // Return appropriate exit code
     let exit_code = if coverage_matrix.overall_conformance_score < 0.95 {
         2 // Poor conformance
-    } else if regression_analysis.as_ref().map(|r| r.has_regressions).unwrap_or(false) {
+    } else if regression_analysis
+        .as_ref()
+        .map(|r| r.has_regressions)
+        .unwrap_or(false)
+    {
         1 // Regressions detected
     } else {
         0 // Success
     };
 
     if exit_code != 0 && verbose {
-        println!("\nExiting with code {} due to conformance issues.", exit_code);
+        println!(
+            "\nExiting with code {} due to conformance issues.",
+            exit_code
+        );
     }
 
     std::process::exit(exit_code);
@@ -316,8 +350,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let args = vec![
             "generate_compliance_report",
-            "--golden-dir", temp_dir.path().to_str().unwrap(),
-            "--output-dir", temp_dir.path().to_str().unwrap(),
+            "--golden-dir",
+            temp_dir.path().to_str().unwrap(),
+            "--output-dir",
+            temp_dir.path().to_str().unwrap(),
         ];
 
         let matches = app.try_get_matches_from(args);

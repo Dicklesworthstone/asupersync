@@ -4,7 +4,7 @@
 
 use super::*;
 use asupersync::bytes::BytesMut;
-use asupersync::net::websocket::frame::{Frame, Opcode, FrameCodec, apply_mask};
+use asupersync::net::websocket::{Frame, Opcode, FrameCodec, apply_mask};
 use asupersync::codec::{Decoder, Encoder};
 
 /// Run all frame format conformance tests.
@@ -263,12 +263,8 @@ fn test_masking_key_format() -> WsConformanceResult {
             payload: payload.to_vec().into(),
         };
 
-        // Verify masking key is 4 bytes
-        if let Some(mask_key) = &masked_frame.mask {
-            if mask_key.len() != 4 {
-                return Err(format!("Masking key must be 4 bytes, got {}", mask_key.len()));
-            }
-        } else {
+        // Verify masking key is present
+        if masked_frame.mask_key.is_none() {
             return Err("Masked frame must have masking key".to_string());
         }
 

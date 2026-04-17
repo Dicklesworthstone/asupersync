@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+
 use asupersync::types::{ObligationId, RegionId};
 use asupersync::lab::{LabConfig, LabRuntime};
 use super::obligation_tracker::{ObligationTracker, InvariantViolation, InvariantViolationType};
@@ -210,7 +211,7 @@ impl ObligationInvariantHarness {
         let suite_start = Instant::now();
 
         for test in tests {
-            let result = self.run_test(test);
+            let result = self.run_test(test).await;
             results.push(result);
         }
 
@@ -246,7 +247,7 @@ impl ObligationInvariantHarness {
                 self.config.clone(),
             );
 
-            let result = harness_clone.run_test(test_clone);
+            let result = harness_clone.run_test(test_clone).await;
 
             // Count violation types
             for violation in &result.violations {
@@ -427,7 +428,7 @@ macro_rules! invariant_test {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::test_helpers::*;
+    // use crate::runtime::test_helpers::*;
 
     /// Helper to create a test runtime
     fn create_test_runtime() -> LabRuntime {
@@ -469,7 +470,8 @@ mod tests {
             fn validate_invariant(&self, _tracker: &ObligationTracker) -> bool { true }
         }
 
-        let result = harness.run_test(PassingTest);
+        // Use futures executor to run async test in sync context
+        let result = futures::executor::block_on(harness.run_test(PassingTest));
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert_eq!(result.test_name, "passing_test");
     }

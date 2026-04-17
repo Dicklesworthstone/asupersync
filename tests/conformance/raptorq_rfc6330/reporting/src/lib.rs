@@ -57,28 +57,26 @@
 //! - `RFC6330_BASELINE_DIR`: Default directory for historical regression baselines
 //! - `RFC6330_REPORT_TEMPLATE_DIR`: Custom template directory for report generation
 
-pub mod coverage_matrix;
 pub mod compliance_report;
-pub mod regression_detection;
+pub mod coverage_matrix;
 pub mod maintenance_workflows;
+pub mod regression_detection;
 
 // Re-export main types for convenience
 pub use coverage_matrix::{
-    CoverageMatrix, CoverageMatrixCalculator, SectionCoverage, RequirementCoverage, ConformanceLevel,
+    ConformanceLevel, CoverageMatrix, CoverageMatrixCalculator, SectionCoverage,
 };
 
-pub use compliance_report::{
-    ComplianceReportGenerator, ReportFormat, ReportConfig,
-};
+pub use compliance_report::{ComplianceReportGenerator, ReportConfig, ReportFormat};
 
 pub use regression_detection::{
-    RegressionDetector, RegressionConfig, RegressionAnalysis, RegressionFinding, RegressionType,
-    RegressionSeverity, ConformanceSnapshot, ConformanceTrend,
+    ConformanceSnapshot, ConformanceTrend, RegressionAnalysis, RegressionConfig,
+    RegressionDetector, RegressionFinding, RegressionSeverity, RegressionType,
 };
 
 pub use maintenance_workflows::{
-    MaintenanceWorkflow, MaintenanceConfig, MaintenanceResult, MaintenanceAction,
-    MaintenanceActionType, FileHealthStatus,
+    FileHealthStatus, MaintenanceAction, MaintenanceActionType, MaintenanceConfig,
+    MaintenanceResult, MaintenanceWorkflow,
 };
 
 /// Main entry point for running the complete conformance reporting pipeline
@@ -156,7 +154,7 @@ pub struct ReportingPipelineResults {
 impl ReportingPipelineResults {
     /// Returns true if the pipeline completed successfully with no critical issues
     pub fn is_success(&self) -> bool {
-        let coverage_ok = self.coverage_matrix.overall_conformance_score >= 0.95;
+        let coverage_ok = self.coverage_matrix.compliance_score >= 0.95;
         let regression_ok = self
             .regression_analysis
             .as_ref()
@@ -191,10 +189,10 @@ impl ReportingPipelineResults {
             Overall Status: {}\n\
             Output Directory: {}\n",
             "✅ COMPLETED",
-            self.coverage_matrix.overall_conformance_score * 100.0,
-            self.coverage_matrix.total_tests,
-            self.coverage_matrix.passed_tests,
-            self.coverage_matrix.failed_tests,
+            self.coverage_matrix.compliance_score * 100.0,
+            self.coverage_matrix.overall.total_tests,
+            self.coverage_matrix.overall.passing_tests,
+            self.coverage_matrix.overall.total_tests - self.coverage_matrix.overall.passing_tests,
             if self.regression_analysis.is_some() {
                 "✅ COMPLETED"
             } else {
@@ -249,7 +247,7 @@ mod tests {
     #[test]
     fn test_pipeline_results_success_determination() {
         let mut coverage_matrix = CoverageMatrix::default();
-        coverage_matrix.overall_conformance_score = 0.98;
+        coverage_matrix.compliance_score = 0.98;
 
         let maintenance_result = MaintenanceResult {
             timestamp: chrono::Utc::now(),
@@ -280,10 +278,9 @@ mod tests {
     #[test]
     fn test_pipeline_results_summary_report() {
         let mut coverage_matrix = CoverageMatrix::default();
-        coverage_matrix.overall_conformance_score = 0.95;
-        coverage_matrix.total_tests = 100;
-        coverage_matrix.passed_tests = 95;
-        coverage_matrix.failed_tests = 5;
+        coverage_matrix.compliance_score = 0.95;
+        coverage_matrix.overall.total_tests = 100;
+        coverage_matrix.overall.passing_tests = 95;
 
         let maintenance_result = MaintenanceResult {
             timestamp: chrono::Utc::now(),

@@ -97,8 +97,8 @@ mod metamorphic_properties {
             // Verify round-trip identity
             prop_assert_eq!(headers.len(), decoded_headers.len());
             for (original, decoded) in headers.iter().zip(decoded_headers.iter()) {
-                prop_assert_eq!(original.name, decoded.name);
-                prop_assert_eq!(original.value, decoded.value);
+                prop_assert_eq!(&original.name, &decoded.name);
+                prop_assert_eq!(&original.value, &decoded.value);
             }
         });
     }
@@ -375,13 +375,13 @@ mod metamorphic_properties {
             prop_assert_eq!(decoded2.len(), 1);
             prop_assert_eq!(decoded3.len(), 1);
 
-            prop_assert_eq!(decoded1[0].name, base_name);
-            prop_assert_eq!(decoded2[0].name, base_name);
-            prop_assert_eq!(decoded3[0].name, base_name);
+            prop_assert_eq!(&decoded1[0].name, &base_name);
+            prop_assert_eq!(&decoded2[0].name, &base_name);
+            prop_assert_eq!(&decoded3[0].name, &base_name);
 
-            prop_assert_eq!(decoded1[0].value, value);
-            prop_assert_eq!(decoded2[0].value, value);
-            prop_assert_eq!(decoded3[0].value, value);
+            prop_assert_eq!(&decoded1[0].value, &value);
+            prop_assert_eq!(&decoded2[0].value, &value);
+            prop_assert_eq!(&decoded3[0].value, &value);
         });
     }
 }
@@ -406,7 +406,8 @@ mod mutation_validation {
 
         // Mutate the encoded data to simulate a bug
         if !encoded.is_empty() {
-            encoded[encoded.len() - 1] ^= 0x01; // Flip a bit
+            let len = encoded.len();
+            encoded[len - 1] ^= 0x01; // Flip a bit
         }
 
         let mut encoded_bytes = encoded.freeze();

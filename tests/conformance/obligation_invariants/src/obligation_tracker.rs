@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
-use crate::runtime::{ObligationId, RegionId};
+use asupersync::types::{ObligationId, RegionId};
 
 /// Tracks obligations and validates structured concurrency invariants.
 #[derive(Debug, Clone)]
@@ -361,22 +361,22 @@ impl ObligationTracker {
         match resource {
             ResourceHandle::FileDescriptor(fd) => {
                 if let Some(fds) = inner.resource_tracker.file_descriptors.get_mut(&obligation_id) {
-                    fds.remove(&fd);
+                    let _: bool = fds.remove(&fd);
                 }
             },
             ResourceHandle::MemoryAllocation(ptr) => {
                 if let Some(ptrs) = inner.resource_tracker.memory_allocations.get_mut(&obligation_id) {
-                    ptrs.remove(&ptr);
+                    let _: bool = ptrs.remove(&ptr);
                 }
             },
             ResourceHandle::WakerRegistration(handle) => {
                 if let Some(wakers) = inner.resource_tracker.waker_registrations.get_mut(&obligation_id) {
-                    wakers.remove(&handle);
+                    let _: bool = wakers.remove(&handle);
                 }
             },
             ResourceHandle::NetworkConnection(handle) => {
                 if let Some(conns) = inner.resource_tracker.network_connections.get_mut(&obligation_id) {
-                    conns.remove(&handle);
+                    let _: bool = conns.remove(&handle);
                 }
             },
         }

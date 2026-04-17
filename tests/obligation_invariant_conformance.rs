@@ -17,7 +17,7 @@ use conformance::obligation_invariants::{
 /// Helper to create a test runtime for conformance testing
 fn create_test_runtime() -> LabRuntime {
     let config = LabConfig::default()
-        .worker_threads(2)
+        .worker_count(2)
         .trace_capacity(2048)
         .max_steps(10000);
     LabRuntime::new(config)
@@ -34,7 +34,7 @@ fn test_basic_obligation_lifecycle_conformance() {
 
     // Test basic obligation lifecycle
     for i in 0..5 {
-        let obligation_id = ObligationId::from_arena(ArenaIndex::from_usize(i));
+        let obligation_id = ObligationId::new_for_test(i as u32, 0);
 
         // Track creation and resolution
         tracker.track_obligation_creation(obligation_id, root_region);
@@ -64,12 +64,12 @@ fn test_nested_obligation_conformance() {
     tracker.track_region_creation(parent_region, None);
 
     // Create child region (simulated)
-    let child_region = RegionId::from_arena(ArenaIndex::from_usize(100));
+    let child_region = RegionId::from_arena(ArenaIndex::new(100, 0));
     tracker.track_region_creation(child_region, Some(parent_region));
 
     // Create obligations in different regions
-    let parent_obligation = ObligationId::from_arena(ArenaIndex::from_usize(1));
-    let child_obligation = ObligationId::from_arena(ArenaIndex::from_usize(2));
+    let parent_obligation = ObligationId::new_for_test(1, 0);
+    let child_obligation = ObligationId::new_for_test(2, 0);
 
     tracker.track_obligation_creation(parent_obligation, parent_region);
     tracker.track_obligation_creation(child_obligation, child_region);
@@ -109,7 +109,7 @@ fn test_region_quiescence_violation_detection() {
     tracker.track_region_creation(region, None);
 
     // Create obligation but don't resolve
-    let obligation = ObligationId::from_arena(ArenaIndex::from_usize(1));
+    let obligation = ObligationId::new_for_test(1, 0);
     tracker.track_obligation_creation(obligation, region);
 
     // Try to close region with active obligation (should detect violation)
@@ -133,9 +133,9 @@ fn test_obligation_cancellation_propagation() {
     let tracker = ObligationTracker::new();
 
     // Create parent and child obligations
-    let region = RegionId::from_arena(ArenaIndex::from_usize(1));
-    let parent_obligation = ObligationId::from_arena(ArenaIndex::from_usize(1));
-    let child_obligation = ObligationId::from_arena(ArenaIndex::from_usize(2));
+    let region = RegionId::from_arena(ArenaIndex::new(1, 0));
+    let parent_obligation = ObligationId::new_for_test(1, 0);
+    let child_obligation = ObligationId::new_for_test(2, 0);
 
     tracker.track_region_creation(region, None);
     tracker.track_obligation_creation(parent_obligation, region);
@@ -158,8 +158,8 @@ fn test_obligation_cancellation_propagation() {
 #[test]
 fn test_resource_leak_detection() {
     let tracker = ObligationTracker::new();
-    let region = RegionId::from_arena(ArenaIndex::from_usize(1));
-    let obligation = ObligationId::from_arena(ArenaIndex::from_usize(1));
+    let region = RegionId::from_arena(ArenaIndex::new(1, 0));
+    let obligation = ObligationId::new_for_test(1, 0);
 
     tracker.track_region_creation(region, None);
     tracker.track_obligation_creation(obligation, region);
@@ -195,7 +195,7 @@ fn test_stress_concurrent_obligations() {
     let mut obligations = Vec::new();
 
     for i in 0..num_obligations {
-        let obligation_id = ObligationId::from_arena(ArenaIndex::from_usize(i));
+        let obligation_id = ObligationId::new_for_test(i as u32, 0);
         tracker.track_obligation_creation(obligation_id, region);
         obligations.push(obligation_id);
     }
@@ -221,8 +221,8 @@ fn test_invariant_tracker_reset() {
     let tracker = ObligationTracker::new();
 
     // Create some state
-    let region = RegionId::from_arena(ArenaIndex::from_usize(1));
-    let obligation = ObligationId::from_arena(ArenaIndex::from_usize(1));
+    let region = RegionId::from_arena(ArenaIndex::new(1, 0));
+    let obligation = ObligationId::new_for_test(1, 0);
 
     tracker.track_region_creation(region, None);
     tracker.track_obligation_creation(obligation, region);
@@ -244,8 +244,8 @@ fn test_comprehensive_invariant_validation() {
 
     // Test scenario: nested regions, multiple obligations, mixed resolution patterns
     let root_region = runtime.state.create_root_region(Budget::INFINITE);
-    let child_region1 = RegionId::from_arena(ArenaIndex::from_usize(100));
-    let child_region2 = RegionId::from_arena(ArenaIndex::from_usize(101));
+    let child_region1 = RegionId::from_arena(ArenaIndex::new(100, 0));
+    let child_region2 = RegionId::from_arena(ArenaIndex::new(101, 0));
 
     // Set up region hierarchy
     tracker.track_region_creation(root_region, None);
@@ -254,19 +254,19 @@ fn test_comprehensive_invariant_validation() {
 
     // Create obligations across regions
     let root_obligations: Vec<_> = (0..3).map(|i| {
-        let id = ObligationId::from_arena(ArenaIndex::from_usize(i));
+        let id = ObligationId::new_for_test(i as u32, 0);
         tracker.track_obligation_creation(id, root_region);
         id
     }).collect();
 
     let child1_obligations: Vec<_> = (10..13).map(|i| {
-        let id = ObligationId::from_arena(ArenaIndex::from_usize(i));
+        let id = ObligationId::new_for_test(i as u32, 0);
         tracker.track_obligation_creation(id, child_region1);
         id
     }).collect();
 
     let child2_obligations: Vec<_> = (20..22).map(|i| {
-        let id = ObligationId::from_arena(ArenaIndex::from_usize(i));
+        let id = ObligationId::new_for_test(i as u32, 0);
         tracker.track_obligation_creation(id, child_region2);
         id
     }).collect();
