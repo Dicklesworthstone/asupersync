@@ -53,6 +53,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_hpack_round_trip"
+path = "fuzz_targets/hpack_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_http2_frame"
 path = "fuzz_targets/http2_frame.rs"
 test = false
