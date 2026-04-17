@@ -64,6 +64,10 @@ mod stress_test;
 #[path = "verification_suite.rs"]
 mod verification_suite;
 
+#[cfg(test)]
+#[path = "broadcast_metamorphic.rs"]
+mod broadcast_metamorphic;
+
 // Re-export commonly used types from mpsc (the default channel)
 pub use mpsc::{Receiver, SendPermit, Sender, channel};
 pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};
