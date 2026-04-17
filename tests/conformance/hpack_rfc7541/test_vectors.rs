@@ -113,6 +113,127 @@ pub const C4_1_INDEXED_HEADER_FIELD: Rfc7541TestVector = Rfc7541TestVector {
     use_huffman: false,
 };
 
+/// RFC 7541 Appendix C.5 Request Examples - Complex multi-request sequences
+/// Note: These require sequential processing to test dynamic table evolution
+
+/// C.5.1: First request in response sequence
+pub const C5_1_RESPONSE_FIRST: Rfc7541TestVector = Rfc7541TestVector {
+    id: "RFC7541-C.5.1",
+    description: "Response Example - First Response",
+    headers: &[
+        (":status", "200"),
+        ("cache-control", "private"),
+        ("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+        ("location", "https://www.example.com"),
+    ],
+    expected_encoded: &[
+        0x48, 0x03, 0x32, 0x30, 0x30, 0x48, 0x07, 0x70, 0x72, 0x69, 0x76, 0x61, 0x74, 0x65,
+        0x61, 0x1d, 0x4d, 0x6f, 0x6e, 0x2c, 0x20, 0x32, 0x31, 0x20, 0x4f, 0x63, 0x74, 0x20,
+        0x32, 0x30, 0x31, 0x33, 0x20, 0x32, 0x30, 0x3a, 0x31, 0x33, 0x3a, 0x32, 0x31, 0x20,
+        0x47, 0x4d, 0x54, 0x6e, 0x17, 0x68, 0x74, 0x74, 0x70, 0x73, 0x3a, 0x2f, 0x2f, 0x77,
+        0x77, 0x77, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d,
+    ],
+    use_huffman: false,
+};
+
+/// C.5.2: Second request in response sequence
+pub const C5_2_RESPONSE_SECOND: Rfc7541TestVector = Rfc7541TestVector {
+    id: "RFC7541-C.5.2",
+    description: "Response Example - Second Response",
+    headers: &[
+        (":status", "307"),
+        ("cache-control", "private"),
+        ("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+        ("location", "https://www.example.com"),
+    ],
+    expected_encoded: &[
+        0x48, 0x03, 0x33, 0x30, 0x37, 0x7c, 0x85, 0xbf, 0x40, 0x0a, 0x63, 0x75, 0x73, 0x74,
+        0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0c, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d,
+        0x76, 0x61, 0x6c, 0x75, 0x65,
+    ],
+    use_huffman: false,
+};
+
+/// C.5.3: Third request in response sequence
+pub const C5_3_RESPONSE_THIRD: Rfc7541TestVector = Rfc7541TestVector {
+    id: "RFC7541-C.5.3",
+    description: "Response Example - Third Response",
+    headers: &[
+        (":status", "200"),
+        ("cache-control", "private"),
+        ("date", "Mon, 21 Oct 2013 20:13:22 GMT"),
+        ("location", "https://www.example.com"),
+        ("content-encoding", "gzip"),
+        ("set-cookie", "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1"),
+    ],
+    expected_encoded: &[
+        0x88, 0xc1, 0x61, 0x1d, 0x4d, 0x6f, 0x6e, 0x2c, 0x20, 0x32, 0x31, 0x20, 0x4f, 0x63,
+        0x74, 0x20, 0x32, 0x30, 0x31, 0x33, 0x20, 0x32, 0x30, 0x3a, 0x31, 0x33, 0x3a, 0x32,
+        0x32, 0x20, 0x47, 0x4d, 0x54, 0xc0, 0x5a, 0x04, 0x67, 0x7a, 0x69, 0x70, 0x77, 0x38,
+        0x66, 0x6f, 0x6f, 0x3d, 0x41, 0x53, 0x44, 0x4a, 0x4b, 0x48, 0x51, 0x4b, 0x42, 0x5a,
+        0x58, 0x4f, 0x51, 0x57, 0x45, 0x4f, 0x50, 0x49, 0x55, 0x41, 0x58, 0x51, 0x57, 0x45,
+        0x4f, 0x49, 0x55, 0x3b, 0x20, 0x6d, 0x61, 0x78, 0x2d, 0x61, 0x67, 0x65, 0x3d, 0x33,
+        0x36, 0x30, 0x30, 0x3b, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x3d, 0x31,
+    ],
+    use_huffman: false,
+};
+
+/// RFC 7541 Appendix C.6 Request Examples - Complex multi-request sequences
+/// Note: These test request encoding with dynamic table evolution
+
+/// C.6.1: First request in sequence
+pub const C6_1_REQUEST_FIRST: Rfc7541TestVector = Rfc7541TestVector {
+    id: "RFC7541-C.6.1",
+    description: "Request Example - First Request",
+    headers: &[
+        (":method", "GET"),
+        (":scheme", "http"),
+        (":path", "/"),
+        (":authority", "www.example.com"),
+    ],
+    expected_encoded: &[
+        0x82, 0x86, 0x84, 0x41, 0x0f, 0x77, 0x77, 0x77, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70,
+        0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d,
+    ],
+    use_huffman: false,
+};
+
+/// C.6.2: Second request in sequence
+pub const C6_2_REQUEST_SECOND: Rfc7541TestVector = Rfc7541TestVector {
+    id: "RFC7541-C.6.2",
+    description: "Request Example - Second Request",
+    headers: &[
+        (":method", "GET"),
+        (":scheme", "http"),
+        (":path", "/"),
+        (":authority", "www.example.com"),
+        ("cache-control", "no-cache"),
+    ],
+    expected_encoded: &[
+        0x82, 0x86, 0x84, 0xbe, 0x58, 0x08, 0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63, 0x68, 0x65,
+    ],
+    use_huffman: false,
+};
+
+/// C.6.3: Third request in sequence
+pub const C6_3_REQUEST_THIRD: Rfc7541TestVector = Rfc7541TestVector {
+    id: "RFC7541-C.6.3",
+    description: "Request Example - Third Request",
+    headers: &[
+        (":method", "GET"),
+        (":scheme", "https"),
+        (":path", "/index.html"),
+        (":authority", "www.example.com"),
+        ("custom-key", "custom-value"),
+    ],
+    expected_encoded: &[
+        0x82, 0x87, 0x85, 0xbf, 0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b,
+        0x65, 0x79, 0x0c, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x76, 0x61, 0x6c, 0x75,
+        0x65,
+    ],
+    use_huffman: false,
+};
+
 /// All RFC 7541 Appendix C test vectors.
 pub const RFC7541_TEST_VECTORS: &[Rfc7541TestVector] = &[
     C1_1_LITERAL_NEW_NAME,
@@ -125,6 +246,12 @@ pub const RFC7541_TEST_VECTORS: &[Rfc7541TestVector] = &[
     C3_2_LITERAL_NEVER_INDEXED_INDEXED,
     C3_3_LITERAL_NEVER_INDEXED_HUFFMAN,
     C4_1_INDEXED_HEADER_FIELD,
+    C5_1_RESPONSE_FIRST,
+    C5_2_RESPONSE_SECOND,
+    C5_3_RESPONSE_THIRD,
+    C6_1_REQUEST_FIRST,
+    C6_2_REQUEST_SECOND,
+    C6_3_REQUEST_THIRD,
 ];
 
 /// Convert test vector headers to Header structs.
