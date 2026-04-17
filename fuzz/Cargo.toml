@@ -345,3 +345,10 @@ path = "fuzz_targets/raptorq_systematic.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_hpack_eviction"
+path = "fuzz_targets/hpack_eviction.rs"
+test = false
+doc = false
+bench = false
