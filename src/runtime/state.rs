@@ -1079,7 +1079,6 @@ impl RuntimeState {
 
         self.record_task_spawn(task_id, region);
 
-
         // Trace task creation
         debug!(
             task_id = ?task_id,

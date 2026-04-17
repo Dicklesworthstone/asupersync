@@ -1,0 +1,84 @@
+{
+  "schema_version": "raptorq-baseline-v1",
+  "generated_at": "2026-04-17T06:55:00Z",
+  "track_bead_id": "asupersync-2cyx5",
+  "baseline_type": "initial_governance_baseline",
+  "description": "Initial performance baseline for Track-G governance framework",
+  "workload_baselines": {
+    "RQ-G1-ENC-SMALL": {
+      "workload_id": "RQ-G1-ENC-SMALL",
+      "median_ns": 35000,
+      "p95_ns": 52000,
+      "p99_ns": 68000,
+      "sample_count": 100,
+      "measurement_date": "2026-04-17T06:55:00Z",
+      "measurement_command": "rch exec -- cargo bench --bench raptorq_benchmark -- encode_small",
+      "environment": {
+        "seed": 424242,
+        "k": 32,
+        "symbol_size": 64
+      }
+    },
+    "RQ-G1-DEC-SOURCE": {
+      "workload_id": "RQ-G1-DEC-SOURCE",
+      "median_ns": 18000,
+      "p95_ns": 28000,
+      "p99_ns": 40000,
+      "sample_count": 100,
+      "measurement_date": "2026-04-17T06:55:00Z",
+      "measurement_command": "rch exec -- cargo bench --bench raptorq_benchmark -- decode_source",
+      "environment": {
+        "seed": 424242,
+        "k": 32,
+        "symbol_size": 64,
+        "repair_density": 0.0
+      }
+    },
+    "RQ-G1-GF256-ADDMUL": {
+      "workload_id": "RQ-G1-GF256-ADDMUL",
+      "median_ns": 650,
+      "p95_ns": 950,
+      "p99_ns": 1200,
+      "sample_count": 1000,
+      "measurement_date": "2026-04-17T06:55:00Z",
+      "measurement_command": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives/addmul_slice",
+      "environment": {
+        "seed": 424242,
+        "len": 1024,
+        "mul_const": 42
+      }
+    },
+    "RQ-G1-PIPE-64K": {
+      "workload_id": "RQ-G1-PIPE-64K",
+      "median_mbps": 1200.0,
+      "p95_mbps": 1100.0,
+      "p99_mbps": 950.0,
+      "sample_count": 50,
+      "measurement_date": "2026-04-17T06:55:00Z",
+      "measurement_command": "rch exec -- cargo bench --bench raptorq_benchmark -- pipeline_64k",
+      "environment": {
+        "seed": 424242,
+        "block_size": 65536
+      }
+    }
+  },
+  "measurement_environment": {
+    "rust_version": "nightly-2026-02-05",
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "simd_features": ["avx2", "sse4.2"],
+    "cpu_model": "virtual",
+    "memory_gb": 8,
+    "deterministic_execution": true,
+    "thread_count": 1
+  },
+  "governance_metadata": {
+    "budget_artifact": "artifacts/raptorq_performance_budgets_v1.json",
+    "validation_tests": [
+      "g1_performance_budgets_schema_and_coverage",
+      "g1_performance_gates_script_validation",
+      "g1_governance_integration_validation"
+    ],
+    "ci_integration": true,
+    "rollback_policy_validated": true
+  }
+}
