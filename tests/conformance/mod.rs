@@ -12,6 +12,7 @@ pub mod h2_rst_stream_ping_rfc9113;
 // pub mod hpack_metamorphic;
 // pub mod hpack_rfc7541;
 pub mod kafka_record_batch_v2;
+pub mod quic_retry_rfc9000;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod postgres_logical_replication;
@@ -30,6 +31,7 @@ pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult, 
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
 pub use mysql_stmt_prepare_execute::{MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory};
 pub use postgres_logical_replication::{PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory};
+pub use quic_retry_rfc9000::{QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -98,6 +100,13 @@ pub enum TestCategory {
     TypeMessages,
     ChangeDataCapture,
     LogicalSnapshots,
+    // QUIC categories
+    PacketFormat,
+    ConnectionIdHandling,
+    TokenProcessing,
+    IntegrityValidation,
+    ClientProcessing,
+    ServerProcessing,
 }
 
 // Unified conformance test result
@@ -184,6 +193,40 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         })
         .collect();
     results.extend(h2_results);
+
+    // QUIC Retry RFC 9000 conformance
+    let quic_harness = QuicRetryConformanceHarness::new();
+    let quic_results: Vec<ConformanceTestResult> = quic_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                quic_retry_rfc9000::TestCategory::PacketFormat => TestCategory::PacketFormat,
+                quic_retry_rfc9000::TestCategory::ConnectionIdHandling => TestCategory::ConnectionIdHandling,
+                quic_retry_rfc9000::TestCategory::TokenProcessing => TestCategory::TokenProcessing,
+                quic_retry_rfc9000::TestCategory::IntegrityValidation => TestCategory::IntegrityValidation,
+                quic_retry_rfc9000::TestCategory::ClientProcessing => TestCategory::ClientProcessing,
+                quic_retry_rfc9000::TestCategory::ServerProcessing => TestCategory::ServerProcessing,
+                quic_retry_rfc9000::TestCategory::ProtocolOrdering => TestCategory::ProtocolOrdering,
+            },
+            requirement_level: match r.requirement_level {
+                quic_retry_rfc9000::RequirementLevel::Must => RequirementLevel::Must,
+                quic_retry_rfc9000::RequirementLevel::Should => RequirementLevel::Should,
+                quic_retry_rfc9000::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                quic_retry_rfc9000::TestVerdict::Pass => TestVerdict::Pass,
+                quic_retry_rfc9000::TestVerdict::Fail => TestVerdict::Fail,
+                quic_retry_rfc9000::TestVerdict::Skipped => TestVerdict::Skipped,
+                quic_retry_rfc9000::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(quic_results);
 
     // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
     /*
@@ -366,6 +409,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "coverage": "systematic",
                     "reference": "RFC 9113 HTTP/2 RST_STREAM and PING frame conformance"
                 },
+                "quic_retry_rfc9000": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 9000 Section 17.2.5 QUIC Retry packet conformance"
+                },
                 "websocket_rfc6455": {
                     "status": "implemented",
                     "coverage": "systematic",
@@ -472,6 +520,44 @@ mod tests {
 
         if !failures.is_empty() {
             panic!("H2 conformance tests failed: {:#?}", failures);
+        }
+    }
+
+    #[test]
+    fn test_quic_conformance_integration() {
+        let quic_harness = QuicRetryConformanceHarness::new();
+        let results = quic_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "QUIC conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&quic_retry_rfc9000::TestCategory::PacketFormat),
+            "Should test QUIC packet format"
+        );
+        assert!(
+            categories.contains(&quic_retry_rfc9000::TestCategory::ConnectionIdHandling),
+            "Should test connection ID handling"
+        );
+        assert!(
+            categories.contains(&quic_retry_rfc9000::TestCategory::TokenProcessing),
+            "Should test token processing"
+        );
+        assert!(
+            categories.contains(&quic_retry_rfc9000::TestCategory::IntegrityValidation),
+            "Should test integrity validation"
+        );
+
+        // Verify all tests pass
+        let failures: Vec<_> = results.iter()
+            .filter(|r| r.verdict == quic_retry_rfc9000::TestVerdict::Fail)
+            .collect();
+
+        if !failures.is_empty() {
+            panic!("QUIC conformance tests failed: {:#?}", failures);
         }
     }
 
