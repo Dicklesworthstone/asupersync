@@ -14,6 +14,7 @@ cargo-fuzz = true
 asupersync = { path = "..", features = ["tls", "postgres", "kafka", "test-internals"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+libc = "0.2"
 
 # Optional: for structured fuzzing
 bytes = "1"
@@ -379,6 +380,13 @@ bench = false
 [[bin]]
 name = "fuzz_channel_fault_injection"
 path = "fuzz_targets/channel_fault_injection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_io_uring_reactor"
+path = "fuzz_targets/io_uring_reactor.rs"
 test = false
 doc = false
 bench = false
