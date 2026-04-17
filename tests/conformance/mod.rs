@@ -13,6 +13,7 @@ pub mod h1_rfc9112;
 pub mod kafka_record_batch_v2;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
+pub mod postgres_logical_replication;
 pub mod obligation_invariants;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
@@ -26,6 +27,7 @@ pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel
 pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult, TestCategory as KafkaTestCategory};
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
 pub use mysql_stmt_prepare_execute::{MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory};
+pub use postgres_logical_replication::{PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -80,6 +82,13 @@ pub enum TestCategory {
     LongData,
     CursorFlags,
     BinaryResultSet,
+    // PostgreSQL logical replication categories
+    TransactionBoundaries,
+    TupleFormat,
+    RelationMessages,
+    TypeMessages,
+    ChangeDataCapture,
+    LogicalSnapshots,
 }
 
 // Unified conformance test result
