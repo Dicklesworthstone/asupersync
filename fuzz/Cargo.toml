@@ -130,6 +130,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_request_line"
+path = "fuzz_targets/h1_request_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_gf256_operations"
 path = "fuzz_targets/gf256_operations.rs"
 test = false

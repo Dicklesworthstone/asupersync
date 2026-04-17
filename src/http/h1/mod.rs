@@ -21,6 +21,9 @@ pub mod server;
 pub mod stream;
 pub mod types;
 
+#[cfg(test)]
+mod request_line_tests;
+
 pub use client::{ClientIncomingBody, ClientStreamingResponse, Http1Client, Http1ClientCodec};
 pub use codec::{Http1Codec, HttpError};
 pub use http_client::{

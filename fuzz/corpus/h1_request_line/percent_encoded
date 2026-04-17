@@ -1,0 +1,1 @@
+GET /path%20with%20spaces%2Fand%2Fencoded%3Fquery%3Dvalue HTTP/1.1
