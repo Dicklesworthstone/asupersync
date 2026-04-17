@@ -2705,7 +2705,9 @@ impl EvidenceEntry {
         let (verdict, detail) = match &self.binding_constraint {
             BindingConstraint::MonotoneSeverity { outcome_kind } => (
                 Verdict::Stop,
-                SupervisionDetail::MonotoneSeverity { outcome_kind: outcome_kind.to_string() },
+                SupervisionDetail::MonotoneSeverity {
+                    outcome_kind: outcome_kind.to_string(),
+                },
             ),
             BindingConstraint::ExplicitStopStrategy => {
                 (Verdict::Stop, SupervisionDetail::ExplicitStop)

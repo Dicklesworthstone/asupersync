@@ -24,9 +24,7 @@ mod harness;
 mod test_vectors;
 
 // Public re-exports for conformance testing
-pub use harness::{
-    HpackConformanceHarness, RequirementLevel, TestCategory, TestVerdict,
-};
+pub use harness::{HpackConformanceHarness, RequirementLevel, TestCategory, TestVerdict};
 
 #[cfg(test)]
 mod tests {

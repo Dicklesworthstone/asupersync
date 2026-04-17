@@ -18,7 +18,8 @@ fn test_chunk_extensions_edge_cases() {
         "\r\n",
         "5;name=\"quoted\nvalue\"\r\nhello\r\n",
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     match result {
@@ -39,7 +40,8 @@ fn test_chunk_extensions_edge_cases() {
         "\r\n",
         "5;a=1;b=2;c=\"test\"\r\nhello\r\n",
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     assert!(result.is_ok(), "Multiple chunk extensions should be valid");
@@ -52,10 +54,14 @@ fn test_chunk_extensions_edge_cases() {
         "\r\n",
         "5;ext\r\nhello\r\n",
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
-    assert!(result.is_ok(), "Chunk extension without value should be valid");
+    assert!(
+        result.is_ok(),
+        "Chunk extension without value should be valid"
+    );
     assert_eq!(result.unwrap().body, b"hello");
 }
 
@@ -75,7 +81,8 @@ fn test_trailer_fields_edge_cases() {
         "X-Trailer-2: value2\r\n",
         "X-Trailer-3: value3\r\n",
         "\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     assert!(result.is_ok(), "Multiple trailer fields should be valid");
@@ -91,7 +98,8 @@ fn test_trailer_fields_edge_cases() {
         "X-Folded: line one\r\n",
         " line two\r\n", // Folded continuation (obsolete in HTTP/1.1 but legacy)
         "\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     // This should be rejected in modern HTTP/1.1 parsers
@@ -108,7 +116,8 @@ fn test_trailer_fields_edge_cases() {
         "5\r\nhello\r\n",
         "0\r\n",
         "\r\n" // Empty trailer section
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     assert!(result.is_ok(), "Empty trailer section should be valid");
@@ -126,21 +135,26 @@ fn test_line_ending_strictness() {
         "Transfer-Encoding: chunked\r\n",
         "\r\n",
         "5\nhello\n", // LF only
-        "0\n\n"      // LF only
-    ).as_bytes();
+        "0\n\n"       // LF only
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     // RFC 9112 requires CRLF, so this should be rejected
-    assert!(result.is_err(), "LF-only line endings should be rejected per RFC 9112");
+    assert!(
+        result.is_err(),
+        "LF-only line endings should be rejected per RFC 9112"
+    );
 
     // Test mixed CRLF/LF (should be rejected for consistency)
     let test_data = concat!(
         "POST /test HTTP/1.1\r\n",
         "Transfer-Encoding: chunked\r\n",
         "\r\n",
-        "5\r\nhello\n",  // CRLF then LF
+        "5\r\nhello\n", // CRLF then LF
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     // Mixed line endings should be rejected
@@ -182,7 +196,11 @@ fn test_hex_case_sensitivity() {
 
         let result = harness.decode_chunked_request(test_data.as_bytes());
         assert!(result.is_ok(), "Failed for {description}");
-        assert_eq!(result.unwrap().body, test_body.as_bytes(), "Body mismatch for {description}");
+        assert_eq!(
+            result.unwrap().body,
+            test_body.as_bytes(),
+            "Body mismatch for {description}"
+        );
     }
 
     // Test large hex numbers with mixed case
@@ -191,7 +209,10 @@ fn test_hex_case_sensitivity() {
         "Transfer-Encoding: chunked\r\n",
         "\r\n",
         "1A2b\r\n", // Mixed case hex = 6699 decimal
-    ).to_string() + &"x".repeat(6699) + "\r\n0\r\n\r\n";
+    )
+    .to_string()
+        + &"x".repeat(6699)
+        + "\r\n0\r\n\r\n";
 
     let result = harness.decode_chunked_request(test_data.as_bytes());
     assert!(result.is_ok(), "Mixed case large hex should be valid");
@@ -250,10 +271,14 @@ fn test_malformed_input_handling() {
         "\r\n",
         " 5\r\nhello\r\n", // Leading space
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
-    assert!(result.is_err(), "Leading whitespace in chunk size should be rejected");
+    assert!(
+        result.is_err(),
+        "Leading whitespace in chunk size should be rejected"
+    );
 
     // Test chunk size with trailing whitespace
     let test_data = concat!(
@@ -262,10 +287,14 @@ fn test_malformed_input_handling() {
         "\r\n",
         "5 \r\nhello\r\n", // Trailing space
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
-    assert!(result.is_err(), "Trailing whitespace in chunk size should be rejected");
+    assert!(
+        result.is_err(),
+        "Trailing whitespace in chunk size should be rejected"
+    );
 
     // Test negative chunk size (invalid hex)
     let test_data = concat!(
@@ -274,7 +303,8 @@ fn test_malformed_input_handling() {
         "\r\n",
         "-5\r\nhello\r\n", // Negative sign not valid in hex
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     assert!(result.is_err(), "Negative chunk size should be rejected");
@@ -286,7 +316,8 @@ fn test_malformed_input_handling() {
         "\r\n",
         "\r\nhello\r\n", // Empty chunk size line
         "0\r\n\r\n"
-    ).as_bytes();
+    )
+    .as_bytes();
 
     let result = harness.decode_chunked_request(test_data);
     assert!(result.is_err(), "Empty chunk size line should be rejected");

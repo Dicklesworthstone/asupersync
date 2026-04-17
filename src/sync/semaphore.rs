@@ -1726,20 +1726,45 @@ mod tests {
 
         // Initial state check
         let initial = sem.available_permits();
-        crate::assert_with_log!(initial >= 0, "initial permits non-negative", true, initial >= 0);
+        crate::assert_with_log!(
+            initial >= 0,
+            "initial permits non-negative",
+            true,
+            initial >= 0
+        );
 
         // Acquire permits up to limit
         let p1 = sem.try_acquire(1).expect("acquire 1");
         let p2 = sem.try_acquire(2).expect("acquire 2");
         let remaining = sem.available_permits();
-        crate::assert_with_log!(remaining >= 0, "after acquiring all permits", true, remaining >= 0);
-        crate::assert_with_log!(remaining == 0, "exactly 0 permits remaining", 0usize, remaining);
+        crate::assert_with_log!(
+            remaining >= 0,
+            "after acquiring all permits",
+            true,
+            remaining >= 0
+        );
+        crate::assert_with_log!(
+            remaining == 0,
+            "exactly 0 permits remaining",
+            0usize,
+            remaining
+        );
 
         // Try to acquire more - should fail, not underflow
         let overflow = sem.try_acquire(1);
-        crate::assert_with_log!(overflow.is_err(), "acquire overflow fails", true, overflow.is_err());
+        crate::assert_with_log!(
+            overflow.is_err(),
+            "acquire overflow fails",
+            true,
+            overflow.is_err()
+        );
         let still_zero = sem.available_permits();
-        crate::assert_with_log!(still_zero >= 0, "no underflow after failed acquire", true, still_zero >= 0);
+        crate::assert_with_log!(
+            still_zero >= 0,
+            "no underflow after failed acquire",
+            true,
+            still_zero >= 0
+        );
         crate::assert_with_log!(still_zero == 0, "permits still zero", 0usize, still_zero);
 
         // Set up async acquire that will be cancelled
@@ -1755,23 +1780,53 @@ mod tests {
         // Cancel the waiting acquisition
         cancel_cx.set_cancel_requested(true);
         let result = poll_once(&mut fut);
-        crate::assert_with_log!(result.is_some(), "cancellation completes", true, result.is_some());
+        crate::assert_with_log!(
+            result.is_some(),
+            "cancellation completes",
+            true,
+            result.is_some()
+        );
 
         // Permit count should still be non-negative after cancellation
         let after_cancel = sem.available_permits();
-        crate::assert_with_log!(after_cancel >= 0, "permits non-negative after cancel", true, after_cancel >= 0);
-        crate::assert_with_log!(after_cancel == 0, "permits unchanged by cancel", 0usize, after_cancel);
+        crate::assert_with_log!(
+            after_cancel >= 0,
+            "permits non-negative after cancel",
+            true,
+            after_cancel >= 0
+        );
+        crate::assert_with_log!(
+            after_cancel == 0,
+            "permits unchanged by cancel",
+            0usize,
+            after_cancel
+        );
 
         // Release permits and verify no underflow
         drop(p1);
         let after_drop1 = sem.available_permits();
-        crate::assert_with_log!(after_drop1 >= 0, "no underflow after drop 1", true, after_drop1 >= 0);
+        crate::assert_with_log!(
+            after_drop1 >= 0,
+            "no underflow after drop 1",
+            true,
+            after_drop1 >= 0
+        );
         crate::assert_with_log!(after_drop1 == 1, "one permit released", 1usize, after_drop1);
 
         drop(p2);
         let after_drop2 = sem.available_permits();
-        crate::assert_with_log!(after_drop2 >= 0, "no underflow after drop 2", true, after_drop2 >= 0);
-        crate::assert_with_log!(after_drop2 == 3, "all permits released", 3usize, after_drop2);
+        crate::assert_with_log!(
+            after_drop2 >= 0,
+            "no underflow after drop 2",
+            true,
+            after_drop2 >= 0
+        );
+        crate::assert_with_log!(
+            after_drop2 == 3,
+            "all permits released",
+            3usize,
+            after_drop2
+        );
 
         crate::test_complete!("metamorphic_no_permit_underflow");
     }
@@ -1787,7 +1842,12 @@ mod tests {
         // Hold one permit, leaving one available
         let _held = sem.try_acquire(1).expect("acquire 1");
         let before_cancel = sem.available_permits();
-        crate::assert_with_log!(before_cancel == 1, "one permit available", 1usize, before_cancel);
+        crate::assert_with_log!(
+            before_cancel == 1,
+            "one permit available",
+            1usize,
+            before_cancel
+        );
 
         // Create multiple cancel contexts for concurrent cancellation test
         let cancel_cx1 = Cx::new(
@@ -1807,7 +1867,12 @@ mod tests {
 
         // First waiter should acquire immediately
         let result1 = poll_once(&mut fut1);
-        crate::assert_with_log!(result1.is_some(), "first waiter acquires", true, result1.is_some());
+        crate::assert_with_log!(
+            result1.is_some(),
+            "first waiter acquires",
+            true,
+            result1.is_some()
+        );
 
         // Second waiter should block
         let pending2 = poll_once(&mut fut2).is_none();
@@ -1815,22 +1880,42 @@ mod tests {
 
         // Permit count should be zero now
         let after_acquire = sem.available_permits();
-        crate::assert_with_log!(after_acquire == 0, "no permits after full acquisition", 0usize, after_acquire);
+        crate::assert_with_log!(
+            after_acquire == 0,
+            "no permits after full acquisition",
+            0usize,
+            after_acquire
+        );
 
         // Cancel the blocked waiter
         cancel_cx2.set_cancel_requested(true);
         let result2 = poll_once(&mut fut2);
-        crate::assert_with_log!(result2.is_some(), "cancellation completes", true, result2.is_some());
+        crate::assert_with_log!(
+            result2.is_some(),
+            "cancellation completes",
+            true,
+            result2.is_some()
+        );
 
         // Permit count should be unchanged by cancellation
         let after_cancel = sem.available_permits();
-        crate::assert_with_log!(after_cancel == 0, "permits unchanged by cancel", 0usize, after_cancel);
+        crate::assert_with_log!(
+            after_cancel == 0,
+            "permits unchanged by cancel",
+            0usize,
+            after_cancel
+        );
 
         // Transform: add permits then cancel more waiters - count should only
         // reflect successful operations, not cancelled ones
         sem.add_permits(3);
         let after_add = sem.available_permits();
-        crate::assert_with_log!(after_add == 3, "permits added successfully", 3usize, after_add);
+        crate::assert_with_log!(
+            after_add == 3,
+            "permits added successfully",
+            3usize,
+            after_add
+        );
 
         // Start more waiters and cancel them
         let cancel_cx3 = Cx::new(
@@ -1840,10 +1925,20 @@ mod tests {
         );
         let mut fut3 = sem.acquire(&cancel_cx3, 2);
         let result3 = poll_once(&mut fut3);
-        crate::assert_with_log!(result3.is_some(), "large acquire succeeds", true, result3.is_some());
+        crate::assert_with_log!(
+            result3.is_some(),
+            "large acquire succeeds",
+            true,
+            result3.is_some()
+        );
 
         let remaining = sem.available_permits();
-        crate::assert_with_log!(remaining == 1, "one permit left after large acquire", 1usize, remaining);
+        crate::assert_with_log!(
+            remaining == 1,
+            "one permit left after large acquire",
+            1usize,
+            remaining
+        );
 
         crate::test_complete!("metamorphic_cancel_preserves_permit_count");
     }
@@ -1902,14 +1997,29 @@ mod tests {
         // Add permits one at a time - should wake remaining waiters in FIFO order
         sem.add_permits(1);
         let result1_first = poll_once(&mut fut1);
-        crate::assert_with_log!(result1_first.is_some(), "fut1 wakes first", true, result1_first.is_some());
+        crate::assert_with_log!(
+            result1_first.is_some(),
+            "fut1 wakes first",
+            true,
+            result1_first.is_some()
+        );
 
         // fut3 should still be waiting
-        crate::assert_with_log!(poll_once(&mut fut3).is_none(), "fut3 still pending", true, true);
+        crate::assert_with_log!(
+            poll_once(&mut fut3).is_none(),
+            "fut3 still pending",
+            true,
+            true
+        );
 
         sem.add_permits(1);
         let result3_second = poll_once(&mut fut3);
-        crate::assert_with_log!(result3_second.is_some(), "fut3 wakes second", true, result3_second.is_some());
+        crate::assert_with_log!(
+            result3_second.is_some(),
+            "fut3 wakes second",
+            true,
+            result3_second.is_some()
+        );
 
         // Transform: Test that FIFO order is preserved even with permit count variations
         let sem2 = Semaphore::new(0);
@@ -1955,7 +2065,12 @@ mod tests {
 
         // All should be pending
         for (i, fut) in futures.iter_mut().enumerate() {
-            crate::assert_with_log!(poll_once(fut).is_none(), &format!("waiter {} pending", i), true, true);
+            crate::assert_with_log!(
+                poll_once(fut).is_none(),
+                &format!("waiter {} pending", i),
+                true,
+                true
+            );
         }
 
         // Cancel odd-indexed waiters (1, 3, 5)
@@ -1966,25 +2081,70 @@ mod tests {
         let result1 = poll_once(&mut futures[1]);
         let result3 = poll_once(&mut futures[3]);
         let result5 = poll_once(&mut futures[5]);
-        crate::assert_with_log!(result1.is_some(), "waiter 1 cancelled", true, result1.is_some());
-        crate::assert_with_log!(result3.is_some(), "waiter 3 cancelled", true, result3.is_some());
-        crate::assert_with_log!(result5.is_some(), "waiter 5 cancelled", true, result5.is_some());
+        crate::assert_with_log!(
+            result1.is_some(),
+            "waiter 1 cancelled",
+            true,
+            result1.is_some()
+        );
+        crate::assert_with_log!(
+            result3.is_some(),
+            "waiter 3 cancelled",
+            true,
+            result3.is_some()
+        );
+        crate::assert_with_log!(
+            result5.is_some(),
+            "waiter 5 cancelled",
+            true,
+            result5.is_some()
+        );
 
         // Add permits and verify FIFO order: 0, then 2, then 4
         sem2.add_permits(1);
         let result0 = poll_once(&mut futures[0]);
-        crate::assert_with_log!(result0.is_some(), "waiter 0 wakes first", true, result0.is_some());
-        crate::assert_with_log!(poll_once(&mut futures[2]).is_none(), "waiter 2 still pending", true, true);
-        crate::assert_with_log!(poll_once(&mut futures[4]).is_none(), "waiter 4 still pending", true, true);
+        crate::assert_with_log!(
+            result0.is_some(),
+            "waiter 0 wakes first",
+            true,
+            result0.is_some()
+        );
+        crate::assert_with_log!(
+            poll_once(&mut futures[2]).is_none(),
+            "waiter 2 still pending",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            poll_once(&mut futures[4]).is_none(),
+            "waiter 4 still pending",
+            true,
+            true
+        );
 
         sem2.add_permits(1);
         let result2 = poll_once(&mut futures[2]);
-        crate::assert_with_log!(result2.is_some(), "waiter 2 wakes second", true, result2.is_some());
-        crate::assert_with_log!(poll_once(&mut futures[4]).is_none(), "waiter 4 still pending", true, true);
+        crate::assert_with_log!(
+            result2.is_some(),
+            "waiter 2 wakes second",
+            true,
+            result2.is_some()
+        );
+        crate::assert_with_log!(
+            poll_once(&mut futures[4]).is_none(),
+            "waiter 4 still pending",
+            true,
+            true
+        );
 
         sem2.add_permits(1);
         let result4_final = poll_once(&mut futures[4]);
-        crate::assert_with_log!(result4_final.is_some(), "waiter 4 wakes third", true, result4_final.is_some());
+        crate::assert_with_log!(
+            result4_final.is_some(),
+            "waiter 4 wakes third",
+            true,
+            result4_final.is_some()
+        );
 
         crate::test_complete!("metamorphic_fifo_order_under_cancellation");
     }
@@ -2022,7 +2182,12 @@ mod tests {
             );
 
             if initial_permits > 0 {
-                crate::assert_with_log!(result1.is_ok(), &format!("try_acquire succeeds on {}", desc), true, result1.is_ok());
+                crate::assert_with_log!(
+                    result1.is_ok(),
+                    &format!("try_acquire succeeds on {}", desc),
+                    true,
+                    result1.is_ok()
+                );
             }
 
             // try_acquire should be immediate even when acquiring all permits
@@ -2073,7 +2238,12 @@ mod tests {
 
         // Start a waiting async acquire
         let mut fut = sem.acquire(&cx, 1);
-        crate::assert_with_log!(poll_once(&mut fut).is_none(), "async acquire waits", true, true);
+        crate::assert_with_log!(
+            poll_once(&mut fut).is_none(),
+            "async acquire waits",
+            true,
+            true
+        );
 
         // try_acquire should still be immediate even with waiters
         let start_time = std::time::Instant::now();

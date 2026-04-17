@@ -8,7 +8,7 @@ use asupersync::sync::mutex::{LockError, Mutex, TryLockError};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{Cx, RegionId, TaskId};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 /// Test data structure for mutex operations
@@ -111,7 +111,10 @@ fn mr2_cancel_non_poisoning_integration() {
     .expect("cancel test should not panic");
 
     // Phase 2: Verify mutex is NOT poisoned
-    assert!(!mutex.is_poisoned(), "mutex should not be poisoned after cancel");
+    assert!(
+        !mutex.is_poisoned(),
+        "mutex should not be poisoned after cancel"
+    );
 
     // Phase 3: Verify subsequent operations succeed
     let try_result = mutex.try_lock();
@@ -203,11 +206,7 @@ fn mr4_concurrent_poison_consistency_integration() {
     // At most one should succeed, rest should see poison
     assert!(success_count <= 1, "at most 1 should succeed");
     if success_count == 1 {
-        assert_eq!(
-            poison_count,
-            results.len() - 1,
-            "rest should see poison"
-        );
+        assert_eq!(poison_count, results.len() - 1, "rest should see poison");
     } else {
         assert_eq!(poison_count, results.len(), "all should see poison");
     }

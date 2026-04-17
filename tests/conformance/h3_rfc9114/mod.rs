@@ -135,14 +135,25 @@ impl CoverageReport {
     /// Generate a coverage report from test results.
     pub fn generate(results: &[H3ConformanceResult]) -> Self {
         let total_tests = results.len();
-        let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
-        let failed = results.iter().filter(|r| r.verdict == TestVerdict::Fail).count();
-        let skipped = results.iter().filter(|r| r.verdict == TestVerdict::Skipped).count();
+        let passed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Pass)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .count();
+        let skipped = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Skipped)
+            .count();
 
-        let must_tests: Vec<_> = results.iter()
+        let must_tests: Vec<_> = results
+            .iter()
             .filter(|r| r.requirement_level == RequirementLevel::Must)
             .collect();
-        let must_passed = must_tests.iter()
+        let must_passed = must_tests
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Pass)
             .count();
 
@@ -206,10 +217,8 @@ mod integration_tests {
         let results = harness.run_all_tests();
 
         // Verify we have tests for all major categories
-        let categories: std::collections::HashSet<TestCategory> = results
-            .iter()
-            .map(|r| r.category)
-            .collect();
+        let categories: std::collections::HashSet<TestCategory> =
+            results.iter().map(|r| r.category).collect();
 
         assert!(categories.contains(&TestCategory::ConnectionPreface));
         assert!(categories.contains(&TestCategory::Settings));

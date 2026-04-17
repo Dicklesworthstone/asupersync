@@ -193,6 +193,8 @@ rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 sha2 = "0.10"
 # HMAC for Macaroon capability token verification (bd-2lqyk.2)
 hmac = "0.12"
+# CRC32 for Kafka RecordBatch v2 format validation (KIP-98)
+crc32fast = "1.4"
 # QUIC/HTTP3 deps remain disabled: current upstream stacks pull Tokio transitively.
 # We will replace this surface with native asupersync implementations.
 # quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }

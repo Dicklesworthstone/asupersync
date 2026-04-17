@@ -652,7 +652,7 @@ fn mr_priority_lane_ordering() {
     let cancel_task = TaskId::new_for_test(3, 0);
 
     // Schedule in reverse priority order (worst case for ordering)
-    scheduler.inject_ready(ready_task, 100);  // Ready lane (lowest)
+    scheduler.inject_ready(ready_task, 100); // Ready lane (lowest)
     scheduler.inject_timed(timed_task, Time::from_nanos(1000)); // Timed lane (middle)
     scheduler.inject_cancel(cancel_task, 200); // Cancel lane (highest)
 

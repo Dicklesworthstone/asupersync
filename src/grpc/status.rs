@@ -897,20 +897,44 @@ mod tests {
             (Code::Ok, ""),
             (Code::Cancelled, "Request was cancelled"),
             (Code::Unknown, "Unknown error occurred"),
-            (Code::InvalidArgument, "Invalid argument: field \"name\" is required"),
+            (
+                Code::InvalidArgument,
+                "Invalid argument: field \"name\" is required",
+            ),
             (Code::DeadlineExceeded, "Deadline exceeded after 30s"),
             (Code::NotFound, "Resource /api/v1/users/123 not found"),
-            (Code::AlreadyExists, "User with email alice@example.com already exists"),
-            (Code::PermissionDenied, "Insufficient permissions for operation"),
-            (Code::ResourceExhausted, "Rate limit exceeded: 1000 requests/hour"),
-            (Code::FailedPrecondition, "Account must be verified before transfer"),
+            (
+                Code::AlreadyExists,
+                "User with email alice@example.com already exists",
+            ),
+            (
+                Code::PermissionDenied,
+                "Insufficient permissions for operation",
+            ),
+            (
+                Code::ResourceExhausted,
+                "Rate limit exceeded: 1000 requests/hour",
+            ),
+            (
+                Code::FailedPrecondition,
+                "Account must be verified before transfer",
+            ),
             (Code::Aborted, "Transaction aborted due to conflict"),
             (Code::OutOfRange, "Index 42 is out of range [0, 10)"),
-            (Code::Unimplemented, "Method FindUsersByLocation not implemented"),
-            (Code::Internal, "Internal server error: database connection failed"),
+            (
+                Code::Unimplemented,
+                "Method FindUsersByLocation not implemented",
+            ),
+            (
+                Code::Internal,
+                "Internal server error: database connection failed",
+            ),
             (Code::Unavailable, "Service temporarily unavailable"),
             (Code::DataLoss, "Data corruption detected in sector 7"),
-            (Code::Unauthenticated, "Invalid or expired authentication token"),
+            (
+                Code::Unauthenticated,
+                "Invalid or expired authentication token",
+            ),
         ];
 
         for (code, message) in test_cases {
@@ -964,8 +988,14 @@ mod tests {
             (GrpcError::MessageTooLarge, Code::ResourceExhausted),
             (GrpcError::transport("Connection failed"), Code::Unavailable),
             (GrpcError::protocol("Invalid frame"), Code::Internal),
-            (GrpcError::invalid_message("Malformed"), Code::InvalidArgument),
-            (GrpcError::compression("Decompression failed"), Code::Internal),
+            (
+                GrpcError::invalid_message("Malformed"),
+                Code::InvalidArgument,
+            ),
+            (
+                GrpcError::compression("Decompression failed"),
+                Code::Internal,
+            ),
         ];
 
         for (error, expected_code) in error_cases {

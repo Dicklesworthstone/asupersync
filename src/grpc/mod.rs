@@ -74,7 +74,6 @@ pub use codec::{
 };
 #[cfg(feature = "compression")]
 pub use codec::{gzip_frame_compress, gzip_frame_decompress};
-pub use protobuf::{ProstCodec, ProtobufError};
 pub use health::{
     HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
     HealthWatcher, ServingStatus,
@@ -85,6 +84,7 @@ pub use interceptor::{
     TracingInterceptor, auth_bearer_interceptor, auth_validator, fn_interceptor,
     logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
 };
+pub use protobuf::{ProstCodec, ProtobufError};
 pub use reflection::{
     ReflectedMethod, ReflectedService, ReflectionDescribeServiceRequest,
     ReflectionDescribeServiceResponse, ReflectionListServicesRequest,

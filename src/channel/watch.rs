@@ -1864,7 +1864,12 @@ mod tests {
             let initial = rx.borrow_and_update();
             crate::assert_with_log!(*initial == 0, "initial value", 0u64, *initial);
         }
-        crate::assert_with_log!(rx.seen_version == 0, "initial seen version", 0u64, rx.seen_version);
+        crate::assert_with_log!(
+            rx.seen_version == 0,
+            "initial seen version",
+            0u64,
+            rx.seen_version
+        );
 
         // Single send - borrow_and_update should see the new value
         tx.send(42).expect("send failed");
@@ -1872,7 +1877,12 @@ mod tests {
             let value1 = rx.borrow_and_update();
             crate::assert_with_log!(*value1 == 42, "after send(42)", 42u64, *value1);
         }
-        crate::assert_with_log!(rx.seen_version == 1, "version after first send", 1u64, rx.seen_version);
+        crate::assert_with_log!(
+            rx.seen_version == 1,
+            "version after first send",
+            1u64,
+            rx.seen_version
+        );
 
         // Multiple sends in sequence - should always see the latest
         for i in 1..10 {
@@ -1918,13 +1928,23 @@ mod tests {
         // borrow_and_update should update seen version
         {
             let val_update = rx.borrow_and_update();
-            crate::assert_with_log!(*val_update == 1234, "borrow_and_update value", 1234u64, *val_update);
+            crate::assert_with_log!(
+                *val_update == 1234,
+                "borrow_and_update value",
+                1234u64,
+                *val_update
+            );
         }
 
         // Subsequent borrow should see the same value without updating version
         {
             let val_borrow = rx.borrow();
-            crate::assert_with_log!(*val_borrow == 1234, "subsequent borrow value", 1234u64, *val_borrow);
+            crate::assert_with_log!(
+                *val_borrow == 1234,
+                "subsequent borrow value",
+                1234u64,
+                *val_borrow
+            );
         }
 
         // Version should not have changed from the borrow
@@ -2004,13 +2024,23 @@ mod tests {
         // rx1 observes after multiple sends - should see latest
         {
             let val1_latest = rx1.borrow_and_update();
-            crate::assert_with_log!(*val1_latest == 300, "rx1 sees latest after multiple sends", 300u32, *val1_latest);
+            crate::assert_with_log!(
+                *val1_latest == 300,
+                "rx1 sees latest after multiple sends",
+                300u32,
+                *val1_latest
+            );
         }
 
         // rx3 observes for first time - should also see latest
         {
             let val3_first = rx3.borrow_and_update();
-            crate::assert_with_log!(*val3_first == 300, "rx3 sees latest on first observation", 300u32, *val3_first);
+            crate::assert_with_log!(
+                *val3_first == 300,
+                "rx3 sees latest on first observation",
+                300u32,
+                *val3_first
+            );
         }
 
         // Versions should be independent but current
@@ -2042,9 +2072,24 @@ mod tests {
         let has_changed2_after = rx2.has_changed();
         let has_changed3_after = rx3.has_changed();
 
-        crate::assert_with_log!(!has_changed1_after, "rx1 no changes after mark", false, has_changed1_after);
-        crate::assert_with_log!(has_changed2_after, "rx2 still has changes", true, has_changed2_after);
-        crate::assert_with_log!(has_changed3_after, "rx3 still has changes", true, has_changed3_after);
+        crate::assert_with_log!(
+            !has_changed1_after,
+            "rx1 no changes after mark",
+            false,
+            has_changed1_after
+        );
+        crate::assert_with_log!(
+            has_changed2_after,
+            "rx2 still has changes",
+            true,
+            has_changed2_after
+        );
+        crate::assert_with_log!(
+            has_changed3_after,
+            "rx3 still has changes",
+            true,
+            has_changed3_after
+        );
 
         crate::test_complete!("metamorphic_receiver_isolation");
     }
@@ -2065,19 +2110,39 @@ mod tests {
 
         // Initial state - no changes yet, should wait
         let initial_version = rx.seen_version();
-        crate::assert_with_log!(initial_version == 0, "initial version", 0u64, initial_version);
+        crate::assert_with_log!(
+            initial_version == 0,
+            "initial version",
+            0u64,
+            initial_version
+        );
 
         // First send - changed() should return exactly once
         tx.send(1).expect("send failed");
 
         let change1 = poll_changed(&mut rx);
-        crate::assert_with_log!(change1.is_ok(), "first changed() succeeds", true, change1.is_ok());
+        crate::assert_with_log!(
+            change1.is_ok(),
+            "first changed() succeeds",
+            true,
+            change1.is_ok()
+        );
 
         // Calling changed() again without a new send should block (no stutter)
         // We can't easily test blocking in a unit test, but we can verify the version is updated
         let version_after_change = rx.seen_version();
-        crate::assert_with_log!(version_after_change == 1, "version updated after changed()", 1u64, version_after_change);
-        crate::assert_with_log!(!rx.has_changed(), "no changes after changed()", false, rx.has_changed());
+        crate::assert_with_log!(
+            version_after_change == 1,
+            "version updated after changed()",
+            1u64,
+            version_after_change
+        );
+        crate::assert_with_log!(
+            !rx.has_changed(),
+            "no changes after changed()",
+            false,
+            rx.has_changed()
+        );
 
         // Multiple sends - each should trigger exactly one changed() notification
         let mut change_count = 1; // Already counted the first change
@@ -2102,7 +2167,12 @@ mod tests {
             );
         }
 
-        crate::assert_with_log!(change_count == 5, "exactly 5 changes for 5 sends", 5, change_count);
+        crate::assert_with_log!(
+            change_count == 5,
+            "exactly 5 changes for 5 sends",
+            5,
+            change_count
+        );
 
         // Transform: Rapid sends - each should still trigger exactly once
         for i in 10..15 {
@@ -2121,23 +2191,48 @@ mod tests {
         }
 
         let final_version = rx.seen_version();
-        crate::assert_with_log!(final_version == 9, "final version after all sends", 9u64, final_version);
+        crate::assert_with_log!(
+            final_version == 9,
+            "final version after all sends",
+            9u64,
+            final_version
+        );
 
         // Transform: Send same value multiple times - each should still trigger changed()
         tx.send(999).expect("send failed");
-        tx.send(999).expect("send failed");  // Same value
-        tx.send(999).expect("send failed");  // Same value again
+        tx.send(999).expect("send failed"); // Same value
+        tx.send(999).expect("send failed"); // Same value again
 
         let change_dup1 = poll_changed(&mut rx);
         let change_dup2 = poll_changed(&mut rx);
         let change_dup3 = poll_changed(&mut rx);
 
-        crate::assert_with_log!(change_dup1.is_ok(), "first duplicate change", true, change_dup1.is_ok());
-        crate::assert_with_log!(change_dup2.is_ok(), "second duplicate change", true, change_dup2.is_ok());
-        crate::assert_with_log!(change_dup3.is_ok(), "third duplicate change", true, change_dup3.is_ok());
+        crate::assert_with_log!(
+            change_dup1.is_ok(),
+            "first duplicate change",
+            true,
+            change_dup1.is_ok()
+        );
+        crate::assert_with_log!(
+            change_dup2.is_ok(),
+            "second duplicate change",
+            true,
+            change_dup2.is_ok()
+        );
+        crate::assert_with_log!(
+            change_dup3.is_ok(),
+            "third duplicate change",
+            true,
+            change_dup3.is_ok()
+        );
 
         let final_value = rx.borrow_and_update();
-        crate::assert_with_log!(*final_value == 999, "final value correct", 999i32, *final_value);
+        crate::assert_with_log!(
+            *final_value == 999,
+            "final value correct",
+            999i32,
+            *final_value
+        );
 
         crate::test_complete!("metamorphic_changed_exactness");
     }
@@ -2155,9 +2250,24 @@ mod tests {
         let mut rx3 = tx.subscribe();
 
         // Initial state - all receivers should see open channel
-        crate::assert_with_log!(!rx1.is_closed(), "rx1 initially open", false, rx1.is_closed());
-        crate::assert_with_log!(!rx2.is_closed(), "rx2 initially open", false, rx2.is_closed());
-        crate::assert_with_log!(!rx3.is_closed(), "rx3 initially open", false, rx3.is_closed());
+        crate::assert_with_log!(
+            !rx1.is_closed(),
+            "rx1 initially open",
+            false,
+            rx1.is_closed()
+        );
+        crate::assert_with_log!(
+            !rx2.is_closed(),
+            "rx2 initially open",
+            false,
+            rx2.is_closed()
+        );
+        crate::assert_with_log!(
+            !rx3.is_closed(),
+            "rx3 initially open",
+            false,
+            rx3.is_closed()
+        );
 
         // Send initial value so receivers have something to observe
         tx.send(42).expect("send failed");
@@ -2177,9 +2287,24 @@ mod tests {
         drop(tx);
 
         // All receivers should now see the channel as closed
-        crate::assert_with_log!(rx1.is_closed(), "rx1 closed after drop", true, rx1.is_closed());
-        crate::assert_with_log!(rx2.is_closed(), "rx2 closed after drop", true, rx2.is_closed());
-        crate::assert_with_log!(rx3.is_closed(), "rx3 closed after drop", true, rx3.is_closed());
+        crate::assert_with_log!(
+            rx1.is_closed(),
+            "rx1 closed after drop",
+            true,
+            rx1.is_closed()
+        );
+        crate::assert_with_log!(
+            rx2.is_closed(),
+            "rx2 closed after drop",
+            true,
+            rx2.is_closed()
+        );
+        crate::assert_with_log!(
+            rx3.is_closed(),
+            "rx3 closed after drop",
+            true,
+            rx3.is_closed()
+        );
 
         // Any attempt to wait for changes should return Closed error
         let mut future1 = rx1.changed(&cx);
@@ -2235,7 +2360,12 @@ mod tests {
         }
 
         // rx5 should have changes pending
-        crate::assert_with_log!(rx5.has_changed(), "rx5 has pending changes", true, rx5.has_changed());
+        crate::assert_with_log!(
+            rx5.has_changed(),
+            "rx5 has pending changes",
+            true,
+            rx5.has_changed()
+        );
 
         // Drop sender
         drop(tx2);
@@ -2253,7 +2383,12 @@ mod tests {
         // But rx5 should still be able to read the last value
         {
             let final5 = rx5.borrow();
-            crate::assert_with_log!(*final5 == 200, "rx5 can still read last value", 200i32, *final5);
+            crate::assert_with_log!(
+                *final5 == 200,
+                "rx5 can still read last value",
+                200i32,
+                *final5
+            );
         }
 
         crate::test_complete!("metamorphic_closed_sender_behavior");

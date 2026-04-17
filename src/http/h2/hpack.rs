@@ -2547,12 +2547,14 @@ mod tests {
 
         // RFC 7541 C.2.1: 40 0a 63 75 73 74 6f 6d 2d 6b 65 79 0d 63 75 73 74 6f 6d 2d 68 65 61 64 65 72
         let encoded = &[
-            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79,
-            0x0d, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
+            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0d, 0x63,
+            0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
         ];
 
         let mut bytes = Bytes::copy_from_slice(encoded);
-        let headers = decoder.decode(&mut bytes).expect("C.2.1 decode should work");
+        let headers = decoder
+            .decode(&mut bytes)
+            .expect("C.2.1 decode should work");
 
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].name, "custom-key");
@@ -2582,12 +2584,14 @@ mod tests {
 
         // RFC 7541 C.3.1: First request (same as C.2.1)
         let encoded_1 = &[
-            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79,
-            0x0d, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
+            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0d, 0x63,
+            0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
         ];
 
         let mut bytes = Bytes::copy_from_slice(encoded_1);
-        let headers_1 = decoder.decode(&mut bytes).expect("C.3.1 decode should work");
+        let headers_1 = decoder
+            .decode(&mut bytes)
+            .expect("C.3.1 decode should work");
 
         assert_eq!(headers_1.len(), 1);
         assert_eq!(headers_1[0].name, "custom-key");
@@ -2597,7 +2601,9 @@ mod tests {
         let encoded_2 = &[0xbe];
 
         let mut bytes = Bytes::copy_from_slice(encoded_2);
-        let headers_2 = decoder.decode(&mut bytes).expect("C.3.2 decode should work");
+        let headers_2 = decoder
+            .decode(&mut bytes)
+            .expect("C.3.2 decode should work");
 
         assert_eq!(headers_2.len(), 1);
         assert_eq!(headers_2[0].name, "custom-key");
@@ -2611,12 +2617,14 @@ mod tests {
 
         // RFC 7541 C.4.1: First request
         let encoded_1 = &[
-            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79,
-            0x0d, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
+            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0d, 0x63,
+            0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
         ];
 
         let mut bytes = Bytes::copy_from_slice(encoded_1);
-        let headers_1 = decoder.decode(&mut bytes).expect("C.4.1 decode should work");
+        let headers_1 = decoder
+            .decode(&mut bytes)
+            .expect("C.4.1 decode should work");
 
         assert_eq!(headers_1.len(), 1);
         assert_eq!(headers_1[0].name, "custom-key");
@@ -2624,12 +2632,14 @@ mod tests {
 
         // RFC 7541 C.4.2: Second request
         let encoded_2 = &[
-            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79,
-            0x0c, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x76, 0x61, 0x6c, 0x75, 0x65,
+            0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0c, 0x63,
+            0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x76, 0x61, 0x6c, 0x75, 0x65,
         ];
 
         let mut bytes = Bytes::copy_from_slice(encoded_2);
-        let headers_2 = decoder.decode(&mut bytes).expect("C.4.2 decode should work");
+        let headers_2 = decoder
+            .decode(&mut bytes)
+            .expect("C.4.2 decode should work");
 
         assert_eq!(headers_2.len(), 1);
         assert_eq!(headers_2[0].name, "custom-key");
@@ -2641,7 +2651,9 @@ mod tests {
         let encoded_3 = &[0xbf, 0xbe];
 
         let mut bytes = Bytes::copy_from_slice(encoded_3);
-        let headers_3 = decoder.decode(&mut bytes).expect("C.4.3 decode should work");
+        let headers_3 = decoder
+            .decode(&mut bytes)
+            .expect("C.4.3 decode should work");
 
         assert_eq!(headers_3.len(), 2);
         // First header: index 63 (older dynamic entry)
@@ -2670,7 +2682,9 @@ mod tests {
         encoder.encode(&headers, &mut encoded);
 
         let mut src = encoded.freeze();
-        let decoded = decoder.decode(&mut src).expect("Round-trip decode should work");
+        let decoded = decoder
+            .decode(&mut src)
+            .expect("Round-trip decode should work");
 
         assert_eq!(decoded.len(), 3);
         assert_eq!(decoded[0].name, ":method");

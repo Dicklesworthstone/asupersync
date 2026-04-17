@@ -8266,7 +8266,8 @@ mod tests {
                 if let Some(region) = regions.get(region_id.arena_index()) {
                     Some(Self {
                         region_id,
-                        close_successful: region.state() == crate::record::region::RegionState::Closed,
+                        close_successful: region.state()
+                            == crate::record::region::RegionState::Closed,
                         final_state: region.state(),
                         task_count: region.task_count(),
                         child_count: region.child_count(),

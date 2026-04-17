@@ -5,8 +5,8 @@
 
 use super::*;
 use asupersync::http::h3_native::{
-    H3Frame, H3Settings, H3UniStreamType, H3NativeError,
-    H3_SETTING_H3_DATAGRAM, H3ConnectionConfig, H3QpackMode
+    H3_SETTING_H3_DATAGRAM, H3ConnectionConfig, H3Frame, H3NativeError, H3QpackMode, H3Settings,
+    H3UniStreamType,
 };
 use std::time::Instant;
 
@@ -94,11 +94,12 @@ pub fn test_h3_connection_preface_server() -> H3ConformanceResult {
         notes.push("Server does not properly reject unknown stream types".to_string());
     }
 
-    let verdict = if accepts_control_stream && processes_settings && sends_settings && rejects_unknown {
-        TestVerdict::Pass
-    } else {
-        TestVerdict::Fail
-    };
+    let verdict =
+        if accepts_control_stream && processes_settings && sends_settings && rejects_unknown {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
 
     H3ConformanceResult {
         test_id: "RFC9114-6.1-SERVER".to_string(),
@@ -322,9 +323,9 @@ fn validate_server_processes_settings() -> bool {
     match H3Settings::decode_payload(&client_settings_payload) {
         Ok(decoded_settings) => {
             // Verify settings were properly decoded
-            decoded_settings.qpack_max_table_capacity == Some(8192) &&
-            decoded_settings.max_field_section_size == Some(32768) &&
-            decoded_settings.h3_datagram == Some(true)
+            decoded_settings.qpack_max_table_capacity == Some(8192)
+                && decoded_settings.max_field_section_size == Some(32768)
+                && decoded_settings.h3_datagram == Some(true)
         }
         Err(_) => false,
     }
@@ -373,9 +374,9 @@ fn validate_server_rejects_unknown_streams() -> bool {
     let qpack_encoder_type = H3UniStreamType::decode(0x02);
     let qpack_decoder_type = H3UniStreamType::decode(0x03);
 
-    matches!(control_type, H3UniStreamType::Control) &&
-    matches!(qpack_encoder_type, H3UniStreamType::QpackEncoder) &&
-    matches!(qpack_decoder_type, H3UniStreamType::QpackDecoder)
+    matches!(control_type, H3UniStreamType::Control)
+        && matches!(qpack_encoder_type, H3UniStreamType::QpackEncoder)
+        && matches!(qpack_decoder_type, H3UniStreamType::QpackDecoder)
 }
 
 fn validate_settings_frame_first() -> bool {
@@ -401,8 +402,7 @@ fn validate_settings_frame_first() -> bool {
     }
 
     // Verify SETTINGS is first
-    !control_stream_frames.is_empty() &&
-    control_stream_frames[0].0 == "SETTINGS"
+    !control_stream_frames.is_empty() && control_stream_frames[0].0 == "SETTINGS"
 }
 
 fn validate_no_settings_on_request_streams() -> bool {
@@ -435,10 +435,12 @@ fn validate_duplicate_settings_handling() -> bool {
 
     // Add QPACK_MAX_TABLE_CAPACITY setting twice (duplicate ID 0x01)
     payload.push(0x01); // Setting ID: QPACK_MAX_TABLE_CAPACITY
-    payload.push(0x80); payload.push(0x20); // Value: 4096
+    payload.push(0x80);
+    payload.push(0x20); // Value: 4096
 
     payload.push(0x01); // Same setting ID again (duplicate)
-    payload.push(0x80); payload.push(0x40); // Different value: 8192
+    payload.push(0x80);
+    payload.push(0x40); // Different value: 8192
 
     // H3Settings::decode_payload should detect and reject duplicate setting IDs
     match H3Settings::decode_payload(&payload) {

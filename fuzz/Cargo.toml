@@ -352,3 +352,10 @@ path = "fuzz_targets/hpack_eviction.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_websocket_deflate"
+path = "fuzz_targets/websocket_deflate.rs"
+test = false
+doc = false
+bench = false

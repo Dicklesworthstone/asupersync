@@ -23,7 +23,9 @@ mod golden_test_vectors;
 mod harness;
 
 // Public re-exports for conformance testing
-pub use harness::{H1ConformanceHarness, H1ConformanceResult, H1TestCategory, RequirementLevel, TestVerdict};
+pub use harness::{
+    H1ConformanceHarness, H1ConformanceResult, H1TestCategory, RequirementLevel, TestVerdict,
+};
 
 #[cfg(test)]
 mod tests {
@@ -90,7 +92,8 @@ mod tests {
             "\r\n",
             "5\r\nhello\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = harness.decode_chunked_request(test_request);
         assert!(result.is_ok(), "Basic chunked decoding should succeed");
@@ -111,7 +114,8 @@ mod tests {
             "\r\n",
             "5;ext=value\r\nhello\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = harness.decode_chunked_request(chunk_ext_request);
         assert!(result.is_ok(), "Chunk-ext should be parsed correctly");
@@ -125,7 +129,8 @@ mod tests {
             "0\r\n",
             "X-Trailer: test\r\n",
             "\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = harness.decode_chunked_request(trailer_request);
         assert!(result.is_ok(), "Trailer fields should be handled correctly");
@@ -138,7 +143,8 @@ mod tests {
             "A\r\nhelloworld\r\n",
             "a\r\nhelloworld\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = harness.decode_chunked_request(hex_case_request);
         assert!(result.is_ok(), "Mixed case hex should be accepted");
@@ -166,7 +172,8 @@ mod tests {
             "\r\n",
             "G\r\nhello\r\n", // G is not valid hex
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = harness.decode_chunked_request(invalid_hex_request);
         assert!(result.is_err(), "Invalid hex should be rejected");

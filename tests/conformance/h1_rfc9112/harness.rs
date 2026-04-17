@@ -4,9 +4,9 @@
 //! focusing on chunked transfer-encoding edge cases and compliance.
 
 use asupersync::bytes::BytesMut;
+use asupersync::codec::{Decoder, Encoder};
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
 use asupersync::http::h1::types::{Request, Response};
-use asupersync::codec::{Decoder, Encoder};
 use std::time::{Duration, Instant};
 
 /// Requirement levels per RFC 2119.
@@ -152,7 +152,8 @@ impl H1ConformanceHarness {
             "5\r\nhello\r\n",
             "6\r\n world\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -182,7 +183,8 @@ impl H1ConformanceHarness {
             "Transfer-Encoding: chunked\r\n",
             "\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -220,7 +222,8 @@ impl H1ConformanceHarness {
             "\r\n",
             "5;name=value;other=param\r\nhello\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -251,7 +254,8 @@ impl H1ConformanceHarness {
             "\r\n",
             "5;name=\"quoted value\"\r\nhello\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -292,7 +296,8 @@ impl H1ConformanceHarness {
             "X-Trailer: value1\r\n",
             "Y-Trailer: value2\r\n",
             "\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -330,7 +335,8 @@ impl H1ConformanceHarness {
             "\r\n",
             "5\nhello\r\n", // LF instead of CRLF in chunk size line
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -368,7 +374,8 @@ impl H1ConformanceHarness {
             "A\r\nhelloworld\r\n", // Uppercase A
             "a\r\nhelloworld\r\n", // Lowercase a
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -440,7 +447,8 @@ impl H1ConformanceHarness {
             "Transfer-Encoding: gzip, chunked\r\n",
             "\r\n",
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -473,7 +481,8 @@ impl H1ConformanceHarness {
             "\r\n",
             "G\r\nhello\r\n", // G is not valid hex
             "0\r\n\r\n"
-        ).as_bytes();
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
@@ -501,9 +510,9 @@ impl H1ConformanceHarness {
             "POST /test HTTP/1.1\r\n",
             "Transfer-Encoding: chunked\r\n",
             "\r\n",
-            "5\r\nhello\r\n"
-            // Missing 0\r\n\r\n terminator
-        ).as_bytes();
+            "5\r\nhello\r\n" // Missing 0\r\n\r\n terminator
+        )
+        .as_bytes();
 
         let result = self.decode_chunked_request(test_data);
         let elapsed = start.elapsed();
