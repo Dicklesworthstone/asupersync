@@ -19,6 +19,7 @@ serde_json = "1"
 tempfile = "3"
 clap = { version = "4.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
+crc32fast = "1.4"
 
 [dev-dependencies]
 # Runtimes can be added here for testing

@@ -36,6 +36,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
+pub mod kafka_record_batch_v2;
 pub mod lean_coverage_matrix;
 pub mod lean_frontier;
 pub mod logging;
@@ -52,6 +53,10 @@ pub use bench::{
     BenchThresholds, Benchmark, Comparison, ComparisonConfidence, RegressionCheck,
     RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
     run_benchmark_comparison,
+};
+pub use kafka_record_batch_v2::{
+    ConformanceTestResult, Header, KafkaConformanceHarness, RecordAttribute, RecordBatchV2,
+    RecordV2, TimestampType,
 };
 pub use lean_coverage_matrix::{
     BlockerCode, CoverageBlocker, CoverageEvidence, CoverageRow, CoverageRowType, CoverageStatus,
