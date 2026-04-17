@@ -92,6 +92,7 @@
 
 use super::{Budget, RegionId, TaskId, Time};
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 /// Configuration for cancel attribution chain limits.
 ///
@@ -109,7 +110,7 @@ use core::fmt;
 ///
 /// let custom = CancelAttributionConfig::new(8, 2048);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelAttributionConfig {
     /// Maximum depth of cause chain to preserve.
     /// Deeper chains are truncated with a 'truncated' marker.
@@ -189,7 +190,7 @@ impl Default for CancelAttributionConfig {
 }
 
 /// The kind of cancellation request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CancelKind {
     /// Explicit cancellation requested by user code.
     User,
@@ -220,7 +221,7 @@ pub enum CancelKind {
 // ========================================================================
 
 /// The cancellation phase witnessed by the runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CancelPhase {
     /// Cancellation has been requested but not yet acknowledged.
     Requested,
@@ -248,7 +249,7 @@ impl CancelPhase {
 ///
 /// This witness is emitted by the cancellation protocol to make completion
 /// verifiable and to detect inconsistent or out-of-order transitions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelWitness {
     /// The task associated with this cancellation.
     pub task_id: TaskId,
@@ -422,7 +423,7 @@ impl fmt::Display for CancelKind {
 /// For example, a timeout might trigger a parent cancellation, which then
 /// cascades to children. Use [`root_cause()`][CancelReason::root_cause] to
 /// find the original cause, or iterate with [`chain()`][CancelReason::chain].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelReason {
     /// The kind of cancellation.
     pub kind: CancelKind,

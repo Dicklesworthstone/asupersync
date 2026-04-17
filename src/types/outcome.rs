@@ -99,11 +99,12 @@
 
 use super::cancel::CancelReason;
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 /// Payload from a caught panic.
 ///
 /// This wraps the panic value for safe transport across task boundaries.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanicPayload {
     message: String,
 }
@@ -209,7 +210,7 @@ impl fmt::Display for Severity {
 ///
 /// Forms a severity lattice where worse outcomes dominate:
 /// `Ok < Err < Cancelled < Panicked`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Outcome<T, E> {
     /// Success with a value.
     Ok(T),
@@ -655,7 +656,7 @@ impl<T, E> From<Result<T, E>> for Outcome<T, E> {
 }
 
 /// Error type for converting Outcome to Result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OutcomeError<E> {
     /// Application error.
     Err(E),

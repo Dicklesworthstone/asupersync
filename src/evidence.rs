@@ -31,6 +31,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::{CancelReason, Outcome, RegionId, TaskId};
 
 // ---------------------------------------------------------------------------
@@ -38,7 +40,7 @@ use crate::types::{CancelReason, Outcome, RegionId, TaskId};
 // ---------------------------------------------------------------------------
 
 /// Spork subsystem that produced the evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Subsystem {
     /// Supervisor restart/stop/escalate decisions.
     Supervision,
@@ -64,7 +66,7 @@ impl fmt::Display for Subsystem {
 /// One-word verdict summarizing the decision outcome.
 ///
 /// The verdict is the "what happened" counterpart to the detail's "why".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Verdict {
     // -- Supervision --
     /// Actor will be restarted.
@@ -123,7 +125,7 @@ impl fmt::Display for Verdict {
 ///
 /// Each variant carries the binding constraint: the specific rule, limit,
 /// or condition that determined the verdict.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EvidenceDetail {
     /// Supervision decision detail.
     Supervision(SupervisionDetail),
@@ -154,12 +156,12 @@ impl fmt::Display for EvidenceDetail {
 ///
 /// Maps directly to the `BindingConstraint` enum in `src/supervision.rs`
 /// but expressed in the generalized evidence schema.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SupervisionDetail {
     /// Outcome severity prevents restart (Panicked / Cancelled / Ok).
     MonotoneSeverity {
         /// The outcome kind label.
-        outcome_kind: &'static str,
+        outcome_kind: String,
     },
     /// Strategy is explicitly `Stop`.
     ExplicitStop,
@@ -214,7 +216,7 @@ impl fmt::Display for SupervisionDetail {
 // -- Registry detail --
 
 /// Why a registry decision was made.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegistryDetail {
     /// Name was available and registration succeeded.
     NameAvailable,
@@ -274,7 +276,7 @@ impl fmt::Display for RegistryDetail {
 // -- Link detail --
 
 /// Why a link decision was made.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LinkDetail {
     /// Linked task failed; exit signal propagated.
     ExitPropagated {
@@ -319,7 +321,7 @@ impl fmt::Display for LinkDetail {
 // -- Monitor detail --
 
 /// Why a monitor decision was made.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MonitorDetail {
     /// Down notification delivered to watcher.
     DownDelivered {
@@ -372,7 +374,7 @@ impl fmt::Display for MonitorDetail {
 /// This is the generalized, subsystem-agnostic envelope.  Every Spork
 /// subsystem produces `EvidenceRecord` entries with identical metadata
 /// layout and subsystem-specific `detail`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRecord {
     /// Virtual timestamp (nanoseconds) when the decision was made.
     pub timestamp: u64,
@@ -455,7 +457,7 @@ impl fmt::Display for EvidenceRecord {
 ///
 /// This is intentionally lightweight and stable so tests can assert exact
 /// output and agents can grep for `rule:` / `substitution:` / `intuition:`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceCard {
     /// Virtual timestamp (nanoseconds) when the decision was made.
     pub timestamp: u64,
@@ -671,7 +673,7 @@ fn evidence_card_triple(
 ///
 /// Entry order is insertion order, which is deterministic under virtual time.
 /// The [`render`](Self::render) method produces a stable multi-line string.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeneralizedLedger {
     entries: Vec<EvidenceRecord>,
 }
@@ -1020,7 +1022,7 @@ mod tests {
                 subsystem: Subsystem::Supervision,
                 verdict: Verdict::Stop,
                 detail: EvidenceDetail::Supervision(SupervisionDetail::MonotoneSeverity {
-                    outcome_kind: "Panicked",
+                    outcome_kind: "Panicked".to_string(),
                 }),
             },
         ];
