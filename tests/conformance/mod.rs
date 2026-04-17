@@ -8,6 +8,7 @@ pub mod hpack_metamorphic;
 pub mod codec_framing;
 pub mod h2_rfc7540;
 pub mod websocket_rfc6455;
+pub mod obligation_invariants;
 
 // Re-export main conformance test functionality
 pub use hpack_rfc7541::{
