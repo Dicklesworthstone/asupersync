@@ -26,7 +26,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 ### Breaking changes
 
-- **`ObjectParams.source_blocks` widened from `u8` to `u16`** ([`37f5b1b2`](https://github.com/Dicklesworthstone/asupersync/commit/37f5b1b2), [#30](https://github.com/Dicklesworthstone/asupersync/issues/30)). `u8` capped source blocks at 255; the protocol needs up to 256. The change applies to both the public field and the `ObjectParams::new(...)` constructor parameter. Downstream consumers using caret constraints on `0.2.x` must update call sites to pass `u16`. Retroactively documented — this was the kind of source-breaking change that should have shipped in `0.3.0`; going forward, public signature width changes get a minor version bump.
+- **`ObjectParams.source_blocks` widened from `u8` to `u16`** ([`f7ae111f`](https://github.com/Dicklesworthstone/asupersync/commit/f7ae111f), [#30](https://github.com/Dicklesworthstone/asupersync/issues/30)). `u8` capped source blocks at 255; the protocol needs up to 256. The change applies to both the public field and the `ObjectParams::new(...)` constructor parameter. A sibling widening of `EncodingConfig::max_source_blocks` from `u8` to `u16` landed the same day in [`37f5b1b2`](https://github.com/Dicklesworthstone/asupersync/commit/37f5b1b2). Downstream consumers using caret constraints on `0.2.x` must update call sites to pass `u16`. Retroactively documented — this was the kind of source-breaking change that should have shipped in `0.3.0`; going forward, public signature width changes get a minor version bump.
 
 ### FABRIC Messaging Engine
 
