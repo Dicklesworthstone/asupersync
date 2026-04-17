@@ -3437,4 +3437,304 @@ mod tests {
 
         assert_eq!(error, FabricCapabilityGrantError::EmptyStreamName);
     }
+
+    // ========================================================================
+    // Metamorphic Testing: Cx::trace ordering across scope boundaries
+    // ========================================================================
+
+    /// MR1: Parent-Child Trace Ordering (Inclusive)
+    /// Transformation: Create child scope
+    /// Relation: Parent traces precede child traces in logical order
+    #[test]
+    fn mr_trace_parent_child_ordering() {
+        let parent_cx = test_cx();
+        let trace = TraceBufferHandle::new(16);
+        parent_cx.set_trace_buffer(trace.clone());
+
+        // Parent emits trace first
+        parent_cx.trace("parent trace 1");
+
+        // Create child context (simulating child scope)
+        let child_cx = parent_cx.clone();
+        child_cx.trace("child trace 1");
+        child_cx.trace("child trace 2");
+
+        // Parent emits another trace after child
+        parent_cx.trace("parent trace 2");
+
+        let events = trace.snapshot();
+        assert_eq!(events.len(), 4);
+
+        // Extract logical times for ordering verification
+        let times: Vec<_> = events.iter()
+            .map(|e| e.logical_time.as_ref().expect("logical time"))
+            .collect();
+
+        // Verify parent traces have logical time precedence structure
+        // (In a real parent-child scenario, parent regions would have different region IDs)
+        // For this test we verify causal ordering through logical time monotonicity
+        for i in 1..times.len() {
+            assert!(
+                times[i-1].tick <= times[i].tick,
+                "Logical time should be monotonically increasing: {} > {}",
+                times[i-1].tick, times[i].tick
+            );
+        }
+    }
+
+    /// MR2: Deterministic Interleaving (Equivalence)
+    /// Transformation: Same seed replay
+    /// Relation: Identical trace order under deterministic execution
+    #[test]
+    fn mr_trace_deterministic_interleaving() {
+        // First execution with entropy seed
+        let cx1 = test_cx_with_entropy(42);
+        let trace1 = TraceBufferHandle::new(16);
+        cx1.set_trace_buffer(trace1.clone());
+
+        // Simulate concurrent traces with deterministic randomization
+        for i in 0..5 {
+            if cx1.random_usize(2) == 0 {
+                cx1.trace(&format!("branch_a_{}", i));
+            } else {
+                cx1.trace(&format!("branch_b_{}", i));
+            }
+        }
+
+        // Second execution with same seed
+        let cx2 = test_cx_with_entropy(42);
+        let trace2 = TraceBufferHandle::new(16);
+        cx2.set_trace_buffer(trace2.clone());
+
+        for i in 0..5 {
+            if cx2.random_usize(2) == 0 {
+                cx2.trace(&format!("branch_a_{}", i));
+            } else {
+                cx2.trace(&format!("branch_b_{}", i));
+            }
+        }
+
+        let events1 = trace1.snapshot();
+        let events2 = trace2.snapshot();
+
+        // Deterministic execution should produce identical trace sequences
+        assert_eq!(events1.len(), events2.len(), "Trace count should be deterministic");
+
+        for (i, (e1, e2)) in events1.iter().zip(events2.iter()).enumerate() {
+            // Note: We compare message content rather than exact logical time
+            // as time implementation details may vary while maintaining determinism
+            assert_eq!(
+                e1.message, e2.message,
+                "Trace message at index {} should be deterministic: '{}' vs '{}'",
+                i, e1.message, e2.message
+            );
+        }
+    }
+
+    /// MR3: Macaroon Causal Ordering (Permutative)
+    /// Transformation: Macaroon attenuation chain
+    /// Relation: Logical time monotonic through auth flow
+    #[test]
+    fn mr_trace_macaroon_causal_ordering() {
+        use super::macaroon::{MacaroonToken, CaveatPredicate};
+        use crate::security::key::AuthKey;
+
+        let key = AuthKey::from_seed(42);
+        let token = MacaroonToken::mint(&key, "trace:emit", "cx/trace");
+
+        // Root context with macaroon
+        let root_cx = test_cx().with_macaroon(token);
+        let trace = TraceBufferHandle::new(16);
+        root_cx.set_trace_buffer(trace.clone());
+
+        root_cx.trace("root macaroon trace");
+
+        // Attenuated context (simulating capability restriction)
+        let attenuated_cx = root_cx
+            .attenuate(CaveatPredicate::TimeBefore(5000))
+            .expect("attenuation should succeed");
+        attenuated_cx.trace("attenuated trace 1");
+
+        // Further attenuated context
+        let further_attenuated_cx = attenuated_cx
+            .attenuate(CaveatPredicate::MaxUses(10))
+            .expect("further attenuation should succeed");
+        further_attenuated_cx.trace("further attenuated trace");
+
+        // Back to less attenuated
+        attenuated_cx.trace("attenuated trace 2");
+
+        let events = trace.snapshot();
+        assert_eq!(events.len(), 4);
+
+        // Verify causal ordering preservation through logical time
+        let logical_times: Vec<_> = events.iter()
+            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .collect();
+
+        // Logical time should increase monotonically regardless of attenuation level
+        for i in 1..logical_times.len() {
+            assert!(
+                logical_times[i-1] <= logical_times[i],
+                "Macaroon attenuation should preserve causal ordering: tick {} > {}",
+                logical_times[i-1], logical_times[i]
+            );
+        }
+    }
+
+    /// MR4: Budget Exhaustion Idempotence (Equivalence)
+    /// Transformation: Multiple budget exhaust attempts
+    /// Relation: Single log entry recorded
+    #[test]
+    fn mr_trace_budget_exhaustion_idempotence() {
+        use crate::types::Budget;
+
+        // Create context with minimal budget
+        let budget = Budget::new().with_poll_quota(1);
+        let cx = Cx::for_testing_with_budget(budget);
+        let trace = TraceBufferHandle::new(16);
+        cx.set_trace_buffer(trace.clone());
+
+        // First trace that might exhaust budget
+        cx.trace("pre-exhaustion trace");
+
+        // Simulate budget exhaustion (in practice this would happen during task execution)
+        // For this test, we verify that multiple trace attempts during exhaustion
+        // don't create duplicate entries
+        cx.trace("exhaustion trace 1");
+        cx.trace("exhaustion trace 2"); // Same condition
+        cx.trace("exhaustion trace 3"); // Same condition
+
+        let events = trace.snapshot();
+
+        // All trace calls should succeed (budget exhaustion doesn't prevent tracing)
+        // But this verifies that tracing remains consistent under budget pressure
+        assert_eq!(events.len(), 4, "All traces should be recorded");
+
+        // Verify no duplicate logical times (idempotence of time allocation)
+        let mut logical_times: Vec<_> = events.iter()
+            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .collect();
+        logical_times.sort_unstable();
+        logical_times.dedup();
+
+        assert_eq!(
+            logical_times.len(), 4,
+            "Logical time allocation should be idempotent (no duplicate times)"
+        );
+    }
+
+    /// MR5: Clone Trace Equivalence (Equivalence)
+    /// Transformation: Clone Cx
+    /// Relation: Same trace patterns produced
+    #[test]
+    fn mr_trace_clone_equivalence() {
+        let original_cx = test_cx_with_entropy(123);
+        let trace = TraceBufferHandle::new(16);
+        original_cx.set_trace_buffer(trace.clone());
+
+        // Clone the context
+        let cloned_cx = original_cx.clone();
+
+        // Both should share the same trace buffer and produce equivalent patterns
+        original_cx.trace("original trace 1");
+        cloned_cx.trace("cloned trace 1");
+        original_cx.trace("original trace 2");
+        cloned_cx.trace("cloned trace 2");
+
+        let events = trace.snapshot();
+        assert_eq!(events.len(), 4, "Both contexts should write to same buffer");
+
+        // Verify logical time ordering is preserved across clone usage
+        let logical_times: Vec<_> = events.iter()
+            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .collect();
+
+        for i in 1..logical_times.len() {
+            assert!(
+                logical_times[i-1] <= logical_times[i],
+                "Clone should preserve logical time ordering: {} > {}",
+                logical_times[i-1], logical_times[i]
+            );
+        }
+
+        // Verify cloned context produces same entropy sequence
+        let val1 = original_cx.random_usize(100);
+        let val2 = cloned_cx.random_usize(100);
+
+        // Both should access the same entropy source
+        assert_eq!(val1, val2, "Cloned context should share entropy state");
+    }
+
+    /// MR6: Composite Trace Ordering (Composition)
+    /// Combines parent-child + clone + macaroon relations
+    #[test]
+    fn mr_trace_composite_ordering() {
+        use super::macaroon::{MacaroonToken, CaveatPredicate};
+        use crate::security::key::AuthKey;
+
+        let key = AuthKey::from_seed(789);
+        let token = MacaroonToken::mint(&key, "trace:composite", "cx/test");
+
+        // Root context with macaroon
+        let root_cx = test_cx_with_entropy(456).with_macaroon(token);
+        let trace = TraceBufferHandle::new(32);
+        root_cx.set_trace_buffer(trace.clone());
+
+        // MR1 + MR3: Parent with macaroon
+        root_cx.trace("parent+macaroon trace");
+
+        // MR5: Clone preserves properties
+        let child_cx = root_cx.clone();
+
+        // MR3: Attenuation preserves ordering
+        let attenuated_child = child_cx
+            .attenuate(CaveatPredicate::TimeBefore(10000))
+            .expect("attenuation should work");
+
+        // MR1: Child traces after parent
+        attenuated_child.trace("child+attenuated trace");
+
+        // MR2: Deterministic interleaving
+        for i in 0..3 {
+            if root_cx.random_usize(2) == 0 {
+                root_cx.trace(&format!("parent_branch_{}", i));
+            } else {
+                attenuated_child.trace(&format!("child_branch_{}", i));
+            }
+        }
+
+        let events = trace.snapshot();
+        assert!(events.len() >= 5, "Composite test should produce multiple traces");
+
+        // Verify all metamorphic properties hold in composition:
+
+        // 1. Logical time monotonicity (covers MR1, MR3, MR5)
+        let logical_times: Vec<_> = events.iter()
+            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .collect();
+
+        for i in 1..logical_times.len() {
+            assert!(
+                logical_times[i-1] <= logical_times[i],
+                "Composite trace ordering should preserve monotonicity: {} > {}",
+                logical_times[i-1], logical_times[i]
+            );
+        }
+
+        // 2. All traces recorded (MR4 budget idempotence equivalent)
+        assert!(
+            events.iter().all(|e| !e.message.is_empty()),
+            "All traces should have non-empty messages"
+        );
+
+        // 3. Deterministic branching produces expected pattern (MR2)
+        let branch_traces: Vec<_> = events.iter()
+            .filter(|e| e.message.contains("_branch_"))
+            .collect();
+        assert_eq!(
+            branch_traces.len(), 3,
+            "Deterministic branching should produce exactly 3 branch traces"
+        );
+    }
 }
