@@ -8,8 +8,8 @@
 
 use super::region_table::RegionCreateError;
 use crate::cancel::protocol_state_machines::{
-    CancelProtocolValidator, ValidationLevel as CancelValidationLevel, RegionEvent, TaskEvent,
-    ObligationEvent, RegionContext, TaskContext, ObligationContext, TransitionResult,
+    CancelProtocolValidator, ObligationContext, ObligationEvent, RegionContext, RegionEvent,
+    TaskContext, TaskEvent, TransitionResult, ValidationLevel as CancelValidationLevel,
 };
 use crate::cx::cx::ObservabilityState;
 use crate::error::{Error, ErrorKind};
@@ -975,6 +975,12 @@ impl RuntimeState {
         );
         let id = self.regions.create_root(budget, self.now);
 
+        // Register region with cancel protocol validator
+        {
+            let mut validator = self.cancel_protocol_validator.lock();
+            validator.register_region(id);
+        }
+
         self.root_region = Some(id);
         self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, None));
         self.metrics.region_created(id, None);
@@ -1069,6 +1075,32 @@ impl RuntimeState {
             TaskRecord::new_with_time(TaskId::from_arena(idx), region, budget, now)
         });
         let task_id = TaskId::from_arena(idx);
+
+        // Register task with cancel protocol validator
+        {
+            let mut validator = self.cancel_protocol_validator.lock();
+            validator.register_task(task_id, region);
+        }
+
+        // Validate task creation protocol transition
+        let context = TaskContext {
+            task_id,
+            region_id: region,
+            spawned_at: self.now,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result = self.validate_task_protocol_transition(
+            task_id,
+            TaskEvent::Start, // Use Start event for task creation
+            &context,
+        );
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            eprintln!("Cancel protocol violation during task creation: {validation_result:?}");
+            // Continue with creation but log violation
+        }
 
         // Add task to the region's task list
         if let Some(region_record) = self.regions.get(region.arena_index()) {
@@ -1461,6 +1493,8 @@ impl RuntimeState {
 
         let acquired_at = SourceLocation::from_panic_location(std::panic::Location::caller());
         let acquire_backtrace = Self::capture_obligation_backtrace();
+
+        // Create the obligation first to get the ID
         let obligation_id =
             self.obligations
                 .create(super::obligation_table::ObligationCreateArgs {
@@ -1472,6 +1506,36 @@ impl RuntimeState {
                     acquired_at,
                     acquire_backtrace,
                 });
+
+        // Register obligation with cancel protocol validator
+        {
+            let mut validator = self.cancel_protocol_validator.lock();
+            validator.register_obligation(obligation_id);
+        }
+
+        // Validate obligation creation protocol transition
+        let context = ObligationContext {
+            obligation_id,
+            region_id: region,
+            created_at: self.now,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result = self.validate_obligation_protocol_transition(
+            obligation_id,
+            ObligationEvent::Reserve {
+                token: obligation_id.arena_index().index() as u64,
+            },
+            &context,
+        );
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            eprintln!(
+                "Cancel protocol violation during obligation creation: {validation_result:?}"
+            );
+            // Continue with creation but log violation
+        }
 
         let _guard = crate::tracing_compat::debug_span!(
             "obligation_reserve",
@@ -1510,6 +1574,30 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+        // Validate obligation commit protocol transition
+        if let Some(record) = self.obligations.get(obligation.arena_index()) {
+            let context = ObligationContext {
+                obligation_id: obligation,
+                region_id: record.region,
+                created_at: record.reserved_at,
+                validation_level: CancelValidationLevel::Basic,
+            };
+            let validation_result = self.validate_obligation_protocol_transition(
+                obligation,
+                ObligationEvent::Commit,
+                &context,
+            );
+            if matches!(
+                validation_result,
+                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+            ) {
+                eprintln!(
+                    "Cancel protocol violation during obligation commit: {validation_result:?}"
+                );
+                // Continue with commit but log violation
+            }
+        }
+
         let info = self.obligations.commit(obligation, self.now)?;
 
         let span = crate::tracing_compat::debug_span!(
@@ -1569,6 +1657,32 @@ impl RuntimeState {
         obligation: ObligationId,
         reason: ObligationAbortReason,
     ) -> Result<u64, Error> {
+        // Validate obligation abort protocol transition
+        if let Some(record) = self.obligations.get(obligation.arena_index()) {
+            let context = ObligationContext {
+                obligation_id: obligation,
+                region_id: record.region,
+                created_at: record.reserved_at,
+                validation_level: CancelValidationLevel::Basic,
+            };
+            let validation_result = self.validate_obligation_protocol_transition(
+                obligation,
+                ObligationEvent::Abort {
+                    reason: format!("{reason:?}"),
+                },
+                &context,
+            );
+            if matches!(
+                validation_result,
+                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+            ) {
+                eprintln!(
+                    "Cancel protocol violation during obligation abort: {validation_result:?}"
+                );
+                // Continue with abort but log violation
+            }
+        }
+
         let info = self.obligations.abort(obligation, self.now, reason)?;
 
         let span = crate::tracing_compat::debug_span!(
@@ -2156,6 +2270,25 @@ impl RuntimeState {
                 );
                 return SmallVec::new();
             };
+
+            // Validate task completion protocol transition
+            let context = TaskContext {
+                task_id,
+                region_id: task.owner,
+                spawned_at: task.created_at,
+                validation_level: CancelValidationLevel::Basic,
+            };
+            let validation_result =
+                self.validate_task_protocol_transition(task_id, TaskEvent::Complete, &context);
+            if matches!(
+                validation_result,
+                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+            ) {
+                eprintln!(
+                    "Cancel protocol violation during task completion: {validation_result:?}"
+                );
+                // Continue with completion but log violation
+            }
             if let Some(inner) = task.cx_inner.as_ref() {
                 // Read-first: skip the write lock when cancel_waker is already
                 // None (the common case — waker was cached back into the record).
@@ -2637,16 +2770,24 @@ impl RuntimeState {
                         if no_children && no_tasks {
                             // Validate protocol transition to Finalizing
                             let context = RegionContext {
-                                active_tasks: region.task_count(),
-                                pending_finalizers: region.finalizer_count() as u32,
+                                region_id,
+                                parent_region: region.parent,
+                                created_at: region.created_at,
+                                validation_level: CancelValidationLevel::Basic,
                             };
                             let validation_result = self.validate_region_protocol_transition(
                                 region_id,
-                                RegionEvent::BeginFinalize,
+                                RegionEvent::RequestClose, // Use RequestClose for finalization
                                 &context,
                             );
-                            if matches!(validation_result, TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }) {
-                                eprintln!("Cancel protocol violation during region finalize transition: {validation_result:?}");
+                            if matches!(
+                                validation_result,
+                                TransitionResult::Invalid { .. }
+                                    | TransitionResult::InvariantViolation { .. }
+                            ) {
+                                eprintln!(
+                                    "Cancel protocol violation during region finalize transition: {validation_result:?}"
+                                );
                                 // Continue with transition but log violation
                             }
 
@@ -2657,16 +2798,26 @@ impl RuntimeState {
                             {
                                 // Validate protocol transition to Draining
                                 let context = RegionContext {
-                                    active_tasks: region.task_count(),
-                                    pending_finalizers: region.finalizer_count() as u32,
+                                    region_id,
+                                    parent_region: region.parent,
+                                    created_at: region.created_at,
+                                    validation_level: CancelValidationLevel::Basic,
                                 };
                                 let validation_result = self.validate_region_protocol_transition(
                                     region_id,
-                                    RegionEvent::BeginDrain,
+                                    RegionEvent::Cancel {
+                                        reason: "draining children".to_string(),
+                                    },
                                     &context,
                                 );
-                                if matches!(validation_result, TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }) {
-                                    eprintln!("Cancel protocol violation during region drain transition: {validation_result:?}");
+                                if matches!(
+                                    validation_result,
+                                    TransitionResult::Invalid { .. }
+                                        | TransitionResult::InvariantViolation { .. }
+                                ) {
+                                    eprintln!(
+                                        "Cancel protocol violation during region drain transition: {validation_result:?}"
+                                    );
                                     // Continue with transition but log violation
                                 }
 
@@ -2728,16 +2879,24 @@ impl RuntimeState {
                                 break;
                             };
                             let context = RegionContext {
-                                active_tasks: region.task_count(),
-                                pending_finalizers: region.finalizer_count() as u32,
+                                region_id,
+                                parent_region: region.parent,
+                                created_at: region.created_at,
+                                validation_level: CancelValidationLevel::Basic,
                             };
                             let validation_result = self.validate_region_protocol_transition(
                                 region_id,
-                                RegionEvent::CompleteClose,
+                                RegionEvent::FinalizerCompleted, // Use FinalizerCompleted for close
                                 &context,
                             );
-                            if matches!(validation_result, TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }) {
-                                eprintln!("Cancel protocol violation during region close completion: {validation_result:?}");
+                            if matches!(
+                                validation_result,
+                                TransitionResult::Invalid { .. }
+                                    | TransitionResult::InvariantViolation { .. }
+                            ) {
+                                eprintln!(
+                                    "Cancel protocol violation during region close completion: {validation_result:?}"
+                                );
                                 // Continue with transition but log violation
                             }
 

@@ -3,7 +3,7 @@
 //! This module tests how our HPACK implementation handles various error
 //! conditions and edge cases as specified in RFC 7541.
 
-use super::harness::{ConformanceTestResult, TestCategory, TestVerdict, RequirementLevel};
+use super::harness::{ConformanceTestResult, RequirementLevel, TestCategory, TestVerdict};
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 use std::time::Instant;
@@ -186,7 +186,7 @@ impl HpackErrorTester {
         let verdict = if errors_handled > 0 {
             TestVerdict::Pass
         } else {
-            TestVerdict::ExpectedFailure  // Huffman validation might be lenient
+            TestVerdict::ExpectedFailure // Huffman validation might be lenient
         };
 
         ConformanceTestResult {
@@ -251,8 +251,8 @@ impl HpackErrorTester {
 
         // Decoder should either handle it or reject it gracefully
         let verdict = match result {
-            Ok(_) => TestVerdict::Pass,     // Handled large header
-            Err(_) => TestVerdict::Pass,    // Rejected appropriately
+            Ok(_) => TestVerdict::Pass,  // Handled large header
+            Err(_) => TestVerdict::Pass, // Rejected appropriately
         };
 
         ConformanceTestResult {
@@ -395,7 +395,7 @@ impl HpackErrorTester {
 
         // First, add an entry to dynamic table
         let first_block = vec![
-            0x40, 0x04, 0x74, 0x65, 0x73, 0x74, 0x04, 0x74, 0x65, 0x73, 0x74
+            0x40, 0x04, 0x74, 0x65, 0x73, 0x74, 0x04, 0x74, 0x65, 0x73, 0x74,
         ]; // Literal with incremental indexing
         let mut src1 = Bytes::copy_from_slice(&first_block);
         let _ = decoder.decode(&mut src1);
@@ -443,9 +443,7 @@ impl HpackEdgeCaseTester {
     fn test_empty_header_names() -> ConformanceTestResult {
         let start_time = Instant::now();
 
-        let empty_name_headers = vec![
-            Header::new("", "value"),
-        ];
+        let empty_name_headers = vec![Header::new("", "value")];
 
         let mut encoder = Encoder::new();
         let mut dst = BytesMut::new();
@@ -476,10 +474,7 @@ impl HpackEdgeCaseTester {
     fn test_empty_header_values() -> ConformanceTestResult {
         let start_time = Instant::now();
 
-        let empty_value_headers = vec![
-            Header::new("x-empty", ""),
-            Header::new("x-test", ""),
-        ];
+        let empty_value_headers = vec![Header::new("x-empty", ""), Header::new("x-test", "")];
 
         let mut encoder = Encoder::new();
         let mut dst = BytesMut::new();
@@ -561,8 +556,8 @@ impl HpackEdgeCaseTester {
 
         // Test table size updates at boundaries (0, 1, max)
         let boundary_sizes = vec![
-            vec![0x20],       // Size 0
-            vec![0x21],       // Size 1
+            vec![0x20],             // Size 0
+            vec![0x21],             // Size 1
             vec![0x3f, 0x80, 0x1f], // Size 4096 (if properly encoded)
         ];
 
@@ -609,7 +604,10 @@ mod tests {
 
         for result in results {
             assert!(!result.test_id.is_empty(), "Test ID should not be empty");
-            assert!(!result.description.is_empty(), "Description should not be empty");
+            assert!(
+                !result.description.is_empty(),
+                "Description should not be empty"
+            );
         }
     }
 

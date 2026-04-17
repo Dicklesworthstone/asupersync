@@ -11,7 +11,7 @@ use asupersync::util::ArenaIndex;
 mod conformance;
 
 use conformance::obligation_invariants::{
-    ObligationTracker, InvariantViolationType, ResourceHandle, WakerHandle,
+    InvariantViolationType, ObligationTracker, ResourceHandle, WakerHandle,
 };
 
 /// Helper to create a test runtime for conformance testing
@@ -117,11 +117,21 @@ fn test_region_quiescence_violation_detection() {
 
     // Check that violation was detected
     let violations = tracker.get_invariant_violations();
-    assert!(!violations.is_empty(), "Expected quiescence violation to be detected");
+    assert!(
+        !violations.is_empty(),
+        "Expected quiescence violation to be detected"
+    );
 
-    let has_quiescence_violation = violations.iter()
-        .any(|v| matches!(v.violation_type, InvariantViolationType::RegionQuiescenceViolation));
-    assert!(has_quiescence_violation, "Expected RegionQuiescenceViolation");
+    let has_quiescence_violation = violations.iter().any(|v| {
+        matches!(
+            v.violation_type,
+            InvariantViolationType::RegionQuiescenceViolation
+        )
+    });
+    assert!(
+        has_quiescence_violation,
+        "Expected RegionQuiescenceViolation"
+    );
 
     // Clean up
     tracker.track_obligation_resolution(obligation);
@@ -175,9 +185,13 @@ fn test_resource_leak_detection() {
     tracker.track_obligation_resolution(obligation);
 
     let violations = tracker.get_invariant_violations();
-    assert!(!violations.is_empty(), "Expected resource leak to be detected");
+    assert!(
+        !violations.is_empty(),
+        "Expected resource leak to be detected"
+    );
 
-    let has_resource_leak = violations.iter()
+    let has_resource_leak = violations
+        .iter()
         .any(|v| matches!(v.violation_type, InvariantViolationType::ResourceLeak));
     assert!(has_resource_leak, "Expected ResourceLeak violation");
 }
@@ -253,23 +267,29 @@ fn test_comprehensive_invariant_validation() {
     tracker.track_region_creation(child_region2, Some(root_region));
 
     // Create obligations across regions
-    let root_obligations: Vec<_> = (0..3).map(|i| {
-        let id = ObligationId::new_for_test(i as u32, 0);
-        tracker.track_obligation_creation(id, root_region);
-        id
-    }).collect();
+    let root_obligations: Vec<_> = (0..3)
+        .map(|i| {
+            let id = ObligationId::new_for_test(i as u32, 0);
+            tracker.track_obligation_creation(id, root_region);
+            id
+        })
+        .collect();
 
-    let child1_obligations: Vec<_> = (10..13).map(|i| {
-        let id = ObligationId::new_for_test(i as u32, 0);
-        tracker.track_obligation_creation(id, child_region1);
-        id
-    }).collect();
+    let child1_obligations: Vec<_> = (10..13)
+        .map(|i| {
+            let id = ObligationId::new_for_test(i as u32, 0);
+            tracker.track_obligation_creation(id, child_region1);
+            id
+        })
+        .collect();
 
-    let child2_obligations: Vec<_> = (20..22).map(|i| {
-        let id = ObligationId::new_for_test(i as u32, 0);
-        tracker.track_obligation_creation(id, child_region2);
-        id
-    }).collect();
+    let child2_obligations: Vec<_> = (20..22)
+        .map(|i| {
+            let id = ObligationId::new_for_test(i as u32, 0);
+            tracker.track_obligation_creation(id, child_region2);
+            id
+        })
+        .collect();
 
     // Verify active state
     assert!(!tracker.is_region_quiescent(root_region));

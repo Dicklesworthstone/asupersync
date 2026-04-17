@@ -9,10 +9,10 @@
 //! - Tests semantic relationships rather than exact byte outputs
 //! - Catches compression bugs through property violations
 
-use std::collections::HashMap;
 use asupersync::bytes::BytesMut;
-use asupersync::http::h2::hpack::{Encoder, Decoder, Header};
+use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 use proptest::prelude::*;
+use std::collections::HashMap;
 
 /// Generate arbitrary HTTP headers for property testing
 fn arb_header() -> impl Strategy<Value = Header> {
@@ -52,7 +52,7 @@ fn arb_header() -> impl Strategy<Value = Header> {
             }),
         ],
     )
-    .prop_map(|(name, value)| Header { name, value })
+        .prop_map(|(name, value)| Header { name, value })
 }
 
 /// Generate arbitrary header lists
@@ -197,11 +197,26 @@ mod metamorphic_properties {
     fn mr4_static_vs_dynamic_table_equivalence() {
         // Use headers that are guaranteed to be in static table.
         let static_headers = vec![
-            Header { name: ":method".to_string(), value: "GET".to_string() },
-            Header { name: ":path".to_string(), value: "/".to_string() },
-            Header { name: ":scheme".to_string(), value: "https".to_string() },
-            Header { name: ":status".to_string(), value: "200".to_string() },
-            Header { name: "accept-encoding".to_string(), value: "gzip, deflate".to_string() },
+            Header {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            Header {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            Header {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
+            Header {
+                name: ":status".to_string(),
+                value: "200".to_string(),
+            },
+            Header {
+                name: "accept-encoding".to_string(),
+                value: "gzip, deflate".to_string(),
+            },
         ];
 
         // Encoder/decoder with empty dynamic table.
@@ -214,8 +229,14 @@ mod metamorphic_properties {
 
         // Populate dynamic table with some other headers first.
         let populate_headers = vec![
-            Header { name: "x-custom-header".to_string(), value: "custom-value".to_string() },
-            Header { name: "x-another".to_string(), value: "another-value".to_string() },
+            Header {
+                name: "x-custom-header".to_string(),
+                value: "custom-value".to_string(),
+            },
+            Header {
+                name: "x-another".to_string(),
+                value: "another-value".to_string(),
+            },
         ];
         let mut populate_buf = BytesMut::new();
         encoder_populated.encode(&populate_headers, &mut populate_buf);
@@ -237,8 +258,7 @@ mod metamorphic_properties {
         let decoded_populated = decoder_populated.decode(&mut populated_bytes).unwrap();
 
         assert_eq!(
-            decoded_clean,
-            decoded_populated,
+            decoded_clean, decoded_populated,
             "Static table headers should decode identically regardless of dynamic table state"
         );
     }
@@ -394,9 +414,10 @@ mod mutation_validation {
     /// Test that MR1 (round-trip) catches data corruption bugs
     #[test]
     fn validate_mr1_catches_corruption() {
-        let headers = vec![
-            Header { name: "test".to_string(), value: "original".to_string() }
-        ];
+        let headers = vec![Header {
+            name: "test".to_string(),
+            value: "original".to_string(),
+        }];
 
         let mut encoder = Encoder::new();
         let mut decoder = Decoder::new();
@@ -416,8 +437,10 @@ mod mutation_validation {
         // Should either fail to decode or produce different output
         match decode_result {
             Ok(decoded) => {
-                assert!(decoded.is_empty() || decoded[0].value != "original",
-                    "Mutated data should not decode to original value");
+                assert!(
+                    decoded.is_empty() || decoded[0].value != "original",
+                    "Mutated data should not decode to original value"
+                );
             }
             Err(_) => {
                 // Decoding failure is also acceptable - the corruption was caught
@@ -430,9 +453,10 @@ mod mutation_validation {
     #[should_panic]
     fn validate_mr_catches_logic_bugs() {
         // This test intentionally breaks round-trip invariant to verify our MR would catch it
-        let headers = vec![
-            Header { name: "test".to_string(), value: "value".to_string() }
-        ];
+        let headers = vec![Header {
+            name: "test".to_string(),
+            value: "value".to_string(),
+        }];
 
         let mut encoder = Encoder::new();
         let mut decoder = Decoder::new();
@@ -450,8 +474,10 @@ mod mutation_validation {
         }
 
         // This should fail if our MR is working
-        assert_eq!(headers[0].value, buggy_decoded[0].value,
-            "This assertion should fail, proving our MR would catch this bug");
+        assert_eq!(
+            headers[0].value, buggy_decoded[0].value,
+            "This assertion should fail, proving our MR would catch this bug"
+        );
     }
 }
 
@@ -489,7 +515,10 @@ mod performance_tests {
         let duration = start.elapsed();
 
         // Ensure MR tests complete in reasonable time (adjust threshold as needed)
-        assert!(duration.as_millis() < 1000,
-            "MR tests took too long: {:?}", duration);
+        assert!(
+            duration.as_millis() < 1000,
+            "MR tests took too long: {:?}",
+            duration
+        );
     }
 }
