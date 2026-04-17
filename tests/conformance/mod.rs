@@ -5,7 +5,7 @@
 
 // pub mod codec_framing;
 pub mod h1_rfc9112;
-// pub mod h2_rfc7540;
+pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_rst_stream_ping_rfc9113;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
@@ -28,7 +28,8 @@ pub mod obligation_invariants;
 
 // Re-export main conformance test functionality
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
-// pub use h2_rfc7540::{H2ConformanceHarness, H2ConformanceResult};
+#[cfg(feature = "tls")]
+pub use h2_alpn_negotiation_rfc7540::{H2AlpnConformanceHarness, H2ConformanceResult as H2AlpnConformanceResult, TestCategory as H2AlpnTestCategory};
 pub use h2_rst_stream_ping_rfc9113::{H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory};
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 // pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
@@ -78,6 +79,14 @@ pub enum TestCategory {
     ErrorClassification,
     ProtocolOrdering,
     ConnectionHandling,
+    // HTTP/2 ALPN categories
+    ClientHelloAlpn,
+    ServerProtocolSelection,
+    TlsExtensionValidation,
+    HttpFallback,
+    PostAlpnSettings,
+    AlpnSecurity,
+    ConnectionStateTransition,
     // Codec categories
     Framing,
     ResourceLimits,
@@ -235,6 +244,43 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         })
         .collect();
     results.extend(h2_results);
+
+    // HTTP/2 ALPN Negotiation RFC 7540 + RFC 9113 conformance
+    #[cfg(feature = "tls")]
+    {
+        let h2_alpn_harness = H2AlpnConformanceHarness::new();
+        let h2_alpn_results: Vec<ConformanceTestResult> = h2_alpn_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    h2_alpn_negotiation_rfc7540::TestCategory::ClientHelloAlpn => TestCategory::ClientHelloAlpn,
+                    h2_alpn_negotiation_rfc7540::TestCategory::ServerProtocolSelection => TestCategory::ServerProtocolSelection,
+                    h2_alpn_negotiation_rfc7540::TestCategory::TlsExtensionValidation => TestCategory::TlsExtensionValidation,
+                    h2_alpn_negotiation_rfc7540::TestCategory::HttpFallback => TestCategory::HttpFallback,
+                    h2_alpn_negotiation_rfc7540::TestCategory::PostAlpnSettings => TestCategory::PostAlpnSettings,
+                    h2_alpn_negotiation_rfc7540::TestCategory::AlpnSecurity => TestCategory::AlpnSecurity,
+                    h2_alpn_negotiation_rfc7540::TestCategory::ConnectionStateTransition => TestCategory::ConnectionStateTransition,
+                },
+                requirement_level: match r.requirement_level {
+                    h2_alpn_negotiation_rfc7540::RequirementLevel::Must => RequirementLevel::Must,
+                    h2_alpn_negotiation_rfc7540::RequirementLevel::Should => RequirementLevel::Should,
+                    h2_alpn_negotiation_rfc7540::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    h2_alpn_negotiation_rfc7540::TestVerdict::Pass => TestVerdict::Pass,
+                    h2_alpn_negotiation_rfc7540::TestVerdict::Fail => TestVerdict::Fail,
+                    h2_alpn_negotiation_rfc7540::TestVerdict::Skipped => TestVerdict::Skipped,
+                    h2_alpn_negotiation_rfc7540::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(h2_alpn_results);
+    }
 
     // QUIC Retry RFC 9000 conformance
     let quic_harness = QuicRetryConformanceHarness::new();
@@ -628,6 +674,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "coverage": "systematic",
                     "reference": "RFC 9113 HTTP/2 RST_STREAM and PING frame conformance"
                 },
+                "h2_alpn_negotiation_rfc7540": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 7540 Section 3.3 + RFC 9113 HTTP/2 over TLS ALPN negotiation conformance"
+                },
                 "quic_retry_rfc9000": {
                     "status": "implemented",
                     "coverage": "systematic",
@@ -765,6 +816,101 @@ mod tests {
         if !failures.is_empty() {
             panic!("H2 conformance tests failed: {:#?}", failures);
         }
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_h2_alpn_conformance_integration() {
+        use h2_alpn_negotiation_rfc7540::{H2AlpnConformanceHarness};
+
+        let h2_alpn_harness = H2AlpnConformanceHarness::new();
+        let results = h2_alpn_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "H2 ALPN conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::ClientHelloAlpn),
+            "Should test ClientHello ALPN advertisement"
+        );
+        assert!(
+            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::ServerProtocolSelection),
+            "Should test server protocol selection"
+        );
+        assert!(
+            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::TlsExtensionValidation),
+            "Should test TLS extension validation"
+        );
+        assert!(
+            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::HttpFallback),
+            "Should test HTTP/1.1 fallback"
+        );
+        assert!(
+            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::PostAlpnSettings),
+            "Should test post-ALPN SETTINGS exchange"
+        );
+        assert!(
+            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::AlpnSecurity),
+            "Should test ALPN security requirements"
+        );
+        assert!(
+            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::ConnectionStateTransition),
+            "Should test connection state transitions"
+        );
+
+        // Verify all tests pass
+        let failures: Vec<_> = results.iter()
+            .filter(|r| r.verdict == h2_alpn_negotiation_rfc7540::TestVerdict::Fail)
+            .collect();
+
+        if !failures.is_empty() {
+            panic!("H2 ALPN conformance tests failed: {:#?}", failures);
+        }
+
+        // Verify we have the expected number of test cases (14 as per the bead requirements)
+        assert!(
+            results.len() >= 14,
+            "Should have at least 14 ALPN conformance test cases, got {}",
+            results.len()
+        );
+
+        // Verify coverage of all 5 bead requirements
+        let test_ids: std::collections::HashSet<_> = results.iter()
+            .map(|r| r.test_id.as_str())
+            .collect();
+
+        // Requirement 1: ClientHello ALPN advertisement
+        assert!(
+            test_ids.contains("h2_alpn_client_hello_advertisement"),
+            "Missing ClientHello ALPN advertisement test"
+        );
+
+        // Requirement 2: Server protocol selection preference
+        assert!(
+            test_ids.contains("h2_alpn_server_h2_preference"),
+            "Missing server h2 preference test"
+        );
+
+        // Requirement 3: TLS extension validation
+        assert!(
+            test_ids.contains("h2_alpn_invalid_tls_extension_rejection"),
+            "Missing TLS extension validation test"
+        );
+
+        // Requirement 4: HTTP/1.1 fallback
+        assert!(
+            test_ids.contains("h2_alpn_http11_fallback"),
+            "Missing HTTP/1.1 fallback test"
+        );
+
+        // Requirement 5: Post-ALPN SETTINGS exchange
+        assert!(
+            test_ids.contains("h2_alpn_settings_frame_exchange"),
+            "Missing post-ALPN SETTINGS exchange test"
+        );
     }
 
     #[test]
