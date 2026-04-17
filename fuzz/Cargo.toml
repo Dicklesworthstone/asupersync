@@ -275,3 +275,10 @@ path = "fuzz_targets/grpc_message_framing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_bytes_codec_framing"
+path = "fuzz_targets/bytes_codec_framing.rs"
+test = false
+doc = false
+bench = false
