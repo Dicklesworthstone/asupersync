@@ -14,12 +14,11 @@
 #[cfg(all(test, feature = "tls"))]
 mod tests {
     use crate::test_utils::{init_test_logging, run_test_with_cx};
-    use rustls::{
-        ClientConfig, ClientConnection, ServerConfig, ServerConnection,
-        Error as RustlsError,
-    };
     use rustls::crypto::ring::default_provider;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+    use rustls::{
+        ClientConfig, ClientConnection, Error as RustlsError, ServerConfig, ServerConnection,
+    };
     use std::io::{self, Cursor};
     use std::sync::Arc;
 
@@ -77,20 +76,25 @@ mod tests {
 
         fn parse_cert(pem: &str) -> Result<CertificateDer<'static>, Box<dyn std::error::Error>> {
             let mut cursor = Cursor::new(pem.as_bytes());
-            let certs: Vec<_> = rustls_pemfile::certs(&mut cursor).collect::<Result<Vec<_>, _>>()?;
-            certs.into_iter().next()
+            let certs: Vec<_> =
+                rustls_pemfile::certs(&mut cursor).collect::<Result<Vec<_>, _>>()?;
+            certs
+                .into_iter()
+                .next()
                 .ok_or("No certificate found in PEM".into())
         }
 
         fn parse_key(pem: &str) -> Result<PrivateKeyDer<'static>, Box<dyn std::error::Error>> {
             let mut cursor = Cursor::new(pem.as_bytes());
-            let keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut cursor).collect::<Result<Vec<_>, _>>()?;
+            let keys: Vec<_> =
+                rustls_pemfile::pkcs8_private_keys(&mut cursor).collect::<Result<Vec<_>, _>>()?;
             if let Some(key) = keys.into_iter().next() {
                 return Ok(PrivateKeyDer::Pkcs8(key));
             }
 
             let mut cursor = Cursor::new(pem.as_bytes());
-            let keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut cursor).collect::<Result<Vec<_>, _>>()?;
+            let keys: Vec<_> =
+                rustls_pemfile::rsa_private_keys(&mut cursor).collect::<Result<Vec<_>, _>>()?;
             if let Some(key) = keys.into_iter().next() {
                 return Ok(PrivateKeyDer::Pkcs1(key));
             }
@@ -164,7 +168,8 @@ mod tests {
             let mut server_buf = Vec::new();
 
             // Handshake loop
-            for _ in 0..10 {  // Limit iterations to prevent infinite loops
+            for _ in 0..10 {
+                // Limit iterations to prevent infinite loops
                 // Process client -> server
                 if self.client.wants_write() {
                     client_buf.clear();
@@ -197,18 +202,22 @@ mod tests {
         /// Inject a raw record into the client connection
         fn inject_client_record(&mut self, record: &TlsRecord) -> Result<(), RustlsError> {
             let record_bytes = record.to_bytes();
-            self.client.read_tls(&mut Cursor::new(&record_bytes)).map_err(|e| {
-                RustlsError::General(format!("I/O error reading TLS record: {}", e))
-            })?;
+            self.client
+                .read_tls(&mut Cursor::new(&record_bytes))
+                .map_err(|e| {
+                    RustlsError::General(format!("I/O error reading TLS record: {}", e))
+                })?;
             self.client.process_new_packets().map(|_| ())
         }
 
         /// Inject a raw record into the server connection
         fn inject_server_record(&mut self, record: &TlsRecord) -> Result<(), RustlsError> {
             let record_bytes = record.to_bytes();
-            self.server.read_tls(&mut Cursor::new(&record_bytes)).map_err(|e| {
-                RustlsError::General(format!("I/O error reading TLS record: {}", e))
-            })?;
+            self.server
+                .read_tls(&mut Cursor::new(&record_bytes))
+                .map_err(|e| {
+                    RustlsError::General(format!("I/O error reading TLS record: {}", e))
+                })?;
             self.server.process_new_packets().map(|_| ())
         }
     }
@@ -222,12 +231,10 @@ mod tests {
         crate::test_phase!("test_tls_inner_plaintext_content_types");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             // Complete handshake first
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test valid content types that should be accepted
             let valid_content_types = [
@@ -284,11 +291,9 @@ mod tests {
         crate::test_phase!("test_record_padding_zero_padding");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test zero padding (no padding bytes)
             // In TLS 1.3, padding is implicit - just content followed by content type
@@ -317,11 +322,9 @@ mod tests {
         crate::test_phase!("test_record_padding_maximum_padding");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test maximum padding
             // RFC 8446 allows arbitrary padding up to record size limits
@@ -339,7 +342,10 @@ mod tests {
                 result.is_ok(),
                 "maximum padding accepted",
                 true,
-                format!("Maximum padding of {} bytes should be valid", max_padding_len)
+                format!(
+                    "Maximum padding of {} bytes should be valid",
+                    max_padding_len
+                )
             );
         });
 
@@ -355,11 +361,9 @@ mod tests {
         crate::test_phase!("test_record_length_exceeds_maximum");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test record length exactly at limit (should be accepted)
             let max_payload = vec![0x00; MAX_ENCRYPTED_RECORD_LENGTH as usize];
@@ -370,7 +374,10 @@ mod tests {
                 result_max.is_ok(),
                 "maximum length accepted",
                 true,
-                format!("Record with maximum length {} should be accepted", MAX_ENCRYPTED_RECORD_LENGTH)
+                format!(
+                    "Record with maximum length {} should be accepted",
+                    MAX_ENCRYPTED_RECORD_LENGTH
+                )
             );
 
             // Test record length exceeding limit (MUST be rejected)
@@ -408,11 +415,9 @@ mod tests {
         crate::test_phase!("test_record_length_edge_cases");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test empty record (length 0) - should be rejected
             let empty_record = TlsRecord::application_data(vec![]);
@@ -449,11 +454,9 @@ mod tests {
         crate::test_phase!("test_ciphertext_header_not_integrity_protected");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Create a valid record first
             let original_payload = b"Test message for header manipulation";
@@ -524,11 +527,9 @@ mod tests {
             // Note: 0-RTT requires PSK or session resumption, which is complex to set up.
             // This test validates the record-layer aspects rather than full 0-RTT flow.
 
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test early data records after handshake (should be rejected)
             // In a real 0-RTT scenario, these would come before ServerHello
@@ -589,11 +590,9 @@ mod tests {
         crate::test_phase!("test_record_fragmentation_conformance");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test large message split across multiple records
             let large_message = vec![0x42; MAX_RECORD_LENGTH as usize * 2]; // 2x record size
@@ -631,11 +630,9 @@ mod tests {
         crate::test_phase!("test_malformed_record_handling");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test record with length field mismatch (header says X, actual payload is Y)
             let payload = vec![0x01, 0x02, 0x03]; // 3 bytes
@@ -674,11 +671,9 @@ mod tests {
         crate::test_phase!("test_record_layer_integration");
 
         run_test_with_cx(|_cx| {
-            let mut harness = TlsTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
-            harness.complete_handshake()
-                .expect("Handshake failed");
+            harness.complete_handshake().expect("Handshake failed");
 
             // Test sequence: valid record, padded record, maximum-size record
             let test_sequence = [
