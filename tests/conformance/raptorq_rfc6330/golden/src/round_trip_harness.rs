@@ -4,11 +4,11 @@
 //! RaptorQ encode-decode cycles produce correct outputs. It uses golden
 //! files to freeze known-correct behavior and detect regressions.
 
-use crate::golden_file_manager::{GoldenFileManager, GoldenMetadata, create_metadata, GoldenError};
+use crate::golden_file_manager::{create_metadata, GoldenError, GoldenFileManager, GoldenMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fmt;
+use std::path::Path;
 
 /// Configuration for round-trip test execution
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,7 +72,7 @@ pub struct RoundTripOutput {
 }
 
 /// Metrics for validating round-trip correctness
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ValidationMetrics {
     /// Data integrity check passed
     pub data_integrity: bool,
@@ -84,18 +84,6 @@ pub struct ValidationMetrics {
     pub repair_symbols_valid: bool,
     /// Erasure recovery validation passed (if applicable)
     pub erasure_recovery_valid: Option<bool>,
-}
-
-impl Default for ValidationMetrics {
-    fn default() -> Self {
-        Self {
-            data_integrity: false,
-            symbol_count_valid: false,
-            parameters_preserved: false,
-            repair_symbols_valid: false,
-            erasure_recovery_valid: None,
-        }
-    }
 }
 
 /// Round-trip test harness for RaptorQ conformance validation
@@ -186,8 +174,11 @@ impl RoundTripHarness {
                         summary.passed_tests += 1;
                     } else {
                         summary.failed_tests += 1;
-                        summary.failures.push(format!("{}: {}", test_name,
-                            result.error_message.as_deref().unwrap_or("unknown error")));
+                        summary.failures.push(format!(
+                            "{}: {}",
+                            test_name,
+                            result.error_message.as_deref().unwrap_or("unknown error")
+                        ));
                     }
                 }
                 Err(e) => {
@@ -202,7 +193,11 @@ impl RoundTripHarness {
     }
 
     /// Executes a single round-trip test
-    pub fn run_single_test(&self, test_name: &str, config: &RoundTripConfig) -> Result<RoundTripOutput, RoundTripError> {
+    pub fn run_single_test(
+        &self,
+        test_name: &str,
+        config: &RoundTripConfig,
+    ) -> Result<RoundTripOutput, RoundTripError> {
         // Generate test input data
         let input = self.generate_test_input(test_name, config)?;
 
@@ -213,14 +208,19 @@ impl RoundTripHarness {
         let filename = format!("{}.golden", test_name);
         let metadata = self.create_test_metadata(test_name, config)?;
 
-        self.golden_manager.assert_golden(&filename, &output, metadata)
+        self.golden_manager
+            .assert_golden(&filename, &output, metadata)
             .map_err(RoundTripError::GoldenFileError)?;
 
         Ok(output)
     }
 
     /// Generates deterministic test input data
-    fn generate_test_input(&self, test_name: &str, config: &RoundTripConfig) -> Result<RoundTripInput, RoundTripError> {
+    fn generate_test_input(
+        &self,
+        test_name: &str,
+        config: &RoundTripConfig,
+    ) -> Result<RoundTripInput, RoundTripError> {
         // Use seeded PRNG for reproducible test data
         let mut rng = Self::create_seeded_rng(config.seed);
 
@@ -240,7 +240,10 @@ impl RoundTripHarness {
     }
 
     /// Executes the actual round-trip encode/decode process
-    fn execute_round_trip(&self, input: &RoundTripInput) -> Result<RoundTripOutput, RoundTripError> {
+    fn execute_round_trip(
+        &self,
+        input: &RoundTripInput,
+    ) -> Result<RoundTripOutput, RoundTripError> {
         let start_time = std::time::Instant::now();
 
         // TODO: Replace with actual RaptorQ encoder calls
@@ -250,21 +253,30 @@ impl RoundTripHarness {
         let decode_start = std::time::Instant::now();
 
         // TODO: Replace with actual RaptorQ decoder calls
-        let decoded_result = self.mock_decode(&encoded_result.symbols, &encoded_result.indices, &input.config)?;
+        let decoded_result = self.mock_decode(
+            &encoded_result.symbols,
+            &encoded_result.indices,
+            &input.config,
+        )?;
         let decode_time = decode_start.elapsed();
 
         // Validate the round-trip
-        let validation_metrics = self.validate_round_trip(&input.source_data, &decoded_result, &input.config)?;
-        let success = validation_metrics.data_integrity &&
-                     validation_metrics.symbol_count_valid &&
-                     validation_metrics.parameters_preserved;
+        let validation_metrics =
+            self.validate_round_trip(&input.source_data, &decoded_result, &input.config)?;
+        let success = validation_metrics.data_integrity
+            && validation_metrics.symbol_count_valid
+            && validation_metrics.parameters_preserved;
 
         Ok(RoundTripOutput {
             encoded_symbols: encoded_result.symbols,
             symbol_indices: encoded_result.indices,
             decoded_data: decoded_result,
             success,
-            error_message: if !success { Some("Round-trip validation failed".to_string()) } else { None },
+            error_message: if !success {
+                Some("Round-trip validation failed".to_string())
+            } else {
+                None
+            },
             encode_time_us: encode_time.as_micros() as u64,
             decode_time_us: decode_time.as_micros() as u64,
             validation_metrics,
@@ -272,44 +284,64 @@ impl RoundTripHarness {
     }
 
     /// Validates round-trip correctness
-    fn validate_round_trip(&self, original: &[u8], decoded: &[u8], config: &RoundTripConfig) -> Result<ValidationMetrics, RoundTripError> {
-        let mut metrics = ValidationMetrics::default();
+    fn validate_round_trip(
+        &self,
+        original: &[u8],
+        decoded: &[u8],
+        config: &RoundTripConfig,
+    ) -> Result<ValidationMetrics, RoundTripError> {
+        let _expected_symbols = config.source_symbols + config.repair_symbols;
 
-        // Check data integrity
-        metrics.data_integrity = original == decoded;
+        let erasure_recovery_valid = if config.test_erasures && config.erasure_probability > 0.0 {
+            Some(true) // TODO: Implement erasure testing
+        } else {
+            None
+        };
 
-        // Check symbol count consistency
-        let expected_symbols = config.source_symbols + config.repair_symbols;
-        metrics.symbol_count_valid = true; // TODO: Implement actual symbol count validation
-
-        // Check parameters preserved
-        metrics.parameters_preserved = true; // TODO: Implement parameter validation
-
-        // Check repair symbols
-        metrics.repair_symbols_valid = true; // TODO: Implement repair symbol validation
-
-        // Check erasure recovery if applicable
-        if config.test_erasures && config.erasure_probability > 0.0 {
-            metrics.erasure_recovery_valid = Some(true); // TODO: Implement erasure testing
-        }
+        let metrics = ValidationMetrics {
+            data_integrity: original == decoded,
+            symbol_count_valid: true, // TODO: Implement actual symbol count validation
+            parameters_preserved: true, // TODO: Implement parameter validation
+            repair_symbols_valid: true, // TODO: Implement repair symbol validation
+            erasure_recovery_valid,
+        };
 
         Ok(metrics)
     }
 
     /// Creates metadata for test golden files
-    fn create_test_metadata(&self, test_name: &str, config: &RoundTripConfig) -> Result<GoldenMetadata, RoundTripError> {
+    fn create_test_metadata(
+        &self,
+        test_name: &str,
+        config: &RoundTripConfig,
+    ) -> Result<GoldenMetadata, RoundTripError> {
         let mut input_params = HashMap::new();
-        input_params.insert("source_symbols".to_string(), config.source_symbols.to_string());
+        input_params.insert(
+            "source_symbols".to_string(),
+            config.source_symbols.to_string(),
+        );
         input_params.insert("symbol_size".to_string(), config.symbol_size.to_string());
-        input_params.insert("repair_symbols".to_string(), config.repair_symbols.to_string());
+        input_params.insert(
+            "repair_symbols".to_string(),
+            config.repair_symbols.to_string(),
+        );
         input_params.insert("seed".to_string(), config.seed.to_string());
-        input_params.insert("test_erasures".to_string(), config.test_erasures.to_string());
-        input_params.insert("erasure_probability".to_string(), config.erasure_probability.to_string());
+        input_params.insert(
+            "test_erasures".to_string(),
+            config.test_erasures.to_string(),
+        );
+        input_params.insert(
+            "erasure_probability".to_string(),
+            config.erasure_probability.to_string(),
+        );
 
         Ok(create_metadata(
             test_name,
             "5.3.2.2", // RFC 6330 systematic indices
-            &format!("Round-trip validation for RaptorQ with K={} symbols", config.source_symbols),
+            &format!(
+                "Round-trip validation for RaptorQ with K={} symbols",
+                config.source_symbols
+            ),
             input_params,
         ))
     }
@@ -330,7 +362,11 @@ impl RoundTripHarness {
     // TODO: Replace these mock implementations with actual RaptorQ calls
 
     /// Mock encoder for testing infrastructure
-    fn mock_encode(&self, data: &[u8], config: &RoundTripConfig) -> Result<MockEncodeResult, RoundTripError> {
+    fn mock_encode(
+        &self,
+        data: &[u8],
+        config: &RoundTripConfig,
+    ) -> Result<MockEncodeResult, RoundTripError> {
         // This is a placeholder implementation
         let symbol_size = config.symbol_size;
         let total_symbols = config.source_symbols + config.repair_symbols;
@@ -361,7 +397,12 @@ impl RoundTripHarness {
     }
 
     /// Mock decoder for testing infrastructure
-    fn mock_decode(&self, symbols: &[Vec<u8>], indices: &[u32], config: &RoundTripConfig) -> Result<Vec<u8>, RoundTripError> {
+    fn mock_decode(
+        &self,
+        symbols: &[Vec<u8>],
+        indices: &[u32],
+        config: &RoundTripConfig,
+    ) -> Result<Vec<u8>, RoundTripError> {
         // This is a placeholder that just reconstructs from source symbols
         let mut decoded_data = Vec::new();
 
@@ -413,8 +454,13 @@ impl RoundTripSummary {
 
 impl fmt::Display for RoundTripSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Round-trip tests: {}/{} passed ({:.1}%)",
-               self.passed_tests, self.total_tests, self.pass_rate() * 100.0)?;
+        write!(
+            f,
+            "Round-trip tests: {}/{} passed ({:.1}%)",
+            self.passed_tests,
+            self.total_tests,
+            self.pass_rate() * 100.0
+        )?;
 
         if !self.failures.is_empty() {
             write!(f, "\nFailures:")?;

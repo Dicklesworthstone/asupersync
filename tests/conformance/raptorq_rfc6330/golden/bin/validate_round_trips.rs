@@ -3,7 +3,7 @@
 //! Validates RaptorQ round-trip encode/decode cycles against golden files.
 
 use clap::{Arg, Command};
-use raptorq_golden_testing::{RoundTripHarness, FormatValidator, FixtureCategory};
+use raptorq_golden_testing::{FormatValidator, RoundTripHarness};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,13 +17,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("golden")
                 .value_name("DIR")
                 .help("Golden files directory")
-                .default_value("golden")
+                .default_value("golden"),
         )
         .arg(
             Arg::new("comprehensive")
                 .long("comprehensive")
                 .action(clap::ArgAction::SetTrue)
-                .help("Run comprehensive validation including all test categories")
+                .help("Run comprehensive validation including all test categories"),
         )
         .arg(
             Arg::new("category")
@@ -31,20 +31,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("category")
                 .value_name("CATEGORY")
                 .help("Run tests only for specific category")
-                .value_parser(["basic", "edge", "performance", "error", "spec", "interop"])
+                .value_parser(["basic", "edge", "performance", "error", "spec", "interop"]),
         )
         .arg(
             Arg::new("validate-format")
                 .long("validate-format")
                 .action(clap::ArgAction::SetTrue)
-                .help("Also validate golden file format and structure")
+                .help("Also validate golden file format and structure"),
         )
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
                 .action(clap::ArgAction::SetTrue)
-                .help("Verbose output including test details")
+                .help("Verbose output including test details"),
         )
         .get_matches();
 
@@ -65,14 +65,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("   Total files: {}", format_results.total_files);
         println!("   Valid files: {}", format_results.valid_files);
-        println!("   Success rate: {:.1}%", format_results.success_rate() * 100.0);
+        println!(
+            "   Success rate: {:.1}%",
+            format_results.success_rate() * 100.0
+        );
 
         if verbose {
             for (file_path, result) in &format_results.results {
                 match result {
                     Ok(validation_result) => {
                         if !validation_result.is_valid || validation_result.has_critical_issues() {
-                            println!("   ⚠️  {}: {} issues", file_path.display(), validation_result.issues.len());
+                            println!(
+                                "   ⚠️  {}: {} issues",
+                                file_path.display(),
+                                validation_result.issues.len()
+                            );
                             if verbose {
                                 for issue in &validation_result.issues {
                                     println!("      - {:?}: {}", issue.severity, issue.description);
@@ -137,7 +144,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if summary.failed_tests > 0 {
-        eprintln!("\n❌ Round-trip validation failed ({} failures)", summary.failed_tests);
+        eprintln!(
+            "\n❌ Round-trip validation failed ({} failures)",
+            summary.failed_tests
+        );
         std::process::exit(1);
     }
 
@@ -196,59 +206,51 @@ fn get_edge_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
 fn get_performance_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
 
-    vec![
-        RoundTripConfig {
-            source_symbols: 1000,
-            symbol_size: 1024,
-            repair_symbols: 200,
-            seed: 123,
-            test_erasures: true,
-            erasure_probability: 0.15,
-        },
-    ]
+    vec![RoundTripConfig {
+        source_symbols: 1000,
+        symbol_size: 1024,
+        repair_symbols: 200,
+        seed: 123,
+        test_erasures: true,
+        erasure_probability: 0.15,
+    }]
 }
 
 fn get_error_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
 
-    vec![
-        RoundTripConfig {
-            source_symbols: 50,
-            symbol_size: 512,
-            repair_symbols: 20,
-            seed: 456,
-            test_erasures: true,
-            erasure_probability: 0.5,
-        },
-    ]
+    vec![RoundTripConfig {
+        source_symbols: 50,
+        symbol_size: 512,
+        repair_symbols: 20,
+        seed: 456,
+        test_erasures: true,
+        erasure_probability: 0.5,
+    }]
 }
 
 fn get_spec_compliance_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
 
-    vec![
-        RoundTripConfig {
-            source_symbols: 64,
-            symbol_size: 256,
-            repair_symbols: 32,
-            seed: 321,
-            test_erasures: false,
-            erasure_probability: 0.0,
-        },
-    ]
+    vec![RoundTripConfig {
+        source_symbols: 64,
+        symbol_size: 256,
+        repair_symbols: 32,
+        seed: 321,
+        test_erasures: false,
+        erasure_probability: 0.0,
+    }]
 }
 
 fn get_interop_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
 
-    vec![
-        RoundTripConfig {
-            source_symbols: 256,
-            symbol_size: 1024,
-            repair_symbols: 64,
-            seed: 0x12345678,
-            test_erasures: true,
-            erasure_probability: 0.25,
-        },
-    ]
+    vec![RoundTripConfig {
+        source_symbols: 256,
+        symbol_size: 1024,
+        repair_symbols: 64,
+        seed: 0x12345678,
+        test_erasures: true,
+        erasure_probability: 0.25,
+    }]
 }

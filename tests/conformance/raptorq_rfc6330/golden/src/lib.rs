@@ -65,31 +65,31 @@
 //! }
 //! ```
 
-pub mod golden_file_manager;
-pub mod round_trip_harness;
 pub mod fixture_generator;
 pub mod format_validator;
+pub mod golden_file_manager;
+pub mod round_trip_harness;
 
 // Re-export main types for convenience
 pub use golden_file_manager::{
-    GoldenFileManager, GoldenMetadata, GoldenFileEntry, GoldenError,
-    ValidationSummary, create_metadata,
+    create_metadata, GoldenError, GoldenFileEntry, GoldenFileManager, GoldenMetadata,
+    ValidationSummary,
 };
 
 pub use round_trip_harness::{
-    RoundTripHarness, RoundTripConfig, RoundTripInput, RoundTripOutput,
-    ValidationMetrics, RoundTripSummary, RoundTripError,
+    RoundTripConfig, RoundTripError, RoundTripHarness, RoundTripInput, RoundTripOutput,
+    RoundTripSummary, ValidationMetrics,
 };
 
 pub use fixture_generator::{
-    FixtureGenerator, FixtureCategory, FixtureSpec, FixtureProperties,
-    MemoryProfile, FixtureGenerationSummary, FixtureGenerationError,
+    FixtureCategory, FixtureGenerationError, FixtureGenerationSummary, FixtureGenerator,
+    FixtureProperties, FixtureSpec, MemoryProfile,
 };
 
 pub use format_validator::{
-    FormatValidator, ValidationConfig, ValidationResult, ValidationIssue,
-    IssueSeverity, IssueCategory, MetadataSummary, DataIntegrityStatus,
-    RfcComplianceStatus, DirectoryValidationResult, ValidationError,
+    DataIntegrityStatus, DirectoryValidationResult, FormatValidator, IssueCategory, IssueSeverity,
+    MetadataSummary, RfcComplianceStatus, ValidationConfig, ValidationError, ValidationIssue,
+    ValidationResult,
 };
 
 /// Main entry point for running complete golden file test suite
@@ -106,23 +106,23 @@ pub fn run_complete_test_suite<P: AsRef<std::path::Path>>(
 
     // Step 1: Generate test fixtures
     let generator = FixtureGenerator::new(fixture_path);
-    let fixture_results = generator.generate_all_fixtures()
+    let fixture_results = generator
+        .generate_all_fixtures()
         .map_err(TestSuiteError::FixtureGeneration)?;
 
     // Step 2: Run round-trip tests
     let harness = RoundTripHarness::new(golden_path);
-    let roundtrip_results = harness.run_all_tests()
-        .map_err(TestSuiteError::RoundTrip)?;
+    let roundtrip_results = harness.run_all_tests().map_err(TestSuiteError::RoundTrip)?;
 
     // Step 3: Validate golden files
     let validator = FormatValidator::new();
-    let validation_results = validator.validate_directory(golden_path)
+    let validation_results = validator
+        .validate_directory(golden_path)
         .map_err(TestSuiteError::Validation)?;
 
     // Step 4: Validate existing golden files
     let manager = GoldenFileManager::new(golden_path);
-    let golden_validation = manager.validate_all()
-        .map_err(TestSuiteError::GoldenFile)?;
+    let golden_validation = manager.validate_all().map_err(TestSuiteError::GoldenFile)?;
 
     Ok(TestSuiteResults {
         fixture_generation: fixture_results,
@@ -177,28 +177,43 @@ impl TestSuiteResults {
             - Failed: {}\n\
             \n\
             Overall Status: {}\n",
-
-            if self.fixture_generation.is_success() { "✅ PASSED" } else { "❌ FAILED" },
+            if self.fixture_generation.is_success() {
+                "✅ PASSED"
+            } else {
+                "❌ FAILED"
+            },
             self.fixture_generation.generated_fixtures,
             self.fixture_generation.failed_fixtures,
-
-            if self.round_trip_tests.is_success() { "✅ PASSED" } else { "❌ FAILED" },
+            if self.round_trip_tests.is_success() {
+                "✅ PASSED"
+            } else {
+                "❌ FAILED"
+            },
             self.round_trip_tests.total_tests,
             self.round_trip_tests.passed_tests,
             self.round_trip_tests.failed_tests,
             self.round_trip_tests.pass_rate() * 100.0,
-
-            if self.format_validation.success_rate() > 0.95 { "✅ PASSED" } else { "❌ FAILED" },
+            if self.format_validation.success_rate() > 0.95 {
+                "✅ PASSED"
+            } else {
+                "❌ FAILED"
+            },
             self.format_validation.total_files,
             self.format_validation.valid_files,
             self.format_validation.success_rate() * 100.0,
-
-            if self.golden_file_validation.is_success() { "✅ PASSED" } else { "❌ FAILED" },
+            if self.golden_file_validation.is_success() {
+                "✅ PASSED"
+            } else {
+                "❌ FAILED"
+            },
             self.golden_file_validation.total,
             self.golden_file_validation.passed,
             self.golden_file_validation.failed,
-
-            if self.is_success() { "✅ ALL TESTS PASSED" } else { "❌ SOME TESTS FAILED" }
+            if self.is_success() {
+                "✅ ALL TESTS PASSED"
+            } else {
+                "❌ SOME TESTS FAILED"
+            }
         )
     }
 }
@@ -314,8 +329,6 @@ mod tests {
 
     #[test]
     fn test_suite_results_summary() {
-        use std::collections::HashMap;
-
         let results = TestSuiteResults {
             fixture_generation: FixtureGenerationSummary {
                 generated_fixtures: 5,

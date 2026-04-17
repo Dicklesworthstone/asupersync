@@ -5,12 +5,12 @@
 //! testing. It performs schema validation, data integrity checks, and format
 //! compliance verification.
 
-use crate::golden_file_manager::{GoldenFileEntry, GoldenMetadata, GoldenError};
-use crate::round_trip_harness::{RoundTripOutput, ValidationMetrics};
+use crate::golden_file_manager::{GoldenFileEntry, GoldenMetadata};
+use crate::round_trip_harness::RoundTripOutput;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Format validation configuration
 #[derive(Debug, Clone)]
@@ -76,7 +76,9 @@ pub struct ValidationResult {
 impl ValidationResult {
     /// Returns true if there are no critical issues
     pub fn has_critical_issues(&self) -> bool {
-        self.issues.iter().any(|issue| issue.severity == IssueSeverity::Critical)
+        self.issues
+            .iter()
+            .any(|issue| issue.severity == IssueSeverity::Critical)
     }
 
     /// Returns the number of issues at each severity level
@@ -206,7 +208,10 @@ impl FormatValidator {
     }
 
     /// Validates a single golden file
-    pub fn validate_file<P: AsRef<Path>>(&self, file_path: P) -> Result<ValidationResult, ValidationError> {
+    pub fn validate_file<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+    ) -> Result<ValidationResult, ValidationError> {
         let path = file_path.as_ref();
         let file_size = fs::metadata(path)?.len();
 
@@ -217,8 +222,10 @@ impl FormatValidator {
                 issues: vec![ValidationIssue {
                     severity: IssueSeverity::Critical,
                     category: IssueCategory::Performance,
-                    description: format!("File size {} bytes exceeds limit of {} bytes",
-                                       file_size, self.config.max_file_size),
+                    description: format!(
+                        "File size {} bytes exceeds limit of {} bytes",
+                        file_size, self.config.max_file_size
+                    ),
                     suggested_fix: Some("Reduce test data size or increase size limit".to_string()),
                     location: None,
                 }],
@@ -253,15 +260,19 @@ impl FormatValidator {
             .map_err(|e| ValidationError::JsonParseError(e.to_string()))?;
 
         // Attempt to deserialize as golden file entry
-        let golden_entry: GoldenFileEntry<RoundTripOutput> = serde_json::from_value(json_value.clone())
-            .map_err(|e| ValidationError::StructureError(e.to_string()))?;
+        let golden_entry: GoldenFileEntry<RoundTripOutput> =
+            serde_json::from_value(json_value.clone())
+                .map_err(|e| ValidationError::StructureError(e.to_string()))?;
 
         // Perform comprehensive validation
         self.validate_golden_entry(&golden_entry, file_size, path)
     }
 
     /// Validates all golden files in a directory
-    pub fn validate_directory<P: AsRef<Path>>(&self, dir_path: P) -> Result<DirectoryValidationResult, ValidationError> {
+    pub fn validate_directory<P: AsRef<Path>>(
+        &self,
+        dir_path: P,
+    ) -> Result<DirectoryValidationResult, ValidationError> {
         let mut results = Vec::new();
         let mut total_files = 0;
         let mut valid_files = 0;
@@ -299,7 +310,7 @@ impl FormatValidator {
         &self,
         entry: &GoldenFileEntry<RoundTripOutput>,
         file_size: u64,
-        file_path: &Path
+        _file_path: &Path,
     ) -> Result<ValidationResult, ValidationError> {
         let mut issues = Vec::new();
 
@@ -321,10 +332,12 @@ impl FormatValidator {
 
         // Build status summaries
         let metadata_summary = self.build_metadata_summary(&entry.metadata, file_size);
-        let data_integrity = self.assess_data_integrity(&entry, &issues);
+        let data_integrity = self.assess_data_integrity(entry, &issues);
         let rfc_compliance = self.assess_rfc_compliance(&entry.metadata, &entry.data, &issues);
 
-        let is_valid = issues.iter().all(|issue| issue.severity != IssueSeverity::Critical);
+        let is_valid = issues
+            .iter()
+            .all(|issue| issue.severity != IssueSeverity::Critical);
 
         Ok(ValidationResult {
             is_valid,
@@ -342,16 +355,14 @@ impl FormatValidator {
         // Check required fields
         for required_field in &self.config.required_metadata_fields {
             match required_field.as_str() {
-                "test_name" => {
-                    if metadata.test_name.is_empty() {
-                        issues.push(ValidationIssue {
-                            severity: IssueSeverity::Critical,
-                            category: IssueCategory::Metadata,
-                            description: "test_name is empty".to_string(),
-                            suggested_fix: Some("Provide a descriptive test name".to_string()),
-                            location: Some("metadata.test_name".to_string()),
-                        });
-                    }
+                "test_name" if metadata.test_name.is_empty() => {
+                    issues.push(ValidationIssue {
+                        severity: IssueSeverity::Critical,
+                        category: IssueCategory::Metadata,
+                        description: "test_name is empty".to_string(),
+                        suggested_fix: Some("Provide a descriptive test name".to_string()),
+                        location: Some("metadata.test_name".to_string()),
+                    });
                 }
                 "rfc_section" => {
                     if metadata.rfc_section.is_empty() {
@@ -362,37 +373,38 @@ impl FormatValidator {
                             suggested_fix: Some("Specify relevant RFC 6330 section".to_string()),
                             location: Some("metadata.rfc_section".to_string()),
                         });
-                    } else if !metadata.rfc_section.starts_with("5.") && !metadata.rfc_section.starts_with("4.") {
+                    } else if !metadata.rfc_section.starts_with("5.")
+                        && !metadata.rfc_section.starts_with("4.")
+                    {
                         issues.push(ValidationIssue {
                             severity: IssueSeverity::Info,
                             category: IssueCategory::RfcCompliance,
-                            description: "RFC section should typically reference sections 4 or 5".to_string(),
+                            description: "RFC section should typically reference sections 4 or 5"
+                                .to_string(),
                             suggested_fix: None,
                             location: Some("metadata.rfc_section".to_string()),
                         });
                     }
                 }
-                "description" => {
-                    if metadata.description.is_empty() {
-                        issues.push(ValidationIssue {
-                            severity: IssueSeverity::Warning,
-                            category: IssueCategory::Metadata,
-                            description: "description is empty".to_string(),
-                            suggested_fix: Some("Provide test description".to_string()),
-                            location: Some("metadata.description".to_string()),
-                        });
-                    }
+                "description" if metadata.description.is_empty() => {
+                    issues.push(ValidationIssue {
+                        severity: IssueSeverity::Warning,
+                        category: IssueCategory::Metadata,
+                        description: "description is empty".to_string(),
+                        suggested_fix: Some("Provide test description".to_string()),
+                        location: Some("metadata.description".to_string()),
+                    });
                 }
-                "checksum" => {
-                    if self.config.validate_checksums && metadata.checksum.is_empty() {
-                        issues.push(ValidationIssue {
-                            severity: IssueSeverity::Critical,
-                            category: IssueCategory::DataIntegrity,
-                            description: "checksum is missing".to_string(),
-                            suggested_fix: Some("Regenerate golden file with valid checksum".to_string()),
-                            location: Some("metadata.checksum".to_string()),
-                        });
-                    }
+                "checksum" if self.config.validate_checksums && metadata.checksum.is_empty() => {
+                    issues.push(ValidationIssue {
+                        severity: IssueSeverity::Critical,
+                        category: IssueCategory::DataIntegrity,
+                        description: "checksum is missing".to_string(),
+                        suggested_fix: Some(
+                            "Regenerate golden file with valid checksum".to_string(),
+                        ),
+                        location: Some("metadata.checksum".to_string()),
+                    });
                 }
                 _ => {}
             }
@@ -432,7 +444,8 @@ impl FormatValidator {
             issues.push(ValidationIssue {
                 severity: IssueSeverity::Critical,
                 category: IssueCategory::DataIntegrity,
-                description: "encoded_symbols and symbol_indices have different lengths".to_string(),
+                description: "encoded_symbols and symbol_indices have different lengths"
+                    .to_string(),
                 suggested_fix: Some("Ensure one index per symbol".to_string()),
                 location: Some("data".to_string()),
             });
@@ -476,25 +489,31 @@ impl FormatValidator {
     }
 
     /// Validates RFC 6330 compliance
-    fn validate_rfc_compliance(&self, metadata: &GoldenMetadata, data: &RoundTripOutput) -> Vec<ValidationIssue> {
+    fn validate_rfc_compliance(
+        &self,
+        metadata: &GoldenMetadata,
+        _data: &RoundTripOutput,
+    ) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
         // Extract parameters from metadata
         if let (Some(source_symbols_str), Some(symbol_size_str)) = (
             metadata.input_params.get("source_symbols"),
-            metadata.input_params.get("symbol_size")
+            metadata.input_params.get("symbol_size"),
         ) {
             if let (Ok(source_symbols), Ok(symbol_size)) = (
                 source_symbols_str.parse::<usize>(),
-                symbol_size_str.parse::<usize>()
+                symbol_size_str.parse::<usize>(),
             ) {
                 // Check symbol count limits
                 if source_symbols > self.config.max_source_symbols {
                     issues.push(ValidationIssue {
                         severity: IssueSeverity::Critical,
                         category: IssueCategory::RfcCompliance,
-                        description: format!("source_symbols {} exceeds RFC 6330 limit of {}",
-                                           source_symbols, self.config.max_source_symbols),
+                        description: format!(
+                            "source_symbols {} exceeds RFC 6330 limit of {}",
+                            source_symbols, self.config.max_source_symbols
+                        ),
                         suggested_fix: Some("Reduce source symbol count".to_string()),
                         location: Some("metadata.input_params.source_symbols".to_string()),
                     });
@@ -505,8 +524,13 @@ impl FormatValidator {
                     issues.push(ValidationIssue {
                         severity: IssueSeverity::Warning,
                         category: IssueCategory::RfcCompliance,
-                        description: format!("symbol_size {} is not a standard RFC 6330 value", symbol_size),
-                        suggested_fix: Some("Use standard symbol sizes (64, 128, 256, 512, 1024, etc.)".to_string()),
+                        description: format!(
+                            "symbol_size {} is not a standard RFC 6330 value",
+                            symbol_size
+                        ),
+                        suggested_fix: Some(
+                            "Use standard symbol sizes (64, 128, 256, 512, 1024, etc.)".to_string(),
+                        ),
                         location: Some("metadata.input_params.symbol_size".to_string()),
                     });
                 }
@@ -518,8 +542,13 @@ impl FormatValidator {
                             issues.push(ValidationIssue {
                                 severity: IssueSeverity::Warning,
                                 category: IssueCategory::RfcCompliance,
-                                description: format!("repair_symbols {} is very large", repair_symbols),
-                                suggested_fix: Some("Consider reducing repair symbol count".to_string()),
+                                description: format!(
+                                    "repair_symbols {} is very large",
+                                    repair_symbols
+                                ),
+                                suggested_fix: Some(
+                                    "Consider reducing repair symbol count".to_string(),
+                                ),
                                 location: Some("metadata.input_params.repair_symbols".to_string()),
                             });
                         }
@@ -534,8 +563,12 @@ impl FormatValidator {
     /// Builds metadata summary
     fn build_metadata_summary(&self, metadata: &GoldenMetadata, file_size: u64) -> MetadataSummary {
         let last_updated = chrono::DateTime::from_timestamp(
-            metadata.last_updated.duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default().as_secs() as i64, 0
+            metadata
+                .last_updated
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            0,
         );
 
         MetadataSummary {
@@ -549,25 +582,40 @@ impl FormatValidator {
     }
 
     /// Assesses data integrity status
-    fn assess_data_integrity(&self, entry: &GoldenFileEntry<RoundTripOutput>, issues: &[ValidationIssue]) -> DataIntegrityStatus {
-        let has_integrity_issues = issues.iter()
+    fn assess_data_integrity(
+        &self,
+        entry: &GoldenFileEntry<RoundTripOutput>,
+        issues: &[ValidationIssue],
+    ) -> DataIntegrityStatus {
+        let has_integrity_issues = issues
+            .iter()
             .any(|issue| issue.category == IssueCategory::DataIntegrity);
 
         DataIntegrityStatus {
-            checksum_valid: !entry.metadata.checksum.is_empty() &&
-                           !issues.iter().any(|i| i.location == Some("metadata.checksum".to_string())),
+            checksum_valid: !entry.metadata.checksum.is_empty()
+                && !issues
+                    .iter()
+                    .any(|i| i.location == Some("metadata.checksum".to_string())),
             json_valid: true, // If we got here, JSON parsing succeeded
-            required_fields_present: !issues.iter()
-                .any(|i| i.category == IssueCategory::Metadata && i.severity == IssueSeverity::Critical),
+            required_fields_present: !issues.iter().any(|i| {
+                i.category == IssueCategory::Metadata && i.severity == IssueSeverity::Critical
+            }),
             types_valid: !has_integrity_issues,
-            sizes_reasonable: !issues.iter()
-                .any(|i| i.category == IssueCategory::Performance && i.severity == IssueSeverity::Critical),
+            sizes_reasonable: !issues.iter().any(|i| {
+                i.category == IssueCategory::Performance && i.severity == IssueSeverity::Critical
+            }),
         }
     }
 
     /// Assesses RFC compliance status
-    fn assess_rfc_compliance(&self, metadata: &GoldenMetadata, data: &RoundTripOutput, issues: &[ValidationIssue]) -> RfcComplianceStatus {
-        let has_rfc_issues = issues.iter()
+    fn assess_rfc_compliance(
+        &self,
+        _metadata: &GoldenMetadata,
+        _data: &RoundTripOutput,
+        issues: &[ValidationIssue],
+    ) -> RfcComplianceStatus {
+        let has_rfc_issues = issues
+            .iter()
             .any(|issue| issue.category == IssueCategory::RfcCompliance);
 
         RfcComplianceStatus {
@@ -623,18 +671,12 @@ pub enum ValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::golden_file_manager::create_metadata;
     use crate::round_trip_harness::{RoundTripOutput, ValidationMetrics};
     use std::collections::HashMap;
 
     fn create_test_golden_file() -> GoldenFileEntry<RoundTripOutput> {
-        let metadata = create_metadata(
-            "test_case",
-            "5.3.1",
-            "Test golden file",
-            HashMap::new(),
-        );
+        let metadata = create_metadata("test_case", "5.3.1", "Test golden file", HashMap::new());
 
         let output = RoundTripOutput {
             encoded_symbols: vec![vec![1, 2, 3], vec![4, 5, 6]],
@@ -679,7 +721,9 @@ mod tests {
         let validator = FormatValidator::new();
         let entry = create_test_golden_file();
 
-        let result = validator.validate_golden_entry(&entry, 1024, Path::new("test.golden")).unwrap();
+        let result = validator
+            .validate_golden_entry(&entry, 1024, Path::new("test.golden"))
+            .unwrap();
 
         // Should have some issues but be generally valid
         assert!(result.data_integrity.json_valid);

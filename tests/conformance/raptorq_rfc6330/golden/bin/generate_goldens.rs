@@ -3,7 +3,7 @@
 //! Generates golden files for RaptorQ RFC 6330 conformance testing.
 
 use clap::{Arg, Command};
-use raptorq_golden_testing::{FixtureGenerator, RoundTripHarness, run_complete_test_suite};
+use raptorq_golden_testing::{run_complete_test_suite, FixtureGenerator};
 use std::env;
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("output")
                 .value_name("DIR")
                 .help("Output directory for golden files")
-                .default_value("fixtures")
+                .default_value("fixtures"),
         )
         .arg(
             Arg::new("golden")
@@ -26,20 +26,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("golden")
                 .value_name("DIR")
                 .help("Golden files directory")
-                .default_value("golden")
+                .default_value("golden"),
         )
         .arg(
             Arg::new("update")
                 .short('u')
                 .long("update")
                 .action(clap::ArgAction::SetTrue)
-                .help("Update existing golden files (sets UPDATE_GOLDENS=1)")
+                .help("Update existing golden files (sets UPDATE_GOLDENS=1)"),
         )
         .arg(
             Arg::new("smoke-only")
                 .long("smoke-only")
                 .action(clap::ArgAction::SetTrue)
-                .help("Only generate high-priority smoke test fixtures")
+                .help("Only generate high-priority smoke test fixtures"),
         )
         .get_matches();
 
@@ -89,7 +89,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("   - {}", failure);
             }
         }
-
     } else {
         println!("   Mode: Complete test suite");
 

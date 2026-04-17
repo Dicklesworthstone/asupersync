@@ -6,7 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -68,7 +67,12 @@ impl GoldenFileManager {
     }
 
     /// Saves or validates a golden file entry
-    pub fn assert_golden<T>(&self, filename: &str, data: &T, metadata: GoldenMetadata) -> Result<(), GoldenError>
+    pub fn assert_golden<T>(
+        &self,
+        filename: &str,
+        data: &T,
+        metadata: GoldenMetadata,
+    ) -> Result<(), GoldenError>
     where
         T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
     {
@@ -82,7 +86,12 @@ impl GoldenFileManager {
     }
 
     /// Saves a golden file (update mode)
-    fn save_golden<T>(&self, path: &Path, data: &T, metadata: GoldenMetadata) -> Result<(), GoldenError>
+    fn save_golden<T>(
+        &self,
+        path: &Path,
+        data: &T,
+        metadata: GoldenMetadata,
+    ) -> Result<(), GoldenError>
     where
         T: Serialize,
     {
@@ -94,10 +103,7 @@ impl GoldenFileManager {
             })?;
         }
 
-        let entry = GoldenFileEntry {
-            metadata,
-            data,
-        };
+        let entry = GoldenFileEntry { metadata, data };
 
         let json = serde_json::to_string_pretty(&entry).map_err(GoldenError::SerializationError)?;
         fs::write(path, json).map_err(|e| GoldenError::IoError {
@@ -126,8 +132,8 @@ impl GoldenFileManager {
             error: e,
         })?;
 
-        let entry: GoldenFileEntry<T> = serde_json::from_str(&contents)
-            .map_err(GoldenError::DeserializationError)?;
+        let entry: GoldenFileEntry<T> =
+            serde_json::from_str(&contents).map_err(GoldenError::DeserializationError)?;
 
         if entry.data != *data {
             return Err(GoldenError::DataMismatch {
@@ -148,7 +154,11 @@ impl GoldenFileManager {
     }
 
     /// Recursively collects golden files
-    fn collect_golden_files(&self, dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), GoldenError> {
+    fn collect_golden_files(
+        &self,
+        dir: &Path,
+        files: &mut Vec<PathBuf>,
+    ) -> Result<(), GoldenError> {
         if !dir.exists() {
             return Ok(());
         }
@@ -233,7 +243,10 @@ pub enum GoldenError {
     },
 
     #[error("IO error for {path}: {error}")]
-    IoError { path: PathBuf, error: std::io::Error },
+    IoError {
+        path: PathBuf,
+        error: std::io::Error,
+    },
 
     #[error("Serialization error: {0}")]
     SerializationError(serde_json::Error),
@@ -246,7 +259,8 @@ pub enum GoldenError {
 #[macro_export]
 macro_rules! assert_golden {
     ($manager:expr, $filename:expr, $data:expr, $metadata:expr) => {
-        $manager.assert_golden($filename, &$data, $metadata)
+        $manager
+            .assert_golden($filename, &$data, $metadata)
             .unwrap_or_else(|e| panic!("Golden file assertion failed: {}", e))
     };
 }
@@ -258,7 +272,10 @@ pub fn create_metadata(
     description: &str,
     input_params: HashMap<String, String>,
 ) -> GoldenMetadata {
-    let data_str = format!("{}{}{}{:?}", test_name, rfc_section, description, input_params);
+    let data_str = format!(
+        "{}{}{}{:?}",
+        test_name, rfc_section, description, input_params
+    );
     let checksum = format!("{:x}", md5::compute(data_str));
 
     GoldenMetadata {
@@ -300,7 +317,9 @@ mod tests {
             HashMap::new(),
         );
 
-        assert!(manager.assert_golden("test.golden", &data, metadata).is_ok());
+        assert!(manager
+            .assert_golden("test.golden", &data, metadata)
+            .is_ok());
         assert!(temp_dir.path().join("test.golden").exists());
     }
 
@@ -322,20 +341,26 @@ mod tests {
         );
 
         // Create golden file
-        manager.assert_golden("test.golden", &data, metadata).unwrap();
+        manager
+            .assert_golden("test.golden", &data, metadata)
+            .unwrap();
 
         // Switch to validation mode
         let validator = GoldenFileManager::with_update_mode(temp_dir.path(), false);
 
         // Should pass with same data
-        assert!(validator.validate_golden(&temp_dir.path().join("test.golden"), &data).is_ok());
+        assert!(validator
+            .validate_golden(&temp_dir.path().join("test.golden"), &data)
+            .is_ok());
 
         // Should fail with different data
         let wrong_data = TestData {
             values: vec![6, 7, 8],
             name: "wrong".to_string(),
         };
-        assert!(validator.validate_golden(&temp_dir.path().join("test.golden"), &wrong_data).is_err());
+        assert!(validator
+            .validate_golden(&temp_dir.path().join("test.golden"), &wrong_data)
+            .is_err());
     }
 
     #[test]

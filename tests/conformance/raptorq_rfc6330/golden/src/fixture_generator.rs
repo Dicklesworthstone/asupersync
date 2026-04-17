@@ -7,8 +7,8 @@
 use crate::round_trip_harness::{RoundTripConfig, RoundTripInput};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Categories of test fixtures covering different RFC 6330 aspects
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -128,14 +128,18 @@ impl FixtureGenerator {
     }
 
     /// Generates all test fixtures and writes them to disk
-    pub fn generate_all_fixtures(&self) -> Result<FixtureGenerationSummary, FixtureGenerationError> {
+    pub fn generate_all_fixtures(
+        &self,
+    ) -> Result<FixtureGenerationSummary, FixtureGenerationError> {
         let mut summary = FixtureGenerationSummary::default();
 
         // Ensure output directory exists
         fs::create_dir_all(&self.output_dir)?;
 
         for (category, fixtures) in &self.fixtures {
-            let category_dir = self.output_dir.join(format!("{:?}", category).to_lowercase());
+            let category_dir = self
+                .output_dir
+                .join(format!("{:?}", category).to_lowercase());
             fs::create_dir_all(&category_dir)?;
 
             for fixture in fixtures {
@@ -156,7 +160,11 @@ impl FixtureGenerator {
     }
 
     /// Generates a single fixture file
-    fn generate_single_fixture(&self, spec: &FixtureSpec, category_dir: &Path) -> Result<PathBuf, FixtureGenerationError> {
+    fn generate_single_fixture(
+        &self,
+        spec: &FixtureSpec,
+        category_dir: &Path,
+    ) -> Result<PathBuf, FixtureGenerationError> {
         let input = self.create_fixture_input(spec)?;
         let fixture_path = category_dir.join(format!("{}.json", spec.id));
 
@@ -177,15 +185,26 @@ impl FixtureGenerator {
     }
 
     /// Creates test input data for a fixture
-    fn create_fixture_input(&self, spec: &FixtureSpec) -> Result<RoundTripInput, FixtureGenerationError> {
+    fn create_fixture_input(
+        &self,
+        spec: &FixtureSpec,
+    ) -> Result<RoundTripInput, FixtureGenerationError> {
         let data_size = spec.config.source_symbols * spec.config.symbol_size;
         let source_data = match spec.category {
-            FixtureCategory::BasicOperations => self.generate_basic_data(data_size, spec.config.seed),
+            FixtureCategory::BasicOperations => {
+                self.generate_basic_data(data_size, spec.config.seed)
+            }
             FixtureCategory::EdgeCases => self.generate_edge_case_data(data_size, &spec.id),
-            FixtureCategory::Performance => self.generate_performance_data(data_size, spec.config.seed),
+            FixtureCategory::Performance => {
+                self.generate_performance_data(data_size, spec.config.seed)
+            }
             FixtureCategory::ErrorHandling => self.generate_error_test_data(data_size, &spec.id),
-            FixtureCategory::SpecCompliance => self.generate_spec_test_data(data_size, spec.config.seed),
-            FixtureCategory::Interoperability => self.generate_interop_data(data_size, spec.config.seed),
+            FixtureCategory::SpecCompliance => {
+                self.generate_spec_test_data(data_size, spec.config.seed)
+            }
+            FixtureCategory::Interoperability => {
+                self.generate_interop_data(data_size, spec.config.seed)
+            }
         };
 
         Ok(RoundTripInput {
@@ -256,11 +275,16 @@ impl FixtureGenerator {
                 },
                 priority: 1,
                 expects_error: false,
-                tags: vec!["basic".to_string(), "medium".to_string(), "erasures".to_string()],
+                tags: vec![
+                    "basic".to_string(),
+                    "medium".to_string(),
+                    "erasures".to_string(),
+                ],
             },
         ];
 
-        self.fixtures.insert(FixtureCategory::BasicOperations, fixtures);
+        self.fixtures
+            .insert(FixtureCategory::BasicOperations, fixtures);
     }
 
     /// Adds edge case test fixtures
@@ -314,7 +338,11 @@ impl FixtureGenerator {
                 },
                 priority: 2,
                 expects_error: false,
-                tags: vec!["edge".to_string(), "maximum".to_string(), "slow".to_string()],
+                tags: vec![
+                    "edge".to_string(),
+                    "maximum".to_string(),
+                    "slow".to_string(),
+                ],
             },
         ];
 
@@ -323,134 +351,129 @@ impl FixtureGenerator {
 
     /// Adds performance test fixtures
     fn add_performance_fixtures(&mut self) {
-        let fixtures = vec![
-            FixtureSpec {
-                id: "perf_large_block".to_string(),
-                name: "Large Block Performance".to_string(),
-                category: FixtureCategory::Performance,
-                description: "Performance test with large data block".to_string(),
-                config: RoundTripConfig {
-                    source_symbols: 1000,
-                    symbol_size: 1024,
-                    repair_symbols: 200,
-                    seed: 123,
-                    test_erasures: true,
-                    erasure_probability: 0.15,
-                },
-                expected_properties: FixtureProperties {
-                    should_succeed: true,
-                    expected_overhead_ratio: Some(0.2),
-                    max_encode_time_ms: Some(10000),
-                    max_decode_time_ms: Some(10000),
-                    memory_profile: MemoryProfile::Moderate,
-                    cross_compat: true,
-                },
-                priority: 3,
-                expects_error: false,
-                tags: vec!["performance".to_string(), "large".to_string()],
+        let fixtures = vec![FixtureSpec {
+            id: "perf_large_block".to_string(),
+            name: "Large Block Performance".to_string(),
+            category: FixtureCategory::Performance,
+            description: "Performance test with large data block".to_string(),
+            config: RoundTripConfig {
+                source_symbols: 1000,
+                symbol_size: 1024,
+                repair_symbols: 200,
+                seed: 123,
+                test_erasures: true,
+                erasure_probability: 0.15,
             },
-        ];
+            expected_properties: FixtureProperties {
+                should_succeed: true,
+                expected_overhead_ratio: Some(0.2),
+                max_encode_time_ms: Some(10000),
+                max_decode_time_ms: Some(10000),
+                memory_profile: MemoryProfile::Moderate,
+                cross_compat: true,
+            },
+            priority: 3,
+            expects_error: false,
+            tags: vec!["performance".to_string(), "large".to_string()],
+        }];
 
         self.fixtures.insert(FixtureCategory::Performance, fixtures);
     }
 
     /// Adds error handling test fixtures
     fn add_error_handling_fixtures(&mut self) {
-        let fixtures = vec![
-            FixtureSpec {
-                id: "error_high_erasure".to_string(),
-                name: "High Erasure Rate".to_string(),
-                category: FixtureCategory::ErrorHandling,
-                description: "Test recovery with high erasure probability".to_string(),
-                config: RoundTripConfig {
-                    source_symbols: 50,
-                    symbol_size: 512,
-                    repair_symbols: 20,
-                    seed: 456,
-                    test_erasures: true,
-                    erasure_probability: 0.5,
-                },
-                expected_properties: FixtureProperties {
-                    should_succeed: false, // May fail with high erasure rate
-                    expected_overhead_ratio: Some(0.4),
-                    max_encode_time_ms: Some(1000),
-                    max_decode_time_ms: Some(1000),
-                    memory_profile: MemoryProfile::Moderate,
-                    cross_compat: false,
-                },
-                priority: 3,
-                expects_error: true,
-                tags: vec!["error".to_string(), "erasure".to_string()],
+        let fixtures = vec![FixtureSpec {
+            id: "error_high_erasure".to_string(),
+            name: "High Erasure Rate".to_string(),
+            category: FixtureCategory::ErrorHandling,
+            description: "Test recovery with high erasure probability".to_string(),
+            config: RoundTripConfig {
+                source_symbols: 50,
+                symbol_size: 512,
+                repair_symbols: 20,
+                seed: 456,
+                test_erasures: true,
+                erasure_probability: 0.5,
             },
-        ];
+            expected_properties: FixtureProperties {
+                should_succeed: false, // May fail with high erasure rate
+                expected_overhead_ratio: Some(0.4),
+                max_encode_time_ms: Some(1000),
+                max_decode_time_ms: Some(1000),
+                memory_profile: MemoryProfile::Moderate,
+                cross_compat: false,
+            },
+            priority: 3,
+            expects_error: true,
+            tags: vec!["error".to_string(), "erasure".to_string()],
+        }];
 
-        self.fixtures.insert(FixtureCategory::ErrorHandling, fixtures);
+        self.fixtures
+            .insert(FixtureCategory::ErrorHandling, fixtures);
     }
 
     /// Adds RFC 6330 specification compliance fixtures
     fn add_spec_compliance_fixtures(&mut self) {
-        let fixtures = vec![
-            FixtureSpec {
-                id: "spec_systematic_indices".to_string(),
-                name: "Systematic Index Ordering".to_string(),
-                category: FixtureCategory::SpecCompliance,
-                description: "RFC 6330 Section 5.3.2.2 systematic index compliance".to_string(),
-                config: RoundTripConfig {
-                    source_symbols: 64,
-                    symbol_size: 256,
-                    repair_symbols: 32,
-                    seed: 321,
-                    test_erasures: false,
-                    erasure_probability: 0.0,
-                },
-                expected_properties: FixtureProperties {
-                    should_succeed: true,
-                    expected_overhead_ratio: Some(0.5),
-                    max_encode_time_ms: Some(500),
-                    max_decode_time_ms: Some(500),
-                    memory_profile: MemoryProfile::Moderate,
-                    cross_compat: true,
-                },
-                priority: 1,
-                expects_error: false,
-                tags: vec!["spec".to_string(), "systematic".to_string()],
+        let fixtures = vec![FixtureSpec {
+            id: "spec_systematic_indices".to_string(),
+            name: "Systematic Index Ordering".to_string(),
+            category: FixtureCategory::SpecCompliance,
+            description: "RFC 6330 Section 5.3.2.2 systematic index compliance".to_string(),
+            config: RoundTripConfig {
+                source_symbols: 64,
+                symbol_size: 256,
+                repair_symbols: 32,
+                seed: 321,
+                test_erasures: false,
+                erasure_probability: 0.0,
             },
-        ];
+            expected_properties: FixtureProperties {
+                should_succeed: true,
+                expected_overhead_ratio: Some(0.5),
+                max_encode_time_ms: Some(500),
+                max_decode_time_ms: Some(500),
+                memory_profile: MemoryProfile::Moderate,
+                cross_compat: true,
+            },
+            priority: 1,
+            expects_error: false,
+            tags: vec!["spec".to_string(), "systematic".to_string()],
+        }];
 
-        self.fixtures.insert(FixtureCategory::SpecCompliance, fixtures);
+        self.fixtures
+            .insert(FixtureCategory::SpecCompliance, fixtures);
     }
 
     /// Adds interoperability test fixtures
     fn add_interoperability_fixtures(&mut self) {
-        let fixtures = vec![
-            FixtureSpec {
-                id: "interop_standard_params".to_string(),
-                name: "Standard Parameters".to_string(),
-                category: FixtureCategory::Interoperability,
-                description: "Common parameters for cross-implementation testing".to_string(),
-                config: RoundTripConfig {
-                    source_symbols: 256,
-                    symbol_size: 1024,
-                    repair_symbols: 64,
-                    seed: 0x12345678,
-                    test_erasures: true,
-                    erasure_probability: 0.25,
-                },
-                expected_properties: FixtureProperties {
-                    should_succeed: true,
-                    expected_overhead_ratio: Some(0.25),
-                    max_encode_time_ms: Some(2000),
-                    max_decode_time_ms: Some(2000),
-                    memory_profile: MemoryProfile::Moderate,
-                    cross_compat: true,
-                },
-                priority: 2,
-                expects_error: false,
-                tags: vec!["interop".to_string(), "standard".to_string()],
+        let fixtures = vec![FixtureSpec {
+            id: "interop_standard_params".to_string(),
+            name: "Standard Parameters".to_string(),
+            category: FixtureCategory::Interoperability,
+            description: "Common parameters for cross-implementation testing".to_string(),
+            config: RoundTripConfig {
+                source_symbols: 256,
+                symbol_size: 1024,
+                repair_symbols: 64,
+                seed: 0x12345678,
+                test_erasures: true,
+                erasure_probability: 0.25,
             },
-        ];
+            expected_properties: FixtureProperties {
+                should_succeed: true,
+                expected_overhead_ratio: Some(0.25),
+                max_encode_time_ms: Some(2000),
+                max_decode_time_ms: Some(2000),
+                memory_profile: MemoryProfile::Moderate,
+                cross_compat: true,
+            },
+            priority: 2,
+            expects_error: false,
+            tags: vec!["interop".to_string(), "standard".to_string()],
+        }];
 
-        self.fixtures.insert(FixtureCategory::Interoperability, fixtures);
+        self.fixtures
+            .insert(FixtureCategory::Interoperability, fixtures);
     }
 
     // Data generation methods for different fixture categories
@@ -521,9 +544,7 @@ impl FixtureGenerator {
         self.fixtures
             .values()
             .flatten()
-            .filter(|fixture| {
-                tags.iter().any(|tag| fixture.tags.contains(tag))
-            })
+            .filter(|fixture| tags.iter().any(|tag| fixture.tags.contains(tag)))
             .collect()
     }
 
@@ -609,7 +630,9 @@ mod tests {
         let generator = FixtureGenerator::new(temp_dir.path());
 
         // Should have fixtures in all categories
-        assert!(generator.fixtures.contains_key(&FixtureCategory::BasicOperations));
+        assert!(generator
+            .fixtures
+            .contains_key(&FixtureCategory::BasicOperations));
         assert!(generator.fixtures.contains_key(&FixtureCategory::EdgeCases));
     }
 
