@@ -569,10 +569,32 @@ impl ResourceAccountingSnapshot {
         self.obligation_stats.iter().map(|s| s.reserved).sum()
     }
 
+    /// Returns the total number of obligations committed across all kinds.
+    #[must_use]
+    pub fn total_committed(&self) -> u64 {
+        self.obligation_stats.iter().map(|s| s.committed).sum()
+    }
+
+    /// Returns the total number of obligations aborted across all kinds.
+    #[must_use]
+    pub fn total_aborted(&self) -> u64 {
+        self.obligation_stats.iter().map(|s| s.aborted).sum()
+    }
+
     /// Returns the total number of obligations leaked across all kinds.
     #[must_use]
     pub fn total_leaked(&self) -> u64 {
         self.obligation_stats.iter().map(|s| s.leaked).sum()
+    }
+
+    /// Returns the total number of unresolved obligations derived from the
+    /// per-kind ledger, independent of the global pending gauge.
+    #[must_use]
+    pub fn total_pending_by_stats(&self) -> u64 {
+        self.obligation_stats
+            .iter()
+            .map(ObligationKindStats::pending)
+            .sum()
     }
 
     /// Returns the total number of admission rejections across all kinds.
@@ -581,10 +603,21 @@ impl ResourceAccountingSnapshot {
         self.admission_stats.iter().map(|s| s.rejections).sum()
     }
 
+    /// Returns true when the global pending gauge disagrees with the
+    /// per-kind ledger-derived unresolved count.
+    #[must_use]
+    pub fn has_accounting_mismatch(&self) -> bool {
+        let derived_pending = self.total_pending_by_stats();
+        match u64::try_from(self.obligations_pending) {
+            Ok(gauge_pending) => gauge_pending != derived_pending,
+            Err(_) => true,
+        }
+    }
+
     /// Returns true if any obligations remain unresolved in the snapshot.
     #[must_use]
     pub fn has_unresolved_obligations(&self) -> bool {
-        self.obligations_pending > 0
+        self.obligations_pending > 0 || self.total_pending_by_stats() > 0
     }
 
     /// Returns true if no obligations have ever leaked.
@@ -597,7 +630,7 @@ impl ResourceAccountingSnapshot {
     /// unresolved obligations still pending.
     #[must_use]
     pub fn is_cleanup_complete(&self) -> bool {
-        self.is_leak_free() && !self.has_unresolved_obligations()
+        self.is_leak_free() && !self.has_accounting_mismatch() && !self.has_unresolved_obligations()
     }
 
     /// Renders a human-readable summary.
@@ -628,6 +661,17 @@ impl ResourceAccountingSnapshot {
             out,
             "  Total pending: {}  Peak: {}",
             self.obligations_pending, self.obligations_peak
+        )
+        .ok();
+        writeln!(
+            out,
+            "  Derived pending: {}  Accounting mismatch: {}",
+            self.total_pending_by_stats(),
+            if self.has_accounting_mismatch() {
+                "yes"
+            } else {
+                "no"
+            }
         )
         .ok();
         writeln!(
@@ -870,6 +914,40 @@ mod tests {
     }
 
     #[test]
+    fn derived_pending_prevents_fail_open_cleanup_completion() {
+        let acc = ResourceAccounting::new();
+
+        acc.obligation_reserved(ObligationKind::SendPermit);
+        // Simulate a caller bug: resolving the wrong kind decrements the global
+        // gauge even though the send permit itself is still unresolved.
+        acc.obligation_aborted(ObligationKind::Ack);
+
+        let snap = acc.snapshot();
+        let send_permit = snap
+            .obligation_stats
+            .iter()
+            .find(|stats| stats.kind == ObligationKind::SendPermit)
+            .expect("send permit stats must be present");
+
+        assert_eq!(
+            snap.obligations_pending, 0,
+            "global gauge was driven to zero"
+        );
+        assert_eq!(
+            send_permit.pending(),
+            1,
+            "per-kind ledger still shows the unresolved obligation"
+        );
+        assert_eq!(snap.total_pending_by_stats(), 1);
+        assert!(snap.has_accounting_mismatch());
+        assert!(snap.has_unresolved_obligations());
+        assert!(
+            !snap.is_cleanup_complete(),
+            "cleanup must fail closed when global and per-kind accounting disagree"
+        );
+    }
+
+    #[test]
     fn obligation_kind_stats_methods() {
         let stats = ObligationKindStats {
             kind: ObligationKind::SendPermit,
@@ -933,7 +1011,21 @@ mod tests {
         assert!(summary.contains("send_permit"));
         assert!(summary.contains("Task"));
         assert!(summary.contains("Poll consumed"));
+        assert!(summary.contains("Accounting mismatch: no"));
         assert!(summary.contains("Cleanup complete: yes"));
+    }
+
+    #[test]
+    fn snapshot_summary_reports_accounting_mismatch() {
+        let acc = ResourceAccounting::new();
+        acc.obligation_reserved(ObligationKind::Lease);
+        acc.obligation_committed(ObligationKind::Ack);
+
+        let summary = acc.snapshot().summary();
+
+        assert!(summary.contains("Derived pending: 1"));
+        assert!(summary.contains("Accounting mismatch: yes"));
+        assert!(summary.contains("Cleanup complete: no"));
     }
 
     #[test]
