@@ -6,6 +6,8 @@
 pub mod aggregator;
 pub mod error;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod half_close_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod mock;
 pub mod router;
 pub mod sink;
