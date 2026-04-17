@@ -13,14 +13,18 @@
 
 #[cfg(feature = "deterministic-mode")]
 mod trace_replay_idempotency_metamorphic_tests {
-    use asupersync::trace::file::{TraceWriter, TraceReader, TraceFileConfig, CompressionMode, TraceFileError};
-    use asupersync::trace::replay::{ReplayEvent, TraceMetadata, CompactTaskId, CompactRegionId, REPLAY_SCHEMA_VERSION};
-    use asupersync::trace::recorder::{TraceRecorder, LimitAction};
-    use asupersync::trace::replayer::TraceReplayer;
-    use asupersync::lab::runtime::LabRuntime;
-    use asupersync::lab::config::LabConfig;
-    use asupersync::types::{Budget, RegionId, TaskId, Time};
     use asupersync::cx::Cx;
+    use asupersync::lab::config::LabConfig;
+    use asupersync::lab::runtime::LabRuntime;
+    use asupersync::trace::file::{
+        CompressionMode, TraceFileConfig, TraceFileError, TraceReader, TraceWriter,
+    };
+    use asupersync::trace::recorder::{LimitAction, TraceRecorder};
+    use asupersync::trace::replay::{
+        CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata,
+    };
+    use asupersync::trace::replayer::TraceReplayer;
+    use asupersync::types::{Budget, RegionId, TaskId, Time};
     use asupersync::util::ArenaIndex;
     use proptest::prelude::*;
     use std::collections::HashMap;
@@ -190,7 +194,10 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Reads events from a trace file.
-        fn read_trace_file(&self, path: &PathBuf) -> Result<(TraceMetadata, Vec<ReplayEvent>), TraceFileError> {
+        fn read_trace_file(
+            &self,
+            path: &PathBuf,
+        ) -> Result<(TraceMetadata, Vec<ReplayEvent>), TraceFileError> {
             let reader = TraceReader::open(path)?;
             let metadata = reader.metadata().clone();
             let events: Result<Vec<_>, _> = reader.events().collect();
@@ -234,7 +241,8 @@ mod trace_replay_idempotency_metamorphic_tests {
             match test_result {
                 Ok(()) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_replay_fidelity".to_string(),
-                    description: "replay(record(execution)) ≡ execution for deterministic runs".to_string(),
+                    description: "replay(record(execution)) ≡ execution for deterministic runs"
+                        .to_string(),
                     category: TestCategory::ReplayFidelity,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -243,7 +251,8 @@ mod trace_replay_idempotency_metamorphic_tests {
                 },
                 Err(e) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_replay_fidelity".to_string(),
-                    description: "replay(record(execution)) ≡ execution for deterministic runs".to_string(),
+                    description: "replay(record(execution)) ≡ execution for deterministic runs"
+                        .to_string(),
                     category: TestCategory::ReplayFidelity,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -373,7 +382,9 @@ mod trace_replay_idempotency_metamorphic_tests {
             match test_result {
                 Ok(()) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_truncation_handling".to_string(),
-                    description: "trace file truncation produces loss annotation, never silent drop".to_string(),
+                    description:
+                        "trace file truncation produces loss annotation, never silent drop"
+                            .to_string(),
                     category: TestCategory::TruncationHandling,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -382,7 +393,9 @@ mod trace_replay_idempotency_metamorphic_tests {
                 },
                 Err(e) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_truncation_handling".to_string(),
-                    description: "trace file truncation produces loss annotation, never silent drop".to_string(),
+                    description:
+                        "trace file truncation produces loss annotation, never silent drop"
+                            .to_string(),
                     category: TestCategory::TruncationHandling,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -481,7 +494,8 @@ mod trace_replay_idempotency_metamorphic_tests {
             match test_result {
                 Ok(()) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_epoch_boundary_ordering".to_string(),
-                    description: "epoch boundary transitions preserve temporal ordering".to_string(),
+                    description: "epoch boundary transitions preserve temporal ordering"
+                        .to_string(),
                     category: TestCategory::EpochBoundaryOrdering,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -490,7 +504,8 @@ mod trace_replay_idempotency_metamorphic_tests {
                 },
                 Err(e) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_epoch_boundary_ordering".to_string(),
-                    description: "epoch boundary transitions preserve temporal ordering".to_string(),
+                    description: "epoch boundary transitions preserve temporal ordering"
+                        .to_string(),
                     category: TestCategory::EpochBoundaryOrdering,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -605,7 +620,8 @@ mod trace_replay_idempotency_metamorphic_tests {
             match test_result {
                 Ok(()) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_cross_region_joining".to_string(),
-                    description: "cross-region traces join correctly under concurrent regions".to_string(),
+                    description: "cross-region traces join correctly under concurrent regions"
+                        .to_string(),
                     category: TestCategory::CrossRegionJoining,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -614,7 +630,8 @@ mod trace_replay_idempotency_metamorphic_tests {
                 },
                 Err(e) => TraceReplayIdempotencyMetamorphicResult {
                     test_id: "mr_cross_region_joining".to_string(),
-                    description: "cross-region traces join correctly under concurrent regions".to_string(),
+                    description: "cross-region traces join correctly under concurrent regions"
+                        .to_string(),
                     category: TestCategory::CrossRegionJoining,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -744,7 +761,9 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: event ordering preservation under all conditions
-        fn run_event_ordering_preservation_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
+        fn run_event_ordering_preservation_relation(
+            &self,
+        ) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
             let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, event_count in 20usize..100)| {
@@ -816,7 +835,9 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: schema version compatibility checking
-        fn run_schema_version_compatibility_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
+        fn run_schema_version_compatibility_relation(
+            &self,
+        ) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
             // This is a simpler test since we can't easily create invalid schema versions
@@ -980,7 +1001,9 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: streaming vs batch read equivalence
-        fn run_streaming_vs_batch_equivalence_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
+        fn run_streaming_vs_batch_equivalence_relation(
+            &self,
+        ) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
             let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, event_count in 50usize..200)| {
@@ -1040,7 +1063,9 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: temporal causality preservation
-        fn run_temporal_causality_preservation_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
+        fn run_temporal_causality_preservation_relation(
+            &self,
+        ) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
             let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
@@ -1190,7 +1215,10 @@ mod trace_replay_idempotency_metamorphic_tests {
                     category: TestCategory::EpochBoundaryOrdering,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
-                    error_message: Some(format!("Temporal causality preservation violation: {}", e)),
+                    error_message: Some(format!(
+                        "Temporal causality preservation violation: {}",
+                        e
+                    )),
                     execution_time_ms,
                 },
             }
@@ -1210,12 +1238,18 @@ fn trace_replay_idempotency_metamorphic_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {
         println!("✓ Trace replay idempotency metamorphic test suite is available");
-        println!("✓ Covers: replay fidelity, idempotent replay, truncation handling, epoch boundary ordering, cross-region joining");
+        println!(
+            "✓ Covers: replay fidelity, idempotent replay, truncation handling, epoch boundary ordering, cross-region joining"
+        );
     }
 
     #[cfg(not(feature = "deterministic-mode"))]
     {
-        println!("⚠ Trace replay idempotency metamorphic tests require --features deterministic-mode");
-        println!("  Run with: cargo test --features deterministic-mode trace_replay_idempotency_metamorphic");
+        println!(
+            "⚠ Trace replay idempotency metamorphic tests require --features deterministic-mode"
+        );
+        println!(
+            "  Run with: cargo test --features deterministic-mode trace_replay_idempotency_metamorphic"
+        );
     }
 }

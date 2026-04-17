@@ -177,8 +177,15 @@ impl MySqlStmtConformanceHarness {
         self.results.clone()
     }
 
-    fn record_result(&mut self, test_id: &str, description: &str, category: TestCategory,
-                    requirement: RequirementLevel, verdict: TestVerdict, notes: Option<String>) {
+    fn record_result(
+        &mut self,
+        test_id: &str,
+        description: &str,
+        category: TestCategory,
+        requirement: RequirementLevel,
+        verdict: TestVerdict,
+        notes: Option<String>,
+    ) {
         self.results.push(MySqlStmtConformanceResult {
             test_id: test_id.to_string(),
             description: description.to_string(),
@@ -205,16 +212,27 @@ impl MySqlStmtConformanceHarness {
             packet.extend_from_slice(sql.as_bytes());
 
             // Verify packet format
-            assert_eq!(packet[0], 0x16, "Command byte must be 0x16 for COM_STMT_PREPARE");
+            assert_eq!(
+                packet[0], 0x16,
+                "Command byte must be 0x16 for COM_STMT_PREPARE"
+            );
 
             let stmt_text = std::str::from_utf8(&packet[1..]).unwrap();
             assert_eq!(stmt_text, sql, "Statement text must match original SQL");
 
             // Verify no null terminator (unlike COM_QUERY)
-            assert_ne!(packet[packet.len() - 1], 0, "COM_STMT_PREPARE should not null-terminate SQL");
+            assert_ne!(
+                packet[packet.len() - 1],
+                0,
+                "COM_STMT_PREPARE should not null-terminate SQL"
+            );
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-001",
             "COM_STMT_PREPARE packet format MUST follow wire protocol",
@@ -254,7 +272,8 @@ impl MySqlStmtConformanceHarness {
             // Verify response structure
             assert_eq!(response[0], 0x00, "Prepare OK must start with 0x00");
 
-            let parsed_stmt_id = u32::from_le_bytes([response[1], response[2], response[3], response[4]]);
+            let parsed_stmt_id =
+                u32::from_le_bytes([response[1], response[2], response[3], response[4]]);
             assert_eq!(parsed_stmt_id, stmt_id, "Statement ID must match");
 
             let parsed_cols = u16::from_le_bytes([response[5], response[6]]);
@@ -269,7 +288,11 @@ impl MySqlStmtConformanceHarness {
             assert_eq!(parsed_warnings, warning_count, "Warning count must match");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-002",
             "COM_STMT_PREPARE_OK response MUST follow specification",
@@ -326,19 +349,34 @@ impl MySqlStmtConformanceHarness {
             let parsed_stmt_id = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
             assert_eq!(parsed_stmt_id, stmt_id, "Statement ID must match");
 
-            assert_eq!(packet[5], CursorType::ReadOnly as u8, "Cursor flags must match");
+            assert_eq!(
+                packet[5],
+                CursorType::ReadOnly as u8,
+                "Cursor flags must match"
+            );
 
-            let parsed_iterations = u32::from_le_bytes([packet[6], packet[7], packet[8], packet[9]]);
-            assert_eq!(parsed_iterations, iteration_count, "Iteration count must be 1");
+            let parsed_iterations =
+                u32::from_le_bytes([packet[6], packet[7], packet[8], packet[9]]);
+            assert_eq!(
+                parsed_iterations, iteration_count,
+                "Iteration count must be 1"
+            );
 
             // Verify NULL bitmap
-            assert_eq!(packet[10], 0x01, "NULL bitmap must indicate first param is NULL");
+            assert_eq!(
+                packet[10], 0x01,
+                "NULL bitmap must indicate first param is NULL"
+            );
 
             // Verify new types flag
             assert_eq!(packet[11], 0x01, "New parameter types flag must be set");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-003",
             "COM_STMT_EXECUTE packet format MUST be compliant",
@@ -362,13 +400,21 @@ impl MySqlStmtConformanceHarness {
 
             // Verify packet structure
             assert_eq!(packet[0], 0x19, "Command must be COM_STMT_CLOSE");
-            assert_eq!(packet.len(), 5, "COM_STMT_CLOSE packet must be exactly 5 bytes");
+            assert_eq!(
+                packet.len(),
+                5,
+                "COM_STMT_CLOSE packet must be exactly 5 bytes"
+            );
 
             let parsed_stmt_id = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
             assert_eq!(parsed_stmt_id, stmt_id, "Statement ID must match");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-004",
             "COM_STMT_CLOSE packet format MUST be correct",
@@ -423,7 +469,11 @@ impl MySqlStmtConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-005",
             "Parameter type signaling MUST use correct MYSQL_TYPE codes",
@@ -465,7 +515,11 @@ impl MySqlStmtConformanceHarness {
             assert_eq!(MySqlType::Geometry as u8, 0xFF);
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-006",
             "MYSQL_TYPE codes MUST match specification exactly",
@@ -519,7 +573,11 @@ impl MySqlStmtConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-007",
             "Unsigned flag handling MUST be correct for integer types",
@@ -534,22 +592,30 @@ impl MySqlStmtConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test length encoding for variable-length parameters
             let test_cases = vec![
-                (250, vec![250]),                           // Short length
-                (251, vec![252, 251, 0]),                   // Medium length (3-byte)
-                (65535, vec![252, 255, 255]),               // Medium length max
-                (65536, vec![253, 0, 0, 1, 0, 0, 0, 0]),     // Long length (8-byte)
+                (250, vec![250]),                        // Short length
+                (251, vec![252, 251, 0]),                // Medium length (3-byte)
+                (65535, vec![252, 255, 255]),            // Medium length max
+                (65536, vec![253, 0, 0, 1, 0, 0, 0, 0]), // Long length (8-byte)
             ];
 
             for (length, expected_encoding) in test_cases {
                 let encoded = encode_length_encoded_integer(length);
-                assert_eq!(encoded, expected_encoding, "Length encoding failed for {}", length);
+                assert_eq!(
+                    encoded, expected_encoding,
+                    "Length encoding failed for {}",
+                    length
+                );
 
                 let decoded = decode_length_encoded_integer(&encoded).0;
                 assert_eq!(decoded, length, "Length decoding failed for {}", length);
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-008",
             "Parameter length encoding MUST follow MySQL specification",
@@ -566,16 +632,20 @@ impl MySqlStmtConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test NULL bitmap encoding per Section 16.6.4.2
             let test_cases = vec![
-                (1, vec![0b00000001]), // 1 param, NULL
-                (1, vec![0b00000000]), // 1 param, not NULL
-                (8, vec![0b11111111]), // 8 params, all NULL
-                (9, vec![0b11111111, 0b00000001]), // 9 params, all NULL
+                (1, vec![0b00000001]),              // 1 param, NULL
+                (1, vec![0b00000000]),              // 1 param, not NULL
+                (8, vec![0b11111111]),              // 8 params, all NULL
+                (9, vec![0b11111111, 0b00000001]),  // 9 params, all NULL
                 (16, vec![0b10101010, 0b01010101]), // 16 params, alternating
             ];
 
             for (param_count, expected_bitmap) in test_cases {
                 let bitmap_len = (param_count + 7) / 8;
-                assert_eq!(expected_bitmap.len(), bitmap_len, "Bitmap length calculation failed");
+                assert_eq!(
+                    expected_bitmap.len(),
+                    bitmap_len,
+                    "Bitmap length calculation failed"
+                );
 
                 // Test bit setting/getting
                 for param_idx in 0..param_count {
@@ -590,7 +660,11 @@ impl MySqlStmtConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-009",
             "NULL bitmap encoding MUST follow Section 16.6.4.2",
@@ -605,24 +679,35 @@ impl MySqlStmtConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test NULL bitmap length calculation formula
             let test_cases = vec![
-                (0, 0),   // 0 parameters
-                (1, 1),   // 1 parameter
-                (7, 1),   // 7 parameters
-                (8, 1),   // 8 parameters
-                (9, 2),   // 9 parameters
-                (15, 2),  // 15 parameters
-                (16, 2),  // 16 parameters
-                (17, 3),  // 17 parameters
+                (0, 0),  // 0 parameters
+                (1, 1),  // 1 parameter
+                (7, 1),  // 7 parameters
+                (8, 1),  // 8 parameters
+                (9, 2),  // 9 parameters
+                (15, 2), // 15 parameters
+                (16, 2), // 16 parameters
+                (17, 3), // 17 parameters
             ];
 
             for (param_count, expected_len) in test_cases {
-                let calculated_len = if param_count == 0 { 0 } else { (param_count + 7) / 8 };
-                assert_eq!(calculated_len, expected_len,
-                    "NULL bitmap length calculation failed for {} parameters", param_count);
+                let calculated_len = if param_count == 0 {
+                    0
+                } else {
+                    (param_count + 7) / 8
+                };
+                assert_eq!(
+                    calculated_len, expected_len,
+                    "NULL bitmap length calculation failed for {} parameters",
+                    param_count
+                );
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-010",
             "NULL bitmap length calculation MUST be correct",
@@ -659,7 +744,11 @@ impl MySqlStmtConformanceHarness {
             assert_eq!(bitmap[1], 0x81); // bits 0 and 7 set: 0b10000001 = 0x81
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-011",
             "NULL bitmap bit ordering MUST follow LSB-first convention",
@@ -694,11 +783,19 @@ impl MySqlStmtConformanceHarness {
                 let byte_idx = param_idx / 8;
                 let bit_idx = param_idx % 8;
                 let is_null = (bitmap[byte_idx] & (1 << bit_idx)) != 0;
-                assert_eq!(is_null, *expected_null, "NULL status mismatch for parameter {}", param_idx);
+                assert_eq!(
+                    is_null, *expected_null,
+                    "NULL status mismatch for parameter {}",
+                    param_idx
+                );
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-012",
             "Mixed NULL/non-NULL parameters MUST be handled correctly",
@@ -727,7 +824,8 @@ impl MySqlStmtConformanceHarness {
             packet.extend_from_slice(&param_index.to_le_bytes());
 
             // Data chunk
-            let data_chunk = b"This is a large text data chunk that exceeds normal parameter size limits";
+            let data_chunk =
+                b"This is a large text data chunk that exceeds normal parameter size limits";
             packet.extend_from_slice(data_chunk);
 
             // Verify packet structure
@@ -745,7 +843,11 @@ impl MySqlStmtConformanceHarness {
             assert!(parsed_data.len() > 60, "Should handle large data chunks");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-013",
             "COM_STMT_SEND_LONG_DATA packet format MUST be correct",
@@ -778,18 +880,28 @@ impl MySqlStmtConformanceHarness {
                 packet.extend_from_slice(chunk);
 
                 // Verify chunk
-                assert!(chunk.len() <= chunk_size, "Chunk size must not exceed limit");
+                assert!(
+                    chunk.len() <= chunk_size,
+                    "Chunk size must not exceed limit"
+                );
                 assert!(!chunk.is_empty(), "Chunk must not be empty");
 
                 chunks_sent += 1;
                 offset = end;
             }
 
-            assert_eq!(chunks_sent, expected_chunks, "Number of chunks must match calculation");
+            assert_eq!(
+                chunks_sent, expected_chunks,
+                "Number of chunks must match calculation"
+            );
             assert!(chunks_sent > 1, "Large data should require multiple chunks");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-014",
             "Long data chunking MUST handle large data correctly",
@@ -832,7 +944,11 @@ impl MySqlStmtConformanceHarness {
             assert!(packet1 != packet2, "Packets should be different");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-015",
             "Long data parameters MUST be reset between executions",
@@ -868,11 +984,19 @@ impl MySqlStmtConformanceHarness {
             for (cursor_type, description) in test_cases {
                 let packet = create_execute_packet(1234, cursor_type);
                 assert_eq!(packet[0], 0x17, "Must be COM_STMT_EXECUTE");
-                assert_eq!(packet[5], cursor_type as u8, "Cursor type must match for {}", description);
+                assert_eq!(
+                    packet[5], cursor_type as u8,
+                    "Cursor type must match for {}",
+                    description
+                );
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-016",
             "Cursor type flags MUST be correctly encoded",
@@ -904,7 +1028,11 @@ impl MySqlStmtConformanceHarness {
             assert!(!is_for_update, "For-update flag must not be set");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-017",
             "CURSOR_TYPE_READ_ONLY MUST be handled correctly",
@@ -940,7 +1068,11 @@ impl MySqlStmtConformanceHarness {
             assert!(is_read_only, "Read-only flag must also be set");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-018",
             "Scrollable cursor behavior MUST be correct",
@@ -992,13 +1124,19 @@ impl MySqlStmtConformanceHarness {
             // Verify non-NULL column values can be parsed
             let values_start = bitmap_start + null_bitmap_len;
             let parsed_col0 = i32::from_le_bytes([
-                row[values_start], row[values_start + 1],
-                row[values_start + 2], row[values_start + 3]
+                row[values_start],
+                row[values_start + 1],
+                row[values_start + 2],
+                row[values_start + 3],
             ]);
             assert_eq!(parsed_col0, col0_value, "Column 0 value must match");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-019",
             "Binary result set format MUST follow specification",
@@ -1015,7 +1153,10 @@ impl MySqlStmtConformanceHarness {
             let column_count = 10;
             let null_bitmap_len = (column_count + 7 + 2) / 8; // +2 offset for binary rows
 
-            assert_eq!(null_bitmap_len, 2, "Should need 2 bytes for 10 columns + 2 offset");
+            assert_eq!(
+                null_bitmap_len, 2,
+                "Should need 2 bytes for 10 columns + 2 offset"
+            );
 
             // Test various NULL patterns
             let test_patterns = vec![
@@ -1048,14 +1189,21 @@ impl MySqlStmtConformanceHarness {
 
                     if byte_idx < bitmap.len() {
                         let is_null = (bitmap[byte_idx] & (1 << bit_pos)) != 0;
-                        assert_eq!(is_null, *expected_null,
-                            "NULL status mismatch for column {}", col_idx);
+                        assert_eq!(
+                            is_null, *expected_null,
+                            "NULL status mismatch for column {}",
+                            col_idx
+                        );
                     }
                 }
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-020",
             "Binary row NULL bitmap MUST handle +2 offset correctly",
@@ -1073,9 +1221,15 @@ impl MySqlStmtConformanceHarness {
                 (MySqlType::Tiny, 255i8.to_le_bytes().to_vec()),
                 (MySqlType::Short, 65535i16.to_le_bytes().to_vec()),
                 (MySqlType::Long, 2147483647i32.to_le_bytes().to_vec()),
-                (MySqlType::LongLong, 9223372036854775807i64.to_le_bytes().to_vec()),
+                (
+                    MySqlType::LongLong,
+                    9223372036854775807i64.to_le_bytes().to_vec(),
+                ),
                 (MySqlType::Float, 3.14f32.to_le_bytes().to_vec()),
-                (MySqlType::Double, 3.141592653589793f64.to_le_bytes().to_vec()),
+                (
+                    MySqlType::Double,
+                    3.141592653589793f64.to_le_bytes().to_vec(),
+                ),
             ];
 
             for (mysql_type, expected_bytes) in test_values {
@@ -1091,7 +1245,10 @@ impl MySqlStmtConformanceHarness {
                 }
 
                 // All multi-byte values should use little-endian encoding
-                assert!(!expected_bytes.is_empty(), "Encoded value must not be empty");
+                assert!(
+                    !expected_bytes.is_empty(),
+                    "Encoded value must not be empty"
+                );
             }
 
             // Test string encoding (length-encoded)
@@ -1102,7 +1259,11 @@ impl MySqlStmtConformanceHarness {
             assert_eq!(&encoded_string[1..], test_string);
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-021",
             "Binary value encoding MUST use correct formats",
@@ -1117,19 +1278,27 @@ impl MySqlStmtConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test length-encoded values in binary result sets
             let test_cases = vec![
-                (b"", vec![0x00]),                           // Empty string
-                (b"a", vec![0x01, b'a']),                     // Single char
+                (b"", vec![0x00]),                                    // Empty string
+                (b"a", vec![0x01, b'a']),                             // Single char
                 (b"hello", vec![0x05, b'h', b'e', b'l', b'l', b'o']), // Short string
             ];
 
             for (input, expected) in test_cases {
                 let encoded = encode_length_encoded_string(input);
-                assert_eq!(encoded, expected, "Length-encoded string failed for: {:?}",
-                    std::str::from_utf8(input).unwrap_or("<invalid utf8>"));
+                assert_eq!(
+                    encoded,
+                    expected,
+                    "Length-encoded string failed for: {:?}",
+                    std::str::from_utf8(input).unwrap_or("<invalid utf8>")
+                );
 
                 let (decoded, bytes_read) = decode_length_encoded_string(&encoded);
-                assert_eq!(decoded, input, "Decode failed for: {:?}",
-                    std::str::from_utf8(input).unwrap_or("<invalid utf8>"));
+                assert_eq!(
+                    decoded,
+                    input,
+                    "Decode failed for: {:?}",
+                    std::str::from_utf8(input).unwrap_or("<invalid utf8>")
+                );
                 assert_eq!(bytes_read, encoded.len(), "Bytes read mismatch");
             }
 
@@ -1138,13 +1307,20 @@ impl MySqlStmtConformanceHarness {
             let encoded_long = encode_length_encoded_string(&long_string);
 
             // Should use 3-byte length encoding: 252 + 2 bytes length + data
-            assert_eq!(encoded_long[0], 252, "Long string should use 3-byte length encoding");
+            assert_eq!(
+                encoded_long[0], 252,
+                "Long string should use 3-byte length encoding"
+            );
             assert_eq!(encoded_long[1], 44, "Length LSB should be 44 (300 & 0xFF)");
             assert_eq!(encoded_long[2], 1, "Length MSB should be 1 (300 >> 8)");
             assert_eq!(&encoded_long[3..], &long_string[..], "Data should match");
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-022",
             "Length-encoded values MUST be handled correctly",
@@ -1166,24 +1342,46 @@ impl MySqlStmtConformanceHarness {
             let close_packet = create_close_packet(invalid_stmt_id);
 
             // Verify packets are formed correctly even with invalid ID
-            assert_eq!(execute_packet[0], 0x17, "Execute packet command must be correct");
-            assert_eq!(close_packet[0], 0x19, "Close packet command must be correct");
+            assert_eq!(
+                execute_packet[0], 0x17,
+                "Execute packet command must be correct"
+            );
+            assert_eq!(
+                close_packet[0], 0x19,
+                "Close packet command must be correct"
+            );
 
             let parsed_exec_id = u32::from_le_bytes([
-                execute_packet[1], execute_packet[2], execute_packet[3], execute_packet[4]
+                execute_packet[1],
+                execute_packet[2],
+                execute_packet[3],
+                execute_packet[4],
             ]);
-            assert_eq!(parsed_exec_id, invalid_stmt_id, "Execute packet ID must match");
+            assert_eq!(
+                parsed_exec_id, invalid_stmt_id,
+                "Execute packet ID must match"
+            );
 
             let parsed_close_id = u32::from_le_bytes([
-                close_packet[1], close_packet[2], close_packet[3], close_packet[4]
+                close_packet[1],
+                close_packet[2],
+                close_packet[3],
+                close_packet[4],
             ]);
-            assert_eq!(parsed_close_id, invalid_stmt_id, "Close packet ID must match");
+            assert_eq!(
+                parsed_close_id, invalid_stmt_id,
+                "Close packet ID must match"
+            );
 
             // Server should respond with error for invalid statement ID
             // This is server behavior, client just sends valid packet format
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-023",
             "Invalid statement ID handling MUST follow protocol",
@@ -1231,10 +1429,17 @@ impl MySqlStmtConformanceHarness {
             let actual_param_count = (types_end - types_start) / 2; // 2 bytes per parameter
 
             assert_eq!(actual_param_count, provided_param_count);
-            assert_ne!(actual_param_count, expected_param_count, "Should detect mismatch");
+            assert_ne!(
+                actual_param_count, expected_param_count,
+                "Should detect mismatch"
+            );
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-024",
             "Parameter count mismatch MUST be detectable",
@@ -1255,7 +1460,10 @@ impl MySqlStmtConformanceHarness {
 
             // Verify packet structure is valid despite invalid flags
             assert_eq!(packet[0], 0x17, "Command must be COM_STMT_EXECUTE");
-            assert_eq!(packet[5], invalid_cursor_flags, "Flags must be preserved in packet");
+            assert_eq!(
+                packet[5], invalid_cursor_flags,
+                "Flags must be preserved in packet"
+            );
 
             // Check individual flag bits
             let flags = packet[5];
@@ -1274,7 +1482,11 @@ impl MySqlStmtConformanceHarness {
             // Client responsibility is to send valid packet format only
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-STMT-025",
             "Invalid cursor type MUST be handled properly",
@@ -1323,23 +1535,28 @@ fn decode_length_encoded_integer(data: &[u8]) -> (u64, usize) {
         0..=250 => (data[0] as u64, 1),
         251 => (0, 1), // NULL value
         252 => {
-            if data.len() < 3 { return (0, 1); }
+            if data.len() < 3 {
+                return (0, 1);
+            }
             let value = u16::from_le_bytes([data[1], data[2]]) as u64;
             (value, 3)
-        },
+        }
         253 => {
-            if data.len() < 4 { return (0, 1); }
+            if data.len() < 4 {
+                return (0, 1);
+            }
             let value = u32::from_le_bytes([data[1], data[2], data[3], 0]) as u64;
             (value, 4)
-        },
+        }
         254 => {
-            if data.len() < 9 { return (0, 1); }
+            if data.len() < 9 {
+                return (0, 1);
+            }
             let value = u64::from_le_bytes([
-                data[1], data[2], data[3], data[4],
-                data[5], data[6], data[7], data[8]
+                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
             ]);
             (value, 9)
-        },
+        }
         255 => (0, 1), // Reserved
     }
 }
@@ -1417,7 +1634,10 @@ mod tests {
 
         // Verify we have comprehensive coverage
         assert!(!results.is_empty(), "Should have conformance test results");
-        assert!(results.len() >= 25, "Should have at least 25 tests for comprehensive coverage");
+        assert!(
+            results.len() >= 25,
+            "Should have at least 25 tests for comprehensive coverage"
+        );
 
         // Check categories are covered
         let categories: std::collections::HashSet<_> =
@@ -1432,15 +1652,21 @@ mod tests {
         assert!(categories.contains(&TestCategory::ErrorHandling));
 
         // All MUST requirements should pass
-        let must_failures: Vec<_> = results.iter()
-            .filter(|r| r.requirement_level == RequirementLevel::Must && r.verdict == TestVerdict::Fail)
+        let must_failures: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                r.requirement_level == RequirementLevel::Must && r.verdict == TestVerdict::Fail
+            })
             .collect();
 
         if !must_failures.is_empty() {
             panic!("MUST requirements failed: {:#?}", must_failures);
         }
 
-        println!("✅ MySQL prepared statement conformance: {} tests passed", results.len());
+        println!(
+            "✅ MySQL prepared statement conformance: {} tests passed",
+            results.len()
+        );
     }
 
     #[test]

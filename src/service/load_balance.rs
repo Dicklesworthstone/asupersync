@@ -2199,15 +2199,27 @@ mod tests {
             let loads = lb.loads();
             let strategy = lb.strategy();
             let selected = strategy.pick(&loads).expect("should pick a backend");
-            assert_eq!(selected, 0, "pick_first should always select primary backend on iteration {i}");
+            assert_eq!(
+                selected, 0,
+                "pick_first should always select primary backend on iteration {i}"
+            );
         }
 
         // Verify only the first backend is permitted
         let loads = lb.loads();
         let strategy = lb.strategy();
-        assert!(strategy.permits_index(0, &loads), "should permit index 0 (primary)");
-        assert!(!strategy.permits_index(1, &loads), "should not permit index 1 (secondary)");
-        assert!(!strategy.permits_index(2, &loads), "should not permit index 2 (tertiary)");
+        assert!(
+            strategy.permits_index(0, &loads),
+            "should permit index 0 (primary)"
+        );
+        assert!(
+            !strategy.permits_index(1, &loads),
+            "should not permit index 1 (secondary)"
+        );
+        assert!(
+            !strategy.permits_index(2, &loads),
+            "should not permit index 2 (tertiary)"
+        );
 
         crate::test_complete!("grpc_pick_first_sticks_to_primary_until_fail");
     }
@@ -2240,12 +2252,18 @@ mod tests {
 
         // Each backend should get exactly 25 requests (100/4)
         for (i, count) in distribution.iter().enumerate() {
-            assert_eq!(*count, 25, "backend {i} should receive exactly 25 requests, got {count}");
+            assert_eq!(
+                *count, 25,
+                "backend {i} should receive exactly 25 requests, got {count}"
+            );
         }
 
         // Verify all indices are permitted
         for i in 0..4 {
-            assert!(strategy.permits_index(i, &loads), "backend {i} should be permitted");
+            assert!(
+                strategy.permits_index(i, &loads),
+                "backend {i} should be permitted"
+            );
         }
 
         crate::test_complete!("grpc_round_robin_even_distribution_steady_endpoints");
@@ -2276,7 +2294,9 @@ mod tests {
 
         // Verify new backend is immediately usable in routing decisions
         let strategy = lb.strategy();
-        let selections = (0..6).map(|_| strategy.pick(&loads).unwrap()).collect::<Vec<_>>();
+        let selections = (0..6)
+            .map(|_| strategy.pick(&loads).unwrap())
+            .collect::<Vec<_>>();
 
         // Should cycle through all 3 backends: [0,1,2,0,1,2]
         assert_eq!(selections, vec![0, 1, 2, 0, 1, 2]);
@@ -2291,7 +2311,9 @@ mod tests {
         assert_eq!(loads.len(), 2);
 
         // Verify routing adapts immediately (only indices 0,1 now valid)
-        let selections = (0..4).map(|_| strategy.pick(&loads).unwrap()).collect::<Vec<_>>();
+        let selections = (0..4)
+            .map(|_| strategy.pick(&loads).unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(selections, vec![0, 1, 0, 1]);
 
         crate::test_complete!("grpc_endpoint_add_remove_atomic_routing_update");
@@ -2302,10 +2324,7 @@ mod tests {
         init_test("grpc_cancel_in_flight_preserves_pending_semantics");
 
         // Use a service that tracks readiness state
-        let lb = LoadBalancer::new(
-            RoundRobin::new(),
-            vec![ReadyArmService::new(42)],
-        );
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![ReadyArmService::new(42)]);
 
         // Start a request
         let mut fut = lb
@@ -2362,8 +2381,10 @@ mod tests {
 
             // Verify round-robin pattern: 0,1,2,0,1,2,...
             let expected_backend = i % 3;
-            assert_eq!(selected, expected_backend,
-                "iteration {i}: expected backend {expected_backend}, got {selected}");
+            assert_eq!(
+                selected, expected_backend,
+                "iteration {i}: expected backend {expected_backend}, got {selected}"
+            );
         }
 
         // Verify expected distribution (4 requests per backend)
@@ -2406,8 +2427,16 @@ mod tests {
         init_test("grpc_pick_first_vs_round_robin_deterministic_behavior");
 
         // Create identical backend sets for comparison
-        let backends_pf = vec![MockService::new(1), MockService::new(2), MockService::new(3)];
-        let backends_rr = vec![MockService::new(1), MockService::new(2), MockService::new(3)];
+        let backends_pf = vec![
+            MockService::new(1),
+            MockService::new(2),
+            MockService::new(3),
+        ];
+        let backends_rr = vec![
+            MockService::new(1),
+            MockService::new(2),
+            MockService::new(3),
+        ];
 
         let lb_pick_first = LoadBalancer::new(PickFirst::new(), backends_pf);
         let lb_round_robin = LoadBalancer::new(RoundRobin::new(), backends_rr);
@@ -2418,13 +2447,21 @@ mod tests {
         let pf_selections: Vec<usize> = (0..10)
             .map(|_| lb_pick_first.strategy().pick(&loads).unwrap())
             .collect();
-        assert_eq!(pf_selections, vec![0; 10], "pick_first should always select backend 0");
+        assert_eq!(
+            pf_selections,
+            vec![0; 10],
+            "pick_first should always select backend 0"
+        );
 
         // RoundRobin should be deterministic in cycling pattern
         let rr_selections: Vec<usize> = (0..9)
             .map(|_| lb_round_robin.strategy().pick(&loads).unwrap())
             .collect();
-        assert_eq!(rr_selections, vec![0,1,2,0,1,2,0,1,2], "round_robin should cycle deterministically");
+        assert_eq!(
+            rr_selections,
+            vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+            "round_robin should cycle deterministically"
+        );
 
         crate::test_complete!("grpc_pick_first_vs_round_robin_deterministic_behavior");
     }

@@ -54,7 +54,12 @@ pub struct RecordBatchV2 {
 
 impl RecordBatchV2 {
     /// Create a new RecordBatch v2.
-    pub fn new(base_offset: i64, producer_id: i64, producer_epoch: i16, base_sequence: i32) -> Self {
+    pub fn new(
+        base_offset: i64,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+    ) -> Self {
         Self {
             base_offset,
             batch_length: 0, // Will be calculated during encoding
@@ -297,26 +302,26 @@ impl KafkaConformanceHarness {
         let batch_length = 49 + records_data.len(); // Fixed header is 49 bytes after base_offset
 
         // Encode fixed header
-        buf.extend_from_slice(&batch.base_offset.to_be_bytes());      // 8 bytes
+        buf.extend_from_slice(&batch.base_offset.to_be_bytes()); // 8 bytes
         buf.extend_from_slice(&(batch_length as i32).to_be_bytes()); // 4 bytes
         buf.extend_from_slice(&batch.partition_leader_epoch.to_be_bytes()); // 4 bytes
-        buf.push(batch.magic as u8);                                  // 1 byte
+        buf.push(batch.magic as u8); // 1 byte
 
         // Reserve space for CRC32 (will calculate after)
         let crc_offset = buf.len();
-        buf.extend_from_slice(&0u32.to_be_bytes());                  // 4 bytes
+        buf.extend_from_slice(&0u32.to_be_bytes()); // 4 bytes
 
         let crc_start = buf.len();
 
         // Encode attributes and remaining header
         buf.extend_from_slice(&batch.last_offset_delta.to_be_bytes()); // 4 bytes
-        buf.extend_from_slice(&batch.first_timestamp.to_be_bytes());   // 8 bytes
-        buf.extend_from_slice(&batch.max_timestamp.to_be_bytes());     // 8 bytes
-        buf.extend_from_slice(&batch.producer_id.to_be_bytes());       // 8 bytes
-        buf.extend_from_slice(&batch.producer_epoch.to_be_bytes());    // 2 bytes
-        buf.extend_from_slice(&batch.base_sequence.to_be_bytes());     // 4 bytes
-        buf.extend_from_slice(&batch.record_count.to_be_bytes());      // 4 bytes
-        buf.push(batch.attributes.as_u8());                           // 1 byte
+        buf.extend_from_slice(&batch.first_timestamp.to_be_bytes()); // 8 bytes
+        buf.extend_from_slice(&batch.max_timestamp.to_be_bytes()); // 8 bytes
+        buf.extend_from_slice(&batch.producer_id.to_be_bytes()); // 8 bytes
+        buf.extend_from_slice(&batch.producer_epoch.to_be_bytes()); // 2 bytes
+        buf.extend_from_slice(&batch.base_sequence.to_be_bytes()); // 4 bytes
+        buf.extend_from_slice(&batch.record_count.to_be_bytes()); // 4 bytes
+        buf.push(batch.attributes.as_u8()); // 1 byte
 
         // Add records
         buf.extend_from_slice(&records_data);
@@ -401,18 +406,30 @@ impl KafkaConformanceHarness {
 
         // Decode fixed header
         let base_offset = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
         let batch_length = i32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
         let partition_leader_epoch = i32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
@@ -424,55 +441,88 @@ impl KafkaConformanceHarness {
         }
 
         let crc = u32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
         // Validate CRC32
         let calculated_crc = crc32fast::hash(&data[offset..]);
         if crc != calculated_crc {
-            return Err(format!("CRC mismatch: got {}, expected {}", calculated_crc, crc));
+            return Err(format!(
+                "CRC mismatch: got {}, expected {}",
+                calculated_crc, crc
+            ));
         }
 
         let last_offset_delta = i32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
         let first_timestamp = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
         let max_timestamp = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
         let producer_id = i64::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         offset += 8;
 
-        let producer_epoch = i16::from_be_bytes([
-            data[offset], data[offset + 1],
-        ]);
+        let producer_epoch = i16::from_be_bytes([data[offset], data[offset + 1]]);
         offset += 2;
 
         let base_sequence = i32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
         let record_count = i32::from_be_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
         offset += 4;
 
-        let attributes = RecordAttribute { value: data[offset] };
+        let attributes = RecordAttribute {
+            value: data[offset],
+        };
         offset += 1;
 
         // Decode records
@@ -606,15 +656,11 @@ impl KafkaConformanceHarness {
 
     /// Test basic RecordBatch v2 encoding.
     fn test_basic_encoding(&self) -> ConformanceTestResult {
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
-        let record = RecordV2::new(
-            Some(b"test-key".to_vec()),
-            Some(b"test-value".to_vec()),
-        )
-        .with_timestamp_delta(0)
-        .with_offset_delta(0);
+        let record = RecordV2::new(Some(b"test-key".to_vec()), Some(b"test-value".to_vec()))
+            .with_timestamp_delta(0)
+            .with_offset_delta(0);
 
         batch.add_record(record);
 
@@ -644,7 +690,8 @@ impl KafkaConformanceHarness {
                     || decoded.record_count != 1
                     || decoded.records.len() != 1
                     || decoded.records[0].key != Some(b"test-key".to_vec())
-                    || decoded.records[0].value != Some(b"test-value".to_vec()) {
+                    || decoded.records[0].value != Some(b"test-value".to_vec())
+                {
                     return ConformanceTestResult::fail(
                         "basic_encoding".to_string(),
                         "Decoded batch does not match original".to_string(),
@@ -682,7 +729,8 @@ impl KafkaConformanceHarness {
         if attr_create.timestamp_type() != TimestampType::CreateTime
             || attr_append.timestamp_type() != TimestampType::LogAppendTime
             || (attr_create.as_u8() & 0x08) != 0
-            || (attr_append.as_u8() & 0x08) != 0x08 {
+            || (attr_append.as_u8() & 0x08) != 0x08
+        {
             return ConformanceTestResult::fail(
                 "record_attributes".to_string(),
                 "Timestamp type bit validation failed".to_string(),
@@ -696,7 +744,8 @@ impl KafkaConformanceHarness {
         if attr_false.is_transactional()
             || !attr_true.is_transactional()
             || (attr_false.as_u8() & 0x10) != 0
-            || (attr_true.as_u8() & 0x10) != 0x10 {
+            || (attr_true.as_u8() & 0x10) != 0x10
+        {
             return ConformanceTestResult::fail(
                 "record_attributes".to_string(),
                 "Transactional bit validation failed".to_string(),
@@ -710,7 +759,8 @@ impl KafkaConformanceHarness {
         if attr_false.is_control()
             || !attr_true.is_control()
             || (attr_false.as_u8() & 0x20) != 0
-            || (attr_true.as_u8() & 0x20) != 0x20 {
+            || (attr_true.as_u8() & 0x20) != 0x20
+        {
             return ConformanceTestResult::fail(
                 "record_attributes".to_string(),
                 "Control bit validation failed".to_string(),
@@ -724,8 +774,7 @@ impl KafkaConformanceHarness {
     fn test_varint_encoding(&self) -> ConformanceTestResult {
         let test_deltas = [0, 1, 127, 128, 16383, 16384, 2097151, 2097152];
 
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         for (i, &delta) in test_deltas.iter().enumerate() {
             let record = RecordV2::new(
@@ -753,8 +802,10 @@ impl KafkaConformanceHarness {
                     if decoded.records[i].timestamp_delta != expected_delta {
                         return ConformanceTestResult::fail(
                             "varint_encoding".to_string(),
-                            format!("Timestamp delta mismatch at index {}: got {}, expected {}",
-                                   i, decoded.records[i].timestamp_delta, expected_delta),
+                            format!(
+                                "Timestamp delta mismatch at index {}: got {}, expected {}",
+                                i, decoded.records[i].timestamp_delta, expected_delta
+                            ),
                         );
                     }
                 }
@@ -772,8 +823,7 @@ impl KafkaConformanceHarness {
 
     /// Test headers array encoding.
     fn test_headers_encoding(&self) -> ConformanceTestResult {
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         let record = RecordV2::new(
             Some(b"user-123".to_vec()),
@@ -817,8 +867,12 @@ impl KafkaConformanceHarness {
                     if &header.key != expected_key || &header.value != expected_value {
                         return ConformanceTestResult::fail(
                             "headers_encoding".to_string(),
-                            format!("Header {} mismatch: expected {:?}, got {:?}",
-                                   i, (expected_key, expected_value), (&header.key, &header.value)),
+                            format!(
+                                "Header {} mismatch: expected {:?}, got {:?}",
+                                i,
+                                (expected_key, expected_value),
+                                (&header.key, &header.value)
+                            ),
                         );
                     }
                 }
@@ -859,13 +913,19 @@ impl KafkaConformanceHarness {
             Ok(decoded) => {
                 if decoded.producer_id != producer_id
                     || decoded.producer_epoch != producer_epoch
-                    || decoded.base_sequence != base_sequence {
+                    || decoded.base_sequence != base_sequence
+                {
                     return ConformanceTestResult::fail(
                         "exactly_once_fields".to_string(),
-                        format!("Exactly-once fields mismatch: producer_id {} vs {}, epoch {} vs {}, sequence {} vs {}",
-                               decoded.producer_id, producer_id,
-                               decoded.producer_epoch, producer_epoch,
-                               decoded.base_sequence, base_sequence),
+                        format!(
+                            "Exactly-once fields mismatch: producer_id {} vs {}, epoch {} vs {}, sequence {} vs {}",
+                            decoded.producer_id,
+                            producer_id,
+                            decoded.producer_epoch,
+                            producer_epoch,
+                            decoded.base_sequence,
+                            base_sequence
+                        ),
                     );
                 }
             }
@@ -883,8 +943,8 @@ impl KafkaConformanceHarness {
     /// Test base_offset and last_offset_delta relationship.
     fn test_offset_relationship(&self) -> ConformanceTestResult {
         let base_offset = 1000i64;
-        let mut batch = RecordBatchV2::new(base_offset, 55555, 1, 50)
-            .with_base_timestamp(1234567890000);
+        let mut batch =
+            RecordBatchV2::new(base_offset, 55555, 1, 50).with_base_timestamp(1234567890000);
 
         // Add multiple records to test offset delta calculation
         for i in 0..10 {
@@ -902,8 +962,10 @@ impl KafkaConformanceHarness {
         if batch.last_offset_delta != 9 {
             return ConformanceTestResult::fail(
                 "offset_relationship".to_string(),
-                format!("last_offset_delta should be 9 for 10 records (0-indexed), got {}",
-                       batch.last_offset_delta),
+                format!(
+                    "last_offset_delta should be 9 for 10 records (0-indexed), got {}",
+                    batch.last_offset_delta
+                ),
             );
         }
 
@@ -913,13 +975,17 @@ impl KafkaConformanceHarness {
             Ok(decoded) => {
                 if decoded.base_offset != base_offset
                     || decoded.last_offset_delta != 9
-                    || decoded.record_count != 10 {
+                    || decoded.record_count != 10
+                {
                     return ConformanceTestResult::fail(
                         "offset_relationship".to_string(),
-                        format!("Offset relationship validation failed: base {} vs {}, last_delta {} vs 9, count {} vs 10",
-                               decoded.base_offset, base_offset,
-                               decoded.last_offset_delta,
-                               decoded.record_count),
+                        format!(
+                            "Offset relationship validation failed: base {} vs {}, last_delta {} vs 9, count {} vs 10",
+                            decoded.base_offset,
+                            base_offset,
+                            decoded.last_offset_delta,
+                            decoded.record_count
+                        ),
                     );
                 }
 
@@ -928,8 +994,10 @@ impl KafkaConformanceHarness {
                     if record.offset_delta != i as i32 {
                         return ConformanceTestResult::fail(
                             "offset_relationship".to_string(),
-                            format!("Record {} has wrong offset_delta: {} vs {}",
-                                   i, record.offset_delta, i),
+                            format!(
+                                "Record {} has wrong offset_delta: {} vs {}",
+                                i, record.offset_delta, i
+                            ),
                         );
                     }
                 }
@@ -951,19 +1019,13 @@ impl KafkaConformanceHarness {
             .with_base_timestamp(1234567890000)
             .with_attributes(RecordAttribute::new().with_transactional(true));
 
-        let record1 = RecordV2::new(
-            Some(b"key1".to_vec()),
-            Some(b"value1".to_vec()),
-        )
-        .with_timestamp_delta(0)
-        .with_offset_delta(0);
+        let record1 = RecordV2::new(Some(b"key1".to_vec()), Some(b"value1".to_vec()))
+            .with_timestamp_delta(0)
+            .with_offset_delta(0);
 
-        let record2 = RecordV2::new(
-            Some(b"key2".to_vec()),
-            Some(b"value2".to_vec()),
-        )
-        .with_timestamp_delta(100)
-        .with_offset_delta(1);
+        let record2 = RecordV2::new(Some(b"key2".to_vec()), Some(b"value2".to_vec()))
+            .with_timestamp_delta(100)
+            .with_offset_delta(1);
 
         batch.add_record(record1);
         batch.add_record(record2);
@@ -974,7 +1036,8 @@ impl KafkaConformanceHarness {
             Ok(decoded) => {
                 if !decoded.attributes.is_transactional()
                     || decoded.record_count != 2
-                    || decoded.records.len() != 2 {
+                    || decoded.records.len() != 2
+                {
                     return ConformanceTestResult::fail(
                         "transactional_batch".to_string(),
                         "Transactional attributes or record count validation failed".to_string(),
@@ -999,7 +1062,7 @@ impl KafkaConformanceHarness {
             .with_attributes(
                 RecordAttribute::new()
                     .with_transactional(true)
-                    .with_control(true)
+                    .with_control(true),
             );
 
         // Control records typically have specific key/value structures
@@ -1018,7 +1081,8 @@ impl KafkaConformanceHarness {
             Ok(decoded) => {
                 if !decoded.attributes.is_transactional()
                     || !decoded.attributes.is_control()
-                    || decoded.record_count != 1 {
+                    || decoded.record_count != 1
+                {
                     return ConformanceTestResult::fail(
                         "control_batch".to_string(),
                         "Control attributes validation failed".to_string(),
@@ -1038,8 +1102,7 @@ impl KafkaConformanceHarness {
 
     /// Test null key and value handling.
     fn test_null_key_value(&self) -> ConformanceTestResult {
-        let mut batch = RecordBatchV2::new(400, 44444, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(400, 44444, 0, 0).with_base_timestamp(1234567890000);
 
         // Record with null key and value
         let record1 = RecordV2::new(None, None)
@@ -1075,7 +1138,8 @@ impl KafkaConformanceHarness {
                 if decoded.records[0].key.is_some()
                     || decoded.records[0].value.is_some()
                     || decoded.records[0].key_length != -1
-                    || decoded.records[0].value_length != -1 {
+                    || decoded.records[0].value_length != -1
+                {
                     return ConformanceTestResult::fail(
                         "null_key_value".to_string(),
                         "Null key/value validation failed for record 0".to_string(),
@@ -1086,7 +1150,8 @@ impl KafkaConformanceHarness {
                 if decoded.records[1].key.is_some()
                     || decoded.records[1].value != Some(b"value-only".to_vec())
                     || decoded.records[1].key_length != -1
-                    || decoded.records[1].value_length != 10 {
+                    || decoded.records[1].value_length != 10
+                {
                     return ConformanceTestResult::fail(
                         "null_key_value".to_string(),
                         "Null key with value validation failed for record 1".to_string(),
@@ -1097,7 +1162,8 @@ impl KafkaConformanceHarness {
                 if decoded.records[2].key != Some(b"key-only".to_vec())
                     || decoded.records[2].value.is_some()
                     || decoded.records[2].key_length != 8
-                    || decoded.records[2].value_length != -1 {
+                    || decoded.records[2].value_length != -1
+                {
                     return ConformanceTestResult::fail(
                         "null_key_value".to_string(),
                         "Key with null value validation failed for record 2".to_string(),
@@ -1117,8 +1183,7 @@ impl KafkaConformanceHarness {
 
     /// Test CRC32 validation.
     fn test_crc32_validation(&self) -> ConformanceTestResult {
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         let record = RecordV2::new(
             Some(b"crc-test-key".to_vec()),
@@ -1164,8 +1229,7 @@ impl KafkaConformanceHarness {
 
     /// Test empty record batch.
     fn test_empty_batch(&self) -> ConformanceTestResult {
-        let batch = RecordBatchV2::new(500, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let batch = RecordBatchV2::new(500, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         // Encode and decode empty batch
         let encoded = self.encode_record_batch(&batch);
@@ -1173,7 +1237,8 @@ impl KafkaConformanceHarness {
             Ok(decoded) => {
                 if decoded.record_count != 0
                     || decoded.records.len() != 0
-                    || decoded.last_offset_delta != 0 {
+                    || decoded.last_offset_delta != 0
+                {
                     return ConformanceTestResult::fail(
                         "empty_batch".to_string(),
                         "Empty batch validation failed".to_string(),
@@ -1268,7 +1333,8 @@ fn decode_varint_unsigned(data: &[u8]) -> Result<(u64, usize), String> {
     let mut shift = 0;
     let mut bytes_read = 0;
 
-    for &byte in data.iter().take(10) { // Max 10 bytes for 64-bit varint
+    for &byte in data.iter().take(10) {
+        // Max 10 bytes for 64-bit varint
         bytes_read += 1;
         result |= ((byte & 0x7F) as u64) << shift;
 
@@ -1311,7 +1377,19 @@ mod tests {
 
     #[test]
     fn test_varint_roundtrip() {
-        let test_values = [-1, 0, 1, 127, 128, 16383, 16384, 2097151, 2097152, i64::MAX, i64::MIN];
+        let test_values = [
+            -1,
+            0,
+            1,
+            127,
+            128,
+            16383,
+            16384,
+            2097151,
+            2097152,
+            i64::MAX,
+            i64::MIN,
+        ];
 
         for &value in &test_values {
             let mut buf = Vec::new();
@@ -1357,15 +1435,11 @@ mod tests {
     fn test_basic_encoding_roundtrip() {
         let harness = KafkaConformanceHarness::new();
 
-        let mut batch = RecordBatchV2::new(100, 12345, 1, 42)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(100, 12345, 1, 42).with_base_timestamp(1234567890000);
 
-        let record = RecordV2::new(
-            Some(b"test-key".to_vec()),
-            Some(b"test-value".to_vec()),
-        )
-        .with_timestamp_delta(50)
-        .with_offset_delta(0);
+        let record = RecordV2::new(Some(b"test-key".to_vec()), Some(b"test-value".to_vec()))
+            .with_timestamp_delta(50)
+            .with_offset_delta(0);
 
         batch.add_record(record);
 

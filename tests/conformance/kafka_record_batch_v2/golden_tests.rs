@@ -18,15 +18,11 @@ mod tests {
         let harness = KafkaConformanceHarness::new();
 
         // Create a simple test batch
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
-        let record = RecordV2::new(
-            Some(b"test-key".to_vec()),
-            Some(b"test-value".to_vec()),
-        )
-        .with_timestamp_delta(0)
-        .with_offset_delta(0);
+        let record = RecordV2::new(Some(b"test-key".to_vec()), Some(b"test-value".to_vec()))
+            .with_timestamp_delta(0)
+            .with_offset_delta(0);
 
         batch.add_record(record);
 
@@ -34,11 +30,16 @@ mod tests {
         let encoded = harness.encode_record_batch(&batch);
 
         // Basic format validation
-        assert!(encoded.len() >= 61, "RecordBatch v2 must be at least 61 bytes");
+        assert!(
+            encoded.len() >= 61,
+            "RecordBatch v2 must be at least 61 bytes"
+        );
         assert_eq!(encoded[16], 2, "Magic byte must be 2 for RecordBatch v2");
 
         // Verify we can decode it back
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
         assert_eq!(decoded.magic, 2);
         assert_eq!(decoded.producer_id, 12345);
         assert_eq!(decoded.record_count, 1);
@@ -53,7 +54,12 @@ mod tests {
         // Test compression bits (0-2)
         for compression in 0..8 {
             let attr = RecordAttribute::new().with_compression(compression);
-            assert_eq!(attr.compression(), compression, "Compression bits failed for type {}", compression);
+            assert_eq!(
+                attr.compression(),
+                compression,
+                "Compression bits failed for type {}",
+                compression
+            );
         }
 
         // Test timestamp type bit (3)
@@ -89,8 +95,7 @@ mod tests {
         // Test various timestamp delta values to verify varint encoding
         let test_deltas = [0, 1, 127, 128, 16383, 16384, 2097151, 2097152];
 
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         for (i, &delta) in test_deltas.iter().enumerate() {
             let record = RecordV2::new(
@@ -105,14 +110,15 @@ mod tests {
 
         // Encode and decode
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify timestamp deltas are preserved
         assert_eq!(decoded.records.len(), test_deltas.len());
         for (i, &expected_delta) in test_deltas.iter().enumerate() {
             assert_eq!(
-                decoded.records[i].timestamp_delta,
-                expected_delta,
+                decoded.records[i].timestamp_delta, expected_delta,
                 "Timestamp delta mismatch at index {}",
                 i
             );
@@ -124,8 +130,7 @@ mod tests {
     fn test_headers_array_encoding() {
         let harness = KafkaConformanceHarness::new();
 
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         let record = RecordV2::new(
             Some(b"user-123".to_vec()),
@@ -141,7 +146,9 @@ mod tests {
 
         // Encode and decode
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify headers are preserved
         assert_eq!(decoded.records.len(), 1);
@@ -185,7 +192,9 @@ mod tests {
 
         // Encode and decode
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify exactly-once fields are preserved
         assert_eq!(decoded.producer_id, producer_id);
@@ -199,8 +208,8 @@ mod tests {
         let harness = KafkaConformanceHarness::new();
 
         let base_offset = 1000i64;
-        let mut batch = RecordBatchV2::new(base_offset, 55555, 1, 50)
-            .with_base_timestamp(1234567890000);
+        let mut batch =
+            RecordBatchV2::new(base_offset, 55555, 1, 50).with_base_timestamp(1234567890000);
 
         // Add multiple records to test offset delta calculation
         for i in 0..10 {
@@ -215,11 +224,16 @@ mod tests {
         }
 
         // Verify last_offset_delta is set correctly
-        assert_eq!(batch.last_offset_delta, 9, "last_offset_delta should be 9 for 10 records (0-indexed)");
+        assert_eq!(
+            batch.last_offset_delta, 9,
+            "last_offset_delta should be 9 for 10 records (0-indexed)"
+        );
 
         // Encode and decode
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify offset relationships are preserved
         assert_eq!(decoded.base_offset, base_offset);
@@ -228,7 +242,11 @@ mod tests {
 
         // Verify each record has the correct offset delta
         for (i, record) in decoded.records.iter().enumerate() {
-            assert_eq!(record.offset_delta, i as i32, "Record {} has wrong offset_delta", i);
+            assert_eq!(
+                record.offset_delta, i as i32,
+                "Record {} has wrong offset_delta",
+                i
+            );
         }
     }
 
@@ -241,26 +259,22 @@ mod tests {
             .with_base_timestamp(1234567890000)
             .with_attributes(RecordAttribute::new().with_transactional(true));
 
-        let record1 = RecordV2::new(
-            Some(b"key1".to_vec()),
-            Some(b"value1".to_vec()),
-        )
-        .with_timestamp_delta(0)
-        .with_offset_delta(0);
+        let record1 = RecordV2::new(Some(b"key1".to_vec()), Some(b"value1".to_vec()))
+            .with_timestamp_delta(0)
+            .with_offset_delta(0);
 
-        let record2 = RecordV2::new(
-            Some(b"key2".to_vec()),
-            Some(b"value2".to_vec()),
-        )
-        .with_timestamp_delta(100)
-        .with_offset_delta(1);
+        let record2 = RecordV2::new(Some(b"key2".to_vec()), Some(b"value2".to_vec()))
+            .with_timestamp_delta(100)
+            .with_offset_delta(1);
 
         batch.add_record(record1);
         batch.add_record(record2);
 
         // Encode and decode
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify transactional attributes
         assert!(decoded.attributes.is_transactional());
@@ -278,7 +292,7 @@ mod tests {
             .with_attributes(
                 RecordAttribute::new()
                     .with_transactional(true)
-                    .with_control(true)
+                    .with_control(true),
             );
 
         // Control records typically have specific key/value structures
@@ -293,7 +307,9 @@ mod tests {
 
         // Encode and decode
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify control attributes
         assert!(decoded.attributes.is_transactional());
@@ -306,8 +322,7 @@ mod tests {
     fn test_null_key_value_handling() {
         let harness = KafkaConformanceHarness::new();
 
-        let mut batch = RecordBatchV2::new(400, 44444, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(400, 44444, 0, 0).with_base_timestamp(1234567890000);
 
         // Record with null key and value
         let record1 = RecordV2::new(None, None)
@@ -330,7 +345,9 @@ mod tests {
 
         // Encode and decode
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify null handling
         assert_eq!(decoded.record_count, 3);
@@ -360,8 +377,7 @@ mod tests {
     fn test_crc32_validation() {
         let harness = KafkaConformanceHarness::new();
 
-        let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         let record = RecordV2::new(
             Some(b"crc-test-key".to_vec()),
@@ -381,7 +397,11 @@ mod tests {
 
         // Should fail with CRC mismatch
         match harness.decode_record_batch(&encoded) {
-            Err(e) => assert!(e.contains("CRC mismatch"), "Expected CRC mismatch error, got: {}", e),
+            Err(e) => assert!(
+                e.contains("CRC mismatch"),
+                "Expected CRC mismatch error, got: {}",
+                e
+            ),
             Ok(_) => panic!("Expected CRC validation to fail"),
         }
     }
@@ -391,12 +411,13 @@ mod tests {
     fn test_empty_record_batch() {
         let harness = KafkaConformanceHarness::new();
 
-        let batch = RecordBatchV2::new(500, 12345, 0, 0)
-            .with_base_timestamp(1234567890000);
+        let batch = RecordBatchV2::new(500, 12345, 0, 0).with_base_timestamp(1234567890000);
 
         // Encode and decode empty batch
         let encoded = harness.encode_record_batch(&batch);
-        let decoded = harness.decode_record_batch(&encoded).expect("Should decode successfully");
+        let decoded = harness
+            .decode_record_batch(&encoded)
+            .expect("Should decode successfully");
 
         // Verify empty batch properties
         assert_eq!(decoded.record_count, 0);

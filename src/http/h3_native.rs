@@ -452,7 +452,10 @@ impl H3ControlState {
                         "duplicate SETTINGS on remote control stream",
                     ));
                 }
-                H3Frame::Data(_) | H3Frame::Headers(_) | H3Frame::PushPromise { .. } | H3Frame::Datagram { .. } => {
+                H3Frame::Data(_)
+                | H3Frame::Headers(_)
+                | H3Frame::PushPromise { .. }
+                | H3Frame::Datagram { .. } => {
                     return Err(H3NativeError::ControlProtocol(
                         "frame type not allowed on control stream",
                     ));
@@ -3260,7 +3263,9 @@ mod tests {
         state
             .on_remote_control_frame(&H3Frame::Settings(H3Settings::default()))
             .expect("settings");
-        let err = state.on_remote_control_frame(&frame).expect_err("must reject DATAGRAM on control stream");
+        let err = state
+            .on_remote_control_frame(&frame)
+            .expect_err("must reject DATAGRAM on control stream");
         assert_eq!(
             err,
             H3NativeError::ControlProtocol("frame type not allowed on control stream")
@@ -3329,15 +3334,15 @@ mod tests {
     fn datagram_frame_context_id_boundary_values() {
         // Test boundary values for quarter_stream_id (context identifier).
         let test_cases = vec![
-            0u64,                    // Minimum value
-            1,                       // Minimum non-zero
-            63,                      // Single-byte varint maximum
-            64,                      // Two-byte varint minimum
-            16383,                   // Two-byte varint maximum
-            16384,                   // Three-byte varint minimum
-            1073741823,              // Four-byte varint maximum
-            (1u64 << 30),           // Five-byte varint minimum
-            (1u64 << 62) - 1,       // Maximum 62-bit value
+            0u64,             // Minimum value
+            1,                // Minimum non-zero
+            63,               // Single-byte varint maximum
+            64,               // Two-byte varint minimum
+            16383,            // Two-byte varint maximum
+            16384,            // Three-byte varint minimum
+            1073741823,       // Four-byte varint maximum
+            (1u64 << 30),     // Five-byte varint minimum
+            (1u64 << 62) - 1, // Maximum 62-bit value
         ];
 
         for quarter_stream_id in test_cases {
@@ -3346,8 +3351,11 @@ mod tests {
                 payload: vec![0x00, 0x01],
             };
             let mut buf = Vec::new();
-            frame.encode(&mut buf).expect(&format!("encode quarter_stream_id={}", quarter_stream_id));
-            let (decoded, consumed) = H3Frame::decode(&buf).expect(&format!("decode quarter_stream_id={}", quarter_stream_id));
+            frame
+                .encode(&mut buf)
+                .expect(&format!("encode quarter_stream_id={}", quarter_stream_id));
+            let (decoded, consumed) = H3Frame::decode(&buf)
+                .expect(&format!("decode quarter_stream_id={}", quarter_stream_id));
             assert_eq!(decoded, frame);
             assert_eq!(consumed, buf.len());
         }
@@ -3375,7 +3383,10 @@ mod tests {
         buf.extend_from_slice(&[0x01, 0x02]); // Only 2 bytes payload, but frame claims 10 total
 
         let err = H3Frame::decode(&buf).expect_err("must reject truncated payload");
-        assert_eq!(err, H3NativeError::InvalidFrame("insufficient frame payload"));
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("insufficient frame payload")
+        );
     }
 
     #[cfg(feature = "http3")]
@@ -3383,10 +3394,10 @@ mod tests {
     fn datagram_frame_varint_quarter_stream_id_encoding() {
         // Verify quarter_stream_id is properly encoded as varint in different ranges.
         let test_cases = vec![
-            (0u64, vec![0x00]),                              // Zero
-            (42, vec![0x2A]),                               // Single byte
-            (300, vec![0x41, 0x2C]),                        // Two bytes
-            (100000, vec![0x80, 0x01, 0x86, 0xA0]),        // Four bytes
+            (0u64, vec![0x00]),                     // Zero
+            (42, vec![0x2A]),                       // Single byte
+            (300, vec![0x41, 0x2C]),                // Two bytes
+            (100000, vec![0x80, 0x01, 0x86, 0xA0]), // Four bytes
         ];
 
         for (quarter_stream_id, expected_varint) in test_cases {
@@ -3401,10 +3412,14 @@ mod tests {
             let (_, type_len) = decode_varint(&buf).expect("frame type");
             let (declared_length, len_len) = decode_varint(&buf[type_len..]).expect("frame length");
             let quarter_stream_id_start = type_len + len_len;
-            let (decoded_id, id_len) = decode_varint(&buf[quarter_stream_id_start..]).expect("quarter_stream_id");
+            let (decoded_id, id_len) =
+                decode_varint(&buf[quarter_stream_id_start..]).expect("quarter_stream_id");
 
             assert_eq!(decoded_id, quarter_stream_id);
-            assert_eq!(&buf[quarter_stream_id_start..quarter_stream_id_start + id_len], &expected_varint);
+            assert_eq!(
+                &buf[quarter_stream_id_start..quarter_stream_id_start + id_len],
+                &expected_varint
+            );
         }
     }
 }

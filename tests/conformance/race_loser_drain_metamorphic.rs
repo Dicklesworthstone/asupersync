@@ -13,20 +13,20 @@
 
 #[cfg(feature = "deterministic-mode")]
 mod race_loser_drain_metamorphic_tests {
-    use asupersync::combinator::race::{Race2, RaceResult, Race3, Race4, PollingOrder, Cancel};
-    use asupersync::lab::runtime::LabRuntime;
+    use asupersync::combinator::race::{Cancel, PollingOrder, Race2, Race3, Race4, RaceResult};
+    use asupersync::cx::{Cx, Scope};
     use asupersync::lab::config::LabConfig;
     use asupersync::lab::oracle::loser_drain::{LoserDrainOracle, LoserDrainViolation};
-    use asupersync::types::{Budget, RegionId, TaskId, Time, Outcome};
+    use asupersync::lab::runtime::LabRuntime;
     use asupersync::types::cancel::CancelReason;
-    use asupersync::cx::{Cx, Scope};
+    use asupersync::types::{Budget, Outcome, RegionId, TaskId, Time};
     use asupersync::util::ArenaIndex;
     use proptest::prelude::*;
-    use std::collections::{HashMap, HashSet, BTreeMap};
-    use std::sync::{Arc, Mutex};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use std::time::Instant;
 
@@ -119,7 +119,11 @@ mod race_loser_drain_metamorphic_tests {
             self.wakeup_count.fetch_add(1, Ordering::AcqRel);
 
             if self.cancelled.load(Ordering::Acquire) {
-                let reason = self.cancel_reason.lock().unwrap().clone()
+                let reason = self
+                    .cancel_reason
+                    .lock()
+                    .unwrap()
+                    .clone()
                     .unwrap_or_else(|| CancelReason::race_loser());
                 return Poll::Ready(Outcome::Cancelled(reason));
             }
@@ -320,7 +324,8 @@ mod race_loser_drain_metamorphic_tests {
             match test_result {
                 Ok(()) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_race_commutativity".to_string(),
-                    description: "race(a,b) result equals race(b,a) when times permit determinism".to_string(),
+                    description: "race(a,b) result equals race(b,a) when times permit determinism"
+                        .to_string(),
                     category: TestCategory::RaceCommutativity,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -329,7 +334,8 @@ mod race_loser_drain_metamorphic_tests {
                 },
                 Err(e) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_race_commutativity".to_string(),
-                    description: "race(a,b) result equals race(b,a) when times permit determinism".to_string(),
+                    description: "race(a,b) result equals race(b,a) when times permit determinism"
+                        .to_string(),
                     category: TestCategory::RaceCommutativity,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -402,7 +408,8 @@ mod race_loser_drain_metamorphic_tests {
             match test_result {
                 Ok(()) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_loser_cancellation".to_string(),
-                    description: "loser observably cancelled (no residual wakeups post-drain)".to_string(),
+                    description: "loser observably cancelled (no residual wakeups post-drain)"
+                        .to_string(),
                     category: TestCategory::LoserCancellation,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -411,7 +418,8 @@ mod race_loser_drain_metamorphic_tests {
                 },
                 Err(e) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_loser_cancellation".to_string(),
-                    description: "loser observably cancelled (no residual wakeups post-drain)".to_string(),
+                    description: "loser observably cancelled (no residual wakeups post-drain)"
+                        .to_string(),
                     category: TestCategory::LoserCancellation,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -469,7 +477,9 @@ mod race_loser_drain_metamorphic_tests {
             match test_result {
                 Ok(()) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_budget_exhaustion".to_string(),
-                    description: "budget exhaustion during drain yields Budget::Exceeded, not panic".to_string(),
+                    description:
+                        "budget exhaustion during drain yields Budget::Exceeded, not panic"
+                            .to_string(),
                     category: TestCategory::BudgetExhaustion,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -478,7 +488,9 @@ mod race_loser_drain_metamorphic_tests {
                 },
                 Err(e) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_budget_exhaustion".to_string(),
-                    description: "budget exhaustion during drain yields Budget::Exceeded, not panic".to_string(),
+                    description:
+                        "budget exhaustion during drain yields Budget::Exceeded, not panic"
+                            .to_string(),
                     category: TestCategory::BudgetExhaustion,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -641,7 +653,8 @@ mod race_loser_drain_metamorphic_tests {
             match test_result {
                 Ok(()) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_region_quiescence".to_string(),
-                    description: "region-close after race quiesces in O(1) additional ticks".to_string(),
+                    description: "region-close after race quiesces in O(1) additional ticks"
+                        .to_string(),
                     category: TestCategory::RegionQuiescence,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Pass,
@@ -650,7 +663,8 @@ mod race_loser_drain_metamorphic_tests {
                 },
                 Err(e) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_region_quiescence".to_string(),
-                    description: "region-close after race quiesces in O(1) additional ticks".to_string(),
+                    description: "region-close after race quiesces in O(1) additional ticks"
+                        .to_string(),
                     category: TestCategory::RegionQuiescence,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -706,7 +720,8 @@ mod race_loser_drain_metamorphic_tests {
             match test_result {
                 Ok(()) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_deterministic_winner_selection".to_string(),
-                    description: "deterministic winner selection under identical conditions".to_string(),
+                    description: "deterministic winner selection under identical conditions"
+                        .to_string(),
                     category: TestCategory::RaceCommutativity,
                     requirement_level: RequirementLevel::Should,
                     verdict: TestVerdict::Pass,
@@ -715,7 +730,8 @@ mod race_loser_drain_metamorphic_tests {
                 },
                 Err(e) => RaceLoserDrainMetamorphicResult {
                     test_id: "mr_deterministic_winner_selection".to_string(),
-                    description: "deterministic winner selection under identical conditions".to_string(),
+                    description: "deterministic winner selection under identical conditions"
+                        .to_string(),
                     category: TestCategory::RaceCommutativity,
                     requirement_level: RequirementLevel::Should,
                     verdict: TestVerdict::Fail,
@@ -858,7 +874,10 @@ mod race_loser_drain_metamorphic_tests {
                     category: TestCategory::LoserCancellation,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
-                    error_message: Some(format!("Cancellation reason propagation violation: {}", e)),
+                    error_message: Some(format!(
+                        "Cancellation reason propagation violation: {}",
+                        e
+                    )),
                     execution_time_ms,
                 },
             }
@@ -1188,12 +1207,16 @@ fn race_loser_drain_metamorphic_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {
         println!("✓ Race loser-drain metamorphic test suite is available");
-        println!("✓ Covers: race commutativity, loser cancellation, budget exhaustion, finalizer invocation, region quiescence");
+        println!(
+            "✓ Covers: race commutativity, loser cancellation, budget exhaustion, finalizer invocation, region quiescence"
+        );
     }
 
     #[cfg(not(feature = "deterministic-mode"))]
     {
         println!("⚠ Race loser-drain metamorphic tests require --features deterministic-mode");
-        println!("  Run with: cargo test --features deterministic-mode race_loser_drain_metamorphic");
+        println!(
+            "  Run with: cargo test --features deterministic-mode race_loser_drain_metamorphic"
+        );
     }
 }

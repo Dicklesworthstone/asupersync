@@ -11,47 +11,83 @@ pub mod h2_rst_stream_ping_rfc9113;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
 // pub mod hpack_rfc7541;
-pub mod kafka_record_batch_v2;
-pub mod quic_retry_rfc9000;
-pub mod tls_0rtt_replay_rfc8446;
 pub mod cancel_dag_determinism;
+pub mod kafka_record_batch_v2;
 pub mod obligation_lifecycle_metamorphic;
-pub mod trace_replay_idempotency_metamorphic;
+pub mod quic_retry_rfc9000;
 pub mod race_loser_drain_metamorphic;
+pub mod tls_0rtt_replay_rfc8446;
+pub mod trace_replay_idempotency_metamorphic;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
-pub mod postgres_logical_replication;
 pub mod obligation_invariants;
+pub mod postgres_logical_replication;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
-pub mod websocket_extension_negotiation_rfc6455;
 pub mod grpc_trailer_forwarding_rfc9113;
 #[cfg(feature = "quic")]
 pub mod quic_connection_migration_rfc9000;
+pub mod websocket_extension_negotiation_rfc6455;
 
 // Re-export main conformance test functionality
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
 #[cfg(feature = "tls")]
-pub use h2_alpn_negotiation_rfc7540::{H2AlpnConformanceHarness, H2ConformanceResult as H2AlpnConformanceResult, TestCategory as H2AlpnTestCategory};
-pub use h2_rst_stream_ping_rfc9113::{H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory};
+pub use h2_alpn_negotiation_rfc7540::{
+    H2AlpnConformanceHarness, H2ConformanceResult as H2AlpnConformanceResult,
+    TestCategory as H2AlpnTestCategory,
+};
+pub use h2_rst_stream_ping_rfc9113::{
+    H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory,
+};
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 // pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
-pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult as KafkaConformanceTestResult, TestCategory as KafkaTestCategory};
+pub use kafka_record_batch_v2::{
+    ConformanceTestResult as KafkaConformanceTestResult, KafkaConformanceHarness,
+    TestCategory as KafkaTestCategory,
+};
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
-pub use mysql_stmt_prepare_execute::{MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory};
-pub use postgres_logical_replication::{PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory};
-pub use quic_retry_rfc9000::{QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory};
-pub use tls_0rtt_replay_rfc8446::{Tls0RttConformanceHarness, Tls0RttConformanceResult, TestCategory as Tls0RttTestCategory};
-pub use cancel_dag_determinism::{CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory};
-pub use obligation_lifecycle_metamorphic::{ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult, TestCategory as ObligationLifecycleTestCategory};
-pub use trace_replay_idempotency_metamorphic::{TraceReplayIdempotencyMetamorphicHarness, TraceReplayIdempotencyMetamorphicResult, TestCategory as TraceReplayTestCategory};
-pub use race_loser_drain_metamorphic::{RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult, TestCategory as RaceLoserDrainTestCategory};
+pub use cancel_dag_determinism::{
+    CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory,
+};
+pub use mysql_stmt_prepare_execute::{
+    MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory,
+};
+pub use obligation_lifecycle_metamorphic::{
+    ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult,
+    TestCategory as ObligationLifecycleTestCategory,
+};
+pub use postgres_logical_replication::{
+    PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory,
+};
+pub use quic_retry_rfc9000::{
+    QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory,
+};
+pub use race_loser_drain_metamorphic::{
+    RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult,
+    TestCategory as RaceLoserDrainTestCategory,
+};
+pub use tls_0rtt_replay_rfc8446::{
+    TestCategory as Tls0RttTestCategory, Tls0RttConformanceHarness, Tls0RttConformanceResult,
+};
+pub use trace_replay_idempotency_metamorphic::{
+    TestCategory as TraceReplayTestCategory, TraceReplayIdempotencyMetamorphicHarness,
+    TraceReplayIdempotencyMetamorphicResult,
+};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
-pub use websocket_extension_negotiation_rfc6455::{WsExtensionConformanceHarness, WsConformanceResult as WsExtensionConformanceResult, TestCategory as WsExtensionTestCategory};
-pub use grpc_trailer_forwarding_rfc9113::{GrpcTrailerConformanceHarness, GrpcConformanceResult as GrpcTrailerConformanceResult, TestCategory as GrpcTrailerTestCategory};
+pub use grpc_trailer_forwarding_rfc9113::{
+    GrpcConformanceResult as GrpcTrailerConformanceResult, GrpcTrailerConformanceHarness,
+    TestCategory as GrpcTrailerTestCategory,
+};
 #[cfg(feature = "quic")]
-pub use quic_connection_migration_rfc9000::{QuicConnectionMigrationConformanceHarness, QuicConnectionMigrationConformanceResult, TestCategory as QuicConnectionMigrationTestCategory};
+pub use quic_connection_migration_rfc9000::{
+    QuicConnectionMigrationConformanceHarness, QuicConnectionMigrationConformanceResult,
+    TestCategory as QuicConnectionMigrationTestCategory,
+};
+pub use websocket_extension_negotiation_rfc6455::{
+    TestCategory as WsExtensionTestCategory, WsConformanceResult as WsExtensionConformanceResult,
+    WsExtensionConformanceHarness,
+};
 
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -252,13 +288,23 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             test_id: r.test_id,
             description: r.description,
             category: match r.category {
-                h2_rst_stream_ping_rfc9113::TestCategory::RstStreamFormat => TestCategory::RstStreamFormat,
-                h2_rst_stream_ping_rfc9113::TestCategory::RstStreamErrorCodes => TestCategory::RstStreamErrorCodes,
+                h2_rst_stream_ping_rfc9113::TestCategory::RstStreamFormat => {
+                    TestCategory::RstStreamFormat
+                }
+                h2_rst_stream_ping_rfc9113::TestCategory::RstStreamErrorCodes => {
+                    TestCategory::RstStreamErrorCodes
+                }
                 h2_rst_stream_ping_rfc9113::TestCategory::PingFormat => TestCategory::PingFormat,
                 h2_rst_stream_ping_rfc9113::TestCategory::PingAck => TestCategory::PingAck,
-                h2_rst_stream_ping_rfc9113::TestCategory::ErrorClassification => TestCategory::ErrorClassification,
-                h2_rst_stream_ping_rfc9113::TestCategory::ProtocolOrdering => TestCategory::ProtocolOrdering,
-                h2_rst_stream_ping_rfc9113::TestCategory::ConnectionHandling => TestCategory::ConnectionHandling,
+                h2_rst_stream_ping_rfc9113::TestCategory::ErrorClassification => {
+                    TestCategory::ErrorClassification
+                }
+                h2_rst_stream_ping_rfc9113::TestCategory::ProtocolOrdering => {
+                    TestCategory::ProtocolOrdering
+                }
+                h2_rst_stream_ping_rfc9113::TestCategory::ConnectionHandling => {
+                    TestCategory::ConnectionHandling
+                }
             },
             requirement_level: match r.requirement_level {
                 h2_rst_stream_ping_rfc9113::RequirementLevel::Must => RequirementLevel::Must,
@@ -269,7 +315,9 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 h2_rst_stream_ping_rfc9113::TestVerdict::Pass => TestVerdict::Pass,
                 h2_rst_stream_ping_rfc9113::TestVerdict::Fail => TestVerdict::Fail,
                 h2_rst_stream_ping_rfc9113::TestVerdict::Skipped => TestVerdict::Skipped,
-                h2_rst_stream_ping_rfc9113::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                h2_rst_stream_ping_rfc9113::TestVerdict::ExpectedFailure => {
+                    TestVerdict::ExpectedFailure
+                }
             },
             error_message: r.error_message,
             execution_time_ms: r.execution_time_ms,
@@ -288,24 +336,42 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 test_id: r.test_id,
                 description: r.description,
                 category: match r.category {
-                    h2_alpn_negotiation_rfc7540::TestCategory::ClientHelloAlpn => TestCategory::ClientHelloAlpn,
-                    h2_alpn_negotiation_rfc7540::TestCategory::ServerProtocolSelection => TestCategory::ServerProtocolSelection,
-                    h2_alpn_negotiation_rfc7540::TestCategory::TlsExtensionValidation => TestCategory::TlsExtensionValidation,
-                    h2_alpn_negotiation_rfc7540::TestCategory::HttpFallback => TestCategory::HttpFallback,
-                    h2_alpn_negotiation_rfc7540::TestCategory::PostAlpnSettings => TestCategory::PostAlpnSettings,
-                    h2_alpn_negotiation_rfc7540::TestCategory::AlpnSecurity => TestCategory::AlpnSecurity,
-                    h2_alpn_negotiation_rfc7540::TestCategory::ConnectionStateTransition => TestCategory::ConnectionStateTransition,
+                    h2_alpn_negotiation_rfc7540::TestCategory::ClientHelloAlpn => {
+                        TestCategory::ClientHelloAlpn
+                    }
+                    h2_alpn_negotiation_rfc7540::TestCategory::ServerProtocolSelection => {
+                        TestCategory::ServerProtocolSelection
+                    }
+                    h2_alpn_negotiation_rfc7540::TestCategory::TlsExtensionValidation => {
+                        TestCategory::TlsExtensionValidation
+                    }
+                    h2_alpn_negotiation_rfc7540::TestCategory::HttpFallback => {
+                        TestCategory::HttpFallback
+                    }
+                    h2_alpn_negotiation_rfc7540::TestCategory::PostAlpnSettings => {
+                        TestCategory::PostAlpnSettings
+                    }
+                    h2_alpn_negotiation_rfc7540::TestCategory::AlpnSecurity => {
+                        TestCategory::AlpnSecurity
+                    }
+                    h2_alpn_negotiation_rfc7540::TestCategory::ConnectionStateTransition => {
+                        TestCategory::ConnectionStateTransition
+                    }
                 },
                 requirement_level: match r.requirement_level {
                     h2_alpn_negotiation_rfc7540::RequirementLevel::Must => RequirementLevel::Must,
-                    h2_alpn_negotiation_rfc7540::RequirementLevel::Should => RequirementLevel::Should,
+                    h2_alpn_negotiation_rfc7540::RequirementLevel::Should => {
+                        RequirementLevel::Should
+                    }
                     h2_alpn_negotiation_rfc7540::RequirementLevel::May => RequirementLevel::May,
                 },
                 verdict: match r.verdict {
                     h2_alpn_negotiation_rfc7540::TestVerdict::Pass => TestVerdict::Pass,
                     h2_alpn_negotiation_rfc7540::TestVerdict::Fail => TestVerdict::Fail,
                     h2_alpn_negotiation_rfc7540::TestVerdict::Skipped => TestVerdict::Skipped,
-                    h2_alpn_negotiation_rfc7540::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                    h2_alpn_negotiation_rfc7540::TestVerdict::ExpectedFailure => {
+                        TestVerdict::ExpectedFailure
+                    }
                 },
                 error_message: r.error_message,
                 execution_time_ms: r.execution_time_ms,
@@ -324,12 +390,22 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             description: r.description,
             category: match r.category {
                 quic_retry_rfc9000::TestCategory::PacketFormat => TestCategory::PacketFormat,
-                quic_retry_rfc9000::TestCategory::ConnectionIdHandling => TestCategory::ConnectionIdHandling,
+                quic_retry_rfc9000::TestCategory::ConnectionIdHandling => {
+                    TestCategory::ConnectionIdHandling
+                }
                 quic_retry_rfc9000::TestCategory::TokenProcessing => TestCategory::TokenProcessing,
-                quic_retry_rfc9000::TestCategory::IntegrityValidation => TestCategory::IntegrityValidation,
-                quic_retry_rfc9000::TestCategory::ClientProcessing => TestCategory::ClientProcessing,
-                quic_retry_rfc9000::TestCategory::ServerProcessing => TestCategory::ServerProcessing,
-                quic_retry_rfc9000::TestCategory::ProtocolOrdering => TestCategory::ProtocolOrdering,
+                quic_retry_rfc9000::TestCategory::IntegrityValidation => {
+                    TestCategory::IntegrityValidation
+                }
+                quic_retry_rfc9000::TestCategory::ClientProcessing => {
+                    TestCategory::ClientProcessing
+                }
+                quic_retry_rfc9000::TestCategory::ServerProcessing => {
+                    TestCategory::ServerProcessing
+                }
+                quic_retry_rfc9000::TestCategory::ProtocolOrdering => {
+                    TestCategory::ProtocolOrdering
+                }
             },
             requirement_level: match r.requirement_level {
                 quic_retry_rfc9000::RequirementLevel::Must => RequirementLevel::Must,
@@ -396,13 +472,27 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 test_id: r.test_id,
                 description: r.description,
                 category: match r.category {
-                    tls_0rtt_replay_rfc8446::TestCategory::PreSharedKeyExtension => TestCategory::PreSharedKeyExtension,
-                    tls_0rtt_replay_rfc8446::TestCategory::TicketAgeObfuscation => TestCategory::TicketAgeObfuscation,
-                    tls_0rtt_replay_rfc8446::TestCategory::ServerReplayRejection => TestCategory::ServerReplayRejection,
-                    tls_0rtt_replay_rfc8446::TestCategory::AntiReplayCache => TestCategory::AntiReplayCache,
-                    tls_0rtt_replay_rfc8446::TestCategory::EarlyDataLimits => TestCategory::EarlyDataLimits,
-                    tls_0rtt_replay_rfc8446::TestCategory::FreshnessWindow => TestCategory::FreshnessWindow,
-                    tls_0rtt_replay_rfc8446::TestCategory::HelloRetryRequest => TestCategory::HelloRetryRequest,
+                    tls_0rtt_replay_rfc8446::TestCategory::PreSharedKeyExtension => {
+                        TestCategory::PreSharedKeyExtension
+                    }
+                    tls_0rtt_replay_rfc8446::TestCategory::TicketAgeObfuscation => {
+                        TestCategory::TicketAgeObfuscation
+                    }
+                    tls_0rtt_replay_rfc8446::TestCategory::ServerReplayRejection => {
+                        TestCategory::ServerReplayRejection
+                    }
+                    tls_0rtt_replay_rfc8446::TestCategory::AntiReplayCache => {
+                        TestCategory::AntiReplayCache
+                    }
+                    tls_0rtt_replay_rfc8446::TestCategory::EarlyDataLimits => {
+                        TestCategory::EarlyDataLimits
+                    }
+                    tls_0rtt_replay_rfc8446::TestCategory::FreshnessWindow => {
+                        TestCategory::FreshnessWindow
+                    }
+                    tls_0rtt_replay_rfc8446::TestCategory::HelloRetryRequest => {
+                        TestCategory::HelloRetryRequest
+                    }
                 },
                 requirement_level: match r.requirement_level {
                     tls_0rtt_replay_rfc8446::RequirementLevel::Must => RequirementLevel::Must,
@@ -413,7 +503,9 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                     tls_0rtt_replay_rfc8446::TestVerdict::Pass => TestVerdict::Pass,
                     tls_0rtt_replay_rfc8446::TestVerdict::Fail => TestVerdict::Fail,
                     tls_0rtt_replay_rfc8446::TestVerdict::Skipped => TestVerdict::Skipped,
-                    tls_0rtt_replay_rfc8446::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                    tls_0rtt_replay_rfc8446::TestVerdict::ExpectedFailure => {
+                        TestVerdict::ExpectedFailure
+                    }
                 },
                 error_message: r.error_message,
                 execution_time_ms: r.execution_time_ms,
@@ -433,11 +525,21 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 test_id: r.test_id,
                 description: r.description,
                 category: match r.category {
-                    cancel_dag_determinism::TestCategory::DagSerialization => TestCategory::DagSerialization,
-                    cancel_dag_determinism::TestCategory::CancellationOrdering => TestCategory::CancellationOrdering,
-                    cancel_dag_determinism::TestCategory::FinalizerLogging => TestCategory::FinalizerLogging,
-                    cancel_dag_determinism::TestCategory::BudgetExhaustion => TestCategory::BudgetExhaustion,
-                    cancel_dag_determinism::TestCategory::DependencyTopology => TestCategory::DependencyTopology,
+                    cancel_dag_determinism::TestCategory::DagSerialization => {
+                        TestCategory::DagSerialization
+                    }
+                    cancel_dag_determinism::TestCategory::CancellationOrdering => {
+                        TestCategory::CancellationOrdering
+                    }
+                    cancel_dag_determinism::TestCategory::FinalizerLogging => {
+                        TestCategory::FinalizerLogging
+                    }
+                    cancel_dag_determinism::TestCategory::BudgetExhaustion => {
+                        TestCategory::BudgetExhaustion
+                    }
+                    cancel_dag_determinism::TestCategory::DependencyTopology => {
+                        TestCategory::DependencyTopology
+                    }
                 },
                 requirement_level: match r.requirement_level {
                     cancel_dag_determinism::RequirementLevel::Must => RequirementLevel::Must,
@@ -448,7 +550,9 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                     cancel_dag_determinism::TestVerdict::Pass => TestVerdict::Pass,
                     cancel_dag_determinism::TestVerdict::Fail => TestVerdict::Fail,
                     cancel_dag_determinism::TestVerdict::Skipped => TestVerdict::Skipped,
-                    cancel_dag_determinism::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                    cancel_dag_determinism::TestVerdict::ExpectedFailure => {
+                        TestVerdict::ExpectedFailure
+                    }
                 },
                 error_message: r.error_message,
                 execution_time_ms: r.execution_time_ms,
@@ -468,22 +572,40 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 test_id: r.test_id,
                 description: r.description,
                 category: match r.category {
-                    obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle => TestCategory::ObligationLifecycle,
-                    obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry => TestCategory::CommitAbortSymmetry,
-                    obligation_lifecycle_metamorphic::TestCategory::LeakInvariants => TestCategory::LeakInvariants,
-                    obligation_lifecycle_metamorphic::TestCategory::SnapshotRestore => TestCategory::SnapshotRestore,
-                    obligation_lifecycle_metamorphic::TestCategory::ParallelCommits => TestCategory::ParallelCommits,
+                    obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle => {
+                        TestCategory::ObligationLifecycle
+                    }
+                    obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry => {
+                        TestCategory::CommitAbortSymmetry
+                    }
+                    obligation_lifecycle_metamorphic::TestCategory::LeakInvariants => {
+                        TestCategory::LeakInvariants
+                    }
+                    obligation_lifecycle_metamorphic::TestCategory::SnapshotRestore => {
+                        TestCategory::SnapshotRestore
+                    }
+                    obligation_lifecycle_metamorphic::TestCategory::ParallelCommits => {
+                        TestCategory::ParallelCommits
+                    }
                 },
                 requirement_level: match r.requirement_level {
-                    obligation_lifecycle_metamorphic::RequirementLevel::Must => RequirementLevel::Must,
-                    obligation_lifecycle_metamorphic::RequirementLevel::Should => RequirementLevel::Should,
-                    obligation_lifecycle_metamorphic::RequirementLevel::May => RequirementLevel::May,
+                    obligation_lifecycle_metamorphic::RequirementLevel::Must => {
+                        RequirementLevel::Must
+                    }
+                    obligation_lifecycle_metamorphic::RequirementLevel::Should => {
+                        RequirementLevel::Should
+                    }
+                    obligation_lifecycle_metamorphic::RequirementLevel::May => {
+                        RequirementLevel::May
+                    }
                 },
                 verdict: match r.verdict {
                     obligation_lifecycle_metamorphic::TestVerdict::Pass => TestVerdict::Pass,
                     obligation_lifecycle_metamorphic::TestVerdict::Fail => TestVerdict::Fail,
                     obligation_lifecycle_metamorphic::TestVerdict::Skipped => TestVerdict::Skipped,
-                    obligation_lifecycle_metamorphic::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                    obligation_lifecycle_metamorphic::TestVerdict::ExpectedFailure => {
+                        TestVerdict::ExpectedFailure
+                    }
                 },
                 error_message: r.error_message,
                 execution_time_ms: r.execution_time_ms,
@@ -503,22 +625,42 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 test_id: r.test_id,
                 description: r.description,
                 category: match r.category {
-                    trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity => TestCategory::ReplayFidelity,
-                    trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay => TestCategory::IdempotentReplay,
-                    trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling => TestCategory::TruncationHandling,
-                    trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering => TestCategory::EpochBoundaryOrdering,
-                    trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining => TestCategory::CrossRegionJoining,
+                    trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity => {
+                        TestCategory::ReplayFidelity
+                    }
+                    trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay => {
+                        TestCategory::IdempotentReplay
+                    }
+                    trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling => {
+                        TestCategory::TruncationHandling
+                    }
+                    trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering => {
+                        TestCategory::EpochBoundaryOrdering
+                    }
+                    trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining => {
+                        TestCategory::CrossRegionJoining
+                    }
                 },
                 requirement_level: match r.requirement_level {
-                    trace_replay_idempotency_metamorphic::RequirementLevel::Must => RequirementLevel::Must,
-                    trace_replay_idempotency_metamorphic::RequirementLevel::Should => RequirementLevel::Should,
-                    trace_replay_idempotency_metamorphic::RequirementLevel::May => RequirementLevel::May,
+                    trace_replay_idempotency_metamorphic::RequirementLevel::Must => {
+                        RequirementLevel::Must
+                    }
+                    trace_replay_idempotency_metamorphic::RequirementLevel::Should => {
+                        RequirementLevel::Should
+                    }
+                    trace_replay_idempotency_metamorphic::RequirementLevel::May => {
+                        RequirementLevel::May
+                    }
                 },
                 verdict: match r.verdict {
                     trace_replay_idempotency_metamorphic::TestVerdict::Pass => TestVerdict::Pass,
                     trace_replay_idempotency_metamorphic::TestVerdict::Fail => TestVerdict::Fail,
-                    trace_replay_idempotency_metamorphic::TestVerdict::Skipped => TestVerdict::Skipped,
-                    trace_replay_idempotency_metamorphic::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                    trace_replay_idempotency_metamorphic::TestVerdict::Skipped => {
+                        TestVerdict::Skipped
+                    }
+                    trace_replay_idempotency_metamorphic::TestVerdict::ExpectedFailure => {
+                        TestVerdict::ExpectedFailure
+                    }
                 },
                 error_message: r.error_message,
                 execution_time_ms: r.execution_time_ms,
@@ -538,22 +680,36 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 test_id: r.test_id,
                 description: r.description,
                 category: match r.category {
-                    race_loser_drain_metamorphic::TestCategory::RaceCommutativity => TestCategory::RaceCommutativity,
-                    race_loser_drain_metamorphic::TestCategory::LoserCancellation => TestCategory::LoserCancellation,
-                    race_loser_drain_metamorphic::TestCategory::BudgetExhaustion => TestCategory::BudgetExhaustion,
-                    race_loser_drain_metamorphic::TestCategory::FinalizerInvocation => TestCategory::FinalizerInvocation,
-                    race_loser_drain_metamorphic::TestCategory::RegionQuiescence => TestCategory::RegionQuiescence,
+                    race_loser_drain_metamorphic::TestCategory::RaceCommutativity => {
+                        TestCategory::RaceCommutativity
+                    }
+                    race_loser_drain_metamorphic::TestCategory::LoserCancellation => {
+                        TestCategory::LoserCancellation
+                    }
+                    race_loser_drain_metamorphic::TestCategory::BudgetExhaustion => {
+                        TestCategory::BudgetExhaustion
+                    }
+                    race_loser_drain_metamorphic::TestCategory::FinalizerInvocation => {
+                        TestCategory::FinalizerInvocation
+                    }
+                    race_loser_drain_metamorphic::TestCategory::RegionQuiescence => {
+                        TestCategory::RegionQuiescence
+                    }
                 },
                 requirement_level: match r.requirement_level {
                     race_loser_drain_metamorphic::RequirementLevel::Must => RequirementLevel::Must,
-                    race_loser_drain_metamorphic::RequirementLevel::Should => RequirementLevel::Should,
+                    race_loser_drain_metamorphic::RequirementLevel::Should => {
+                        RequirementLevel::Should
+                    }
                     race_loser_drain_metamorphic::RequirementLevel::May => RequirementLevel::May,
                 },
                 verdict: match r.verdict {
                     race_loser_drain_metamorphic::TestVerdict::Pass => TestVerdict::Pass,
                     race_loser_drain_metamorphic::TestVerdict::Fail => TestVerdict::Fail,
                     race_loser_drain_metamorphic::TestVerdict::Skipped => TestVerdict::Skipped,
-                    race_loser_drain_metamorphic::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                    race_loser_drain_metamorphic::TestVerdict::ExpectedFailure => {
+                        TestVerdict::ExpectedFailure
+                    }
                 },
                 error_message: r.error_message,
                 execution_time_ms: r.execution_time_ms,
@@ -670,24 +826,42 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             test_id: r.test_id,
             description: r.description,
             category: match r.category {
-                grpc_trailer_forwarding_rfc9113::TestCategory::StatusTrailerPlacement => TestCategory::StatusTrailerPlacement,
-                grpc_trailer_forwarding_rfc9113::TestCategory::MessageEncoding => TestCategory::MessageEncoding,
-                grpc_trailer_forwarding_rfc9113::TestCategory::TrailerOnlyResponses => TestCategory::TrailerOnlyResponses,
-                grpc_trailer_forwarding_rfc9113::TestCategory::RstStreamHandling => TestCategory::RstStreamHandling,
-                grpc_trailer_forwarding_rfc9113::TestCategory::TimeoutHeaderParsing => TestCategory::TimeoutHeaderParsing,
-                grpc_trailer_forwarding_rfc9113::TestCategory::Http2FrameOrdering => TestCategory::Http2FrameOrdering,
-                grpc_trailer_forwarding_rfc9113::TestCategory::ErrorResponseHandling => TestCategory::ErrorResponseHandling,
+                grpc_trailer_forwarding_rfc9113::TestCategory::StatusTrailerPlacement => {
+                    TestCategory::StatusTrailerPlacement
+                }
+                grpc_trailer_forwarding_rfc9113::TestCategory::MessageEncoding => {
+                    TestCategory::MessageEncoding
+                }
+                grpc_trailer_forwarding_rfc9113::TestCategory::TrailerOnlyResponses => {
+                    TestCategory::TrailerOnlyResponses
+                }
+                grpc_trailer_forwarding_rfc9113::TestCategory::RstStreamHandling => {
+                    TestCategory::RstStreamHandling
+                }
+                grpc_trailer_forwarding_rfc9113::TestCategory::TimeoutHeaderParsing => {
+                    TestCategory::TimeoutHeaderParsing
+                }
+                grpc_trailer_forwarding_rfc9113::TestCategory::Http2FrameOrdering => {
+                    TestCategory::Http2FrameOrdering
+                }
+                grpc_trailer_forwarding_rfc9113::TestCategory::ErrorResponseHandling => {
+                    TestCategory::ErrorResponseHandling
+                }
             },
             requirement_level: match r.requirement_level {
                 grpc_trailer_forwarding_rfc9113::RequirementLevel::Must => RequirementLevel::Must,
-                grpc_trailer_forwarding_rfc9113::RequirementLevel::Should => RequirementLevel::Should,
+                grpc_trailer_forwarding_rfc9113::RequirementLevel::Should => {
+                    RequirementLevel::Should
+                }
                 grpc_trailer_forwarding_rfc9113::RequirementLevel::May => RequirementLevel::May,
             },
             verdict: match r.verdict {
                 grpc_trailer_forwarding_rfc9113::TestVerdict::Pass => TestVerdict::Pass,
                 grpc_trailer_forwarding_rfc9113::TestVerdict::Fail => TestVerdict::Fail,
                 grpc_trailer_forwarding_rfc9113::TestVerdict::Skipped => TestVerdict::Skipped,
-                grpc_trailer_forwarding_rfc9113::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                grpc_trailer_forwarding_rfc9113::TestVerdict::ExpectedFailure => {
+                    TestVerdict::ExpectedFailure
+                }
             },
             error_message: r.error_message,
             execution_time_ms: r.execution_time_ms,
@@ -960,7 +1134,8 @@ mod tests {
         );
 
         // Verify all tests pass
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == h2_rst_stream_ping_rfc9113::TestVerdict::Fail)
             .collect();
 
@@ -972,7 +1147,7 @@ mod tests {
     #[test]
     #[cfg(feature = "tls")]
     fn test_h2_alpn_conformance_integration() {
-        use h2_alpn_negotiation_rfc7540::{H2AlpnConformanceHarness};
+        use h2_alpn_negotiation_rfc7540::H2AlpnConformanceHarness;
 
         let h2_alpn_harness = H2AlpnConformanceHarness::new();
         let results = h2_alpn_harness.run_all_tests();
@@ -988,7 +1163,8 @@ mod tests {
             "Should test ClientHello ALPN advertisement"
         );
         assert!(
-            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::ServerProtocolSelection),
+            categories
+                .contains(&h2_alpn_negotiation_rfc7540::TestCategory::ServerProtocolSelection),
             "Should test server protocol selection"
         );
         assert!(
@@ -1008,12 +1184,14 @@ mod tests {
             "Should test ALPN security requirements"
         );
         assert!(
-            categories.contains(&h2_alpn_negotiation_rfc7540::TestCategory::ConnectionStateTransition),
+            categories
+                .contains(&h2_alpn_negotiation_rfc7540::TestCategory::ConnectionStateTransition),
             "Should test connection state transitions"
         );
 
         // Verify all tests pass
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == h2_alpn_negotiation_rfc7540::TestVerdict::Fail)
             .collect();
 
@@ -1029,9 +1207,8 @@ mod tests {
         );
 
         // Verify coverage of all 5 bead requirements
-        let test_ids: std::collections::HashSet<_> = results.iter()
-            .map(|r| r.test_id.as_str())
-            .collect();
+        let test_ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
 
         // Requirement 1: ClientHello ALPN advertisement
         assert!(
@@ -1093,7 +1270,8 @@ mod tests {
         );
 
         // Verify all tests pass
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == quic_retry_rfc9000::TestVerdict::Fail)
             .collect();
 
@@ -1105,12 +1283,15 @@ mod tests {
     #[test]
     #[cfg(feature = "quic")]
     fn test_quic_connection_migration_conformance_integration() {
-        use quic_connection_migration_rfc9000::{QuicConnectionMigrationConformanceHarness};
+        use quic_connection_migration_rfc9000::QuicConnectionMigrationConformanceHarness;
 
         let quic_migration_harness = QuicConnectionMigrationConformanceHarness::new();
         let results = quic_migration_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "QUIC connection migration conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "QUIC connection migration conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
@@ -1121,29 +1302,38 @@ mod tests {
             "Should test path validation with PATH_CHALLENGE/PATH_RESPONSE"
         );
         assert!(
-            categories.contains(&quic_connection_migration_rfc9000::TestCategory::ConnectionIdRetirement),
+            categories
+                .contains(&quic_connection_migration_rfc9000::TestCategory::ConnectionIdRetirement),
             "Should test connection ID retirement after migration"
         );
         assert!(
-            categories.contains(&quic_connection_migration_rfc9000::TestCategory::AntiAmplificationLimits),
+            categories.contains(
+                &quic_connection_migration_rfc9000::TestCategory::AntiAmplificationLimits
+            ),
             "Should test anti-amplification limits on unverified paths"
         );
         assert!(
-            categories.contains(&quic_connection_migration_rfc9000::TestCategory::NatRebindingDetection),
+            categories
+                .contains(&quic_connection_migration_rfc9000::TestCategory::NatRebindingDetection),
             "Should test NAT rebinding detection via source address change"
         );
         assert!(
-            categories.contains(&quic_connection_migration_rfc9000::TestCategory::ConcurrentMigration),
+            categories
+                .contains(&quic_connection_migration_rfc9000::TestCategory::ConcurrentMigration),
             "Should test concurrent path migration from both endpoints"
         );
 
         // Verify all tests pass
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == quic_connection_migration_rfc9000::TestVerdict::Fail)
             .collect();
 
         if !failures.is_empty() {
-            panic!("QUIC connection migration conformance tests failed: {:#?}", failures);
+            panic!(
+                "QUIC connection migration conformance tests failed: {:#?}",
+                failures
+            );
         }
 
         // Verify we have the expected number of test cases (15+ as per bead requirements)
@@ -1154,9 +1344,8 @@ mod tests {
         );
 
         // Verify coverage of all 5 bead requirements
-        let test_ids: std::collections::HashSet<_> = results.iter()
-            .map(|r| r.test_id.as_str())
-            .collect();
+        let test_ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
 
         // Requirement 1: path validation with PATH_CHALLENGE/PATH_RESPONSE
         assert!(
@@ -1195,7 +1384,10 @@ mod tests {
         let tls_0rtt_harness = Tls0RttConformanceHarness::new();
         let results = tls_0rtt_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "TLS 0-RTT conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "TLS 0-RTT conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
@@ -1219,15 +1411,20 @@ mod tests {
         );
 
         // Verify we have both pass and expected failure verdicts (for negative tests)
-        let passes = results.iter()
+        let passes = results
+            .iter()
             .filter(|r| r.verdict == tls_0rtt_replay_rfc8446::TestVerdict::Pass)
             .count();
-        let expected_failures = results.iter()
+        let expected_failures = results
+            .iter()
             .filter(|r| r.verdict == tls_0rtt_replay_rfc8446::TestVerdict::ExpectedFailure)
             .count();
 
         assert!(passes > 0, "Should have passing tests for positive cases");
-        assert!(expected_failures > 0, "Should have expected failures for negative tests");
+        assert!(
+            expected_failures > 0,
+            "Should have expected failures for negative tests"
+        );
     }
 
     #[test]
@@ -1236,7 +1433,10 @@ mod tests {
         let cancel_dag_harness = CancelDagDeterminismHarness::new();
         let results = cancel_dag_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "Cancel DAG determinism conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "Cancel DAG determinism conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
@@ -1264,11 +1464,15 @@ mod tests {
         );
 
         // Verify we have appropriate requirement levels
-        let must_tests = results.iter()
+        let must_tests = results
+            .iter()
             .filter(|r| r.requirement_level == cancel_dag_determinism::RequirementLevel::Must)
             .count();
 
-        assert!(must_tests > 0, "Should have MUST requirements for determinism");
+        assert!(
+            must_tests > 0,
+            "Should have MUST requirements for determinism"
+        );
 
         // Verify test execution completed without panic
         for result in &results {
@@ -1286,18 +1490,23 @@ mod tests {
         let obligation_lifecycle_harness = ObligationLifecycleMetamorphicHarness::new();
         let results = obligation_lifecycle_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "Obligation lifecycle metamorphic conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "Obligation lifecycle metamorphic conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
             results.iter().map(|r| &r.category).collect();
 
         assert!(
-            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle),
+            categories
+                .contains(&obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle),
             "Should test obligation lifecycle properties"
         );
         assert!(
-            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry),
+            categories
+                .contains(&obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry),
             "Should test commit-abort symmetry"
         );
         assert!(
@@ -1314,14 +1523,23 @@ mod tests {
         );
 
         // Verify we have appropriate requirement levels
-        let must_tests = results.iter()
-            .filter(|r| r.requirement_level == obligation_lifecycle_metamorphic::RequirementLevel::Must)
+        let must_tests = results
+            .iter()
+            .filter(|r| {
+                r.requirement_level == obligation_lifecycle_metamorphic::RequirementLevel::Must
+            })
             .count();
 
-        assert!(must_tests > 0, "Should have MUST requirements for obligation lifecycle");
+        assert!(
+            must_tests > 0,
+            "Should have MUST requirements for obligation lifecycle"
+        );
 
         // Verify metamorphic relations (should have multiple test cases per relation)
-        assert!(results.len() >= 12, "Should have sufficient metamorphic test coverage");
+        assert!(
+            results.len() >= 12,
+            "Should have sufficient metamorphic test coverage"
+        );
 
         // Verify test execution completed without panic
         for result in &results {
@@ -1333,11 +1551,15 @@ mod tests {
         }
 
         // Verify proptest completed full iteration counts
-        let proptest_results = results.iter()
+        let proptest_results = results
+            .iter()
             .filter(|r| r.description.contains("proptest"))
             .count();
 
-        assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
+        assert!(
+            proptest_results > 0,
+            "Should have proptest-based metamorphic relations"
+        );
     }
 
     #[test]
@@ -1346,42 +1568,60 @@ mod tests {
         let trace_replay_harness = TraceReplayIdempotencyMetamorphicHarness::new();
         let results = trace_replay_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "Trace replay idempotency metamorphic conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "Trace replay idempotency metamorphic conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
             results.iter().map(|r| &r.category).collect();
 
         assert!(
-            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity),
+            categories
+                .contains(&trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity),
             "Should test replay fidelity"
         );
         assert!(
-            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay),
+            categories
+                .contains(&trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay),
             "Should test idempotent replay"
         );
         assert!(
-            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling),
+            categories
+                .contains(&trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling),
             "Should test truncation handling"
         );
         assert!(
-            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering),
+            categories.contains(
+                &trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering
+            ),
             "Should test epoch boundary ordering"
         );
         assert!(
-            categories.contains(&trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining),
+            categories
+                .contains(&trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining),
             "Should test cross-region joining"
         );
 
         // Verify we have appropriate requirement levels
-        let must_tests = results.iter()
-            .filter(|r| r.requirement_level == trace_replay_idempotency_metamorphic::RequirementLevel::Must)
+        let must_tests = results
+            .iter()
+            .filter(|r| {
+                r.requirement_level == trace_replay_idempotency_metamorphic::RequirementLevel::Must
+            })
             .count();
 
-        assert!(must_tests > 0, "Should have MUST requirements for trace replay idempotency");
+        assert!(
+            must_tests > 0,
+            "Should have MUST requirements for trace replay idempotency"
+        );
 
         // Verify comprehensive metamorphic test coverage
-        assert!(results.len() >= 12, "Should have comprehensive metamorphic test coverage");
+        assert!(
+            results.len() >= 12,
+            "Should have comprehensive metamorphic test coverage"
+        );
 
         // Verify test execution completed without panic
         for result in &results {
@@ -1410,11 +1650,15 @@ mod tests {
         }
 
         // Verify proptest completed full iteration counts
-        let proptest_results = results.iter()
+        let proptest_results = results
+            .iter()
             .filter(|r| r.description.contains("replay") || r.description.contains("idempotency"))
             .count();
 
-        assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
+        assert!(
+            proptest_results > 0,
+            "Should have proptest-based metamorphic relations"
+        );
     }
 
     #[test]
@@ -1423,7 +1667,10 @@ mod tests {
         let race_loser_drain_harness = RaceLoserDrainMetamorphicHarness::new();
         let results = race_loser_drain_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "Race loser-drain metamorphic conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "Race loser-drain metamorphic conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
@@ -1451,14 +1698,21 @@ mod tests {
         );
 
         // Verify we have appropriate requirement levels
-        let must_tests = results.iter()
+        let must_tests = results
+            .iter()
             .filter(|r| r.requirement_level == race_loser_drain_metamorphic::RequirementLevel::Must)
             .count();
 
-        assert!(must_tests > 0, "Should have MUST requirements for race loser-drain");
+        assert!(
+            must_tests > 0,
+            "Should have MUST requirements for race loser-drain"
+        );
 
         // Verify comprehensive metamorphic test coverage
-        assert!(results.len() >= 12, "Should have comprehensive metamorphic test coverage");
+        assert!(
+            results.len() >= 12,
+            "Should have comprehensive metamorphic test coverage"
+        );
 
         // Verify test execution completed without panic
         for result in &results {
@@ -1503,11 +1757,19 @@ mod tests {
         }
 
         // Verify proptest completed full iteration counts
-        let proptest_results = results.iter()
-            .filter(|r| r.description.contains("race") || r.description.contains("loser") || r.description.contains("drain"))
+        let proptest_results = results
+            .iter()
+            .filter(|r| {
+                r.description.contains("race")
+                    || r.description.contains("loser")
+                    || r.description.contains("drain")
+            })
             .count();
 
-        assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
+        assert!(
+            proptest_results > 0,
+            "Should have proptest-based metamorphic relations"
+        );
     }
 
     #[test]
@@ -1515,14 +1777,19 @@ mod tests {
         let ws_ext_harness = WsExtensionConformanceHarness::new();
         let results = ws_ext_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "WebSocket extension conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "WebSocket extension conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
             results.iter().map(|r| &r.category).collect();
 
         assert!(
-            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ExtensionHeaderProcessing),
+            categories.contains(
+                &websocket_extension_negotiation_rfc6455::TestCategory::ExtensionHeaderProcessing
+            ),
             "Should test extension header processing"
         );
         assert!(
@@ -1530,7 +1797,9 @@ mod tests {
             "Should test permessage-deflate negotiation"
         );
         assert!(
-            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::UnknownExtensionHandling),
+            categories.contains(
+                &websocket_extension_negotiation_rfc6455::TestCategory::UnknownExtensionHandling
+            ),
             "Should test unknown extension handling"
         );
         assert!(
@@ -1538,25 +1807,35 @@ mod tests {
             "Should test multiple extension composition"
         );
         assert!(
-            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ParameterMismatchHandling),
+            categories.contains(
+                &websocket_extension_negotiation_rfc6455::TestCategory::ParameterMismatchHandling
+            ),
             "Should test parameter mismatch handling"
         );
         assert!(
-            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ExtensionSecurity),
+            categories.contains(
+                &websocket_extension_negotiation_rfc6455::TestCategory::ExtensionSecurity
+            ),
             "Should test extension security requirements"
         );
         assert!(
-            categories.contains(&websocket_extension_negotiation_rfc6455::TestCategory::ExtensionOrdering),
+            categories.contains(
+                &websocket_extension_negotiation_rfc6455::TestCategory::ExtensionOrdering
+            ),
             "Should test extension ordering preservation"
         );
 
         // Verify all tests pass
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == websocket_extension_negotiation_rfc6455::TestVerdict::Fail)
             .collect();
 
         if !failures.is_empty() {
-            panic!("WebSocket extension conformance tests failed: {:#?}", failures);
+            panic!(
+                "WebSocket extension conformance tests failed: {:#?}",
+                failures
+            );
         }
 
         // Verify we have the expected number of test cases (14 as per the bead requirements)
@@ -1567,9 +1846,8 @@ mod tests {
         );
 
         // Verify coverage of all 5 bead requirements
-        let test_ids: std::collections::HashSet<_> = results.iter()
-            .map(|r| r.test_id.as_str())
-            .collect();
+        let test_ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
 
         // Requirement 1: Sec-WebSocket-Extensions header ordering preserved
         assert!(
@@ -1607,14 +1885,18 @@ mod tests {
         let grpc_trailer_harness = GrpcTrailerConformanceHarness::new();
         let results = grpc_trailer_harness.run_all_tests();
 
-        assert!(!results.is_empty(), "gRPC trailer conformance should have tests");
+        assert!(
+            !results.is_empty(),
+            "gRPC trailer conformance should have tests"
+        );
 
         // Check for expected test categories
         let categories: std::collections::HashSet<_> =
             results.iter().map(|r| &r.category).collect();
 
         assert!(
-            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::StatusTrailerPlacement),
+            categories
+                .contains(&grpc_trailer_forwarding_rfc9113::TestCategory::StatusTrailerPlacement),
             "Should test status trailer placement"
         );
         assert!(
@@ -1622,7 +1904,8 @@ mod tests {
             "Should test message encoding"
         );
         assert!(
-            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::TrailerOnlyResponses),
+            categories
+                .contains(&grpc_trailer_forwarding_rfc9113::TestCategory::TrailerOnlyResponses),
             "Should test trailer-only responses"
         );
         assert!(
@@ -1630,7 +1913,8 @@ mod tests {
             "Should test RST_STREAM handling"
         );
         assert!(
-            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::TimeoutHeaderParsing),
+            categories
+                .contains(&grpc_trailer_forwarding_rfc9113::TestCategory::TimeoutHeaderParsing),
             "Should test timeout header parsing"
         );
         assert!(
@@ -1638,12 +1922,14 @@ mod tests {
             "Should test HTTP/2 frame ordering"
         );
         assert!(
-            categories.contains(&grpc_trailer_forwarding_rfc9113::TestCategory::ErrorResponseHandling),
+            categories
+                .contains(&grpc_trailer_forwarding_rfc9113::TestCategory::ErrorResponseHandling),
             "Should test error response handling"
         );
 
         // Verify all tests pass
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == grpc_trailer_forwarding_rfc9113::TestVerdict::Fail)
             .collect();
 
@@ -1659,9 +1945,8 @@ mod tests {
         );
 
         // Verify coverage of all 5 bead requirements
-        let test_ids: std::collections::HashSet<_> = results.iter()
-            .map(|r| r.test_id.as_str())
-            .collect();
+        let test_ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
 
         // Requirement 1: grpc-status in trailers (not headers)
         assert!(

@@ -22,15 +22,11 @@ pub enum RequirementLevel {
 
 /// Test vector for basic record batch with no compression.
 pub fn basic_record_batch_no_compression() -> Kip98TestVector {
-    let mut batch = RecordBatchV2::new(0, 12345, 0, 0)
-        .with_base_timestamp(1234567890000);
+    let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
-    let record = RecordV2::new(
-        Some(b"test-key".to_vec()),
-        Some(b"test-value".to_vec()),
-    )
-    .with_timestamp_delta(0)
-    .with_offset_delta(0);
+    let record = RecordV2::new(Some(b"test-key".to_vec()), Some(b"test-value".to_vec()))
+        .with_timestamp_delta(0)
+        .with_offset_delta(0);
 
     batch.add_record(record);
 
@@ -50,19 +46,13 @@ pub fn transactional_record_batch() -> Kip98TestVector {
         .with_base_timestamp(1234567890000)
         .with_attributes(RecordAttribute::new().with_transactional(true));
 
-    let record1 = RecordV2::new(
-        Some(b"key1".to_vec()),
-        Some(b"value1".to_vec()),
-    )
-    .with_timestamp_delta(0)
-    .with_offset_delta(0);
+    let record1 = RecordV2::new(Some(b"key1".to_vec()), Some(b"value1".to_vec()))
+        .with_timestamp_delta(0)
+        .with_offset_delta(0);
 
-    let record2 = RecordV2::new(
-        Some(b"key2".to_vec()),
-        Some(b"value2".to_vec()),
-    )
-    .with_timestamp_delta(100)
-    .with_offset_delta(1);
+    let record2 = RecordV2::new(Some(b"key2".to_vec()), Some(b"value2".to_vec()))
+        .with_timestamp_delta(100)
+        .with_offset_delta(1);
 
     batch.add_record(record1);
     batch.add_record(record2);
@@ -83,7 +73,7 @@ pub fn control_record_batch() -> Kip98TestVector {
         .with_attributes(
             RecordAttribute::new()
                 .with_transactional(true)
-                .with_control(true)
+                .with_control(true),
         );
 
     // Control records typically have specific key/value structures
@@ -107,8 +97,7 @@ pub fn control_record_batch() -> Kip98TestVector {
 
 /// Test vector for record with headers.
 pub fn record_with_headers() -> Kip98TestVector {
-    let mut batch = RecordBatchV2::new(50, 11111, 0, 5)
-        .with_base_timestamp(1234567890000);
+    let mut batch = RecordBatchV2::new(50, 11111, 0, 5).with_base_timestamp(1234567890000);
 
     let record = RecordV2::new(
         Some(b"user-123".to_vec()),
@@ -140,7 +129,13 @@ pub fn compressed_record_batch_gzip() -> Kip98TestVector {
     for i in 0..5 {
         let record = RecordV2::new(
             Some(format!("key-{}", i).into_bytes()),
-            Some(format!("This is a longer value for record {} to test compression efficiency", i).into_bytes()),
+            Some(
+                format!(
+                    "This is a longer value for record {} to test compression efficiency",
+                    i
+                )
+                .into_bytes(),
+            ),
         )
         .with_timestamp_delta(i * 10)
         .with_offset_delta(i);
@@ -160,8 +155,7 @@ pub fn compressed_record_batch_gzip() -> Kip98TestVector {
 /// Test vector for timestamp delta encoding.
 pub fn timestamp_delta_encoding() -> Kip98TestVector {
     let base_timestamp = 1234567890000i64;
-    let mut batch = RecordBatchV2::new(300, 33333, 0, 100)
-        .with_base_timestamp(base_timestamp);
+    let mut batch = RecordBatchV2::new(300, 33333, 0, 100).with_base_timestamp(base_timestamp);
 
     // Create records with various timestamp deltas to test varint encoding
     let timestamp_deltas = [0, 1, 127, 128, 16383, 16384, 2097151, 2097152];
@@ -188,8 +182,7 @@ pub fn timestamp_delta_encoding() -> Kip98TestVector {
 
 /// Test vector for null key and value.
 pub fn null_key_value_record() -> Kip98TestVector {
-    let mut batch = RecordBatchV2::new(400, 44444, 0, 0)
-        .with_base_timestamp(1234567890000);
+    let mut batch = RecordBatchV2::new(400, 44444, 0, 0).with_base_timestamp(1234567890000);
 
     // Record with null key and value
     let record1 = RecordV2::new(None, None)
@@ -245,8 +238,8 @@ pub fn producer_id_epoch_sequence() -> Kip98TestVector {
 /// Test vector for base_offset and last_offset_delta relationship.
 pub fn offset_relationship() -> Kip98TestVector {
     let base_offset = 1000i64;
-    let mut batch = RecordBatchV2::new(base_offset, 55555, 1, 50)
-        .with_base_timestamp(1234567890000);
+    let mut batch =
+        RecordBatchV2::new(base_offset, 55555, 1, 50).with_base_timestamp(1234567890000);
 
     // Add multiple records to test offset delta calculation
     for i in 0..10 {
@@ -274,8 +267,7 @@ pub fn offset_relationship() -> Kip98TestVector {
 
 /// Test vector for LogAppendTime timestamp type.
 pub fn log_append_time_timestamp() -> Kip98TestVector {
-    let mut batch = RecordBatchV2::new(600, 66666, 0, 0)
-        .with_base_timestamp(1234567890000);
+    let mut batch = RecordBatchV2::new(600, 66666, 0, 0).with_base_timestamp(1234567890000);
 
     let record = RecordV2::new(
         Some(b"append-time-key".to_vec()),
@@ -283,14 +275,14 @@ pub fn log_append_time_timestamp() -> Kip98TestVector {
     )
     .with_timestamp_delta(0)
     .with_offset_delta(0)
-    .with_attributes(
-        RecordAttribute::new().with_timestamp_type(TimestampType::LogAppendTime)
-    );
+    .with_attributes(RecordAttribute::new().with_timestamp_type(TimestampType::LogAppendTime));
 
     batch.add_record(record);
 
     // Batch attributes should also reflect LogAppendTime
-    batch.attributes = batch.attributes.with_timestamp_type(TimestampType::LogAppendTime);
+    batch.attributes = batch
+        .attributes
+        .with_timestamp_type(TimestampType::LogAppendTime);
 
     Kip98TestVector {
         id: "KIP98-LOG-APPEND-TIME",

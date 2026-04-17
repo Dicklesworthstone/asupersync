@@ -11,13 +11,13 @@
 
 #[cfg(feature = "tls")]
 mod tls_0rtt_tests {
-    use asupersync::tls::{TlsAcceptor, TlsConnector, TlsAcceptorBuilder, TlsConnectorBuilder};
-    use asupersync::tls::TlsError;
-    use asupersync::types::{Budget, RegionId, TaskId, Time};
     use asupersync::cx::Cx;
-    use std::time::Duration;
-    use std::sync::Arc;
+    use asupersync::tls::TlsError;
+    use asupersync::tls::{TlsAcceptor, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder};
+    use asupersync::types::{Budget, RegionId, TaskId, Time};
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     /// Create a test context for TLS operations.
     fn create_test_context() -> Cx {
@@ -173,7 +173,10 @@ mod tls_0rtt_tests {
 
                 if psk_offered && early_data_extension_present {
                     if !psk_suitable_for_0rtt {
-                        return Err("PSK not suitable for 0-RTT but early_data extension present".to_string());
+                        return Err(
+                            "PSK not suitable for 0-RTT but early_data extension present"
+                                .to_string(),
+                        );
                     }
                     Ok(())
                 } else if early_data_extension_present && !psk_offered {
@@ -185,10 +188,15 @@ mod tls_0rtt_tests {
 
             Tls0RttConformanceResult {
                 test_id: "tls_0rtt_psk_early_data_extension".to_string(),
-                description: "PreSharedKey extension must be properly associated with early_data".to_string(),
+                description: "PreSharedKey extension must be properly associated with early_data"
+                    .to_string(),
                 category: TestCategory::PreSharedKeyExtension,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -210,8 +218,10 @@ mod tls_0rtt_tests {
                 let recovered_age = obfuscated_age.wrapping_sub(ticket_age_add);
 
                 if recovered_age != actual_ticket_age {
-                    Err(format!("Ticket age obfuscation failed: expected {}, got {}",
-                               actual_ticket_age, recovered_age))
+                    Err(format!(
+                        "Ticket age obfuscation failed: expected {}, got {}",
+                        actual_ticket_age, recovered_age
+                    ))
                 } else {
                     Ok(())
                 }
@@ -219,10 +229,15 @@ mod tls_0rtt_tests {
 
             Tls0RttConformanceResult {
                 test_id: "tls_0rtt_ticket_age_obfuscation".to_string(),
-                description: "Ticket age obfuscation must work correctly for replay protection".to_string(),
+                description: "Ticket age obfuscation must work correctly for replay protection"
+                    .to_string(),
                 category: TestCategory::TicketAgeObfuscation,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -250,10 +265,15 @@ mod tls_0rtt_tests {
 
             Tls0RttConformanceResult {
                 test_id: "tls_0rtt_freshness_window".to_string(),
-                description: "Freshness window must be enforced to prevent old ticket replay".to_string(),
+                description: "Freshness window must be enforced to prevent old ticket replay"
+                    .to_string(),
                 category: TestCategory::FreshnessWindow,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -290,10 +310,15 @@ mod tls_0rtt_tests {
 
             Tls0RttConformanceResult {
                 test_id: "tls_0rtt_hello_retry_rejection".to_string(),
-                description: "Server must properly reject replayed 0-RTT via HelloRetryRequest".to_string(),
+                description: "Server must properly reject replayed 0-RTT via HelloRetryRequest"
+                    .to_string(),
                 category: TestCategory::HelloRetryRequest,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -334,7 +359,11 @@ mod tls_0rtt_tests {
                 description: "Anti-replay cache TTL must be enforced properly".to_string(),
                 category: TestCategory::AntiReplayCache,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -361,10 +390,15 @@ mod tls_0rtt_tests {
 
             Tls0RttConformanceResult {
                 test_id: "tls_0rtt_max_early_data_size".to_string(),
-                description: "Server must honor max_early_data_size limits from session tickets".to_string(),
+                description: "Server must honor max_early_data_size limits from session tickets"
+                    .to_string(),
                 category: TestCategory::EarlyDataLimits,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::ExpectedFailure } else { TestVerdict::Pass },
+                verdict: if result.is_ok() {
+                    TestVerdict::ExpectedFailure
+                } else {
+                    TestVerdict::Pass
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -390,10 +424,15 @@ mod tls_0rtt_tests {
 
             Tls0RttConformanceResult {
                 test_id: "tls_0rtt_early_data_ordering".to_string(),
-                description: "Early data must be sent in correct order relative to handshake".to_string(),
+                description: "Early data must be sent in correct order relative to handshake"
+                    .to_string(),
                 category: TestCategory::PreSharedKeyExtension,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -422,7 +461,11 @@ mod tls_0rtt_tests {
                 description: "PSK binder must properly validate early data inclusion".to_string(),
                 category: TestCategory::PreSharedKeyExtension,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -449,7 +492,11 @@ mod tls_0rtt_tests {
                 description: "Client must properly indicate early data capability".to_string(),
                 category: TestCategory::PreSharedKeyExtension,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -466,8 +513,10 @@ mod tls_0rtt_tests {
                 let no_replay_detected = true;
                 let within_freshness_window = true;
 
-                let should_accept = cipher_suite_matches && ticket_valid &&
-                                  no_replay_detected && within_freshness_window;
+                let should_accept = cipher_suite_matches
+                    && ticket_valid
+                    && no_replay_detected
+                    && within_freshness_window;
 
                 if should_accept {
                     Ok(())
@@ -481,7 +530,11 @@ mod tls_0rtt_tests {
                 description: "Server early data acceptance logic must be sound".to_string(),
                 category: TestCategory::ServerReplayRejection,
                 requirement_level: RequirementLevel::Should,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -497,7 +550,10 @@ mod tls_0rtt_tests {
                 let max_early_data = 16384; // 16KB limit
 
                 if bytes_sent > max_early_data {
-                    Err(format!("Early data stream exceeded limit: {} > {}", bytes_sent, max_early_data))
+                    Err(format!(
+                        "Early data stream exceeded limit: {} > {}",
+                        bytes_sent, max_early_data
+                    ))
                 } else {
                     Ok(())
                 }
@@ -508,7 +564,11 @@ mod tls_0rtt_tests {
                 description: "Early data stream limits must be enforced".to_string(),
                 category: TestCategory::EarlyDataLimits,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::ExpectedFailure },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::ExpectedFailure
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -525,10 +585,14 @@ mod tls_0rtt_tests {
                 let early_data_hash = b"early_data_fingerprint".to_vec();
 
                 // Record early data hash for this session
-                session_cache.entry(session_id.clone()).or_default().push(early_data_hash.clone());
+                session_cache
+                    .entry(session_id.clone())
+                    .or_default()
+                    .push(early_data_hash.clone());
 
                 // Attempt to replay same early data in same session
-                let replaying_in_session = session_cache.get(&session_id)
+                let replaying_in_session = session_cache
+                    .get(&session_id)
                     .map_or(false, |hashes| hashes.contains(&early_data_hash));
 
                 if replaying_in_session {
@@ -543,7 +607,11 @@ mod tls_0rtt_tests {
                 description: "Replay protection must work across different sessions".to_string(),
                 category: TestCategory::AntiReplayCache,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::ExpectedFailure },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::ExpectedFailure
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -577,7 +645,11 @@ mod tls_0rtt_tests {
                 description: "Invalid ticket ages must be properly rejected".to_string(),
                 category: TestCategory::TicketAgeObfuscation,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::ExpectedFailure },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::ExpectedFailure
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -604,7 +676,11 @@ mod tls_0rtt_tests {
                 description: "Early data without PSK must be rejected".to_string(),
                 category: TestCategory::PreSharedKeyExtension,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::ExpectedFailure },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::ExpectedFailure
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -630,7 +706,11 @@ mod tls_0rtt_tests {
                 description: "Multiple early_data extensions must be rejected".to_string(),
                 category: TestCategory::PreSharedKeyExtension,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::ExpectedFailure },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::ExpectedFailure
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -679,11 +759,15 @@ mod tls_0rtt_tests {
             // Verify all tests have required fields
             for result in &results {
                 assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-                assert!(!result.description.is_empty(), "Description must not be empty");
+                assert!(
+                    !result.description.is_empty(),
+                    "Description must not be empty"
+                );
             }
 
             // Check for expected test categories
-            let categories: std::collections::HashSet<_> = results.iter().map(|r| &r.category).collect();
+            let categories: std::collections::HashSet<_> =
+                results.iter().map(|r| &r.category).collect();
             assert!(categories.contains(&TestCategory::PreSharedKeyExtension));
             assert!(categories.contains(&TestCategory::TicketAgeObfuscation));
             assert!(categories.contains(&TestCategory::AntiReplayCache));
@@ -696,13 +780,26 @@ mod tls_0rtt_tests {
             let results = harness.run_all_tests();
 
             // Ensure we test all major categories required by the bead
-            let has_psk_extension = results.iter().any(|r| r.category == TestCategory::PreSharedKeyExtension);
-            let has_ticket_age = results.iter().any(|r| r.category == TestCategory::TicketAgeObfuscation);
-            let has_anti_replay = results.iter().any(|r| r.category == TestCategory::AntiReplayCache);
-            let has_early_data_limits = results.iter().any(|r| r.category == TestCategory::EarlyDataLimits);
-            let has_hello_retry = results.iter().any(|r| r.category == TestCategory::HelloRetryRequest);
+            let has_psk_extension = results
+                .iter()
+                .any(|r| r.category == TestCategory::PreSharedKeyExtension);
+            let has_ticket_age = results
+                .iter()
+                .any(|r| r.category == TestCategory::TicketAgeObfuscation);
+            let has_anti_replay = results
+                .iter()
+                .any(|r| r.category == TestCategory::AntiReplayCache);
+            let has_early_data_limits = results
+                .iter()
+                .any(|r| r.category == TestCategory::EarlyDataLimits);
+            let has_hello_retry = results
+                .iter()
+                .any(|r| r.category == TestCategory::HelloRetryRequest);
 
-            assert!(has_psk_extension, "Should test PreSharedKey extension requirements");
+            assert!(
+                has_psk_extension,
+                "Should test PreSharedKey extension requirements"
+            );
             assert!(has_ticket_age, "Should test ticket age obfuscation");
             assert!(has_anti_replay, "Should test anti-replay cache");
             assert!(has_early_data_limits, "Should test early data limits");
@@ -715,11 +812,23 @@ mod tls_0rtt_tests {
             let results = harness.run_all_tests();
 
             // Check that we have appropriate requirement levels
-            let must_tests = results.iter().filter(|r| r.requirement_level == RequirementLevel::Must).count();
-            let should_tests = results.iter().filter(|r| r.requirement_level == RequirementLevel::Should).count();
+            let must_tests = results
+                .iter()
+                .filter(|r| r.requirement_level == RequirementLevel::Must)
+                .count();
+            let should_tests = results
+                .iter()
+                .filter(|r| r.requirement_level == RequirementLevel::Should)
+                .count();
 
-            assert!(must_tests > 0, "Should have MUST requirements from RFC 8446");
-            assert!(must_tests >= should_tests, "MUST requirements should be primary focus");
+            assert!(
+                must_tests > 0,
+                "Should have MUST requirements from RFC 8446"
+            );
+            assert!(
+                must_tests >= should_tests,
+                "MUST requirements should be primary focus"
+            );
         }
 
         #[test]
@@ -728,12 +837,16 @@ mod tls_0rtt_tests {
             let results = harness.run_all_tests();
 
             // Some tests are designed to validate rejection behavior
-            let expected_failures = results.iter()
+            let expected_failures = results
+                .iter()
                 .filter(|r| r.verdict == TestVerdict::ExpectedFailure)
                 .count();
 
             // We should have some expected failures for negative test cases
-            assert!(expected_failures > 0, "Should have expected failures for negative tests");
+            assert!(
+                expected_failures > 0,
+                "Should have expected failures for negative tests"
+            );
         }
     }
 }
@@ -744,7 +857,9 @@ fn tls_0rtt_conformance_suite_availability() {
     #[cfg(feature = "tls")]
     {
         println!("✓ TLS 1.3 0-RTT conformance test suite is available");
-        println!("✓ Covers: PSK+early_data, ticket age obfuscation, replay protection, anti-replay cache, early data limits");
+        println!(
+            "✓ Covers: PSK+early_data, ticket age obfuscation, replay protection, anti-replay cache, early data limits"
+        );
     }
 
     #[cfg(not(feature = "tls"))]

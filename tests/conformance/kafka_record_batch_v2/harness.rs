@@ -314,8 +314,16 @@ impl KafkaConformanceHarness {
             description: "Record attribute compression bits (0-2)".to_string(),
             category: TestCategory::Attributes,
             requirement_level: RequirementLevel::Must,
-            verdict: if all_passed { TestVerdict::Pass } else { TestVerdict::Fail },
-            details: if details.is_empty() { None } else { Some(details.join("; ")) },
+            verdict: if all_passed {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            },
+            details: if details.is_empty() {
+                None
+            } else {
+                Some(details.join("; "))
+            },
         }
     }
 
@@ -389,13 +397,22 @@ impl KafkaConformanceHarness {
             Ok(decoded) => {
                 let verdict = if decoded.records.len() == test_vector.record_batch.records.len() {
                     let mut all_match = true;
-                    for (orig, decoded_rec) in test_vector.record_batch.records.iter().zip(&decoded.records) {
+                    for (orig, decoded_rec) in test_vector
+                        .record_batch
+                        .records
+                        .iter()
+                        .zip(&decoded.records)
+                    {
                         if orig.timestamp_delta != decoded_rec.timestamp_delta {
                             all_match = false;
                             break;
                         }
                     }
-                    if all_match { TestVerdict::Pass } else { TestVerdict::Fail }
+                    if all_match {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    }
                 } else {
                     TestVerdict::Fail
                 };
@@ -431,7 +448,8 @@ impl KafkaConformanceHarness {
                     let decoded_rec = &decoded.records[0];
 
                     if orig_rec.key_length == decoded_rec.key_length
-                        && orig_rec.value_length == decoded_rec.value_length {
+                        && orig_rec.value_length == decoded_rec.value_length
+                    {
                         TestVerdict::Pass
                     } else {
                         TestVerdict::Fail
@@ -468,13 +486,22 @@ impl KafkaConformanceHarness {
             Ok(decoded) => {
                 let verdict = if decoded.records.len() == test_vector.record_batch.records.len() {
                     let mut all_match = true;
-                    for (orig, decoded_rec) in test_vector.record_batch.records.iter().zip(&decoded.records) {
+                    for (orig, decoded_rec) in test_vector
+                        .record_batch
+                        .records
+                        .iter()
+                        .zip(&decoded.records)
+                    {
                         if orig.offset_delta != decoded_rec.offset_delta {
                             all_match = false;
                             break;
                         }
                     }
-                    if all_match { TestVerdict::Pass } else { TestVerdict::Fail }
+                    if all_match {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    }
                 } else {
                     TestVerdict::Fail
                 };
@@ -504,19 +531,26 @@ impl KafkaConformanceHarness {
 
         match self.decode_record_batch(&encoded) {
             Ok(decoded) => {
-                let verdict = if !decoded.records.is_empty() && !decoded.records[0].headers.is_empty() {
+                let verdict = if !decoded.records.is_empty()
+                    && !decoded.records[0].headers.is_empty()
+                {
                     let orig_headers = &test_vector.record_batch.records[0].headers;
                     let decoded_headers = &decoded.records[0].headers;
 
                     if orig_headers.len() == decoded_headers.len() {
                         let mut all_match = true;
                         for (orig, decoded_header) in orig_headers.iter().zip(decoded_headers) {
-                            if orig.key != decoded_header.key || orig.value != decoded_header.value {
+                            if orig.key != decoded_header.key || orig.value != decoded_header.value
+                            {
                                 all_match = false;
                                 break;
                             }
                         }
-                        if all_match { TestVerdict::Pass } else { TestVerdict::Fail }
+                        if all_match {
+                            TestVerdict::Pass
+                        } else {
+                            TestVerdict::Fail
+                        }
                     } else {
                         TestVerdict::Fail
                     }
@@ -605,7 +639,8 @@ impl KafkaConformanceHarness {
         let test_vector = offset_relationship();
 
         let verdict = if test_vector.record_batch.last_offset_delta == 9 // 10 records (0-9)
-            && test_vector.record_batch.base_offset == 1000 {
+            && test_vector.record_batch.base_offset == 1000
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -653,15 +688,21 @@ impl KafkaConformanceHarness {
             && original.base_sequence == decoded.base_sequence
             && original.record_count == decoded.record_count
             && original.records.len() == decoded.records.len()
-            && original.records.iter().zip(&decoded.records).all(|(orig, dec)| {
-                orig.timestamp_delta == dec.timestamp_delta
-                    && orig.offset_delta == dec.offset_delta
-                    && orig.key == dec.key
-                    && orig.value == dec.value
-                    && orig.headers.len() == dec.headers.len()
-                    && orig.headers.iter().zip(&dec.headers).all(|(oh, dh)| {
-                        oh.key == dh.key && oh.value == dh.value
-                    })
-            })
+            && original
+                .records
+                .iter()
+                .zip(&decoded.records)
+                .all(|(orig, dec)| {
+                    orig.timestamp_delta == dec.timestamp_delta
+                        && orig.offset_delta == dec.offset_delta
+                        && orig.key == dec.key
+                        && orig.value == dec.value
+                        && orig.headers.len() == dec.headers.len()
+                        && orig
+                            .headers
+                            .iter()
+                            .zip(&dec.headers)
+                            .all(|(oh, dh)| oh.key == dh.key && oh.value == dh.value)
+                })
     }
 }

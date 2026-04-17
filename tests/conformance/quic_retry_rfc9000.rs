@@ -139,13 +139,15 @@ impl QuicRetryConformanceHarness {
                     src_cid: ConnectionId::new(&[0x05, 0x06]).map_err(to_string)?,
                     token: vec![0xaa, 0xbb, 0xcc, 0xdd],
                     integrity_tag: [
-                        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-                        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+                        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98,
+                        0x76, 0x54, 0x32, 0x10,
                     ],
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 let (decoded, consumed) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                 assert_eq!(consumed, encoded.len());
@@ -176,7 +178,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry)
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 // Verify header format per RFC 9000
                 assert!(encoded.len() >= 9, "Minimum header size");
@@ -221,7 +225,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                 match decoded {
@@ -252,7 +258,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                 match decoded {
@@ -289,7 +297,7 @@ impl QuicRetryConformanceHarness {
                 // - SCID in Retry = original client DCID (from Initial packet)
                 let retry = RetryHeader {
                     version: 0x0000_0001,
-                    dst_cid: new_scid, // New server-chosen CID
+                    dst_cid: new_scid,      // New server-chosen CID
                     src_cid: original_dcid, // Original client DCID
                     token: vec![0x42, 0x43],
                     integrity_tag: [0x00; 16],
@@ -301,7 +309,9 @@ impl QuicRetryConformanceHarness {
 
                 // Test encoding/decoding preserves CID ordering
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                 match decoded {
@@ -332,7 +342,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                 match decoded {
@@ -362,9 +374,9 @@ impl QuicRetryConformanceHarness {
             RequirementLevel::May,
             || {
                 let test_tokens = vec![
-                    vec![], // Empty token
-                    vec![0x00], // Single byte
-                    vec![0x42; 100], // Large token
+                    vec![],                             // Empty token
+                    vec![0x00],                         // Single byte
+                    vec![0x42; 100],                    // Large token
                     vec![0x01, 0x02, 0x03, 0xff, 0xfe], // Mixed bytes
                 ];
 
@@ -378,7 +390,9 @@ impl QuicRetryConformanceHarness {
                     };
 
                     let mut encoded = Vec::new();
-                    PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                    PacketHeader::Retry(retry.clone())
+                        .encode(&mut encoded)
+                        .map_err(to_string)?;
 
                     let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                     match decoded {
@@ -411,7 +425,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                 match decoded {
@@ -448,7 +464,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 // Verify the encoded packet ends with exactly 16 integrity tag bytes
                 assert!(encoded.len() >= 16, "Packet must have integrity tag");
@@ -477,8 +495,10 @@ impl QuicRetryConformanceHarness {
                 let test_tags = [
                     [0x00; 16], // All zeros
                     [0xff; 16], // All ones
-                    [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-                     0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10], // Mixed pattern
+                    [
+                        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98,
+                        0x76, 0x54, 0x32, 0x10,
+                    ], // Mixed pattern
                 ];
 
                 for (i, tag) in test_tags.iter().enumerate() {
@@ -491,7 +511,9 @@ impl QuicRetryConformanceHarness {
                     };
 
                     let mut encoded = Vec::new();
-                    PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                    PacketHeader::Retry(retry.clone())
+                        .encode(&mut encoded)
+                        .map_err(to_string)?;
 
                     let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                     match decoded {
@@ -529,7 +551,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                 match decoded {
@@ -563,7 +587,7 @@ impl QuicRetryConformanceHarness {
                 let retry = RetryHeader {
                     version: 0x0000_0001,
                     dst_cid: client_original_cid, // Client's original DCID
-                    src_cid: server_new_cid, // Server's new CID (becomes client's DCID)
+                    src_cid: server_new_cid,      // Server's new CID (becomes client's DCID)
                     token: vec![0x42],
                     integrity_tag: [0x00; 16],
                 };
@@ -605,15 +629,17 @@ impl QuicRetryConformanceHarness {
                 // - DCID = client's original SCID (so client recognizes it)
                 // - SCID = server's new CID (for client to use going forward)
                 let retry = RetryHeader {
-                    version: 0x0000_0001, // Must match client's version
+                    version: 0x0000_0001,         // Must match client's version
                     dst_cid: client_initial_scid, // Client's SCID becomes Retry DCID
-                    src_cid: server_new_cid, // Server's new CID becomes Retry SCID
+                    src_cid: server_new_cid,      // Server's new CID becomes Retry SCID
                     token: server_token,
                     integrity_tag: [0x42; 16], // Would be computed with actual crypto
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry.clone())
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 // Verify server generated valid packet
                 assert!(encoded.len() >= 16, "Must include integrity tag");
@@ -656,14 +682,21 @@ impl QuicRetryConformanceHarness {
                     };
 
                     let mut encoded = Vec::new();
-                    PacketHeader::Retry(retry.clone()).encode(&mut encoded).map_err(to_string)?;
+                    PacketHeader::Retry(retry.clone())
+                        .encode(&mut encoded)
+                        .map_err(to_string)?;
 
                     let (decoded, _) = PacketHeader::decode(&encoded, 0).map_err(to_string)?;
                     match decoded {
                         PacketHeader::Retry(decoded_retry) => {
                             assert_eq!(decoded_retry.version, version);
                         }
-                        _ => return Err(format!("Expected Retry packet for version {:#x}", version)),
+                        _ => {
+                            return Err(format!(
+                                "Expected Retry packet for version {:#x}",
+                                version
+                            ));
+                        }
                     }
                 }
                 Ok(())
@@ -686,7 +719,9 @@ impl QuicRetryConformanceHarness {
                 };
 
                 let mut encoded = Vec::new();
-                PacketHeader::Retry(retry).encode(&mut encoded).map_err(to_string)?;
+                PacketHeader::Retry(retry)
+                    .encode(&mut encoded)
+                    .map_err(to_string)?;
 
                 // Verify first byte has correct packet type encoding
                 // RFC 9000: Long header format with type = 3 (Retry)
@@ -700,8 +735,14 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Helper function to run a single test with proper error handling and timing.
-    fn run_test<F>(&self, test_id: &str, description: &str, category: TestCategory,
-                   requirement_level: RequirementLevel, test_fn: F) -> QuicRetryConformanceResult
+    fn run_test<F>(
+        &self,
+        test_id: &str,
+        description: &str,
+        category: TestCategory,
+        requirement_level: RequirementLevel,
+        test_fn: F,
+    ) -> QuicRetryConformanceResult
     where
         F: FnOnce() -> Result<(), String>,
     {
@@ -807,7 +848,8 @@ mod tests {
         }
 
         // Check for any failures
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Fail)
             .collect();
 
@@ -833,8 +875,10 @@ mod tests {
         for result in &results {
             assert_eq!(result.category, TestCategory::PacketFormat);
             if result.verdict == TestVerdict::Fail {
-                panic!("Packet format test failed: {} - {:?}",
-                       result.test_id, result.error_message);
+                panic!(
+                    "Packet format test failed: {} - {:?}",
+                    result.test_id, result.error_message
+                );
             }
         }
     }
@@ -850,8 +894,10 @@ mod tests {
         for result in &results {
             assert_eq!(result.category, TestCategory::ConnectionIdHandling);
             if result.verdict == TestVerdict::Fail {
-                panic!("Connection ID test failed: {} - {:?}",
-                       result.test_id, result.error_message);
+                panic!(
+                    "Connection ID test failed: {} - {:?}",
+                    result.test_id, result.error_message
+                );
             }
         }
     }
@@ -868,7 +914,9 @@ mod tests {
         };
 
         let mut encoded = Vec::new();
-        PacketHeader::Retry(retry.clone()).encode(&mut encoded).unwrap();
+        PacketHeader::Retry(retry.clone())
+            .encode(&mut encoded)
+            .unwrap();
 
         let (decoded, _) = PacketHeader::decode(&encoded, 0).unwrap();
         match decoded {

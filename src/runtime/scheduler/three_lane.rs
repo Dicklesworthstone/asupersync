@@ -55,7 +55,6 @@ use crate::obligation::lyapunov::{
 use crate::observability::spectral_health::{SpectralHealthMonitor, SpectralThresholds};
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_injector::GlobalInjector;
-use crate::runtime::scheduler::invariant_monitor::{InvariantCategory, SchedulerInvariant};
 use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;

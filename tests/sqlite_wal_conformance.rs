@@ -68,11 +68,17 @@ mod sqlite_wal_tests {
             };
 
             // Basic setup - create table and initial data
-            match conn.execute_batch(&cx, "
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
                 CREATE TABLE test_accounts (id INTEGER, balance INTEGER);
                 INSERT INTO test_accounts VALUES (1, 1000), (2, 2000);
-            ").await {
-                Outcome::Ok(()) => {},
+            ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
                 other => panic!("Failed to setup test data: {:?}", other),
             };
 
@@ -80,7 +86,10 @@ mod sqlite_wal_tests {
             println!("✓ Journal mode: {:?}", journal_mode);
 
             // Test basic functionality - this validates that WAL mode is working
-            let count_result = match conn.query(&cx, "SELECT COUNT(*) FROM test_accounts", &[]).await {
+            let count_result = match conn
+                .query(&cx, "SELECT COUNT(*) FROM test_accounts", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed to count records: {:?}", other),
             };
@@ -105,26 +114,40 @@ mod sqlite_wal_tests {
             };
 
             // Create table and generate WAL content
-            match conn.execute_batch(&cx, "
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
                 CREATE TABLE checkpoint_test (id INTEGER PRIMARY KEY, data TEXT);
-            ").await {
-                Outcome::Ok(()) => {},
+            ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
                 other => panic!("Failed to create checkpoint table: {:?}", other),
             };
 
             // Insert data to generate WAL content
             for i in 1..=20 {
-                match conn.execute(&cx,
-                    "INSERT INTO checkpoint_test (data) VALUES (?)",
-                    &[asupersync::database::SqliteValue::Text(format!("data_{}", i))]
-                ).await {
-                    Outcome::Ok(_) => {},
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO checkpoint_test (data) VALUES (?)",
+                        &[asupersync::database::SqliteValue::Text(format!(
+                            "data_{}",
+                            i
+                        ))],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to insert data {}: {:?}", i, other),
                 };
             }
 
             // Test PASSIVE checkpoint
-            let passive_result = match conn.query(&cx, "PRAGMA wal_checkpoint(PASSIVE)", &[]).await {
+            let passive_result = match conn.query(&cx, "PRAGMA wal_checkpoint(PASSIVE)", &[]).await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed PASSIVE checkpoint: {:?}", other),
             };
@@ -133,7 +156,8 @@ mod sqlite_wal_tests {
             println!("✓ PASSIVE checkpoint executed successfully");
 
             // Test RESTART checkpoint
-            let restart_result = match conn.query(&cx, "PRAGMA wal_checkpoint(RESTART)", &[]).await {
+            let restart_result = match conn.query(&cx, "PRAGMA wal_checkpoint(RESTART)", &[]).await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed RESTART checkpoint: {:?}", other),
             };
@@ -142,7 +166,10 @@ mod sqlite_wal_tests {
             println!("✓ RESTART checkpoint executed successfully");
 
             // Test TRUNCATE checkpoint
-            let truncate_result = match conn.query(&cx, "PRAGMA wal_checkpoint(TRUNCATE)", &[]).await {
+            let truncate_result = match conn
+                .query(&cx, "PRAGMA wal_checkpoint(TRUNCATE)", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed TRUNCATE checkpoint: {:?}", other),
             };
@@ -151,7 +178,10 @@ mod sqlite_wal_tests {
             println!("✓ TRUNCATE checkpoint executed successfully");
 
             // Verify data integrity after all checkpoints
-            let final_count = match conn.query(&cx, "SELECT COUNT(*) FROM checkpoint_test", &[]).await {
+            let final_count = match conn
+                .query(&cx, "SELECT COUNT(*) FROM checkpoint_test", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed final count: {:?}", other),
             };
@@ -176,11 +206,17 @@ mod sqlite_wal_tests {
             };
 
             // Create test table
-            match conn.execute_batch(&cx, "
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
                 CREATE TABLE busy_test (id INTEGER PRIMARY KEY, value TEXT);
                 INSERT INTO busy_test (value) VALUES ('initial');
-            ").await {
-                Outcome::Ok(()) => {},
+            ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
                 other => panic!("Failed to create busy test table: {:?}", other),
             };
 
@@ -188,15 +224,18 @@ mod sqlite_wal_tests {
             match conn.set_busy_timeout(&cx, Duration::from_millis(100)).await {
                 Outcome::Ok(()) => {
                     println!("✓ Busy timeout set successfully");
-                },
+                }
                 other => panic!("Failed to set busy timeout: {:?}", other),
             };
 
             // Test that basic operations work with busy handler configured
-            match conn.execute(&cx, "INSERT INTO busy_test (value) VALUES ('test')", &[]).await {
+            match conn
+                .execute(&cx, "INSERT INTO busy_test (value) VALUES ('test')", &[])
+                .await
+            {
                 Outcome::Ok(_) => {
                     println!("✓ Operations work correctly with busy handler configured");
-                },
+                }
                 other => panic!("Failed basic operation with busy handler: {:?}", other),
             };
 
@@ -226,38 +265,55 @@ mod sqlite_wal_tests {
             };
 
             // Configure autocheckpoint threshold
-            let autocheckpoint_result = match conn.query(&cx, "PRAGMA wal_autocheckpoint(100)", &[]).await {
-                Outcome::Ok(rows) => rows,
-                other => panic!("Failed to set wal_autocheckpoint: {:?}", other),
-            };
+            let autocheckpoint_result =
+                match conn.query(&cx, "PRAGMA wal_autocheckpoint(100)", &[]).await {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("Failed to set wal_autocheckpoint: {:?}", other),
+                };
 
             assert!(!autocheckpoint_result.is_empty());
             println!("✓ WAL autocheckpoint threshold configured");
 
             // Create table for threshold test
-            match conn.execute_batch(&cx, "
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
                 CREATE TABLE autocheckpoint_test (id INTEGER PRIMARY KEY, data BLOB);
-            ").await {
-                Outcome::Ok(()) => {},
+            ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
                 other => panic!("Failed to create autocheckpoint test table: {:?}", other),
             };
 
             // Insert enough data to potentially trigger autocheckpoint
             let test_data = vec![0u8; 1024]; // 1KB per row
             for i in 1..=50 {
-                match conn.execute(&cx,
-                    "INSERT INTO autocheckpoint_test (data) VALUES (?)",
-                    &[asupersync::database::SqliteValue::Blob(test_data.clone())]
-                ).await {
-                    Outcome::Ok(_) => {},
-                    other => panic!("Failed to insert autocheckpoint test data {}: {:?}", i, other),
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO autocheckpoint_test (data) VALUES (?)",
+                        &[asupersync::database::SqliteValue::Blob(test_data.clone())],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
+                    other => panic!(
+                        "Failed to insert autocheckpoint test data {}: {:?}",
+                        i, other
+                    ),
                 };
             }
 
             println!("✓ Generated sufficient data for autocheckpoint testing");
 
             // Verify data integrity and autocheckpoint behavior
-            let count_result = match conn.query(&cx, "SELECT COUNT(*) FROM autocheckpoint_test", &[]).await {
+            let count_result = match conn
+                .query(&cx, "SELECT COUNT(*) FROM autocheckpoint_test", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed to verify autocheckpoint data: {:?}", other),
             };
@@ -290,11 +346,17 @@ mod sqlite_wal_tests {
             };
 
             // Create test table
-            match conn.execute_batch(&cx, "
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
                 CREATE TABLE retry_test (id INTEGER PRIMARY KEY, value INTEGER);
                 INSERT INTO retry_test (value) VALUES (42);
-            ").await {
-                Outcome::Ok(()) => {},
+            ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
                 other => panic!("Failed to create retry test table: {:?}", other),
             };
 
@@ -302,35 +364,42 @@ mod sqlite_wal_tests {
             match conn.set_busy_timeout(&cx, Duration::from_millis(50)).await {
                 Outcome::Ok(()) => {
                     println!("✓ Short busy timeout configured for retry testing");
-                },
+                }
                 other => panic!("Failed to set short busy timeout: {:?}", other),
             };
 
             // Test that operations complete correctly even with short timeouts
             let retry_operations_successful = (1..=10).all(|i| {
                 let result = block_on(async {
-                    conn.execute(&cx,
+                    conn.execute(
+                        &cx,
                         "INSERT INTO retry_test (value) VALUES (?)",
-                        &[asupersync::database::SqliteValue::Integer(i)]
-                    ).await
+                        &[asupersync::database::SqliteValue::Integer(i)],
+                    )
+                    .await
                 });
 
                 match result {
                     Outcome::Ok(_) => true,
-                    Outcome::Err(SqliteError::Sqlite(msg)) if msg.contains("database is locked") => {
+                    Outcome::Err(SqliteError::Sqlite(msg))
+                        if msg.contains("database is locked") =>
+                    {
                         // Expected under contention - retry logic should handle this
                         println!("  Detected busy condition (expected): {}", msg);
                         false // Mark as expected busy condition
-                    },
+                    }
                     other => {
                         println!("  Unexpected result for operation {}: {:?}", i, other);
                         false
-                    },
+                    }
                 }
             });
 
             // Verify final state regardless of individual operation outcomes
-            let final_count = match conn.query(&cx, "SELECT COUNT(*) FROM retry_test", &[]).await {
+            let final_count = match conn
+                .query(&cx, "SELECT COUNT(*) FROM retry_test", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed to get final count: {:?}", other),
             };
@@ -368,51 +437,73 @@ mod sqlite_wal_tests {
 
             // Configure WAL settings for comprehensive test
             match conn.query(&cx, "PRAGMA wal_autocheckpoint(20)", &[]).await {
-                Outcome::Ok(_) => {},
+                Outcome::Ok(_) => {}
                 other => panic!("Failed to configure autocheckpoint: {:?}", other),
             };
 
             match conn.set_busy_timeout(&cx, Duration::from_millis(200)).await {
-                Outcome::Ok(()) => {},
+                Outcome::Ok(()) => {}
                 other => panic!("Failed to set integrated test busy timeout: {:?}", other),
             };
 
             // Create schema for integrated test
-            match conn.execute_batch(&cx, "
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
                 CREATE TABLE integrated_test (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     data TEXT NOT NULL,
                     timestamp INTEGER DEFAULT (unixepoch())
                 );
                 CREATE INDEX idx_timestamp ON integrated_test(timestamp);
-            ").await {
-                Outcome::Ok(()) => {},
+            ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
                 other => panic!("Failed to create integrated test schema: {:?}", other),
             };
 
             // Perform operations that exercise multiple WAL features
             for batch in 1..=5 {
                 for i in 1..=10 {
-                    match conn.execute(&cx,
-                        "INSERT INTO integrated_test (data) VALUES (?)",
-                        &[asupersync::database::SqliteValue::Text(format!("batch_{}_item_{}", batch, i))]
-                    ).await {
-                        Outcome::Ok(_) => {},
-                        other => panic!("Failed integrated test insert batch {} item {}: {:?}", batch, i, other),
+                    match conn
+                        .execute(
+                            &cx,
+                            "INSERT INTO integrated_test (data) VALUES (?)",
+                            &[asupersync::database::SqliteValue::Text(format!(
+                                "batch_{}_item_{}",
+                                batch, i
+                            ))],
+                        )
+                        .await
+                    {
+                        Outcome::Ok(_) => {}
+                        other => panic!(
+                            "Failed integrated test insert batch {} item {}: {:?}",
+                            batch, i, other
+                        ),
                     };
                 }
 
                 // Trigger checkpoint periodically
                 if batch % 2 == 0 {
                     match conn.query(&cx, "PRAGMA wal_checkpoint(PASSIVE)", &[]).await {
-                        Outcome::Ok(_) => {},
-                        other => panic!("Failed integrated test checkpoint at batch {}: {:?}", batch, other),
+                        Outcome::Ok(_) => {}
+                        other => panic!(
+                            "Failed integrated test checkpoint at batch {}: {:?}",
+                            batch, other
+                        ),
                     };
                 }
             }
 
             // Final verification
-            let final_count = match conn.query(&cx, "SELECT COUNT(*) FROM integrated_test", &[]).await {
+            let final_count = match conn
+                .query(&cx, "SELECT COUNT(*) FROM integrated_test", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed integrated test final count: {:?}", other),
             };
@@ -420,10 +511,14 @@ mod sqlite_wal_tests {
             assert_eq!(final_count.len(), 1);
 
             // Test complex query
-            let complex_query_result = match conn.query(&cx,
-                "SELECT COUNT(*) FROM integrated_test WHERE data LIKE 'batch_3_%'",
-                &[]
-            ).await {
+            let complex_query_result = match conn
+                .query(
+                    &cx,
+                    "SELECT COUNT(*) FROM integrated_test WHERE data LIKE 'batch_3_%'",
+                    &[],
+                )
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed complex query: {:?}", other),
             };
@@ -443,7 +538,9 @@ fn sqlite_wal_conformance_suite_availability() {
     #[cfg(feature = "sqlite")]
     {
         println!("✓ SQLite WAL conformance test suite is available");
-        println!("✓ Covers: reader snapshot consistency, checkpoint modes, busy handling, autocheckpoint, retry correctness");
+        println!(
+            "✓ Covers: reader snapshot consistency, checkpoint modes, busy handling, autocheckpoint, retry correctness"
+        );
     }
 
     #[cfg(not(feature = "sqlite"))]

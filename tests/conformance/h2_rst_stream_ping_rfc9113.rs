@@ -43,7 +43,7 @@
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{
     error::{ErrorCode, H2Error},
-    frame::{parse_frame, Frame, FrameHeader, FrameType, PingFrame, RstStreamFrame, ping_flags},
+    frame::{Frame, FrameHeader, FrameType, PingFrame, RstStreamFrame, parse_frame, ping_flags},
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -277,7 +277,8 @@ impl H2ConformanceHarness {
                     let error_value: u32 = (*error_code).into();
                     let payload = Bytes::copy_from_slice(&error_value.to_be_bytes());
 
-                    let result = RstStreamFrame::parse(&header, &payload).map_err(h2error_to_string)?;
+                    let result =
+                        RstStreamFrame::parse(&header, &payload).map_err(h2error_to_string)?;
                     assert_eq!(result.error_code, *error_code);
                 }
                 Ok(())
@@ -644,8 +645,14 @@ impl H2ConformanceHarness {
     }
 
     /// Helper function to run a single test with proper error handling and timing.
-    fn run_test<F>(&self, test_id: &str, description: &str, category: TestCategory,
-                   requirement_level: RequirementLevel, test_fn: F) -> H2ConformanceResult
+    fn run_test<F>(
+        &self,
+        test_id: &str,
+        description: &str,
+        category: TestCategory,
+        requirement_level: RequirementLevel,
+        test_fn: F,
+    ) -> H2ConformanceResult
     where
         F: FnOnce() -> Result<(), String>,
     {
@@ -749,7 +756,8 @@ mod tests {
         }
 
         // Check for any failures
-        let failures: Vec<_> = results.iter()
+        let failures: Vec<_> = results
+            .iter()
             .filter(|r| r.verdict == TestVerdict::Fail)
             .collect();
 
@@ -775,8 +783,10 @@ mod tests {
         for result in &results {
             assert_eq!(result.category, TestCategory::RstStreamFormat);
             if result.verdict == TestVerdict::Fail {
-                panic!("RST_STREAM format test failed: {} - {:?}",
-                       result.test_id, result.error_message);
+                panic!(
+                    "RST_STREAM format test failed: {} - {:?}",
+                    result.test_id, result.error_message
+                );
             }
         }
     }
@@ -792,8 +802,10 @@ mod tests {
         for result in &results {
             assert_eq!(result.category, TestCategory::PingFormat);
             if result.verdict == TestVerdict::Fail {
-                panic!("PING format test failed: {} - {:?}",
-                       result.test_id, result.error_message);
+                panic!(
+                    "PING format test failed: {} - {:?}",
+                    result.test_id, result.error_message
+                );
             }
         }
     }

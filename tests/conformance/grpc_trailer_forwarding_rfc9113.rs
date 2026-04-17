@@ -48,17 +48,17 @@
 
 //#[cfg(feature = "grpc")]  // gRPC appears to be available by default
 mod grpc_trailer_conformance_tests {
-    use asupersync::grpc::{
-        status::{Status, Code},
-        streaming::{Metadata, MetadataValue},
-        server::{parse_grpc_timeout, format_grpc_timeout},
-        web::{encode_trailers, decode_trailers, TrailerFrame},
-    };
     use asupersync::bytes::{Bytes, BytesMut};
+    use asupersync::grpc::{
+        server::{format_grpc_timeout, parse_grpc_timeout},
+        status::{Code, Status},
+        streaming::{Metadata, MetadataValue},
+        web::{TrailerFrame, decode_trailers, encode_trailers},
+    };
     use asupersync::http::h2::frame::{Frame, FrameHeader, FrameType};
     use serde::{Deserialize, Serialize};
-    use std::time::{Duration, Instant};
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     /// Test result for a single gRPC trailer forwarding conformance requirement.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +164,8 @@ mod grpc_trailer_conformance_tests {
         /// Build the final response with proper trailer placement.
         pub fn build_response(&mut self) {
             // Per gRPC spec: grpc-status MUST be in trailers, not initial headers
-            self.trailers.insert("grpc-status", &self.status.code() as &dyn ToString);
+            self.trailers
+                .insert("grpc-status", &self.status.code() as &dyn ToString);
 
             if !self.status.message().is_empty() {
                 // Base64-encode grpc-message if it contains non-ASCII
@@ -187,7 +188,9 @@ mod grpc_trailer_conformance_tests {
         pub fn validate_trailer_placement(&self) -> Result<(), String> {
             // grpc-status MUST NOT be in initial headers
             if self.initial_headers.get("grpc-status").is_some() {
-                return Err("grpc-status found in initial headers (must be in trailers)".to_string());
+                return Err(
+                    "grpc-status found in initial headers (must be in trailers)".to_string()
+                );
             }
 
             // grpc-status MUST be in trailers
@@ -258,8 +261,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_status_in_trailers_not_headers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
-                .with_status(Status::new(Code::Ok));
+            let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok));
 
             // Erroneously place grpc-status in initial headers
             response.initial_headers.insert("grpc-status", "0");
@@ -278,7 +280,8 @@ mod grpc_trailer_conformance_tests {
 
             GrpcTrailerConformanceResult {
                 test_id: "grpc_status_trailers_not_headers".to_string(),
-                description: "grpc-status MUST be in trailers, not initial headers (RFC 9113)".to_string(),
+                description: "grpc-status MUST be in trailers, not initial headers (RFC 9113)"
+                    .to_string(),
                 category: TestCategory::StatusTrailerPlacement,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -291,8 +294,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_status_required_in_trailers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
-                .with_status(Status::new(Code::Ok));
+            let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok));
 
             // Don't call build_response() to simulate missing grpc-status
             let verdict = match response.validate_trailer_placement() {
@@ -322,8 +324,10 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let non_ascii_message = "错误消息"; // Chinese error message
-            let mut response = MockGrpcResponse::new()
-                .with_status(Status::with_message(Code::InvalidArgument, non_ascii_message));
+            let mut response = MockGrpcResponse::new().with_status(Status::with_message(
+                Code::InvalidArgument,
+                non_ascii_message,
+            ));
 
             response.build_response();
 
@@ -333,7 +337,10 @@ mod grpc_trailer_conformance_tests {
                 if encoded != non_ascii_message {
                     // Try to decode and check if it matches original
                     if let Ok(decoded) = base64::decode(encoded) {
-                        if String::from_utf8(decoded).map(|s| s == non_ascii_message).unwrap_or(false) {
+                        if String::from_utf8(decoded)
+                            .map(|s| s == non_ascii_message)
+                            .unwrap_or(false)
+                        {
                             TestVerdict::Pass
                         } else {
                             TestVerdict::Fail
@@ -407,8 +414,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_message_empty_handling(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
-                .with_status(Status::new(Code::Ok)); // No message
+            let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok)); // No message
 
             response.build_response();
 
@@ -447,12 +453,12 @@ mod grpc_trailer_conformance_tests {
             // Don't add any data frames for immediate error
             response.build_response();
 
-            let verdict = if response.is_trailer_only() &&
-                           response.trailers.get("grpc-status").is_some() {
-                TestVerdict::Pass
-            } else {
-                TestVerdict::Fail
-            };
+            let verdict =
+                if response.is_trailer_only() && response.trailers.get("grpc-status").is_some() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                };
 
             let error_message = if verdict == TestVerdict::Fail {
                 Some("Immediate errors should use trailer-only responses".to_string())
@@ -462,7 +468,8 @@ mod grpc_trailer_conformance_tests {
 
             GrpcTrailerConformanceResult {
                 test_id: "trailer_only_response_immediate_errors".to_string(),
-                description: "trailer-only response for immediate errors before DATA frames".to_string(),
+                description: "trailer-only response for immediate errors before DATA frames"
+                    .to_string(),
                 category: TestCategory::TrailerOnlyResponses,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -481,11 +488,15 @@ mod grpc_trailer_conformance_tests {
             response.build_response();
 
             // Trailer-only response should have proper headers and trailers
-            let has_content_type = response.initial_headers.get("content-type")
+            let has_content_type = response
+                .initial_headers
+                .get("content-type")
                 .map(|v| matches!(v, MetadataValue::Ascii(s) if s.contains("application/grpc")))
                 .unwrap_or(false);
 
-            let has_status_200 = response.initial_headers.get(":status")
+            let has_status_200 = response
+                .initial_headers
+                .get(":status")
                 .map(|v| matches!(v, MetadataValue::Ascii(s) if s == "200"))
                 .unwrap_or(false);
 
@@ -521,9 +532,10 @@ mod grpc_trailer_conformance_tests {
                 .with_data_frame(Bytes::from("response data"))
                 .with_rst_stream(0); // NO_ERROR = 0
 
-            let verdict = if response.has_rst_stream &&
-                           response.rst_stream_error_code == Some(0) &&
-                           !response.data_frames.is_empty() {
+            let verdict = if response.has_rst_stream
+                && response.rst_stream_error_code == Some(0)
+                && !response.data_frames.is_empty()
+            {
                 TestVerdict::Pass
             } else {
                 TestVerdict::Fail
@@ -583,17 +595,17 @@ mod grpc_trailer_conformance_tests {
 
             let test_cases = vec![
                 ("10H", Some(Duration::from_secs(10 * 3600))), // Hours
-                ("5M", Some(Duration::from_secs(5 * 60))),      // Minutes
-                ("30S", Some(Duration::from_secs(30))),          // Seconds
-                ("500m", Some(Duration::from_millis(500))),      // Milliseconds
-                ("1000u", Some(Duration::from_micros(1000))),    // Microseconds
-                ("2000n", Some(Duration::from_nanos(2000))),     // Nanoseconds
-                ("99H", Some(Duration::from_secs(99 * 3600))),   // Maximum value
-                ("1H", Some(Duration::from_secs(3600))),         // Minimum value
-                ("0S", Some(Duration::from_secs(0))),            // Zero (edge case)
-                ("invalid", None),                               // Invalid format
-                ("100X", None),                                  // Invalid unit
-                ("", None),                                      // Empty string
+                ("5M", Some(Duration::from_secs(5 * 60))),     // Minutes
+                ("30S", Some(Duration::from_secs(30))),        // Seconds
+                ("500m", Some(Duration::from_millis(500))),    // Milliseconds
+                ("1000u", Some(Duration::from_micros(1000))),  // Microseconds
+                ("2000n", Some(Duration::from_nanos(2000))),   // Nanoseconds
+                ("99H", Some(Duration::from_secs(99 * 3600))), // Maximum value
+                ("1H", Some(Duration::from_secs(3600))),       // Minimum value
+                ("0S", Some(Duration::from_secs(0))),          // Zero (edge case)
+                ("invalid", None),                             // Invalid format
+                ("100X", None),                                // Invalid unit
+                ("", None),                                    // Empty string
             ];
 
             let mut all_passed = true;
@@ -610,7 +622,11 @@ mod grpc_trailer_conformance_tests {
                 }
             }
 
-            let verdict = if all_passed { TestVerdict::Pass } else { TestVerdict::Fail };
+            let verdict = if all_passed {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
             let error_message = if error_messages.is_empty() {
                 None
             } else {
@@ -619,7 +635,8 @@ mod grpc_trailer_conformance_tests {
 
             GrpcTrailerConformanceResult {
                 test_id: "grpc_timeout_header_parsing_all_units".to_string(),
-                description: "grpc-timeout header parsing H[1-99]<unit> units U=H,M,S,m,u,n".to_string(),
+                description: "grpc-timeout header parsing H[1-99]<unit> units U=H,M,S,m,u,n"
+                    .to_string(),
                 category: TestCategory::TimeoutHeaderParsing,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -633,12 +650,12 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let test_cases = vec![
-                (Duration::from_secs(3600), "1H"),     // Should prefer hours
-                (Duration::from_secs(60), "1M"),       // Should prefer minutes
-                (Duration::from_secs(1), "1S"),        // Should prefer seconds
-                (Duration::from_millis(1), "1m"),      // Should use milliseconds
-                (Duration::from_micros(1), "1u"),      // Should use microseconds
-                (Duration::from_nanos(1), "1n"),       // Should use nanoseconds
+                (Duration::from_secs(3600), "1H"), // Should prefer hours
+                (Duration::from_secs(60), "1M"),   // Should prefer minutes
+                (Duration::from_secs(1), "1S"),    // Should prefer seconds
+                (Duration::from_millis(1), "1m"),  // Should use milliseconds
+                (Duration::from_micros(1), "1u"),  // Should use microseconds
+                (Duration::from_nanos(1), "1n"),   // Should use nanoseconds
             ];
 
             let mut all_passed = true;
@@ -655,7 +672,11 @@ mod grpc_trailer_conformance_tests {
                 }
             }
 
-            let verdict = if all_passed { TestVerdict::Pass } else { TestVerdict::Fail };
+            let verdict = if all_passed {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
             let error_message = if error_messages.is_empty() {
                 None
             } else {
@@ -678,14 +699,14 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let invalid_cases = vec![
-                "100H",     // Value too large (>99)
-                "0H",       // Value too small (<1) for this unit
-                "1.5S",     // Decimal not allowed
-                "1SS",      // Double unit
-                "S1",       // Unit before value
-                "-1S",      // Negative value
-                "1h",       // Wrong case (should be 'H')
-                " 1S ",     // Whitespace
+                "100H", // Value too large (>99)
+                "0H",   // Value too small (<1) for this unit
+                "1.5S", // Decimal not allowed
+                "1SS",  // Double unit
+                "S1",   // Unit before value
+                "-1S",  // Negative value
+                "1h",   // Wrong case (should be 'H')
+                " 1S ", // Whitespace
             ];
 
             let mut all_rejected = true;
@@ -695,11 +716,16 @@ mod grpc_trailer_conformance_tests {
                 let parsed = parse_grpc_timeout(invalid_case);
                 if parsed.is_some() {
                     all_rejected = false;
-                    error_messages.push(format!("Should reject invalid format: '{}'", invalid_case));
+                    error_messages
+                        .push(format!("Should reject invalid format: '{}'", invalid_case));
                 }
             }
 
-            let verdict = if all_rejected { TestVerdict::Pass } else { TestVerdict::Fail };
+            let verdict = if all_rejected {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
             let error_message = if error_messages.is_empty() {
                 None
             } else {
@@ -739,7 +765,10 @@ mod grpc_trailer_conformance_tests {
             };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("HTTP/2 frame ordering must be: HEADERS -> DATA -> HEADERS(trailers)".to_string())
+                Some(
+                    "HTTP/2 frame ordering must be: HEADERS -> DATA -> HEADERS(trailers)"
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -767,8 +796,9 @@ mod grpc_trailer_conformance_tests {
             response.build_response();
 
             // All DATA frames must come before trailers
-            let verdict = if response.data_frames.len() == 2 &&
-                           response.trailers.get("grpc-status").is_some() {
+            let verdict = if response.data_frames.len() == 2
+                && response.trailers.get("grpc-status").is_some()
+            {
                 TestVerdict::Pass
             } else {
                 TestVerdict::Fail
@@ -795,14 +825,20 @@ mod grpc_trailer_conformance_tests {
         fn test_error_response_trailer_forwarding(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
-                .with_status(Status::with_message(Code::Internal, "database connection failed"));
+            let mut response = MockGrpcResponse::new().with_status(Status::with_message(
+                Code::Internal,
+                "database connection failed",
+            ));
 
             response.build_response();
 
-            let has_error_status = response.trailers.get("grpc-status")
+            let has_error_status = response
+                .trailers
+                .get("grpc-status")
                 .map(|v| match v {
-                    MetadataValue::Ascii(s) => s.parse::<i32>().unwrap_or(-1) == Code::Internal as i32,
+                    MetadataValue::Ascii(s) => {
+                        s.parse::<i32>().unwrap_or(-1) == Code::Internal as i32
+                    }
                     _ => false,
                 })
                 .unwrap_or(false);
@@ -816,7 +852,10 @@ mod grpc_trailer_conformance_tests {
             };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("Error responses must include grpc-status and grpc-message in trailers".to_string())
+                Some(
+                    "Error responses must include grpc-status and grpc-message in trailers"
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -848,15 +887,17 @@ mod grpc_trailer_conformance_tests {
         }
 
         pub fn decode(input: &str) -> Result<Vec<u8>, ()> {
-            base64::engine::general_purpose::STANDARD.decode(input).map_err(|_| ())
+            base64::engine::general_purpose::STANDARD
+                .decode(input)
+                .map_err(|_| ())
         }
     }
 
+    pub use GrpcTrailerConformanceHarness;
     /// Re-export types for conformance system integration.
     pub use GrpcTrailerConformanceResult as GrpcConformanceResult;
-    pub use GrpcTrailerConformanceHarness;
-    pub use TestCategory;
     pub use RequirementLevel;
+    pub use TestCategory;
     pub use TestVerdict;
 }
 
@@ -864,7 +905,9 @@ mod grpc_trailer_conformance_tests {
 #[test]
 fn grpc_trailer_conformance_suite_availability() {
     println!("✓ gRPC trailer forwarding conformance test suite is available");
-    println!("✓ Covers: status trailer placement, message encoding, timeout parsing, RST_STREAM handling");
+    println!(
+        "✓ Covers: status trailer placement, message encoding, timeout parsing, RST_STREAM handling"
+    );
 }
 
 #[cfg(test)]
@@ -873,8 +916,8 @@ mod tests {
 
     #[test]
     fn test_mock_grpc_response() {
-        let mut mock = MockGrpcResponse::new()
-            .with_status(Status::with_message(Code::Ok, "success"));
+        let mut mock =
+            MockGrpcResponse::new().with_status(Status::with_message(Code::Ok, "success"));
 
         mock.build_response();
 
@@ -893,13 +936,15 @@ mod tests {
         // Verify all tests have required fields
         for result in &results {
             assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-            assert!(!result.description.is_empty(), "Description must not be empty");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
         }
 
         // Should have tests for all required categories
-        let categories: std::collections::HashSet<_> = results.iter()
-            .map(|r| &r.category)
-            .collect();
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
 
         assert!(categories.contains(&TestCategory::StatusTrailerPlacement));
         assert!(categories.contains(&TestCategory::MessageEncoding));
@@ -910,8 +955,7 @@ mod tests {
 
     #[test]
     fn test_trailer_placement_validation() {
-        let mut response = MockGrpcResponse::new()
-            .with_status(Status::new(Code::Ok));
+        let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok));
 
         // Valid: grpc-status in trailers only
         response.build_response();

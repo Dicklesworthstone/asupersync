@@ -225,7 +225,10 @@ impl Semaphore {
             // On ARM this avoids a store-release barrier per acquisition.
             self.permits_shadow.store(state.permits, Ordering::Relaxed);
             Ok(SemaphorePermit {
-                obligation: Some(ObligationToken::reserve(format!("semaphore-permit-{}", count))),
+                obligation: Some(ObligationToken::reserve(format!(
+                    "semaphore-permit-{}",
+                    count
+                ))),
                 semaphore: self,
                 count,
             })
@@ -371,7 +374,10 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 next.wake();
             }
             return Poll::Ready(Ok(SemaphorePermit {
-                obligation: Some(ObligationToken::reserve(format!("semaphore-permit-{}", self.count))),
+                obligation: Some(ObligationToken::reserve(format!(
+                    "semaphore-permit-{}",
+                    self.count
+                ))),
                 semaphore: self.semaphore,
                 count: self.count,
             }));
@@ -707,7 +713,10 @@ impl Future for OwnedAcquireFuture {
                 next.wake();
             }
             return Poll::Ready(Ok(OwnedSemaphorePermit {
-                obligation: Some(ObligationToken::reserve(format!("semaphore-permit-{}", this.count))),
+                obligation: Some(ObligationToken::reserve(format!(
+                    "semaphore-permit-{}",
+                    this.count
+                ))),
                 semaphore: this.semaphore.clone(),
                 count: this.count,
             }));

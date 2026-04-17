@@ -12,14 +12,14 @@
 #[cfg(feature = "deterministic-mode")]
 mod cancel_dag_determinism_tests {
     use asupersync::cancel::progress_certificate::{ProgressCertificate, ProgressConfig};
-    use asupersync::cancel::symbol_cancel::{SymbolCancelToken, CancelBroadcaster};
-    use asupersync::lab::runtime::LabRuntime;
-    use asupersync::lab::config::LabConfig;
-    use asupersync::types::{Budget, CancelKind, CancelReason, Time, RegionId, TaskId};
-    use asupersync::types::symbol::{Symbol, ObjectId};
+    use asupersync::cancel::symbol_cancel::{CancelBroadcaster, SymbolCancelToken};
     use asupersync::cx::Cx;
+    use asupersync::lab::config::LabConfig;
+    use asupersync::lab::runtime::LabRuntime;
+    use asupersync::types::symbol::{ObjectId, Symbol};
+    use asupersync::types::{Budget, CancelKind, CancelReason, RegionId, TaskId, Time};
     use asupersync::util::ArenaIndex;
-    use std::collections::{HashMap, BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -168,13 +168,18 @@ mod cancel_dag_determinism_tests {
 
                 // Verify byte-identical serialization
                 if snapshot1 != snapshot2 {
-                    return Err(format!("Cancel DAG snapshots differ between runs with same seed: {:?} vs {:?}",
-                              snapshot1.cancellation_events.len(), snapshot2.cancellation_events.len()));
+                    return Err(format!(
+                        "Cancel DAG snapshots differ between runs with same seed: {:?} vs {:?}",
+                        snapshot1.cancellation_events.len(),
+                        snapshot2.cancellation_events.len()
+                    ));
                 }
 
                 // Verify deterministic ordering in events
                 if snapshot1.cancellation_events != snapshot2.cancellation_events {
-                    return Err("Cancellation events order differs between identical runs".to_string());
+                    return Err(
+                        "Cancellation events order differs between identical runs".to_string()
+                    );
                 }
 
                 Ok(())
@@ -182,10 +187,16 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_serialization_determinism".to_string(),
-                description: "Same random seed must produce byte-identical cancel DAG serialization".to_string(),
+                description:
+                    "Same random seed must produce byte-identical cancel DAG serialization"
+                        .to_string(),
                 category: TestCategory::DagSerialization,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -210,15 +221,26 @@ mod cancel_dag_determinism_tests {
                         }
                         Some(ref_order) => {
                             if ref_order.len() != current_order.len() {
-                                return Err(format!("Run {} has different event count: {} vs {}",
-                                                 run, ref_order.len(), current_order.len()));
+                                return Err(format!(
+                                    "Run {} has different event count: {} vs {}",
+                                    run,
+                                    ref_order.len(),
+                                    current_order.len()
+                                ));
                             }
 
                             // Verify same cancellation order (by timestamp)
-                            for (i, (ref_event, cur_event)) in ref_order.iter().zip(current_order.iter()).enumerate() {
+                            for (i, (ref_event, cur_event)) in
+                                ref_order.iter().zip(current_order.iter()).enumerate()
+                            {
                                 if ref_event.timestamp_nanos != cur_event.timestamp_nanos {
-                                    return Err(format!("Run {} event {} timestamp differs: {} vs {}",
-                                                     run, i, ref_event.timestamp_nanos, cur_event.timestamp_nanos));
+                                    return Err(format!(
+                                        "Run {} event {} timestamp differs: {} vs {}",
+                                        run,
+                                        i,
+                                        ref_event.timestamp_nanos,
+                                        cur_event.timestamp_nanos
+                                    ));
                                 }
                             }
                         }
@@ -251,22 +273,31 @@ mod cancel_dag_determinism_tests {
                 let snapshot2 = self.create_cancel_dag_with_panicking_finalizers(seed)?;
 
                 // Verify same trace IDs for panicked finalizers
-                let panicked1: Vec<_> = snapshot1.finalizer_calls.iter()
+                let panicked1: Vec<_> = snapshot1
+                    .finalizer_calls
+                    .iter()
                     .filter(|e| e.panicked)
                     .collect();
-                let panicked2: Vec<_> = snapshot2.finalizer_calls.iter()
+                let panicked2: Vec<_> = snapshot2
+                    .finalizer_calls
+                    .iter()
                     .filter(|e| e.panicked)
                     .collect();
 
                 if panicked1.len() != panicked2.len() {
-                    return Err(format!("Different number of panicked finalizers: {} vs {}",
-                                     panicked1.len(), panicked2.len()));
+                    return Err(format!(
+                        "Different number of panicked finalizers: {} vs {}",
+                        panicked1.len(),
+                        panicked2.len()
+                    ));
                 }
 
                 for (f1, f2) in panicked1.iter().zip(panicked2.iter()) {
                     if f1.trace_id != f2.trace_id {
-                        return Err(format!("Trace ID mismatch for object {:?}: {} vs {}",
-                                         f1.object_id, f1.trace_id, f2.trace_id));
+                        return Err(format!(
+                            "Trace ID mismatch for object {:?}: {} vs {}",
+                            f1.object_id, f1.trace_id, f2.trace_id
+                        ));
                     }
                 }
 
@@ -275,10 +306,15 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_finalizer_trace_consistency".to_string(),
-                description: "Panicked finalizers must be logged with same trace_id across runs".to_string(),
+                description: "Panicked finalizers must be logged with same trace_id across runs"
+                    .to_string(),
                 category: TestCategory::FinalizerLogging,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -296,15 +332,24 @@ mod cancel_dag_determinism_tests {
 
                 // Verify same budget exhaustion events
                 if snapshot1.budget_exhaustions != snapshot2.budget_exhaustions {
-                    return Err(format!("Budget exhaustion events differ: {} vs {} events",
-                                     snapshot1.budget_exhaustions.len(), snapshot2.budget_exhaustions.len()));
+                    return Err(format!(
+                        "Budget exhaustion events differ: {} vs {} events",
+                        snapshot1.budget_exhaustions.len(),
+                        snapshot2.budget_exhaustions.len()
+                    ));
                 }
 
                 // Verify timing is deterministic
-                for (b1, b2) in snapshot1.budget_exhaustions.iter().zip(snapshot2.budget_exhaustions.iter()) {
+                for (b1, b2) in snapshot1
+                    .budget_exhaustions
+                    .iter()
+                    .zip(snapshot2.budget_exhaustions.iter())
+                {
                     if b1.exhausted_at != b2.exhausted_at {
-                        return Err(format!("Budget exhaustion timing differs for object {:?}: {} vs {}",
-                                         b1.object_id, b1.exhausted_at, b2.exhausted_at));
+                        return Err(format!(
+                            "Budget exhaustion timing differs for object {:?}: {} vs {}",
+                            b1.object_id, b1.exhausted_at, b2.exhausted_at
+                        ));
                     }
                 }
 
@@ -316,7 +361,11 @@ mod cancel_dag_determinism_tests {
                 description: "Budget exhaustion must be deterministic across replays".to_string(),
                 category: TestCategory::BudgetExhaustion,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -358,10 +407,16 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_dependency_topo_order".to_string(),
-                description: "Symbol-cancel order must match declared dependency graph topological sort".to_string(),
+                description:
+                    "Symbol-cancel order must match declared dependency graph topological sort"
+                        .to_string(),
                 category: TestCategory::DependencyTopology,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -385,7 +440,10 @@ mod cancel_dag_determinism_tests {
                 for (i, snapshot1) in snapshots.iter().enumerate() {
                     for (j, snapshot2) in snapshots.iter().enumerate() {
                         if i != j && snapshot1 == snapshot2 {
-                            return Err(format!("Seeds {} and {} produced identical results", seeds[i], seeds[j]));
+                            return Err(format!(
+                                "Seeds {} and {} produced identical results",
+                                seeds[i], seeds[j]
+                            ));
                         }
                     }
                 }
@@ -404,10 +462,16 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_multiple_seed_consistency".to_string(),
-                description: "Multiple seeds must produce consistent but distinct deterministic results".to_string(),
+                description:
+                    "Multiple seeds must produce consistent but distinct deterministic results"
+                        .to_string(),
                 category: TestCategory::DagSerialization,
                 requirement_level: RequirementLevel::Should,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -425,8 +489,10 @@ mod cancel_dag_determinism_tests {
                 let mut prev_timestamp = 0u64;
                 for event in &snapshot.cancellation_events {
                     if event.timestamp_nanos < prev_timestamp {
-                        return Err(format!("Events not ordered by timestamp: {} < {}",
-                                         event.timestamp_nanos, prev_timestamp));
+                        return Err(format!(
+                            "Events not ordered by timestamp: {} < {}",
+                            event.timestamp_nanos, prev_timestamp
+                        ));
                     }
                     prev_timestamp = event.timestamp_nanos;
                 }
@@ -445,10 +511,15 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_serialization_byte_ordering".to_string(),
-                description: "Cancel DAG serialization must maintain deterministic byte ordering".to_string(),
+                description: "Cancel DAG serialization must maintain deterministic byte ordering"
+                    .to_string(),
                 category: TestCategory::DagSerialization,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -470,15 +541,22 @@ mod cancel_dag_determinism_tests {
                 }
 
                 // Verify parent-child relationships are preserved
-                for events in [&snapshot1.cancellation_events, &snapshot2.cancellation_events] {
+                for events in [
+                    &snapshot1.cancellation_events,
+                    &snapshot2.cancellation_events,
+                ] {
                     for event in events {
                         // Check that parents are cancelled before children (simplified check)
                         if self.has_parent_dependency(event.object_id) {
-                            let parent_cancelled_first = events.iter()
-                                .any(|e| self.is_parent_of(e.object_id, event.object_id)
-                                       && e.timestamp_nanos <= event.timestamp_nanos);
+                            let parent_cancelled_first = events.iter().any(|e| {
+                                self.is_parent_of(e.object_id, event.object_id)
+                                    && e.timestamp_nanos <= event.timestamp_nanos
+                            });
                             if !parent_cancelled_first {
-                                return Err(format!("Child {:?} cancelled before parent", event.object_id));
+                                return Err(format!(
+                                    "Child {:?} cancelled before parent",
+                                    event.object_id
+                                ));
                             }
                         }
                     }
@@ -489,10 +567,16 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_hierarchical_determinism".to_string(),
-                description: "Hierarchical cancellation must follow deterministic parent-child ordering".to_string(),
+                description:
+                    "Hierarchical cancellation must follow deterministic parent-child ordering"
+                        .to_string(),
                 category: TestCategory::DependencyTopology,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -511,15 +595,24 @@ mod cancel_dag_determinism_tests {
 
                 // Verify concurrent requests are ordered deterministically
                 if snapshot1.cancellation_events.len() != snapshot2.cancellation_events.len() {
-                    return Err(format!("Different number of concurrent cancellation events: {} vs {}",
-                                     snapshot1.cancellation_events.len(), snapshot2.cancellation_events.len()));
+                    return Err(format!(
+                        "Different number of concurrent cancellation events: {} vs {}",
+                        snapshot1.cancellation_events.len(),
+                        snapshot2.cancellation_events.len()
+                    ));
                 }
 
                 // Check that the resolution of concurrent requests is deterministic
-                for (e1, e2) in snapshot1.cancellation_events.iter().zip(snapshot2.cancellation_events.iter()) {
+                for (e1, e2) in snapshot1
+                    .cancellation_events
+                    .iter()
+                    .zip(snapshot2.cancellation_events.iter())
+                {
                     if e1.object_id != e2.object_id || e1.timestamp_nanos != e2.timestamp_nanos {
-                        return Err(format!("Concurrent cancellation resolution differs: {:?}@{} vs {:?}@{}",
-                                         e1.object_id, e1.timestamp_nanos, e2.object_id, e2.timestamp_nanos));
+                        return Err(format!(
+                            "Concurrent cancellation resolution differs: {:?}@{} vs {:?}@{}",
+                            e1.object_id, e1.timestamp_nanos, e2.object_id, e2.timestamp_nanos
+                        ));
                     }
                 }
 
@@ -528,10 +621,15 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_concurrent_ordering".to_string(),
-                description: "Concurrent cancellation requests must be ordered deterministically".to_string(),
+                description: "Concurrent cancellation requests must be ordered deterministically"
+                    .to_string(),
                 category: TestCategory::CancellationOrdering,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -557,13 +655,19 @@ mod cancel_dag_determinism_tests {
 
                 // Verify certificates produce same progression
                 if cert1.len() != cert2.len() {
-                    return Err(format!("Progress certificate traces have different lengths: {} vs {}",
-                                     cert1.len(), cert2.len()));
+                    return Err(format!(
+                        "Progress certificate traces have different lengths: {} vs {}",
+                        cert1.len(),
+                        cert2.len()
+                    ));
                 }
 
                 for (i, (p1, p2)) in cert1.iter().zip(cert2.iter()).enumerate() {
                     if (p1 - p2).abs() > f64::EPSILON {
-                        return Err(format!("Progress certificate value differs at step {}: {} vs {}", i, p1, p2));
+                        return Err(format!(
+                            "Progress certificate value differs at step {}: {} vs {}",
+                            i, p1, p2
+                        ));
                     }
                 }
 
@@ -572,10 +676,15 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_progress_certificate_determinism".to_string(),
-                description: "Progress certificates must produce deterministic Lyapunov traces".to_string(),
+                description: "Progress certificates must produce deterministic Lyapunov traces"
+                    .to_string(),
                 category: TestCategory::BudgetExhaustion,
                 requirement_level: RequirementLevel::Should,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -596,16 +705,23 @@ mod cancel_dag_determinism_tests {
 
                 // Validate cancellation respects chain ordering
                 for event in &snapshot.cancellation_events {
-                    let chain_predecessors = self.get_dependency_chain_predecessors(event.object_id, &snapshot.dependency_graph);
+                    let chain_predecessors = self.get_dependency_chain_predecessors(
+                        event.object_id,
+                        &snapshot.dependency_graph,
+                    );
 
                     for predecessor in chain_predecessors {
-                        let predecessor_event = snapshot.cancellation_events.iter()
+                        let predecessor_event = snapshot
+                            .cancellation_events
+                            .iter()
                             .find(|e| e.object_id == predecessor);
 
                         if let Some(pred_event) = predecessor_event {
                             if pred_event.timestamp_nanos > event.timestamp_nanos {
-                                return Err(format!("Symbol dependency chain violated: {:?} cancelled before {:?}",
-                                                 event.object_id, predecessor));
+                                return Err(format!(
+                                    "Symbol dependency chain violated: {:?} cancelled before {:?}",
+                                    event.object_id, predecessor
+                                ));
                             }
                         }
                     }
@@ -616,10 +732,16 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_symbol_dependency_chain".to_string(),
-                description: "Symbol dependency chains must be validated and respected in cancellation order".to_string(),
+                description:
+                    "Symbol dependency chains must be validated and respected in cancellation order"
+                        .to_string(),
                 category: TestCategory::DependencyTopology,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -642,13 +764,18 @@ mod cancel_dag_determinism_tests {
 
                 // Verify broadcast ordering respects causal dependencies
                 for event in &snapshot1.cancellation_events {
-                    if event.cancel_kind == 7 { // ParentCancelled
+                    if event.cancel_kind == 7 {
+                        // ParentCancelled
                         // Find the parent cancellation event
-                        let parent_event = snapshot1.cancellation_events.iter()
-                            .find(|e| e.timestamp_nanos < event.timestamp_nanos && e.cancel_kind != 7);
+                        let parent_event = snapshot1.cancellation_events.iter().find(|e| {
+                            e.timestamp_nanos < event.timestamp_nanos && e.cancel_kind != 7
+                        });
 
                         if parent_event.is_none() {
-                            return Err(format!("ParentCancelled event {:?} has no preceding parent", event.object_id));
+                            return Err(format!(
+                                "ParentCancelled event {:?} has no preceding parent",
+                                event.object_id
+                            ));
                         }
                     }
                 }
@@ -658,10 +785,15 @@ mod cancel_dag_determinism_tests {
 
             CancelDagDeterminismResult {
                 test_id: "cancel_dag_broadcast_determinism".to_string(),
-                description: "Cancel broadcast propagation must be deterministic across runs".to_string(),
+                description: "Cancel broadcast propagation must be deterministic across runs"
+                    .to_string(),
                 category: TestCategory::CancellationOrdering,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             }
@@ -705,7 +837,10 @@ mod cancel_dag_determinism_tests {
             })
         }
 
-        fn create_cancel_dag_with_panicking_finalizers(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
+        fn create_cancel_dag_with_panicking_finalizers(
+            &self,
+            seed: u64,
+        ) -> Result<CancelDagSnapshot, String> {
             let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
 
             // Add mock finalizer events
@@ -721,12 +856,16 @@ mod cancel_dag_determinism_tests {
             Ok(snapshot)
         }
 
-        fn create_cancel_dag_with_budget_limits(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
+        fn create_cancel_dag_with_budget_limits(
+            &self,
+            seed: u64,
+        ) -> Result<CancelDagSnapshot, String> {
             let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
 
             // Add mock budget exhaustion events
             for (i, event) in snapshot.cancellation_events.iter().enumerate() {
-                if (i % 2) == 0 { // Every other object has budget exhaustion
+                if (i % 2) == 0 {
+                    // Every other object has budget exhaustion
                     snapshot.budget_exhaustions.push(BudgetEvent {
                         object_id: event.object_id,
                         budget_kind: 3, // PollQuota
@@ -740,18 +879,29 @@ mod cancel_dag_determinism_tests {
             Ok(snapshot)
         }
 
-        fn create_cancel_dag_with_dependencies(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
+        fn create_cancel_dag_with_dependencies(
+            &self,
+            seed: u64,
+        ) -> Result<CancelDagSnapshot, String> {
             let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
 
             // Create more complex dependency graph
-            let object_ids: Vec<_> = snapshot.cancellation_events.iter().map(|e| e.object_id).collect();
+            let object_ids: Vec<_> = snapshot
+                .cancellation_events
+                .iter()
+                .map(|e| e.object_id)
+                .collect();
 
             // Add additional dependencies to create a more complex DAG
             if object_ids.len() >= 4 {
-                snapshot.dependency_graph.insert(object_ids[3], vec![object_ids[0], object_ids[1]]);
+                snapshot
+                    .dependency_graph
+                    .insert(object_ids[3], vec![object_ids[0], object_ids[1]]);
             }
             if object_ids.len() >= 5 {
-                snapshot.dependency_graph.insert(object_ids[4], vec![object_ids[2]]);
+                snapshot
+                    .dependency_graph
+                    .insert(object_ids[4], vec![object_ids[2]]);
             }
 
             Ok(snapshot)
@@ -763,26 +913,35 @@ mod cancel_dag_determinism_tests {
             Ok(snapshot)
         }
 
-        fn create_concurrent_cancel_scenario(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
+        fn create_concurrent_cancel_scenario(
+            &self,
+            seed: u64,
+        ) -> Result<CancelDagSnapshot, String> {
             let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
 
             // Simulate concurrent requests by having events at same timestamp
             for i in 1..snapshot.cancellation_events.len() {
                 if (i % 3) == 0 {
-                    snapshot.cancellation_events[i].timestamp_nanos = snapshot.cancellation_events[i-1].timestamp_nanos;
+                    snapshot.cancellation_events[i].timestamp_nanos =
+                        snapshot.cancellation_events[i - 1].timestamp_nanos;
                 }
             }
 
             // Resort to ensure deterministic ordering for concurrent events
             snapshot.cancellation_events.sort_by(|a, b| {
-                a.timestamp_nanos.cmp(&b.timestamp_nanos)
+                a.timestamp_nanos
+                    .cmp(&b.timestamp_nanos)
                     .then_with(|| a.object_id.cmp(&b.object_id))
             });
 
             Ok(snapshot)
         }
 
-        fn create_progress_certificate_trace(&self, seed: u64, _config: ProgressConfig) -> Result<Vec<f64>, String> {
+        fn create_progress_certificate_trace(
+            &self,
+            seed: u64,
+            _config: ProgressConfig,
+        ) -> Result<Vec<f64>, String> {
             // Mock progress certificate trace
             let mut trace = Vec::new();
             let mut potential = 100.0f64;
@@ -796,7 +955,10 @@ mod cancel_dag_determinism_tests {
             Ok(trace)
         }
 
-        fn create_cancel_dag_with_symbol_chains(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
+        fn create_cancel_dag_with_symbol_chains(
+            &self,
+            seed: u64,
+        ) -> Result<CancelDagSnapshot, String> {
             self.create_cancel_dag_with_dependencies(seed)
         }
 
@@ -806,16 +968,22 @@ mod cancel_dag_determinism_tests {
             // Add some ParentCancelled events
             if snapshot.cancellation_events.len() >= 3 {
                 snapshot.cancellation_events[2].cancel_kind = 7; // ParentCancelled
-                snapshot.cancellation_events[2].timestamp_nanos = snapshot.cancellation_events[0].timestamp_nanos + 10;
+                snapshot.cancellation_events[2].timestamp_nanos =
+                    snapshot.cancellation_events[0].timestamp_nanos + 10;
             }
 
-            snapshot.cancellation_events.sort_by_key(|e| e.timestamp_nanos);
+            snapshot
+                .cancellation_events
+                .sort_by_key(|e| e.timestamp_nanos);
             Ok(snapshot)
         }
 
         // Helper methods for graph operations
 
-        fn topological_sort(&self, graph: &BTreeMap<ObjectId, Vec<ObjectId>>) -> Result<Vec<ObjectId>, String> {
+        fn topological_sort(
+            &self,
+            graph: &BTreeMap<ObjectId, Vec<ObjectId>>,
+        ) -> Result<Vec<ObjectId>, String> {
             // Simple topological sort implementation
             let mut result = Vec::new();
             let mut visited = std::collections::HashSet::new();
@@ -864,7 +1032,11 @@ mod cancel_dag_determinism_tests {
             self.topological_sort(graph).is_err()
         }
 
-        fn get_dependency_chain_predecessors(&self, _object_id: ObjectId, graph: &BTreeMap<ObjectId, Vec<ObjectId>>) -> Vec<ObjectId> {
+        fn get_dependency_chain_predecessors(
+            &self,
+            _object_id: ObjectId,
+            graph: &BTreeMap<ObjectId, Vec<ObjectId>>,
+        ) -> Vec<ObjectId> {
             // Simplified implementation - return direct dependencies
             graph.get(&_object_id).cloned().unwrap_or_default()
         }
@@ -916,17 +1088,28 @@ mod cancel_dag_determinism_tests {
             let harness = CancelDagDeterminismHarness::new();
             let results = harness.run_all_tests();
 
-            assert!(!results.is_empty(), "Should have cancel DAG determinism test results");
-            assert_eq!(results.len(), 12, "Should have 12 cancel DAG determinism conformance tests");
+            assert!(
+                !results.is_empty(),
+                "Should have cancel DAG determinism test results"
+            );
+            assert_eq!(
+                results.len(),
+                12,
+                "Should have 12 cancel DAG determinism conformance tests"
+            );
 
             // Verify all tests have required fields
             for result in &results {
                 assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-                assert!(!result.description.is_empty(), "Description must not be empty");
+                assert!(
+                    !result.description.is_empty(),
+                    "Description must not be empty"
+                );
             }
 
             // Check for expected test categories
-            let categories: std::collections::HashSet<_> = results.iter().map(|r| &r.category).collect();
+            let categories: std::collections::HashSet<_> =
+                results.iter().map(|r| &r.category).collect();
             assert!(categories.contains(&TestCategory::DagSerialization));
             assert!(categories.contains(&TestCategory::CancellationOrdering));
             assert!(categories.contains(&TestCategory::FinalizerLogging));
@@ -940,13 +1123,26 @@ mod cancel_dag_determinism_tests {
             let results = harness.run_all_tests();
 
             // Ensure we test all major categories required by the bead
-            let has_serialization = results.iter().any(|r| r.category == TestCategory::DagSerialization);
-            let has_ordering = results.iter().any(|r| r.category == TestCategory::CancellationOrdering);
-            let has_finalizers = results.iter().any(|r| r.category == TestCategory::FinalizerLogging);
-            let has_budget = results.iter().any(|r| r.category == TestCategory::BudgetExhaustion);
-            let has_topology = results.iter().any(|r| r.category == TestCategory::DependencyTopology);
+            let has_serialization = results
+                .iter()
+                .any(|r| r.category == TestCategory::DagSerialization);
+            let has_ordering = results
+                .iter()
+                .any(|r| r.category == TestCategory::CancellationOrdering);
+            let has_finalizers = results
+                .iter()
+                .any(|r| r.category == TestCategory::FinalizerLogging);
+            let has_budget = results
+                .iter()
+                .any(|r| r.category == TestCategory::BudgetExhaustion);
+            let has_topology = results
+                .iter()
+                .any(|r| r.category == TestCategory::DependencyTopology);
 
-            assert!(has_serialization, "Should test DAG serialization determinism");
+            assert!(
+                has_serialization,
+                "Should test DAG serialization determinism"
+            );
             assert!(has_ordering, "Should test cancellation ordering");
             assert!(has_finalizers, "Should test finalizer logging");
             assert!(has_budget, "Should test budget exhaustion");
@@ -958,18 +1154,30 @@ mod cancel_dag_determinism_tests {
             let harness = CancelDagDeterminismHarness::new();
             let seed = 42u64;
 
-            let snapshot1 = harness.create_cancel_dag_snapshot(seed).expect("Should create snapshot");
-            let snapshot2 = harness.create_cancel_dag_snapshot(seed).expect("Should create snapshot");
+            let snapshot1 = harness
+                .create_cancel_dag_snapshot(seed)
+                .expect("Should create snapshot");
+            let snapshot2 = harness
+                .create_cancel_dag_snapshot(seed)
+                .expect("Should create snapshot");
 
-            assert_eq!(snapshot1, snapshot2, "Snapshots with same seed should be identical");
+            assert_eq!(
+                snapshot1, snapshot2,
+                "Snapshots with same seed should be identical"
+            );
         }
 
         #[test]
         fn test_cancel_dag_dependency_graph_acyclicity() {
             let harness = CancelDagDeterminismHarness::new();
-            let snapshot = harness.create_cancel_dag_with_dependencies(123).expect("Should create snapshot");
+            let snapshot = harness
+                .create_cancel_dag_with_dependencies(123)
+                .expect("Should create snapshot");
 
-            assert!(!harness.has_cycles(&snapshot.dependency_graph), "Dependency graph should be acyclic");
+            assert!(
+                !harness.has_cycles(&snapshot.dependency_graph),
+                "Dependency graph should be acyclic"
+            );
         }
     }
 }
@@ -980,12 +1188,16 @@ fn cancel_dag_determinism_conformance_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {
         println!("✓ Cancel DAG determinism conformance test suite is available");
-        println!("✓ Covers: DAG serialization, cancellation ordering, finalizer logging, budget exhaustion, dependency topology");
+        println!(
+            "✓ Covers: DAG serialization, cancellation ordering, finalizer logging, budget exhaustion, dependency topology"
+        );
     }
 
     #[cfg(not(feature = "deterministic-mode"))]
     {
-        println!("⚠ Cancel DAG determinism conformance tests require --features deterministic-mode");
+        println!(
+            "⚠ Cancel DAG determinism conformance tests require --features deterministic-mode"
+        );
         println!("  Run with: cargo test --features deterministic-mode cancel_dag_determinism");
     }
 }

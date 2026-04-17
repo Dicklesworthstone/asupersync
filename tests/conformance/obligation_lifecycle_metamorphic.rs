@@ -13,16 +13,18 @@
 
 #[cfg(feature = "deterministic-mode")]
 mod obligation_lifecycle_metamorphic_tests {
-    use asupersync::obligation::ledger::{ObligationLedger, ObligationToken, LedgerStats, LeakedObligation};
+    use asupersync::cx::Cx;
+    use asupersync::lab::config::LabConfig;
+    use asupersync::lab::runtime::LabRuntime;
+    use asupersync::obligation::ledger::{
+        LeakedObligation, LedgerStats, ObligationLedger, ObligationToken,
+    };
     use asupersync::obligation::recovery::{RecoveryConfig, RecoveryProtocol};
     use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationRecord};
     use asupersync::types::{Budget, ObligationId, RegionId, TaskId, Time};
-    use asupersync::lab::runtime::LabRuntime;
-    use asupersync::lab::config::LabConfig;
-    use asupersync::cx::Cx;
     use asupersync::util::ArenaIndex;
     use proptest::prelude::*;
-    use std::collections::{HashMap, HashSet, BTreeMap};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
 
     /// Metamorphic test harness for obligation lifecycle properties.
@@ -366,7 +368,9 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR4: ledger snapshot restore preserves all in-flight obligations
-        fn test_snapshot_restore_preservation_relation(&self) -> ObligationLifecycleMetamorphicResult {
+        fn test_snapshot_restore_preservation_relation(
+            &self,
+        ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
 
@@ -426,10 +430,15 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_snapshot_restore_preservation".to_string(),
-                description: "ledger snapshot restore preserves all in-flight obligations".to_string(),
+                description: "ledger snapshot restore preserves all in-flight obligations"
+                    .to_string(),
                 category: TestCategory::SnapshotRestoration,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -437,7 +446,9 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR5: parallel commits on independent obligations commute
-        fn test_parallel_commits_commutation_relation(&self) -> ObligationLifecycleMetamorphicResult {
+        fn test_parallel_commits_commutation_relation(
+            &self,
+        ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
 
@@ -511,7 +522,11 @@ mod obligation_lifecycle_metamorphic_tests {
                 description: "parallel commits on independent obligations commute".to_string(),
                 category: TestCategory::ParallelCommutation,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -573,10 +588,15 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_acquire_abort_idempotence".to_string(),
-                description: "acquire-then-abort pattern maintains consistent final state".to_string(),
+                description: "acquire-then-abort pattern maintains consistent final state"
+                    .to_string(),
                 category: TestCategory::SequentialConsistency,
                 requirement_level: RequirementLevel::Should,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -638,10 +658,15 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_acquire_commit_idempotence".to_string(),
-                description: "acquire-then-commit pattern maintains consistent final state".to_string(),
+                description: "acquire-then-commit pattern maintains consistent final state"
+                    .to_string(),
                 category: TestCategory::SequentialConsistency,
                 requirement_level: RequirementLevel::Should,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -649,7 +674,9 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR8: operation ordering with different tasks
-        fn test_cross_task_operation_ordering_relation(&self) -> ObligationLifecycleMetamorphicResult {
+        fn test_cross_task_operation_ordering_relation(
+            &self,
+        ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
 
@@ -701,10 +728,16 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_cross_task_operation_ordering".to_string(),
-                description: "operation ordering across different tasks maintains ledger consistency".to_string(),
+                description:
+                    "operation ordering across different tasks maintains ledger consistency"
+                        .to_string(),
                 category: TestCategory::SequentialConsistency,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -772,10 +805,16 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_region_isolation".to_string(),
-                description: "region isolation: operations in one region don't affect other regions".to_string(),
+                description:
+                    "region isolation: operations in one region don't affect other regions"
+                        .to_string(),
                 category: TestCategory::ObligationInvariant,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -835,10 +874,15 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_leak_detection_consistency".to_string(),
-                description: "leak detection consistency: properly resolved obligations don't leak".to_string(),
+                description: "leak detection consistency: properly resolved obligations don't leak"
+                    .to_string(),
                 category: TestCategory::LeakPrevention,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -846,7 +890,9 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR11: recovery protocol convergence
-        fn test_recovery_protocol_convergence_relation(&self) -> ObligationLifecycleMetamorphicResult {
+        fn test_recovery_protocol_convergence_relation(
+            &self,
+        ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
 
@@ -886,10 +932,15 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_recovery_protocol_convergence".to_string(),
-                description: "recovery protocol convergence: system reaches clean state".to_string(),
+                description: "recovery protocol convergence: system reaches clean state"
+                    .to_string(),
                 category: TestCategory::RecoveryProtocol,
                 requirement_level: RequirementLevel::Should,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -897,7 +948,9 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR12: temporal ordering preservation
-        fn test_temporal_ordering_preservation_relation(&self) -> ObligationLifecycleMetamorphicResult {
+        fn test_temporal_ordering_preservation_relation(
+            &self,
+        ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
 
@@ -935,10 +988,15 @@ mod obligation_lifecycle_metamorphic_tests {
 
             ObligationLifecycleMetamorphicResult {
                 test_id: "obligation_temporal_ordering_preservation".to_string(),
-                description: "temporal ordering preservation: commit time >= acquire time".to_string(),
+                description: "temporal ordering preservation: commit time >= acquire time"
+                    .to_string(),
                 category: TestCategory::SequentialConsistency,
                 requirement_level: RequirementLevel::Must,
-                verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 iterations_tested: iterations,
@@ -948,7 +1006,8 @@ mod obligation_lifecycle_metamorphic_tests {
         /// Safe test execution wrapper that catches panics.
         fn run_metamorphic_test<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
         where
-            F: FnOnce(&LabConfig) -> Result<(), proptest::test_runner::TestCaseError> + std::panic::UnwindSafe,
+            F: FnOnce(&LabConfig) -> Result<(), proptest::test_runner::TestCaseError>
+                + std::panic::UnwindSafe,
         {
             match std::panic::catch_unwind(|| test_fn(&self.config)) {
                 Ok(Ok(())) => Ok(()),
@@ -983,18 +1042,32 @@ mod obligation_lifecycle_metamorphic_tests {
             let harness = ObligationLifecycleMetamorphicHarness::new();
             let results = harness.run_all_tests();
 
-            assert!(!results.is_empty(), "Should have obligation metamorphic test results");
-            assert_eq!(results.len(), 12, "Should have 12 obligation metamorphic tests");
+            assert!(
+                !results.is_empty(),
+                "Should have obligation metamorphic test results"
+            );
+            assert_eq!(
+                results.len(),
+                12,
+                "Should have 12 obligation metamorphic tests"
+            );
 
             // Verify all tests have required fields
             for result in &results {
                 assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-                assert!(!result.description.is_empty(), "Description must not be empty");
-                assert!(result.iterations_tested > 0, "Should have tested some iterations");
+                assert!(
+                    !result.description.is_empty(),
+                    "Description must not be empty"
+                );
+                assert!(
+                    result.iterations_tested > 0,
+                    "Should have tested some iterations"
+                );
             }
 
             // Check for expected test categories
-            let categories: std::collections::HashSet<_> = results.iter().map(|r| &r.category).collect();
+            let categories: std::collections::HashSet<_> =
+                results.iter().map(|r| &r.category).collect();
             assert!(categories.contains(&TestCategory::CommitAbortSymmetry));
             assert!(categories.contains(&TestCategory::SequentialConsistency));
             assert!(categories.contains(&TestCategory::ObligationInvariant));
@@ -1036,12 +1109,16 @@ fn obligation_lifecycle_metamorphic_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {
         println!("✓ Obligation lifecycle metamorphic test suite is available");
-        println!("✓ Covers: commit-abort symmetry, sequential consistency, invariants, snapshot restoration, parallel commutation");
+        println!(
+            "✓ Covers: commit-abort symmetry, sequential consistency, invariants, snapshot restoration, parallel commutation"
+        );
     }
 
     #[cfg(not(feature = "deterministic-mode"))]
     {
         println!("⚠ Obligation lifecycle metamorphic tests require --features deterministic-mode");
-        println!("  Run with: cargo test --features deterministic-mode obligation_lifecycle_metamorphic");
+        println!(
+            "  Run with: cargo test --features deterministic-mode obligation_lifecycle_metamorphic"
+        );
     }
 }

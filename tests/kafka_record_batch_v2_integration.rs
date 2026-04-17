@@ -32,5 +32,8 @@ fn kafka_record_batch_v2_conformance_integration() {
         failed_count
     );
 
-    println!("✓ All {} Kafka RecordBatch v2 conformance tests passed", results.len());
+    println!(
+        "✓ All {} Kafka RecordBatch v2 conformance tests passed",
+        results.len()
+    );
 }

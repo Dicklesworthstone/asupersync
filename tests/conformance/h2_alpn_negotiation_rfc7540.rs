@@ -38,9 +38,9 @@
 mod h2_alpn_conformance_tests {
     use asupersync::bytes::{Bytes, BytesMut};
     use asupersync::http::h2::{
-        error::{ErrorCode, H2Error},
-        frame::{Frame, FrameHeader, FrameType, SettingsFrame, Setting, parse_frame},
         connection::{CLIENT_PREFACE, ConnectionState},
+        error::{ErrorCode, H2Error},
+        frame::{Frame, FrameHeader, FrameType, Setting, SettingsFrame, parse_frame},
     };
     use asupersync::tls::types::{AlpnProtocol, TlsConfig};
     use serde::{Deserialize, Serialize};
@@ -210,7 +210,9 @@ mod h2_alpn_conformance_tests {
 
             H2AlpnConformanceResult {
                 test_id: "h2_alpn_client_hello_advertisement".to_string(),
-                description: "Client MUST advertise 'h2' in ClientHello ALPN extension (RFC 7540 §3.3)".to_string(),
+                description:
+                    "Client MUST advertise 'h2' in ClientHello ALPN extension (RFC 7540 §3.3)"
+                        .to_string(),
                 category: TestCategory::ClientHelloAlpn,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -227,16 +229,20 @@ mod h2_alpn_conformance_tests {
             let handshake = MockTlsHandshake::new()
                 .with_client_alpn(vec!["h2".to_string(), "http/1.1".to_string()]);
 
-            let h2_index = handshake.client_alpn_protocols.iter()
+            let h2_index = handshake
+                .client_alpn_protocols
+                .iter()
                 .position(|p| p == "h2");
-            let http11_index = handshake.client_alpn_protocols.iter()
+            let http11_index = handshake
+                .client_alpn_protocols
+                .iter()
                 .position(|p| p == "http/1.1");
 
             let verdict = match (h2_index, http11_index) {
                 (Some(h2_pos), Some(http11_pos)) if h2_pos < http11_pos => TestVerdict::Pass,
                 (Some(_), Some(_)) => TestVerdict::Fail,
                 (Some(_), None) => TestVerdict::Pass, // h2 present, http/1.1 optional
-                (None, _) => TestVerdict::Fail, // h2 missing
+                (None, _) => TestVerdict::Fail,       // h2 missing
             };
 
             let error_message = if verdict == TestVerdict::Fail {
@@ -247,7 +253,9 @@ mod h2_alpn_conformance_tests {
 
             H2AlpnConformanceResult {
                 test_id: "h2_alpn_client_protocol_ordering".to_string(),
-                description: "Client SHOULD order ALPN protocols by preference (h2 before http/1.1)".to_string(),
+                description:
+                    "Client SHOULD order ALPN protocols by preference (h2 before http/1.1)"
+                        .to_string(),
                 category: TestCategory::ClientHelloAlpn,
                 requirement_level: RequirementLevel::Should,
                 verdict,
@@ -273,14 +281,19 @@ mod h2_alpn_conformance_tests {
             };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("Server must prefer 'h2' over 'h2c' when both are available in TLS context".to_string())
+                Some(
+                    "Server must prefer 'h2' over 'h2c' when both are available in TLS context"
+                        .to_string(),
+                )
             } else {
                 None
             };
 
             H2AlpnConformanceResult {
                 test_id: "h2_alpn_server_h2_preference".to_string(),
-                description: "Server MUST prefer 'h2' over 'h2c' when both available (RFC 7540 §3.3)".to_string(),
+                description:
+                    "Server MUST prefer 'h2' over 'h2c' when both available (RFC 7540 §3.3)"
+                        .to_string(),
                 category: TestCategory::ServerProtocolSelection,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -296,8 +309,16 @@ mod h2_alpn_conformance_tests {
             // Test various valid protocol selections
             let test_cases = vec![
                 (vec!["h2".to_string()], Some("h2".to_string()), true),
-                (vec!["http/1.1".to_string()], Some("http/1.1".to_string()), true),
-                (vec!["h2".to_string(), "http/1.1".to_string()], Some("h2".to_string()), true),
+                (
+                    vec!["http/1.1".to_string()],
+                    Some("http/1.1".to_string()),
+                    true,
+                ),
+                (
+                    vec!["h2".to_string(), "http/1.1".to_string()],
+                    Some("h2".to_string()),
+                    true,
+                ),
                 (vec!["unknown".to_string()], None, true), // Should reject unknown
             ];
 
@@ -313,12 +334,18 @@ mod h2_alpn_conformance_tests {
 
                 if should_pass && !valid {
                     all_passed = false;
-                    error_messages.push(format!("Invalid selection for ALPN {:?}, expected {:?}, got {:?}",
-                        client_alpn, expected_selection, handshake.server_selected_protocol));
+                    error_messages.push(format!(
+                        "Invalid selection for ALPN {:?}, expected {:?}, got {:?}",
+                        client_alpn, expected_selection, handshake.server_selected_protocol
+                    ));
                 }
             }
 
-            let verdict = if all_passed { TestVerdict::Pass } else { TestVerdict::Fail };
+            let verdict = if all_passed {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
             let error_message = if error_messages.is_empty() {
                 None
             } else {
@@ -359,7 +386,8 @@ mod h2_alpn_conformance_tests {
 
             H2AlpnConformanceResult {
                 test_id: "h2_alpn_unknown_protocol_rejection".to_string(),
-                description: "Server MUST reject unknown protocol identifiers (RFC 7301 §3.1)".to_string(),
+                description: "Server MUST reject unknown protocol identifiers (RFC 7301 §3.1)"
+                    .to_string(),
                 category: TestCategory::ServerProtocolSelection,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -409,7 +437,10 @@ mod h2_alpn_conformance_tests {
             let test_cases = vec![
                 (vec![], "Empty ALPN protocol list"),
                 (vec!["".to_string()], "Empty protocol identifier"),
-                (vec!["h2".to_string(), "h2".to_string()], "Duplicate protocol identifiers"),
+                (
+                    vec!["h2".to_string(), "h2".to_string()],
+                    "Duplicate protocol identifiers",
+                ),
             ];
 
             let mut all_handled_correctly = true;
@@ -427,7 +458,11 @@ mod h2_alpn_conformance_tests {
                 }
             }
 
-            let verdict = if all_handled_correctly { TestVerdict::Pass } else { TestVerdict::Fail };
+            let verdict = if all_handled_correctly {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
             let error_message = if error_messages.is_empty() {
                 None
             } else {
@@ -456,12 +491,17 @@ mod h2_alpn_conformance_tests {
                 .completed();
 
             let verdict = match &handshake.server_selected_protocol {
-                Some(selected) if selected == "http/1.1" && handshake.handshake_completed => TestVerdict::Pass,
+                Some(selected) if selected == "http/1.1" && handshake.handshake_completed => {
+                    TestVerdict::Pass
+                }
                 _ => TestVerdict::Fail,
             };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("Server should gracefully fallback to HTTP/1.1 when h2 is not available".to_string())
+                Some(
+                    "Server should gracefully fallback to HTTP/1.1 when h2 is not available"
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -502,7 +542,8 @@ mod h2_alpn_conformance_tests {
 
             H2AlpnConformanceResult {
                 test_id: "h2_alpn_graceful_fallback".to_string(),
-                description: "Graceful fallback behavior maintains connection integrity".to_string(),
+                description: "Graceful fallback behavior maintains connection integrity"
+                    .to_string(),
                 category: TestCategory::HttpFallback,
                 requirement_level: RequirementLevel::Should,
                 verdict,
@@ -524,23 +565,28 @@ mod h2_alpn_conformance_tests {
             // Create a mock SETTINGS frame that should be sent after ALPN
             let settings_frame = create_test_settings_frame();
 
-            let verdict = if handshake.server_selected_protocol == Some("h2".to_string()) &&
-                         handshake.handshake_completed &&
-                         settings_frame.is_ok() {
+            let verdict = if handshake.server_selected_protocol == Some("h2".to_string())
+                && handshake.handshake_completed
+                && settings_frame.is_ok()
+            {
                 TestVerdict::Pass
             } else {
                 TestVerdict::Fail
             };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("SETTINGS frame must be sent immediately after successful h2 ALPN negotiation".to_string())
+                Some(
+                    "SETTINGS frame must be sent immediately after successful h2 ALPN negotiation"
+                        .to_string(),
+                )
             } else {
                 None
             };
 
             H2AlpnConformanceResult {
                 test_id: "h2_alpn_settings_frame_exchange".to_string(),
-                description: "SETTINGS frame exchange immediately after ALPN (RFC 7540 §3.5)".to_string(),
+                description: "SETTINGS frame exchange immediately after ALPN (RFC 7540 §3.5)"
+                    .to_string(),
                 category: TestCategory::PostAlpnSettings,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -560,18 +606,21 @@ mod h2_alpn_conformance_tests {
                 .completed();
 
             // Validate connection preface format
-            let preface_valid = CLIENT_PREFACE.len() == 24 &&
-                               CLIENT_PREFACE.starts_with(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+            let preface_valid = CLIENT_PREFACE.len() == 24
+                && CLIENT_PREFACE.starts_with(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
 
-            let verdict = if handshake.server_selected_protocol == Some("h2".to_string()) &&
-                         preface_valid {
-                TestVerdict::Pass
-            } else {
-                TestVerdict::Fail
-            };
+            let verdict =
+                if handshake.server_selected_protocol == Some("h2".to_string()) && preface_valid {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("Client must send valid connection preface after h2 ALPN negotiation".to_string())
+                Some(
+                    "Client must send valid connection preface after h2 ALPN negotiation"
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -601,8 +650,10 @@ mod h2_alpn_conformance_tests {
             let settings_frame = create_test_settings_frame();
             let settings_ack = create_test_settings_ack_frame();
 
-            let verdict = if handshake.server_selected_protocol == Some("h2".to_string()) &&
-                         settings_frame.is_ok() && settings_ack.is_ok() {
+            let verdict = if handshake.server_selected_protocol == Some("h2".to_string())
+                && settings_frame.is_ok()
+                && settings_ack.is_ok()
+            {
                 TestVerdict::Pass
             } else {
                 TestVerdict::Fail
@@ -640,7 +691,8 @@ mod h2_alpn_conformance_tests {
                 .with_client_alpn(vec!["h2".to_string()])
                 .with_server_selection(Some("http/1.1".to_string()));
 
-            let verdict = if legitimate_handshake.server_selected_protocol == Some("h2".to_string()) {
+            let verdict = if legitimate_handshake.server_selected_protocol == Some("h2".to_string())
+            {
                 TestVerdict::Pass
             } else {
                 TestVerdict::Fail
@@ -693,7 +745,11 @@ mod h2_alpn_conformance_tests {
                 }
             }
 
-            let verdict = if transitions_correct { TestVerdict::Pass } else { TestVerdict::Fail };
+            let verdict = if transitions_correct {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
             let error_message = if error_messages.is_empty() {
                 None
             } else {
@@ -729,9 +785,15 @@ mod h2_alpn_conformance_tests {
 
             let all_successful = handshakes.iter().all(|h| h.handshake_completed);
 
-            let verdict = if all_successful { TestVerdict::Pass } else { TestVerdict::Fail };
+            let verdict = if all_successful {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
             let error_message = if !all_successful {
-                Some("Concurrent ALPN negotiations should not interfere with each other".to_string())
+                Some(
+                    "Concurrent ALPN negotiations should not interfere with each other".to_string(),
+                )
             } else {
                 None
             };
@@ -773,11 +835,11 @@ mod h2_alpn_conformance_tests {
         Ok(SettingsFrame::new(vec![], true))
     }
 
+    pub use H2AlpnConformanceHarness;
     /// Re-export types for conformance system integration.
     pub use H2AlpnConformanceResult as H2ConformanceResult;
-    pub use H2AlpnConformanceHarness;
-    pub use TestCategory;
     pub use RequirementLevel;
+    pub use TestCategory;
     pub use TestVerdict;
 }
 
@@ -787,7 +849,9 @@ fn h2_alpn_conformance_suite_availability() {
     #[cfg(feature = "tls")]
     {
         println!("✓ HTTP/2 ALPN conformance test suite is available");
-        println!("✓ Covers: ClientHello ALPN, server selection, TLS validation, HTTP/1.1 fallback, SETTINGS exchange");
+        println!(
+            "✓ Covers: ClientHello ALPN, server selection, TLS validation, HTTP/1.1 fallback, SETTINGS exchange"
+        );
     }
 
     #[cfg(not(all(feature = "tls", feature = "http2")))]

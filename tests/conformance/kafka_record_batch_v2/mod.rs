@@ -25,8 +25,10 @@ mod harness;
 mod test_vectors;
 
 // Public re-exports for conformance testing
-pub use format::{RecordBatchV2, RecordV2, RecordAttribute, TimestampType};
-pub use harness::{KafkaConformanceHarness, ConformanceTestResult, RequirementLevel, TestCategory, TestVerdict};
+pub use format::{RecordAttribute, RecordBatchV2, RecordV2, TimestampType};
+pub use harness::{
+    ConformanceTestResult, KafkaConformanceHarness, RequirementLevel, TestCategory, TestVerdict,
+};
 
 #[cfg(test)]
 mod tests {

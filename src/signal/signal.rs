@@ -717,4 +717,290 @@ mod tests {
         );
         crate::test_complete!("windows_raw_signal_mapping_subset");
     }
+
+    // =========================================================================
+    // SIGPIPE Conformance Tests - RFC POSIX.1-2017 Section 2.4.1
+    // =========================================================================
+
+    #[cfg(unix)]
+    #[test]
+    fn sigpipe_signal_handler_registration() {
+        init_test("sigpipe_signal_handler_registration");
+
+        // Test that SIGPIPE can be registered for handling
+        let stream_result = signal(SignalKind::pipe());
+        crate::assert_with_log!(
+            stream_result.is_ok(),
+            "SIGPIPE signal stream creation succeeds",
+            true,
+            stream_result.is_ok()
+        );
+
+        // Verify SIGPIPE is mapped to correct raw signal value
+        let raw_sigpipe = SignalKind::pipe().as_raw_value();
+        crate::assert_with_log!(
+            raw_sigpipe == libc::SIGPIPE,
+            "SIGPIPE maps to libc::SIGPIPE",
+            libc::SIGPIPE,
+            raw_sigpipe
+        );
+
+        crate::test_complete!("sigpipe_signal_handler_registration");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigpipe_signal_delivery_observable() {
+        init_test("sigpipe_signal_delivery_observable");
+
+        let mut stream = signal(SignalKind::pipe()).expect("SIGPIPE stream");
+
+        // Inject a SIGPIPE signal into the dispatcher
+        let dispatcher = dispatcher_for(SignalKind::pipe()).expect("SIGPIPE dispatcher");
+        dispatcher.inject(SignalKind::pipe());
+
+        // Poll the signal stream to observe delivery
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut recv = Box::pin(stream.recv());
+        let poll = recv.as_mut().poll(&mut cx);
+
+        crate::assert_with_log!(
+            matches!(poll, Poll::Ready(Some(()))),
+            "SIGPIPE signal delivery is observable",
+            "Poll::Ready(Some(()))",
+            poll
+        );
+
+        crate::test_complete!("sigpipe_signal_delivery_observable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigpipe_multiple_deliveries_preserved() {
+        init_test("sigpipe_multiple_deliveries_preserved");
+
+        let mut stream = signal(SignalKind::pipe()).expect("SIGPIPE stream");
+        let dispatcher = dispatcher_for(SignalKind::pipe()).expect("SIGPIPE dispatcher");
+
+        // Inject multiple SIGPIPE signals
+        dispatcher.inject(SignalKind::pipe());
+        dispatcher.inject(SignalKind::pipe());
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First recv should succeed
+        let mut recv1 = Box::pin(stream.recv());
+        let poll1 = recv1.as_mut().poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(poll1, Poll::Ready(Some(()))),
+            "First SIGPIPE delivery received",
+            "Poll::Ready(Some(()))",
+            poll1
+        );
+
+        // Second recv should also succeed (no lost signals)
+        let mut recv2 = Box::pin(stream.recv());
+        let poll2 = recv2.as_mut().poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(poll2, Poll::Ready(Some(()))),
+            "Second SIGPIPE delivery received",
+            "Poll::Ready(Some(()))",
+            poll2
+        );
+
+        crate::test_complete!("sigpipe_multiple_deliveries_preserved");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sigpipe_unsupported_on_windows() {
+        init_test("sigpipe_unsupported_on_windows");
+
+        // SIGPIPE should not be supported on Windows
+        let raw_value = SignalKind::pipe().as_raw_value();
+        crate::assert_with_log!(
+            raw_value.is_none(),
+            "SIGPIPE not supported on Windows",
+            None,
+            raw_value
+        );
+
+        // Signal stream creation should fail with unsupported error
+        let stream_result = signal(SignalKind::pipe());
+        crate::assert_with_log!(
+            stream_result.is_err(),
+            "SIGPIPE signal stream creation fails on Windows",
+            true,
+            stream_result.is_err()
+        );
+
+        if let Err(err) = stream_result {
+            let error_msg = err.to_string();
+            crate::assert_with_log!(
+                error_msg.to_lowercase().contains("unsupported")
+                    || error_msg.to_lowercase().contains("not supported"),
+                "Error message indicates unsupported",
+                true,
+                error_msg.to_lowercase().contains("unsupported")
+                    || error_msg.to_lowercase().contains("not supported")
+            );
+        }
+
+        crate::test_complete!("sigpipe_unsupported_on_windows");
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn sigpipe_unsupported_on_other_platforms() {
+        init_test("sigpipe_unsupported_on_other_platforms");
+
+        // SIGPIPE should not be supported on non-Unix, non-Windows platforms
+        let raw_value = SignalKind::pipe().as_raw_value();
+        crate::assert_with_log!(
+            raw_value.is_none(),
+            "SIGPIPE not supported on other platforms",
+            None,
+            raw_value
+        );
+
+        crate::test_complete!("sigpipe_unsupported_on_other_platforms");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigpipe_cancel_safety_preserved() {
+        init_test("sigpipe_cancel_safety_preserved");
+
+        let mut stream = signal(SignalKind::pipe()).expect("SIGPIPE stream");
+        let dispatcher = dispatcher_for(SignalKind::pipe()).expect("SIGPIPE dispatcher");
+
+        // Inject a signal before starting recv
+        dispatcher.inject(SignalKind::pipe());
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Start recv, then drop it (simulating cancellation)
+        {
+            let mut recv = Box::pin(stream.recv());
+            let _poll = recv.as_mut().poll(&mut cx);
+        } // recv dropped here
+
+        // Start a new recv - signal should still be delivered (cancel-safe)
+        let mut recv_after_cancel = Box::pin(stream.recv());
+        let poll_after = recv_after_cancel.as_mut().poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(poll_after, Poll::Ready(Some(()))),
+            "SIGPIPE delivery preserved after cancellation",
+            "Poll::Ready(Some(()))",
+            poll_after
+        );
+
+        crate::test_complete!("sigpipe_cancel_safety_preserved");
+    }
+
+    #[test]
+    fn sigpipe_platform_behavior_documented() {
+        init_test("sigpipe_platform_behavior_documented");
+
+        // Document platform-specific SIGPIPE behavior differences
+
+        #[cfg(unix)]
+        {
+            // Unix: SIGPIPE fully supported
+            let unix_supported = SignalKind::pipe().as_raw_value() == libc::SIGPIPE;
+            crate::assert_with_log!(
+                unix_supported,
+                "Unix: SIGPIPE mapped to libc::SIGPIPE",
+                true,
+                unix_supported
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            // Windows: SIGPIPE not supported (different pipe break semantics)
+            let windows_unsupported = SignalKind::pipe().as_raw_value().is_none();
+            crate::assert_with_log!(
+                windows_unsupported,
+                "Windows: SIGPIPE not supported (uses ERROR_BROKEN_PIPE instead)",
+                true,
+                windows_unsupported
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux: MSG_NOSIGNAL flag available for send()
+            let msg_nosignal_available = libc::MSG_NOSIGNAL != 0;
+            crate::assert_with_log!(
+                msg_nosignal_available,
+                "Linux: MSG_NOSIGNAL flag available",
+                true,
+                msg_nosignal_available
+            );
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+        {
+            // BSD-based: SO_NOSIGPIPE socket option available
+            let so_nosigpipe_available = libc::SO_NOSIGPIPE != 0;
+            crate::assert_with_log!(
+                so_nosigpipe_available,
+                "BSD: SO_NOSIGPIPE socket option available",
+                true,
+                so_nosigpipe_available
+            );
+        }
+
+        crate::test_complete!("sigpipe_platform_behavior_documented");
+    }
+
+    #[cfg(all(windows, feature = "test-internals"))]
+    #[test]
+    fn sigpipe_ctrl_c_event_interaction() {
+        init_test("sigpipe_ctrl_c_event_interaction");
+
+        // On Windows, test that CTRL_C_EVENT doesn't interfere with
+        // broken pipe error reporting (since SIGPIPE doesn't exist)
+
+        // CTRL_C_EVENT should map to SIGINT
+        let ctrl_c_signal = SignalKind::interrupt().as_raw_value();
+        crate::assert_with_log!(
+            ctrl_c_signal == Some(libc::SIGINT),
+            "CTRL_C_EVENT maps to SIGINT",
+            Some(libc::SIGINT),
+            ctrl_c_signal
+        );
+
+        // SIGPIPE should remain unsupported
+        let sigpipe_unsupported = SignalKind::pipe().as_raw_value().is_none();
+        crate::assert_with_log!(
+            sigpipe_unsupported,
+            "SIGPIPE remains unsupported with CTRL_C_EVENT",
+            true,
+            sigpipe_unsupported
+        );
+
+        // Both should be independent - SIGINT available, SIGPIPE not
+        let int_stream = signal(SignalKind::interrupt());
+        let pipe_stream = signal(SignalKind::pipe());
+
+        crate::assert_with_log!(
+            int_stream.is_ok(),
+            "SIGINT stream creation succeeds",
+            true,
+            int_stream.is_ok()
+        );
+        crate::assert_with_log!(
+            pipe_stream.is_err(),
+            "SIGPIPE stream creation fails",
+            true,
+            pipe_stream.is_err()
+        );
+
+        crate::test_complete!("sigpipe_ctrl_c_event_interaction");
+    }
 }

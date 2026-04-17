@@ -32,8 +32,8 @@
 //! - **MAY** optimize extension parameter values within spec limits
 
 use asupersync::net::websocket::{
-    handshake::{ClientHandshake, ServerHandshake, HandshakeResult, HandshakeError},
     WsUrl,
+    handshake::{ClientHandshake, HandshakeError, HandshakeResult, ServerHandshake},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -140,11 +140,17 @@ impl MockExtensionNegotiation {
             let extension_name = Self::extract_extension_name(offered);
 
             // Check if server supports this extension
-            if self.server_supported_extensions.iter()
-                .any(|supported| Self::extract_extension_name(supported) == extension_name) {
+            if self
+                .server_supported_extensions
+                .iter()
+                .any(|supported| Self::extract_extension_name(supported) == extension_name)
+            {
                 // Simple negotiation: use server's parameters if available
-                if let Some(server_ext) = self.server_supported_extensions.iter()
-                    .find(|ext| Self::extract_extension_name(ext) == extension_name) {
+                if let Some(server_ext) = self
+                    .server_supported_extensions
+                    .iter()
+                    .find(|ext| Self::extract_extension_name(ext) == extension_name)
+                {
                     negotiated.push(server_ext.clone());
                 } else {
                     negotiated.push(offered.clone());
@@ -234,10 +240,13 @@ impl WsExtensionConformanceHarness {
         negotiation.simulate_negotiation();
 
         // Check that the order reflects client preference
-        let verdict = if !negotiation.negotiated_extensions.is_empty() &&
-                         negotiation.negotiated_extensions.first()
-                             .map(|ext| MockExtensionNegotiation::extract_extension_name(ext))
-                             == Some("permessage-deflate") {
+        let verdict = if !negotiation.negotiated_extensions.is_empty()
+            && negotiation
+                .negotiated_extensions
+                .first()
+                .map(|ext| MockExtensionNegotiation::extract_extension_name(ext))
+                == Some("permessage-deflate")
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -251,7 +260,9 @@ impl WsExtensionConformanceHarness {
 
         WsExtensionConformanceResult {
             test_id: "ws_ext_header_ordering_preserved".to_string(),
-            description: "Sec-WebSocket-Extensions header ordering MUST be preserved (RFC 6455 §9.1)".to_string(),
+            description:
+                "Sec-WebSocket-Extensions header ordering MUST be preserved (RFC 6455 §9.1)"
+                    .to_string(),
             category: TestCategory::ExtensionOrdering,
             requirement_level: RequirementLevel::Must,
             verdict,
@@ -276,12 +287,12 @@ impl WsExtensionConformanceHarness {
 
         negotiation.simulate_negotiation();
 
-        let verdict = if negotiation.negotiated_extensions.len() == 2 &&
-                         negotiation.negotiation_successful {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
+        let verdict =
+            if negotiation.negotiated_extensions.len() == 2 && negotiation.negotiation_successful {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
 
         let error_message = if verdict == TestVerdict::Fail {
             Some("Server should support multiple extension headers".to_string())
@@ -315,22 +326,28 @@ impl WsExtensionConformanceHarness {
         negotiation.simulate_negotiation();
 
         // Server should be able to reduce window bits but not increase
-        let verdict = if negotiation.negotiated_extensions.len() == 1 &&
-                         negotiation.negotiated_extensions[0].contains("server_max_window_bits=12") {
+        let verdict = if negotiation.negotiated_extensions.len() == 1
+            && negotiation.negotiated_extensions[0].contains("server_max_window_bits=12")
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
         };
 
         let error_message = if verdict == TestVerdict::Fail {
-            Some("Server should be able to negotiate smaller window bits for permessage-deflate".to_string())
+            Some(
+                "Server should be able to negotiate smaller window bits for permessage-deflate"
+                    .to_string(),
+            )
         } else {
             None
         };
 
         WsExtensionConformanceResult {
             test_id: "ws_ext_permessage_deflate_server_max_window_bits".to_string(),
-            description: "permessage-deflate server_max_window_bits negotiation (RFC 7692 §7.1.2.1)".to_string(),
+            description:
+                "permessage-deflate server_max_window_bits negotiation (RFC 7692 §7.1.2.1)"
+                    .to_string(),
             category: TestCategory::PermessageDeflateNegotiation,
             requirement_level: RequirementLevel::Must,
             verdict,
@@ -353,12 +370,12 @@ impl WsExtensionConformanceHarness {
 
         negotiation.simulate_negotiation();
 
-        let verdict = if negotiation.negotiated_extensions.len() == 1 &&
-                         negotiation.negotiation_successful {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
+        let verdict =
+            if negotiation.negotiated_extensions.len() == 1 && negotiation.negotiation_successful {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
 
         let error_message = if verdict == TestVerdict::Fail {
             Some("Server should handle client_max_window_bits parameter".to_string())
@@ -368,7 +385,9 @@ impl WsExtensionConformanceHarness {
 
         WsExtensionConformanceResult {
             test_id: "ws_ext_permessage_deflate_client_max_window_bits".to_string(),
-            description: "permessage-deflate client_max_window_bits negotiation (RFC 7692 §7.1.2.2)".to_string(),
+            description:
+                "permessage-deflate client_max_window_bits negotiation (RFC 7692 §7.1.2.2)"
+                    .to_string(),
             category: TestCategory::PermessageDeflateNegotiation,
             requirement_level: RequirementLevel::Must,
             verdict,
@@ -391,8 +410,9 @@ impl WsExtensionConformanceHarness {
 
         negotiation.simulate_negotiation();
 
-        let verdict = if negotiation.negotiated_extensions.len() == 1 &&
-                         negotiation.negotiated_extensions[0].contains("server_no_context_takeover") {
+        let verdict = if negotiation.negotiated_extensions.len() == 1
+            && negotiation.negotiated_extensions[0].contains("server_no_context_takeover")
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -406,7 +426,9 @@ impl WsExtensionConformanceHarness {
 
         WsExtensionConformanceResult {
             test_id: "ws_ext_permessage_deflate_no_server_context_takeover".to_string(),
-            description: "permessage-deflate server_no_context_takeover parameter (RFC 7692 §7.1.1.1)".to_string(),
+            description:
+                "permessage-deflate server_no_context_takeover parameter (RFC 7692 §7.1.1.1)"
+                    .to_string(),
             category: TestCategory::PermessageDeflateNegotiation,
             requirement_level: RequirementLevel::Must,
             verdict,
@@ -424,15 +446,14 @@ impl WsExtensionConformanceHarness {
                 "unknown-extension".to_string(),
                 "invalid-ext; bad_param=value".to_string(),
             ])
-            .with_server_support(vec![
-                "permessage-deflate".to_string(),
-            ]);
+            .with_server_support(vec!["permessage-deflate".to_string()]);
 
         negotiation.simulate_negotiation();
 
         // Unknown extensions should be rejected, but handshake should succeed
-        let verdict = if negotiation.negotiated_extensions.is_empty() &&
-                         negotiation.negotiation_successful == false {
+        let verdict = if negotiation.negotiated_extensions.is_empty()
+            && negotiation.negotiation_successful == false
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -446,7 +467,8 @@ impl WsExtensionConformanceHarness {
 
         WsExtensionConformanceResult {
             test_id: "ws_ext_unknown_extension_graceful_rejection".to_string(),
-            description: "Unknown extensions MUST be gracefully rejected (RFC 6455 §9.2)".to_string(),
+            description: "Unknown extensions MUST be gracefully rejected (RFC 6455 §9.2)"
+                .to_string(),
             category: TestCategory::UnknownExtensionHandling,
             requirement_level: RequirementLevel::Must,
             verdict,
@@ -465,15 +487,16 @@ impl WsExtensionConformanceHarness {
                 "unknown-extension".to_string(),
                 "x-webkit-deflate-frame".to_string(),
             ])
-            .with_server_support(vec![
-                "permessage-deflate".to_string(),
-            ]);
+            .with_server_support(vec!["permessage-deflate".to_string()]);
 
         negotiation.simulate_negotiation();
 
         // Should negotiate known extensions and skip unknown ones
-        let verdict = if negotiation.negotiated_extensions.len() == 1 &&
-                         MockExtensionNegotiation::extract_extension_name(&negotiation.negotiated_extensions[0]) == "permessage-deflate" {
+        let verdict = if negotiation.negotiated_extensions.len() == 1
+            && MockExtensionNegotiation::extract_extension_name(
+                &negotiation.negotiated_extensions[0],
+            ) == "permessage-deflate"
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -513,12 +536,12 @@ impl WsExtensionConformanceHarness {
         negotiation.simulate_negotiation();
 
         // Multiple extensions should not conflict
-        let verdict = if negotiation.negotiated_extensions.len() == 2 &&
-                         negotiation.negotiation_successful {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        };
+        let verdict =
+            if negotiation.negotiated_extensions.len() == 2 && negotiation.negotiation_successful {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            };
 
         let error_message = if verdict == TestVerdict::Fail {
             Some("Multiple extensions should compose without conflicts".to_string())
@@ -554,8 +577,11 @@ impl WsExtensionConformanceHarness {
         negotiation.simulate_negotiation();
 
         // Should respect client ordering preference
-        let verdict = if !negotiation.negotiated_extensions.is_empty() &&
-                         MockExtensionNegotiation::extract_extension_name(&negotiation.negotiated_extensions[0]) == "high-priority-ext" {
+        let verdict = if !negotiation.negotiated_extensions.is_empty()
+            && MockExtensionNegotiation::extract_extension_name(
+                &negotiation.negotiated_extensions[0],
+            ) == "high-priority-ext"
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -593,8 +619,9 @@ impl WsExtensionConformanceHarness {
         negotiation.simulate_negotiation();
 
         // Server should be able to use smaller window bits
-        let verdict = if negotiation.negotiated_extensions.len() == 1 &&
-                         negotiation.negotiated_extensions[0].contains("server_max_window_bits=10") {
+        let verdict = if negotiation.negotiated_extensions.len() == 1
+            && negotiation.negotiated_extensions[0].contains("server_max_window_bits=10")
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -622,9 +649,18 @@ impl WsExtensionConformanceHarness {
         let start = Instant::now();
 
         let test_cases = vec![
-            ("permessage-deflate; server_max_window_bits=7", "window bits too small"),  // RFC 7692: min 8
-            ("permessage-deflate; server_max_window_bits=16", "window bits too large"), // RFC 7692: max 15
-            ("permessage-deflate; invalid_param=value", "unknown parameter"),
+            (
+                "permessage-deflate; server_max_window_bits=7",
+                "window bits too small",
+            ), // RFC 7692: min 8
+            (
+                "permessage-deflate; server_max_window_bits=16",
+                "window bits too large",
+            ), // RFC 7692: max 15
+            (
+                "permessage-deflate; invalid_param=value",
+                "unknown parameter",
+            ),
         ];
 
         let mut all_rejected = true;
@@ -644,7 +680,11 @@ impl WsExtensionConformanceHarness {
             }
         }
 
-        let verdict = if all_rejected { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if all_rejected {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         let error_message = if error_messages.is_empty() {
             None
         } else {
@@ -729,7 +769,11 @@ impl WsExtensionConformanceHarness {
             }
         }
 
-        let verdict = if all_handled { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if all_handled {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         let error_message = if error_messages.is_empty() {
             None
         } else {
@@ -766,10 +810,17 @@ impl WsExtensionConformanceHarness {
         negotiation.simulate_negotiation();
 
         // Should preserve client order: ext1, ext2, ext3
-        let verdict = if negotiation.negotiated_extensions.len() == 3 &&
-                         MockExtensionNegotiation::extract_extension_name(&negotiation.negotiated_extensions[0]) == "ext1" &&
-                         MockExtensionNegotiation::extract_extension_name(&negotiation.negotiated_extensions[1]) == "ext2" &&
-                         MockExtensionNegotiation::extract_extension_name(&negotiation.negotiated_extensions[2]) == "ext3" {
+        let verdict = if negotiation.negotiated_extensions.len() == 3
+            && MockExtensionNegotiation::extract_extension_name(
+                &negotiation.negotiated_extensions[0],
+            ) == "ext1"
+            && MockExtensionNegotiation::extract_extension_name(
+                &negotiation.negotiated_extensions[1],
+            ) == "ext2"
+            && MockExtensionNegotiation::extract_extension_name(
+                &negotiation.negotiated_extensions[2],
+            ) == "ext3"
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -801,9 +852,7 @@ impl WsExtensionConformanceHarness {
                 "permessage-deflate; server_max_window_bits=15".to_string(),
                 "permessage-deflate; server_max_window_bits=12".to_string(),
             ])
-            .with_server_support(vec![
-                "permessage-deflate".to_string(),
-            ]);
+            .with_server_support(vec!["permessage-deflate".to_string()]);
 
         negotiation.simulate_negotiation();
 
@@ -838,18 +887,20 @@ impl Default for WsExtensionConformanceHarness {
     }
 }
 
+pub use RequirementLevel;
+pub use TestCategory;
+pub use TestVerdict;
+pub use WsExtensionConformanceHarness;
 /// Re-export types for conformance system integration.
 pub use WsExtensionConformanceResult as WsConformanceResult;
-pub use WsExtensionConformanceHarness;
-pub use TestCategory;
-pub use RequirementLevel;
-pub use TestVerdict;
 
 // Tests that always run regardless of features
 #[test]
 fn ws_extension_conformance_suite_availability() {
     println!("✓ WebSocket extension negotiation conformance test suite is available");
-    println!("✓ Covers: extension header processing, permessage-deflate negotiation, unknown extension handling");
+    println!(
+        "✓ Covers: extension header processing, permessage-deflate negotiation, unknown extension handling"
+    );
     println!("✓ Validates: ordering preservation, parameter negotiation, security requirements");
 }
 
@@ -867,7 +918,10 @@ mod tests {
 
         assert!(mock.negotiation_successful);
         assert_eq!(mock.negotiated_extensions.len(), 1);
-        assert_eq!(MockExtensionNegotiation::extract_extension_name(&mock.negotiated_extensions[0]), "permessage-deflate");
+        assert_eq!(
+            MockExtensionNegotiation::extract_extension_name(&mock.negotiated_extensions[0]),
+            "permessage-deflate"
+        );
     }
 
     #[test]
@@ -880,13 +934,15 @@ mod tests {
         // Verify all tests have required fields
         for result in &results {
             assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-            assert!(!result.description.is_empty(), "Description must not be empty");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
         }
 
         // Should have tests for all required categories
-        let categories: std::collections::HashSet<_> = results.iter()
-            .map(|r| &r.category)
-            .collect();
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
 
         assert!(categories.contains(&TestCategory::ExtensionHeaderProcessing));
         assert!(categories.contains(&TestCategory::PermessageDeflateNegotiation));
@@ -897,9 +953,21 @@ mod tests {
 
     #[test]
     fn test_extension_name_extraction() {
-        assert_eq!(MockExtensionNegotiation::extract_extension_name("permessage-deflate"), "permessage-deflate");
-        assert_eq!(MockExtensionNegotiation::extract_extension_name("permessage-deflate; param=value"), "permessage-deflate");
-        assert_eq!(MockExtensionNegotiation::extract_extension_name("ext; param1=val1; param2=val2"), "ext");
-        assert_eq!(MockExtensionNegotiation::extract_extension_name("simple-ext"), "simple-ext");
+        assert_eq!(
+            MockExtensionNegotiation::extract_extension_name("permessage-deflate"),
+            "permessage-deflate"
+        );
+        assert_eq!(
+            MockExtensionNegotiation::extract_extension_name("permessage-deflate; param=value"),
+            "permessage-deflate"
+        );
+        assert_eq!(
+            MockExtensionNegotiation::extract_extension_name("ext; param1=val1; param2=val2"),
+            "ext"
+        );
+        assert_eq!(
+            MockExtensionNegotiation::extract_extension_name("simple-ext"),
+            "simple-ext"
+        );
     }
 }

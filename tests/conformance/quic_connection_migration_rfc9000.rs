@@ -107,7 +107,10 @@ impl MockPathValidator {
 
     /// Simulate anti-amplification limit enforcement per RFC 9000 §8.1
     pub fn check_anti_amplification_limit(&self, path_id: u64, bytes_to_send: u64) -> bool {
-        let limit = self.anti_amplification_limits.get(&path_id).unwrap_or(&1200);
+        let limit = self
+            .anti_amplification_limits
+            .get(&path_id)
+            .unwrap_or(&1200);
         bytes_to_send <= *limit
     }
 
@@ -128,7 +131,8 @@ impl MockPathValidator {
 
     /// Simulate concurrent migration from both endpoints
     pub fn simulate_concurrent_migration(&mut self, local_path_id: u64, remote_path_id: u64) {
-        self.concurrent_migrations.push((local_path_id, remote_path_id));
+        self.concurrent_migrations
+            .push((local_path_id, remote_path_id));
     }
 }
 
@@ -159,7 +163,8 @@ impl MockConnectionIdManager {
         self.retire_prior_to = retire_prior_to;
 
         // Move connection IDs to retired list
-        let to_retire: Vec<_> = self.active_connection_ids
+        let to_retire: Vec<_> = self
+            .active_connection_ids
             .iter()
             .filter_map(|(path_id, conn_id)| {
                 if *path_id < retire_prior_to {
@@ -175,12 +180,15 @@ impl MockConnectionIdManager {
         }
 
         // Remove from active set
-        self.active_connection_ids.retain(|path_id, _| *path_id >= retire_prior_to);
+        self.active_connection_ids
+            .retain(|path_id, _| *path_id >= retire_prior_to);
     }
 
     /// Check if a connection ID has been retired
     pub fn is_connection_id_retired(&self, conn_id: &[u8]) -> bool {
-        self.retired_connection_ids.iter().any(|retired| retired == conn_id)
+        self.retired_connection_ids
+            .iter()
+            .any(|retired| retired == conn_id)
     }
 }
 
@@ -268,7 +276,9 @@ impl QuicConnectionMigrationConformanceHarness {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_path_challenge_response_exchange".to_string(),
-            description: "PATH_CHALLENGE/PATH_RESPONSE exchange validates new path per RFC 9000 §8.2".to_string(),
+            description:
+                "PATH_CHALLENGE/PATH_RESPONSE exchange validates new path per RFC 9000 §8.2"
+                    .to_string(),
             category: TestCategory::PathValidation,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -288,21 +298,27 @@ impl QuicConnectionMigrationConformanceHarness {
 
         if !response_valid {
             result.verdict = TestVerdict::Fail;
-            result.error_message = Some("PATH_RESPONSE did not match PATH_CHALLENGE data".to_string());
+            result.error_message =
+                Some("PATH_RESPONSE did not match PATH_CHALLENGE data".to_string());
         } else if !validator.is_path_verified(path_id) {
             result.verdict = TestVerdict::Fail;
-            result.error_message = Some("Path not marked as verified after successful exchange".to_string());
+            result.error_message =
+                Some("Path not marked as verified after successful exchange".to_string());
         }
 
         result.execution_time_ms = start_time.elapsed().as_millis() as u64;
         result
     }
 
-    fn test_path_validation_required_before_migration(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_path_validation_required_before_migration(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_path_validation_required_before_migration".to_string(),
-            description: "Path validation MUST complete before migrating connection per RFC 9000 §9.1".to_string(),
+            description:
+                "Path validation MUST complete before migrating connection per RFC 9000 §9.1"
+                    .to_string(),
             category: TestCategory::PathValidation,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -344,7 +360,8 @@ impl QuicConnectionMigrationConformanceHarness {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_path_challenge_data_uniqueness".to_string(),
-            description: "PATH_CHALLENGE data MUST be cryptographically random per RFC 9000 §8.2.1".to_string(),
+            description: "PATH_CHALLENGE data MUST be cryptographically random per RFC 9000 §8.2.1"
+                .to_string(),
             category: TestCategory::PathValidation,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -369,7 +386,8 @@ impl QuicConnectionMigrationConformanceHarness {
             for (j, data2) in challenge_data_samples.iter().enumerate() {
                 if i != j && data1 == data2 {
                     result.verdict = TestVerdict::Fail;
-                    result.error_message = Some("PATH_CHALLENGE data not unique between frames".to_string());
+                    result.error_message =
+                        Some("PATH_CHALLENGE data not unique between frames".to_string());
                     break;
                 }
             }
@@ -401,11 +419,15 @@ impl QuicConnectionMigrationConformanceHarness {
 
     // Connection ID Retirement Tests
 
-    fn test_connection_id_retirement_after_migration(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_connection_id_retirement_after_migration(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_connection_id_retirement_after_migration".to_string(),
-            description: "Old connection IDs MUST be retired after path migration per RFC 9000 §9.5".to_string(),
+            description:
+                "Old connection IDs MUST be retired after path migration per RFC 9000 §9.5"
+                    .to_string(),
             category: TestCategory::ConnectionIdRetirement,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -429,13 +451,15 @@ impl QuicConnectionMigrationConformanceHarness {
         // Verify old connection ID was retired
         if !conn_id_mgr.is_connection_id_retired(&old_conn_id) {
             result.verdict = TestVerdict::Fail;
-            result.error_message = Some("Old connection ID not retired after migration".to_string());
+            result.error_message =
+                Some("Old connection ID not retired after migration".to_string());
         }
 
         // Verify new connection ID is still active
         if !conn_id_mgr.active_connection_ids.contains_key(&new_path_id) {
             result.verdict = TestVerdict::Fail;
-            result.error_message = Some("New connection ID not retained after migration".to_string());
+            result.error_message =
+                Some("New connection ID not retained after migration".to_string());
         }
 
         result.execution_time_ms = start_time.elapsed().as_millis() as u64;
@@ -488,11 +512,15 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
-    fn test_connection_id_sequence_number_ordering(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_connection_id_sequence_number_ordering(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_connection_id_sequence_number_ordering".to_string(),
-            description: "Connection ID sequence numbers MUST be processed in order per RFC 9000 §5.1.1".to_string(),
+            description:
+                "Connection ID sequence numbers MUST be processed in order per RFC 9000 §5.1.1"
+                    .to_string(),
             category: TestCategory::ConnectionIdRetirement,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass, // Mock implementation assumes correct ordering
@@ -505,11 +533,15 @@ impl QuicConnectionMigrationConformanceHarness {
 
     // Anti-Amplification Tests
 
-    fn test_anti_amplification_limit_enforcement(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_anti_amplification_limit_enforcement(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_anti_amplification_limit_enforcement".to_string(),
-            description: "Anti-amplification limits MUST be enforced on unverified paths per RFC 9000 §8.1".to_string(),
+            description:
+                "Anti-amplification limits MUST be enforced on unverified paths per RFC 9000 §8.1"
+                    .to_string(),
             category: TestCategory::AntiAmplificationLimits,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -526,13 +558,15 @@ impl QuicConnectionMigrationConformanceHarness {
         // Test sending within limit - should be allowed
         if !validator.check_anti_amplification_limit(path_id, limit) {
             result.verdict = TestVerdict::Fail;
-            result.error_message = Some("Sending within anti-amplification limit was rejected".to_string());
+            result.error_message =
+                Some("Sending within anti-amplification limit was rejected".to_string());
         }
 
         // Test sending beyond limit - should be rejected
         if validator.check_anti_amplification_limit(path_id, limit + 1) {
             result.verdict = TestVerdict::Fail;
-            result.error_message = Some("Sending beyond anti-amplification limit was allowed".to_string());
+            result.error_message =
+                Some("Sending beyond anti-amplification limit was allowed".to_string());
         }
 
         result.execution_time_ms = start_time.elapsed().as_millis() as u64;
@@ -567,14 +601,17 @@ impl QuicConnectionMigrationConformanceHarness {
         // Test sending more than 3x received bytes - should be rejected
         if validator.check_anti_amplification_limit(path_id, max_send_bytes + 1) {
             result.verdict = TestVerdict::Fail;
-            result.error_message = Some("Sending more than 3x received bytes was allowed".to_string());
+            result.error_message =
+                Some("Sending more than 3x received bytes was allowed".to_string());
         }
 
         result.execution_time_ms = start_time.elapsed().as_millis() as u64;
         result
     }
 
-    fn test_anti_amplification_after_path_validation(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_anti_amplification_after_path_validation(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_anti_amplification_after_path_validation".to_string(),
@@ -605,7 +642,8 @@ impl QuicConnectionMigrationConformanceHarness {
 
             if !validator.check_anti_amplification_limit(path_id, 10000) {
                 result.verdict = TestVerdict::Fail;
-                result.error_message = Some("Large sends still rejected after path validation".to_string());
+                result.error_message =
+                    Some("Large sends still rejected after path validation".to_string());
             }
         } else {
             result.verdict = TestVerdict::Fail;
@@ -622,7 +660,9 @@ impl QuicConnectionMigrationConformanceHarness {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_nat_rebinding_detection".to_string(),
-            description: "NAT rebinding MUST be detected via source address change per RFC 9000 §9.3".to_string(),
+            description:
+                "NAT rebinding MUST be detected via source address change per RFC 9000 §9.3"
+                    .to_string(),
             category: TestCategory::NatRebindingDetection,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -668,11 +708,15 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
-    fn test_implicit_path_migration_on_nat_rebinding(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_implicit_path_migration_on_nat_rebinding(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_implicit_path_migration_on_nat_rebinding".to_string(),
-            description: "Implicit path migration SHOULD occur on NAT rebinding per RFC 9000 §9.3.3".to_string(),
+            description:
+                "Implicit path migration SHOULD occur on NAT rebinding per RFC 9000 §9.3.3"
+                    .to_string(),
             category: TestCategory::NatRebindingDetection,
             requirement_level: RequirementLevel::Should,
             verdict: TestVerdict::Pass, // Assume implicit migration works in mock
@@ -685,11 +729,15 @@ impl QuicConnectionMigrationConformanceHarness {
 
     // Concurrent Migration Tests
 
-    fn test_concurrent_path_migration_both_endpoints(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_concurrent_path_migration_both_endpoints(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_concurrent_path_migration_both_endpoints".to_string(),
-            description: "Concurrent path migration from both endpoints MUST be handled per RFC 9000 §9.2".to_string(),
+            description:
+                "Concurrent path migration from both endpoints MUST be handled per RFC 9000 §9.2"
+                    .to_string(),
             category: TestCategory::ConcurrentMigration,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -705,7 +753,8 @@ impl QuicConnectionMigrationConformanceHarness {
         validator.simulate_concurrent_migration(local_path_id, remote_path_id);
 
         // Verify concurrent migration was recorded
-        let found_migration = validator.concurrent_migrations
+        let found_migration = validator
+            .concurrent_migrations
             .iter()
             .any(|(local, remote)| *local == local_path_id && *remote == remote_path_id);
 
@@ -722,7 +771,9 @@ impl QuicConnectionMigrationConformanceHarness {
         let start_time = Instant::now();
         let result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_migration_collision_resolution".to_string(),
-            description: "Migration collisions MUST be resolved deterministically per RFC 9000 §9.2.1".to_string(),
+            description:
+                "Migration collisions MUST be resolved deterministically per RFC 9000 §9.2.1"
+                    .to_string(),
             category: TestCategory::ConcurrentMigration,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass, // Assume deterministic resolution in mock
@@ -733,7 +784,9 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
-    fn test_path_migration_race_condition_handling(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_path_migration_race_condition_handling(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_path_migration_race_condition_handling".to_string(),
@@ -820,7 +873,8 @@ mod tests {
         assert!(!results.is_empty(), "Should have conformance test results");
 
         // Verify we have tests for all required categories
-        let categories: std::collections::HashSet<_> = results.iter().map(|r| &r.category).collect();
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
         assert!(categories.contains(&TestCategory::PathValidation));
         assert!(categories.contains(&TestCategory::ConnectionIdRetirement));
         assert!(categories.contains(&TestCategory::AntiAmplificationLimits));
@@ -830,11 +884,18 @@ mod tests {
         // Verify all tests have required fields
         for result in &results {
             assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-            assert!(!result.description.is_empty(), "Description must not be empty");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
         }
 
         // Verify we have the minimum expected number of test cases (15 as per bead)
-        assert!(results.len() >= 15, "Should have at least 15 connection migration conformance test cases, got {}", results.len());
+        assert!(
+            results.len() >= 15,
+            "Should have at least 15 connection migration conformance test cases, got {}",
+            results.len()
+        );
     }
 
     #[test]
@@ -842,9 +903,8 @@ mod tests {
         let harness = QuicConnectionMigrationConformanceHarness::new();
         let results = harness.run_all_tests();
 
-        let test_ids: std::collections::HashSet<_> = results.iter()
-            .map(|r| r.test_id.as_str())
-            .collect();
+        let test_ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
 
         // Requirement 1: path validation with PATH_CHALLENGE/PATH_RESPONSE
         assert!(
@@ -882,10 +942,12 @@ mod tests {
         let harness = QuicConnectionMigrationConformanceHarness::new();
         let results = harness.run_all_tests();
 
-        let must_tests = results.iter()
+        let must_tests = results
+            .iter()
             .filter(|r| r.requirement_level == RequirementLevel::Must)
             .count();
-        let should_tests = results.iter()
+        let should_tests = results
+            .iter()
             .filter(|r| r.requirement_level == RequirementLevel::Should)
             .count();
 

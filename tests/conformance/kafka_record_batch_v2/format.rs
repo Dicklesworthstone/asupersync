@@ -223,13 +223,18 @@ pub struct RecordBatchV2 {
 
 impl RecordBatchV2 {
     /// Create a new RecordBatch v2.
-    pub fn new(base_offset: i64, producer_id: i64, producer_epoch: i16, base_sequence: i32) -> Self {
+    pub fn new(
+        base_offset: i64,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+    ) -> Self {
         Self {
             base_offset,
             batch_length: 0, // Will be calculated during encoding
             partition_leader_epoch: 0,
             magic: 2, // RecordBatch v2
-            crc: 0, // Will be calculated during encoding
+            crc: 0,   // Will be calculated during encoding
             attributes: RecordAttribute::new(),
             last_offset_delta: 0,
             base_timestamp: 0,
@@ -246,20 +251,14 @@ impl RecordBatchV2 {
     pub fn new_test_batch() -> Self {
         let mut batch = Self::new(0, 12345, 0, 0);
 
-        let record1 = RecordV2::new(
-            Some(b"key1".to_vec()),
-            Some(b"value1".to_vec()),
-        )
-        .with_timestamp_delta(0)
-        .with_offset_delta(0);
+        let record1 = RecordV2::new(Some(b"key1".to_vec()), Some(b"value1".to_vec()))
+            .with_timestamp_delta(0)
+            .with_offset_delta(0);
 
-        let record2 = RecordV2::new(
-            Some(b"key2".to_vec()),
-            Some(b"value2".to_vec()),
-        )
-        .with_timestamp_delta(100)
-        .with_offset_delta(1)
-        .with_header("trace-id".to_string(), Some(b"abc-123".to_vec()));
+        let record2 = RecordV2::new(Some(b"key2".to_vec()), Some(b"value2".to_vec()))
+            .with_timestamp_delta(100)
+            .with_offset_delta(1)
+            .with_header("trace-id".to_string(), Some(b"abc-123".to_vec()));
 
         batch.add_record(record1);
         batch.add_record(record2);
@@ -367,7 +366,9 @@ impl RecordBatchV2 {
         let crc_data = &data[crc_start..];
         let calculated_crc = crc32fast::hash(crc_data);
         if stored_crc != calculated_crc {
-            return Err(format!("CRC mismatch: expected {stored_crc:x}, got {calculated_crc:x}"));
+            return Err(format!(
+                "CRC mismatch: expected {stored_crc:x}, got {calculated_crc:x}"
+            ));
         }
 
         // Decode records
@@ -460,7 +461,9 @@ fn decode_record(cursor: &mut Cursor<&[u8]>) -> Result<RecordV2, String> {
     let value_length = decode_varint(cursor)?;
     let value = if value_length >= 0 {
         let mut value_buf = vec![0u8; value_length as usize];
-        cursor.read_exact(&mut value_buf).map_err(|e| e.to_string())?;
+        cursor
+            .read_exact(&mut value_buf)
+            .map_err(|e| e.to_string())?;
         Some(value_buf)
     } else {
         None
@@ -472,13 +475,17 @@ fn decode_record(cursor: &mut Cursor<&[u8]>) -> Result<RecordV2, String> {
     for _ in 0..headers_count {
         let header_key_length = decode_varint(cursor)?;
         let mut header_key_buf = vec![0u8; header_key_length as usize];
-        cursor.read_exact(&mut header_key_buf).map_err(|e| e.to_string())?;
+        cursor
+            .read_exact(&mut header_key_buf)
+            .map_err(|e| e.to_string())?;
         let header_key = String::from_utf8(header_key_buf).map_err(|e| e.to_string())?;
 
         let header_value_length = decode_varint(cursor)?;
         let header_value = if header_value_length >= 0 {
             let mut header_value_buf = vec![0u8; header_value_length as usize];
-            cursor.read_exact(&mut header_value_buf).map_err(|e| e.to_string())?;
+            cursor
+                .read_exact(&mut header_value_buf)
+                .map_err(|e| e.to_string())?;
             Some(header_value_buf)
         } else {
             None
@@ -538,11 +545,17 @@ fn encode_varint_u64(mut value: u64, buffer: &mut Vec<u8>) {
 /// Get the size of a varint encoding.
 fn varint_size(value: i32) -> usize {
     let unsigned = ((value << 1) ^ (value >> 31)) as u32;
-    if unsigned < 0x80 { 1 }
-    else if unsigned < 0x4000 { 2 }
-    else if unsigned < 0x200000 { 3 }
-    else if unsigned < 0x10000000 { 4 }
-    else { 5 }
+    if unsigned < 0x80 {
+        1
+    } else if unsigned < 0x4000 {
+        2
+    } else if unsigned < 0x200000 {
+        3
+    } else if unsigned < 0x10000000 {
+        4
+    } else {
+        5
+    }
 }
 
 /// Decode a varint.
@@ -562,7 +575,8 @@ fn decode_varint_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32, String> {
     let mut result = 0u32;
     let mut shift = 0;
 
-    for _ in 0..5 { // Max 5 bytes for u32 varint
+    for _ in 0..5 {
+        // Max 5 bytes for u32 varint
         let byte = read_u8(cursor)?;
         result |= ((byte & 0x7F) as u32) << shift;
         if (byte & 0x80) == 0 {
@@ -579,7 +593,8 @@ fn decode_varint_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64, String> {
     let mut result = 0u64;
     let mut shift = 0;
 
-    for _ in 0..10 { // Max 10 bytes for u64 varint
+    for _ in 0..10 {
+        // Max 10 bytes for u64 varint
         let byte = read_u8(cursor)?;
         result |= ((byte & 0x7F) as u64) << shift;
         if (byte & 0x80) == 0 {
