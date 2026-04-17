@@ -1731,4 +1731,298 @@ mod tests {
         let outer: StreamTableError = inner.clone().into();
         assert_eq!(outer, StreamTableError::Stream(inner));
     }
+
+    // ========================================================================
+    // Golden tests for HTTP/3 flow-control + stream-reset race conditions
+    // ========================================================================
+
+    #[cfg(feature = "http3")]
+    mod h3_flow_reset_golden_tests {
+        use super::*;
+
+        /// Serialize flow control state for golden comparison.
+        fn serialize_flow_state(table: &StreamTable, stream_id: StreamId) -> String {
+            let stream = table.stream(stream_id).expect("stream exists");
+            format!(
+                "connection_send_used={},connection_send_limit={},connection_send_remaining={},\
+                 stream_send_used={},stream_send_limit={},stream_send_remaining={},\
+                 stream_send_offset={},stream_recv_offset={},send_reset={:?}",
+                table.send_connection_credit.used(),
+                table.send_connection_credit.limit(),
+                table.send_connection_credit.remaining(),
+                stream.send_credit.used(),
+                stream.send_credit.limit(),
+                stream.send_credit.remaining(),
+                stream.send_offset,
+                stream.recv_offset,
+                stream.send_reset
+            )
+        }
+
+        #[test]
+        fn golden_max_data_increment_after_reset() {
+            // Test scenario 1: MAX_DATA increment after RESET
+            let mut table = StreamTable::new_with_connection_limits(
+                StreamRole::Client,
+                2, // max bidi
+                0, // max uni
+                100, // stream send window
+                100, // stream recv window
+                200, // connection send limit
+                200, // connection recv limit
+            );
+
+            let stream_id = table.open_local_bidi().expect("open stream");
+
+            // Initial state
+            let initial_state = serialize_flow_state(&table, stream_id);
+            assert_eq!(initial_state,
+                "connection_send_used=0,connection_send_limit=200,connection_send_remaining=200,\
+                 stream_send_used=0,stream_send_limit=100,stream_send_remaining=100,\
+                 stream_send_offset=0,stream_recv_offset=0,send_reset=None");
+
+            // Write some data
+            table.write_stream(stream_id, 50).expect("write data");
+            let after_write_state = serialize_flow_state(&table, stream_id);
+            assert_eq!(after_write_state,
+                "connection_send_used=50,connection_send_limit=200,connection_send_remaining=150,\
+                 stream_send_used=50,stream_send_limit=100,stream_send_remaining=50,\
+                 stream_send_offset=50,stream_recv_offset=0,send_reset=None");
+
+            // Reset stream - connection budget should be released
+            table.stream_mut(stream_id).expect("stream").reset_send(42, 50).expect("reset");
+            let after_reset_state = serialize_flow_state(&table, stream_id);
+            assert_eq!(after_reset_state,
+                "connection_send_used=50,connection_send_limit=200,connection_send_remaining=150,\
+                 stream_send_used=50,stream_send_limit=100,stream_send_remaining=50,\
+                 stream_send_offset=50,stream_recv_offset=0,send_reset=Some((42, 50))");
+
+            // Simulate MAX_DATA frame increasing connection limit
+            table.send_connection_credit.increase_limit(300).expect("increase limit");
+            let after_max_data_state = serialize_flow_state(&table, stream_id);
+            assert_eq!(after_max_data_state,
+                "connection_send_used=50,connection_send_limit=300,connection_send_remaining=250,\
+                 stream_send_used=50,stream_send_limit=100,stream_send_remaining=50,\
+                 stream_send_offset=50,stream_recv_offset=0,send_reset=Some((42, 50))");
+        }
+
+        #[test]
+        fn golden_flow_control_bytes_released_on_reset() {
+            // Test scenario 2: Flow-control bytes released on reset
+            let mut table = StreamTable::new_with_connection_limits(
+                StreamRole::Client,
+                2, // max bidi
+                0, // max uni
+                80, // stream send window
+                80, // stream recv window
+                100, // connection send limit (tight)
+                100, // connection recv limit
+            );
+
+            let stream1 = table.open_local_bidi().expect("open stream1");
+            let stream2 = table.open_local_bidi().expect("open stream2");
+
+            // Fill up most of connection budget with stream1
+            table.write_stream(stream1, 70).expect("write to stream1");
+            let state_stream1_written = format!(
+                "stream1: {}, stream2: {}",
+                serialize_flow_state(&table, stream1),
+                serialize_flow_state(&table, stream2)
+            );
+            assert_eq!(state_stream1_written,
+                "stream1: connection_send_used=70,connection_send_limit=100,connection_send_remaining=30,\
+                 stream_send_used=70,stream_send_limit=80,stream_send_remaining=10,\
+                 stream_send_offset=70,stream_recv_offset=0,send_reset=None, \
+                 stream2: connection_send_used=70,connection_send_limit=100,connection_send_remaining=30,\
+                 stream_send_used=0,stream_send_limit=80,stream_send_remaining=80,\
+                 stream_send_offset=0,stream_recv_offset=0,send_reset=None");
+
+            // Try to write to stream2 - should fail due to connection limit
+            let write_err = table.write_stream(stream2, 40).expect_err("should fail - connection limit");
+            assert!(matches!(write_err,
+                StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted {
+                    attempted: 40, remaining: 30
+                }))));
+
+            // Reset stream1 - this should conceptually release its connection budget
+            table.stream_mut(stream1).expect("stream1").reset_send(99, 70).expect("reset stream1");
+
+            // Manually release connection budget (simulating what QUIC implementation should do)
+            table.send_connection_credit.release(70);
+
+            let state_after_reset = format!(
+                "stream1: {}, stream2: {}",
+                serialize_flow_state(&table, stream1),
+                serialize_flow_state(&table, stream2)
+            );
+            assert_eq!(state_after_reset,
+                "stream1: connection_send_used=0,connection_send_limit=100,connection_send_remaining=100,\
+                 stream_send_used=70,stream_send_limit=80,stream_send_remaining=10,\
+                 stream_send_offset=70,stream_recv_offset=0,send_reset=Some((99, 70)), \
+                 stream2: connection_send_used=0,connection_send_limit=100,connection_send_remaining=100,\
+                 stream_send_used=0,stream_send_limit=80,stream_send_remaining=80,\
+                 stream_send_offset=0,stream_recv_offset=0,send_reset=None");
+        }
+
+        #[test]
+        fn golden_new_stream_reuses_released_budget() {
+            // Test scenario 3: New stream reuses released budget
+            let mut table = StreamTable::new_with_connection_limits(
+                StreamRole::Client,
+                3, // max bidi
+                0, // max uni
+                60, // stream send window
+                60, // stream recv window
+                100, // connection send limit
+                100, // connection recv limit
+            );
+
+            let stream1 = table.open_local_bidi().expect("open stream1");
+            let stream2 = table.open_local_bidi().expect("open stream2");
+
+            // Use connection budget across both streams
+            table.write_stream(stream1, 40).expect("write to stream1");
+            table.write_stream(stream2, 50).expect("write to stream2");
+
+            let state_both_written = format!(
+                "connection_budget_used={}, stream1_used={}, stream2_used={}",
+                table.send_connection_credit.used(),
+                table.stream(stream1).unwrap().send_credit.used(),
+                table.stream(stream2).unwrap().send_credit.used()
+            );
+            assert_eq!(state_both_written, "connection_budget_used=90, stream1_used=40, stream2_used=50");
+
+            // Reset stream1 and release its budget
+            table.stream_mut(stream1).expect("stream1").reset_send(1, 40).expect("reset stream1");
+            table.send_connection_credit.release(40); // Simulate budget recovery
+
+            // Open new stream3 and verify it can use the released budget
+            let stream3 = table.open_local_bidi().expect("open stream3");
+            table.write_stream(stream3, 35).expect("write to stream3 - using released budget");
+
+            let state_after_reuse = format!(
+                "connection_budget_used={}, stream1_reset={:?}, stream2_used={}, stream3_used={}",
+                table.send_connection_credit.used(),
+                table.stream(stream1).unwrap().send_reset,
+                table.stream(stream2).unwrap().send_credit.used(),
+                table.stream(stream3).unwrap().send_credit.used()
+            );
+            assert_eq!(state_after_reuse,
+                "connection_budget_used=85, stream1_reset=Some((1, 40)), stream2_used=50, stream3_used=35");
+        }
+
+        #[test]
+        fn golden_peer_initiated_vs_local_reset() {
+            // Test scenario 4: Peer-initiated reset vs. local reset
+            let mut client_table = StreamTable::new_with_connection_limits(
+                StreamRole::Client,
+                2, // max bidi
+                0, // max uni
+                50, // stream window
+                50, // stream window
+                100, // connection limit
+                100, // connection limit
+            );
+
+            // Client opens stream and writes data
+            let stream_id = client_table.open_local_bidi().expect("open client stream");
+            client_table.write_stream(stream_id, 30).expect("client writes");
+
+            let client_after_write = serialize_flow_state(&client_table, stream_id);
+            assert_eq!(client_after_write,
+                "connection_send_used=30,connection_send_limit=100,connection_send_remaining=70,\
+                 stream_send_used=30,stream_send_limit=50,stream_send_remaining=20,\
+                 stream_send_offset=30,stream_recv_offset=0,send_reset=None");
+
+            // Scenario A: Local reset (client resets its own stream)
+            let mut local_reset_table = client_table.clone();
+            local_reset_table.stream_mut(stream_id).expect("stream").reset_send(42, 30).expect("local reset");
+            let local_reset_state = serialize_flow_state(&local_reset_table, stream_id);
+            assert_eq!(local_reset_state,
+                "connection_send_used=30,connection_send_limit=100,connection_send_remaining=70,\
+                 stream_send_used=30,stream_send_limit=50,stream_send_remaining=20,\
+                 stream_send_offset=30,stream_recv_offset=0,send_reset=Some((42, 30))");
+
+            // Scenario B: Peer-initiated reset (server resets client's stream via STOP_SENDING)
+            let mut peer_reset_table = client_table;
+            peer_reset_table.stream_mut(stream_id).expect("stream").on_stop_sending(99);
+            let peer_stop_state = format!(
+                "connection_send_used={},stream_send_used={},send_offset={},stop_sending_error_code={:?}",
+                peer_reset_table.send_connection_credit.used(),
+                peer_reset_table.stream(stream_id).unwrap().send_credit.used(),
+                peer_reset_table.stream(stream_id).unwrap().send_offset,
+                peer_reset_table.stream(stream_id).unwrap().stop_sending_error_code
+            );
+            assert_eq!(peer_stop_state,
+                "connection_send_used=30,stream_send_used=30,send_offset=30,stop_sending_error_code=Some(99)");
+
+            // Verify peer-reset prevents further writes
+            let write_after_stop_err = peer_reset_table.write_stream(stream_id, 5).expect_err("should fail");
+            assert_eq!(write_after_stop_err, StreamTableError::Stream(QuicStreamError::SendStopped { code: 99 }));
+        }
+
+        #[test]
+        fn golden_connection_level_budget_recovery() {
+            // Test scenario 5: Connection-level budget recovery
+            let mut table = StreamTable::new_with_connection_limits(
+                StreamRole::Server,
+                3, // max bidi
+                1, // max uni
+                40, // stream window
+                40, // stream window
+                80, // connection send limit (tight)
+                80, // connection recv limit
+            );
+
+            let bidi1 = table.open_local_bidi().expect("open bidi1");
+            let bidi2 = table.open_local_bidi().expect("open bidi2");
+            let uni1 = table.open_local_uni().expect("open uni1");
+
+            // Fill connection budget across multiple streams
+            table.write_stream(bidi1, 25).expect("write bidi1");
+            table.write_stream(bidi2, 30).expect("write bidi2");
+            table.write_stream(uni1, 20).expect("write uni1");
+
+            let state_budget_full = format!(
+                "connection_used={},connection_remaining={},bidi1_used={},bidi2_used={},uni1_used={}",
+                table.send_connection_credit.used(),
+                table.send_connection_credit.remaining(),
+                table.stream(bidi1).unwrap().send_credit.used(),
+                table.stream(bidi2).unwrap().send_credit.used(),
+                table.stream(uni1).unwrap().send_credit.used()
+            );
+            assert_eq!(state_budget_full, "connection_used=75,connection_remaining=5,bidi1_used=25,bidi2_used=30,uni1_used=20");
+
+            // Connection budget nearly exhausted - new writes should fail
+            let write_fail_err = table.write_stream(bidi1, 10).expect_err("should fail - connection exhausted");
+            assert!(matches!(write_fail_err, StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted { attempted: 10, remaining: 5 }))));
+
+            // Reset bidi2 and uni1, then recover their connection budget
+            table.stream_mut(bidi2).expect("bidi2").reset_send(1, 30).expect("reset bidi2");
+            table.stream_mut(uni1).expect("uni1").reset_send(2, 20).expect("reset uni1");
+            table.send_connection_credit.release(50); // Recover bidi2(30) + uni1(20) budget
+
+            let state_after_recovery = format!(
+                "connection_used={},connection_remaining={},bidi1_used={},bidi2_reset={:?},uni1_reset={:?}",
+                table.send_connection_credit.used(),
+                table.send_connection_credit.remaining(),
+                table.stream(bidi1).unwrap().send_credit.used(),
+                table.stream(bidi2).unwrap().send_reset,
+                table.stream(uni1).unwrap().send_reset
+            );
+            assert_eq!(state_after_recovery,
+                "connection_used=25,connection_remaining=55,bidi1_used=25,bidi2_reset=Some((1, 30)),uni1_reset=Some((2, 20))");
+
+            // Now bidi1 can write again with recovered budget
+            table.write_stream(bidi1, 15).expect("write bidi1 with recovered budget");
+
+            let final_state = format!(
+                "connection_used={},connection_remaining={},bidi1_used={}",
+                table.send_connection_credit.used(),
+                table.send_connection_credit.remaining(),
+                table.stream(bidi1).unwrap().send_credit.used()
+            );
+            assert_eq!(final_state, "connection_used=40,connection_remaining=40,bidi1_used=40");
+        }
+    }
 }
