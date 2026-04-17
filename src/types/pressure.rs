@@ -7,9 +7,14 @@
 //!
 //! # Headroom Semantics
 //!
-//! - `1.0` — system is idle, full headroom available
-//! - `0.5` — moderate load, background tasks may be paused
-//! - `0.0` — critically overloaded, emergency degradation
+//! `SystemPressure` uses the same five-band scale as the runtime resource
+//! monitor so callers see a stable public degradation signal:
+//!
+//! - `1.0` — normal, full headroom available
+//! - `0.75` — light degradation
+//! - `0.5` — moderate degradation
+//! - `0.25` — heavy degradation
+//! - `0.0` — emergency degradation
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -75,22 +80,27 @@ impl SystemPressure {
 
     /// Degradation level (0–4) based on headroom thresholds.
     ///
-    /// - Level 0: headroom >= 0.5 (Normal)
-    /// - Level 1: headroom >= 0.3 (Warning — background tasks paused)
-    /// - Level 2: headroom >= 0.15 (Degraded — cache reduced)
-    /// - Level 3: headroom >= 0.05 (Critical — writes throttled)
-    /// - Level 4: headroom < 0.05 (Emergency — read-only mode)
+    /// The cut points intentionally mirror
+    /// `runtime::resource_monitor::DegradationLevel::from_headroom` so a
+    /// `SystemPressure` cloned out of the resource monitor reports the same
+    /// public severity band:
+    ///
+    /// - Level 0: headroom > 0.875 (Normal)
+    /// - Level 1: headroom > 0.625 (Light)
+    /// - Level 2: headroom > 0.375 (Moderate)
+    /// - Level 3: headroom > 0.125 (Heavy)
+    /// - Level 4: headroom <= 0.125 (Emergency)
     #[must_use]
     #[inline]
     pub fn degradation_level(&self) -> u8 {
         let h = self.headroom();
-        if h >= 0.5 {
+        if h > 0.875 {
             0
-        } else if h >= 0.3 {
+        } else if h > 0.625 {
             1
-        } else if h >= 0.15 {
+        } else if h > 0.375 {
             2
-        } else if h >= 0.05 {
+        } else if h > 0.125 {
             3
         } else {
             4
@@ -103,9 +113,9 @@ impl SystemPressure {
     pub fn level_label(&self) -> &'static str {
         match self.degradation_level() {
             0 => "normal",
-            1 => "warning",
-            2 => "degraded",
-            3 => "critical",
+            1 => "light",
+            2 => "moderate",
+            3 => "heavy",
             _ => "emergency",
         }
     }
@@ -149,15 +159,15 @@ mod tests {
     #[test]
     fn degradation_levels() {
         let p = SystemPressure::new();
-        p.set_headroom(0.8);
+        p.set_headroom(0.9);
         assert_eq!(p.degradation_level(), 0);
-        p.set_headroom(0.4);
+        p.set_headroom(0.8);
         assert_eq!(p.degradation_level(), 1);
-        p.set_headroom(0.2);
+        p.set_headroom(0.5);
         assert_eq!(p.degradation_level(), 2);
-        p.set_headroom(0.1);
+        p.set_headroom(0.25);
         assert_eq!(p.degradation_level(), 3);
-        p.set_headroom(0.02);
+        p.set_headroom(0.0);
         assert_eq!(p.degradation_level(), 4);
     }
 
@@ -177,15 +187,15 @@ mod tests {
     #[test]
     fn level_labels() {
         let p = SystemPressure::new();
-        p.set_headroom(0.6);
+        p.set_headroom(0.9);
         assert_eq!(p.level_label(), "normal");
-        p.set_headroom(0.35);
-        assert_eq!(p.level_label(), "warning");
-        p.set_headroom(0.2);
-        assert_eq!(p.level_label(), "degraded");
-        p.set_headroom(0.08);
-        assert_eq!(p.level_label(), "critical");
-        p.set_headroom(0.01);
+        p.set_headroom(0.75);
+        assert_eq!(p.level_label(), "light");
+        p.set_headroom(0.5);
+        assert_eq!(p.level_label(), "moderate");
+        p.set_headroom(0.25);
+        assert_eq!(p.level_label(), "heavy");
+        p.set_headroom(0.0);
         assert_eq!(p.level_label(), "emergency");
     }
 }

@@ -1039,6 +1039,37 @@ mod tests {
     }
 
     #[test]
+    fn test_resource_pressure_system_pressure_matches_degradation_band() {
+        let pressure = ResourcePressure::new();
+        let system_pressure = pressure.system_pressure();
+
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::None);
+        assert!((system_pressure.headroom() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(system_pressure.degradation_level(), 0);
+        assert_eq!(system_pressure.level_label(), "normal");
+
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Light);
+        assert!((system_pressure.headroom() - 0.75).abs() < f32::EPSILON);
+        assert_eq!(system_pressure.degradation_level(), 1);
+        assert_eq!(system_pressure.level_label(), "light");
+
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Moderate);
+        assert!((system_pressure.headroom() - 0.5).abs() < f32::EPSILON);
+        assert_eq!(system_pressure.degradation_level(), 2);
+        assert_eq!(system_pressure.level_label(), "moderate");
+
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Heavy);
+        assert!((system_pressure.headroom() - 0.25).abs() < f32::EPSILON);
+        assert_eq!(system_pressure.degradation_level(), 3);
+        assert_eq!(system_pressure.level_label(), "heavy");
+
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Emergency);
+        assert!(system_pressure.headroom().abs() < f32::EPSILON);
+        assert_eq!(system_pressure.degradation_level(), 4);
+        assert_eq!(system_pressure.level_label(), "emergency");
+    }
+
+    #[test]
     fn test_degradation_engine_policies() {
         let pressure = Arc::new(ResourcePressure::new());
         let engine = DegradationEngine::new(Arc::clone(&pressure));
