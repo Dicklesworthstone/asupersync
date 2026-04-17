@@ -388,8 +388,8 @@ fuzz_target!(|input: &[u8]| {
     // Test BytesMut final state invariants
     if !bytes_mut.is_empty() {
         // Test that remaining BytesMut can still be frozen
-        let final_frozen = bytes_mut.freeze();
-        // Basic sanity - length should be non-negative (always true for usize)
+        let _final_frozen = bytes_mut.freeze();
+        // Basic sanity - freeze operation completes successfully
 
         // Test that BytesMut is Send + Sync (compile-time check)
         fn assert_send_sync<T: Send + Sync>() {}
