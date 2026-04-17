@@ -1868,3 +1868,6 @@ mod tests {
         assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
     }
 }
+
+// Metamorphic tests for blocking pool fairness properties
+mod metamorphic;

@@ -966,7 +966,7 @@ mod tests {
             } => {
                 assert_eq!(*to, b);
                 assert_eq!(reason.kind, CancelKind::LinkedExit);
-                assert_eq!(reason.message, Some("link exit"));
+                assert_eq!(reason.message, Some("link exit".to_string()));
                 assert_eq!(*link_ref, lref);
             }
             other => panic!("expected CancelPeer, got {other:?}"),

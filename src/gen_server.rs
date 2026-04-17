@@ -2539,7 +2539,10 @@ mod tests {
             Ok(_) => unreachable!("expected cancellation, got Ok"),
             Err(CallError::Cancelled(reason)) => {
                 assert_eq!(reason.kind, CancelKind::User);
-                assert_eq!(reason.message, Some("gen_server call cancelled"));
+                assert_eq!(
+                    reason.message,
+                    Some("gen_server call cancelled".to_string())
+                );
             }
             Err(other) => unreachable!("expected CallError::Cancelled, got {other:?}"),
         }
@@ -2671,7 +2674,10 @@ mod tests {
             Ok(()) => unreachable!("expected cancellation, got Ok"),
             Err(CastError::Cancelled(reason)) => {
                 assert_eq!(reason.kind, CancelKind::User);
-                assert_eq!(reason.message, Some("gen_server cast cancelled"));
+                assert_eq!(
+                    reason.message,
+                    Some("gen_server cast cancelled".to_string())
+                );
             }
             Err(other) => unreachable!("expected CastError::Cancelled, got {other:?}"),
         }

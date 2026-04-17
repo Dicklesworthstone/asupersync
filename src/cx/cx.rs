@@ -2754,7 +2754,7 @@ mod tests {
         assert!(cx.is_cancel_requested());
         let reason = cx.cancel_reason().expect("should have reason");
         assert_eq!(reason.kind, CancelKind::User);
-        assert_eq!(reason.message, Some("manual stop"));
+        assert_eq!(reason.message, Some("manual stop".to_string()));
     }
 
     #[test]
@@ -2914,7 +2914,7 @@ mod tests {
             // Log or metric: "Request cancelled due to timeout"
             let root = cx.root_cancel_cause().unwrap();
             assert_eq!(root.kind, CancelKind::Timeout);
-            assert_eq!(root.message, Some("request timeout"));
+            assert_eq!(root.message, Some("request timeout".to_string()));
         }
 
         // Full chain inspection

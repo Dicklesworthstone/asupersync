@@ -1166,7 +1166,7 @@ mod tests {
 
         let stored = cancel_handle.reason().unwrap();
         assert_eq!(stored.kind, CancelKind::Timeout);
-        assert_eq!(stored.message, Some("timed out"));
+        assert_eq!(stored.message, Some("timed out".to_string()));
     }
 
     #[test]

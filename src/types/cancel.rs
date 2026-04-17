@@ -895,7 +895,7 @@ impl CancelReason {
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
-            self.message = other.message.clone();
+            self.message.clone_from(&other.message);
             self.cause.clone_from(&other.cause);
             self.truncated = other.truncated;
             self.truncated_at_depth = other.truncated_at_depth;
@@ -913,7 +913,7 @@ impl CancelReason {
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
-            self.message = other.message.clone();
+            self.message.clone_from(&other.message);
             self.cause.clone_from(&other.cause);
             self.truncated = other.truncated;
             self.truncated_at_depth = other.truncated_at_depth;
@@ -935,7 +935,7 @@ impl CancelReason {
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
-            self.message = other.message.clone();
+            self.message.clone_from(&other.message);
             self.cause.clone_from(&other.cause);
             self.truncated = other.truncated;
             self.truncated_at_depth = other.truncated_at_depth;
@@ -1309,7 +1309,7 @@ mod tests {
             reason.kind
         );
         crate::assert_with_log!(
-            reason.message == Some("a"),
+            reason.message == Some("a".to_string()),
             "message should be deterministic",
             Some("a"),
             reason.message
@@ -1660,7 +1660,7 @@ mod tests {
             reason.timestamp
         );
         crate::assert_with_log!(
-            reason.message == Some("test timeout"),
+            reason.message == Some("test timeout".to_string()),
             "message should match",
             Some("test timeout"),
             reason.message
@@ -1720,7 +1720,7 @@ mod tests {
             found_root.kind
         );
         crate::assert_with_log!(
-            found_root.message == Some("original timeout"),
+            found_root.message == Some("original timeout".to_string()),
             "root_cause message should match",
             Some("original timeout"),
             found_root.message
