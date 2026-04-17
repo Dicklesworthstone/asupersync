@@ -1640,4 +1640,538 @@ mod tests {
         crate::assert_with_log!(poll.is_ready(), "ready", true, poll.is_ready());
         crate::test_complete!("time_zero_deadline");
     }
+
+    // =========================================================================
+    // Metamorphic Testing: Sleep Cancel Relations
+    // =========================================================================
+
+    /// MR1: Cancellation idempotency - reset(reset(sleep)) ≡ reset(sleep)
+    /// Tests that multiple resets to the same deadline are equivalent to a single reset.
+    #[test]
+    fn mr_cancel_idempotency() {
+        init_test("mr_cancel_idempotency");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 100),
+            TaskId::new_for_test(0, 100),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let initial_deadline = Time::from_secs(10);
+        let reset_deadline = Time::from_secs(20);
+
+        // Create two identical sleeps
+        let mut sleep1 = Sleep::new(initial_deadline);
+        let mut sleep2 = Sleep::new(initial_deadline);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // Poll both to register timers
+        let _ = Pin::new(&mut sleep1).poll(&mut task_cx);
+        let _ = Pin::new(&mut sleep2).poll(&mut task_cx);
+
+        // Reset once vs reset twice to same deadline
+        sleep1.reset(reset_deadline);  // Single reset
+        sleep2.reset(reset_deadline);  // Double reset (first)
+        sleep2.reset(reset_deadline);  // Double reset (second)
+
+        // Both should behave identically
+        crate::assert_with_log!(
+            sleep1.deadline() == sleep2.deadline(),
+            "deadlines equal after reset idempotency",
+            sleep1.deadline(),
+            sleep2.deadline()
+        );
+        crate::assert_with_log!(
+            sleep1.was_polled() == sleep2.was_polled(),
+            "polled state equal after reset idempotency",
+            sleep1.was_polled(),
+            sleep2.was_polled()
+        );
+
+        // Both should poll identically
+        let poll1 = Pin::new(&mut sleep1).poll(&mut task_cx);
+        let poll2 = Pin::new(&mut sleep2).poll(&mut task_cx);
+        crate::assert_with_log!(
+            poll1.is_pending() && poll2.is_pending(),
+            "both pending after reset idempotency",
+            true,
+            poll1.is_pending() && poll2.is_pending()
+        );
+
+        // Fire both and check they complete identically
+        clock.set(reset_deadline);
+        let _ = timer.process_timers();
+        let final1 = Pin::new(&mut sleep1).poll(&mut task_cx);
+        let final2 = Pin::new(&mut sleep2).poll(&mut task_cx);
+        crate::assert_with_log!(
+            final1.is_ready() && final2.is_ready(),
+            "both ready after timer fires",
+            true,
+            final1.is_ready() && final2.is_ready()
+        );
+
+        crate::test_complete!("mr_cancel_idempotency");
+    }
+
+    /// MR2: Cancel after fire is no-op
+    /// Tests that operations on a completed Sleep have no effect.
+    #[test]
+    fn mr_cancel_after_fire_noop() {
+        init_test("mr_cancel_after_fire_noop");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 101),
+            TaskId::new_for_test(0, 101),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let deadline = Time::from_secs(5);
+        let mut sleep = Sleep::new(deadline);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // Poll to register timer
+        let initial = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            initial.is_pending(),
+            "initial poll pending",
+            true,
+            initial.is_pending()
+        );
+
+        // Fire the timer
+        clock.set(deadline);
+        let _ = timer.process_timers();
+        let fired = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            fired.is_ready(),
+            "sleep ready after timer fires",
+            true,
+            fired.is_ready()
+        );
+
+        // After completion, timer should be deregistered
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "no timers pending after completion",
+            0,
+            timer.pending_count()
+        );
+
+        // Now test that reset after completion works (creates fresh timer)
+        let new_deadline = Time::from_secs(10);
+        sleep.reset(new_deadline);
+        crate::assert_with_log!(
+            sleep.deadline() == new_deadline,
+            "deadline updated after reset",
+            new_deadline,
+            sleep.deadline()
+        );
+        crate::assert_with_log!(
+            !sleep.was_polled(),
+            "polled flag cleared after reset",
+            false,
+            sleep.was_polled()
+        );
+
+        // Should be able to use normally after reset
+        let after_reset = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            after_reset.is_pending(),
+            "pending after reset on completed sleep",
+            true,
+            after_reset.is_pending()
+        );
+
+        crate::test_complete!("mr_cancel_after_fire_noop");
+    }
+
+    /// MR3: Reset-after-cancel yields fresh timer
+    /// Tests that reset() creates a completely independent timer registration.
+    #[test]
+    fn mr_reset_after_cancel_fresh() {
+        init_test("mr_reset_after_cancel_fresh");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 102),
+            TaskId::new_for_test(0, 102),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let original_deadline = Time::from_secs(5);
+        let reset_deadline = Time::from_secs(15);
+        let mut sleep = Sleep::new(original_deadline);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // Register original timer
+        let _ = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "original timer registered",
+            1,
+            timer.pending_count()
+        );
+
+        // Reset cancels old timer and prepares for new one
+        sleep.reset(reset_deadline);
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "reset cancels original timer",
+            0,
+            timer.pending_count()
+        );
+        crate::assert_with_log!(
+            sleep.deadline() == reset_deadline,
+            "deadline updated by reset",
+            reset_deadline,
+            sleep.deadline()
+        );
+
+        // Poll registers new timer
+        let after_reset = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            after_reset.is_pending(),
+            "pending after reset",
+            true,
+            after_reset.is_pending()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "new timer registered after reset",
+            1,
+            timer.pending_count()
+        );
+
+        // Original deadline should not fire the reset timer
+        clock.set(original_deadline);
+        let original_fires = timer.process_timers();
+        crate::assert_with_log!(
+            original_fires == 0,
+            "original deadline does not fire reset timer",
+            0,
+            original_fires
+        );
+        let still_pending = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            still_pending.is_pending(),
+            "sleep still pending at original deadline",
+            true,
+            still_pending.is_pending()
+        );
+
+        // Reset deadline should fire
+        clock.set(reset_deadline);
+        let reset_fires = timer.process_timers();
+        crate::assert_with_log!(
+            reset_fires == 1,
+            "reset deadline fires timer",
+            1,
+            reset_fires
+        );
+        let ready = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            ready.is_ready(),
+            "sleep ready at reset deadline",
+            true,
+            ready.is_ready()
+        );
+
+        crate::test_complete!("mr_reset_after_cancel_fresh");
+    }
+
+    /// MR4: N sleeps with same deadline fire in deterministic order under LabRuntime
+    /// Tests that timer firing order is consistent across multiple identical sleeps.
+    #[test]
+    fn mr_deterministic_order_same_deadline() {
+        init_test("mr_deterministic_order_same_deadline");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 103),
+            TaskId::new_for_test(0, 103),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let shared_deadline = Time::from_secs(10);
+        let mut sleeps = Vec::new();
+        let mut wakers = Vec::new();
+        let mut woke_flags = Vec::new();
+
+        // Create multiple sleeps with same deadline
+        for i in 0..5 {
+            let mut sleep = Sleep::new(shared_deadline);
+            let woke = Arc::new(AtomicBool::new(false));
+            let waker = waker_that_sets(Arc::clone(&woke));
+            let mut task_cx = Context::from_waker(&waker);
+
+            // Register each timer in order
+            let poll = Pin::new(&mut sleep).poll(&mut task_cx);
+            crate::assert_with_log!(
+                poll.is_pending(),
+                &format!("sleep {} pending", i),
+                true,
+                poll.is_pending()
+            );
+
+            sleeps.push(sleep);
+            wakers.push(task_cx);
+            woke_flags.push(woke);
+        }
+
+        crate::assert_with_log!(
+            timer.pending_count() == 5,
+            "all timers registered",
+            5,
+            timer.pending_count()
+        );
+
+        // Fire all timers at deadline
+        clock.set(shared_deadline);
+        let fired_count = timer.process_timers();
+        crate::assert_with_log!(
+            fired_count == 5,
+            "all timers fire at deadline",
+            5,
+            fired_count
+        );
+
+        // All wakers should fire
+        for (i, woke) in woke_flags.iter().enumerate() {
+            crate::assert_with_log!(
+                woke.load(Ordering::SeqCst),
+                &format!("waker {} fired", i),
+                true,
+                woke.load(Ordering::SeqCst)
+            );
+        }
+
+        // All sleeps should be ready when polled
+        for (i, (sleep, waker)) in sleeps.iter_mut().zip(wakers.iter_mut()).enumerate() {
+            let ready = Pin::new(sleep).poll(waker);
+            crate::assert_with_log!(
+                ready.is_ready(),
+                &format!("sleep {} ready after timer fire", i),
+                true,
+                ready.is_ready()
+            );
+        }
+
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "no pending timers after completion",
+            0,
+            timer.pending_count()
+        );
+
+        crate::test_complete!("mr_deterministic_order_same_deadline");
+    }
+
+    /// MR5: Drop cancellation removes from wheel atomically
+    /// Tests that dropping a Sleep cleanly removes its timer registration.
+    #[test]
+    fn mr_drop_removes_atomically() {
+        init_test("mr_drop_removes_atomically");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 104),
+            TaskId::new_for_test(0, 104),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "timer starts empty",
+            0,
+            timer.pending_count()
+        );
+
+        // Scope to control when Sleep is dropped
+        {
+            let mut sleep = Sleep::new(Time::from_secs(10));
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+
+            // Register timer
+            let poll = Pin::new(&mut sleep).poll(&mut task_cx);
+            crate::assert_with_log!(
+                poll.is_pending(),
+                "sleep pending after registration",
+                true,
+                poll.is_pending()
+            );
+            crate::assert_with_log!(
+                timer.pending_count() == 1,
+                "timer registered",
+                1,
+                timer.pending_count()
+            );
+
+            // Test timer is functional
+            clock.set(Time::from_secs(5));
+            let midway_fires = timer.process_timers();
+            crate::assert_with_log!(
+                midway_fires == 0,
+                "timer does not fire before deadline",
+                0,
+                midway_fires
+            );
+
+            // Sleep will be dropped here, should cancel timer
+        }
+
+        // Verify timer was cancelled on drop
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "timer cancelled on drop",
+            0,
+            timer.pending_count()
+        );
+
+        // Verify timer wheel is clean - no spurious fires
+        clock.set(Time::from_secs(10));
+        let dropped_fires = timer.process_timers();
+        crate::assert_with_log!(
+            dropped_fires == 0,
+            "no spurious fires after drop",
+            0,
+            dropped_fires
+        );
+
+        clock.set(Time::from_secs(15));
+        let later_fires = timer.process_timers();
+        crate::assert_with_log!(
+            later_fires == 0,
+            "timer wheel remains clean",
+            0,
+            later_fires
+        );
+
+        crate::test_complete!("mr_drop_removes_atomically");
+    }
+
+    /// Composite MR: Cancellation composition properties
+    /// Tests that combinations of operations preserve metamorphic relations.
+    #[test]
+    fn mr_cancellation_composition() {
+        init_test("mr_cancellation_composition");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 105),
+            TaskId::new_for_test(0, 105),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // Test: clone + reset preserves independence
+        let original = Sleep::new(Time::from_secs(5));
+        let mut cloned = original.clone();
+
+        let _ = Pin::new(&mut cloned).poll(&mut task_cx);
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "cloned sleep registers independently",
+            1,
+            timer.pending_count()
+        );
+
+        cloned.reset(Time::from_secs(10));
+        crate::assert_with_log!(
+            original.deadline() == Time::from_secs(5),
+            "original unaffected by clone reset",
+            Time::from_secs(5),
+            original.deadline()
+        );
+        crate::assert_with_log!(
+            cloned.deadline() == Time::from_secs(10),
+            "cloned deadline updated",
+            Time::from_secs(10),
+            cloned.deadline()
+        );
+
+        // Test: multiple resets + drop is equivalent to single drop
+        let mut sleep1 = Sleep::new(Time::from_secs(1));
+        let mut sleep2 = Sleep::new(Time::from_secs(1));
+
+        let _ = Pin::new(&mut sleep1).poll(&mut task_cx);
+        let _ = Pin::new(&mut sleep2).poll(&mut task_cx);
+        crate::assert_with_log!(
+            timer.pending_count() == 3,
+            "all sleeps registered",
+            3,
+            timer.pending_count()
+        );
+
+        // sleep1: reset multiple times then drop
+        sleep1.reset(Time::from_secs(2));
+        sleep1.reset(Time::from_secs(3));
+        sleep1.reset(Time::from_secs(4));
+        drop(sleep1);
+
+        // sleep2: drop directly
+        drop(sleep2);
+
+        // Both should result in same timer state (only cloned sleep remains)
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "multiple resets + drop ≡ direct drop",
+            0,
+            timer.pending_count()
+        );
+
+        crate::test_complete!("mr_cancellation_composition");
+    }
 }
