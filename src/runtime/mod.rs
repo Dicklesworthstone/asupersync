@@ -137,6 +137,7 @@ pub mod reactor;
 pub mod region_heap;
 pub mod region_table;
 pub mod resource_monitor;
+pub mod resource_cleanup_verifier;
 pub mod scheduler;
 pub mod sharded_state;
 /// Async wrapper for blocking pool operations.
@@ -191,6 +192,9 @@ pub use reactor::{
 };
 pub use region_heap::{HeapIndex, HeapRef, HeapStats, RegionHeap, global_alloc_count};
 pub use region_table::{RegionCreateError, RegionTable};
+pub use resource_cleanup_verifier::{
+    ResourceCleanupVerifier, ResourceCleanupError, ResourceCleanupConfig,
+};
 pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
