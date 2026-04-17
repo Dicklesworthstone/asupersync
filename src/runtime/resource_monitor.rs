@@ -20,14 +20,16 @@
 //! - IO driver handles file descriptor pressure
 //! - Memory allocators trigger on heap pressure
 
-use crate::types::pressure::SystemPressure;
+#![allow(missing_docs)]
+
 use crate::types::RegionId;
+use crate::types::pressure::SystemPressure;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
 /// Errors that can occur during resource monitoring.
@@ -76,7 +78,7 @@ impl std::fmt::Display for ResourceType {
             Self::FileDescriptors => write!(f, "file_descriptors"),
             Self::CpuLoad => write!(f, "cpu_load"),
             Self::NetworkConnections => write!(f, "network_connections"),
-            Self::Custom(name) => write!(f, "custom:{}", name),
+            Self::Custom(name) => write!(f, "custom:{name}"),
         }
     }
 }
@@ -98,6 +100,7 @@ pub struct ResourceMeasurement {
 
 impl ResourceMeasurement {
     /// Create a new measurement.
+    #[must_use]
     pub fn new(current: u64, soft_limit: u64, hard_limit: u64, max_limit: u64) -> Self {
         Self {
             current,
@@ -109,6 +112,7 @@ impl ResourceMeasurement {
     }
 
     /// Calculate usage percentage (0.0-1.0).
+    #[must_use]
     pub fn usage_ratio(&self) -> f64 {
         if self.max_limit == 0 {
             return 0.0;
@@ -117,16 +121,19 @@ impl ResourceMeasurement {
     }
 
     /// Check if soft threshold is exceeded.
+    #[must_use]
     pub fn is_soft_exceeded(&self) -> bool {
         self.current >= self.soft_limit
     }
 
     /// Check if hard threshold is exceeded.
+    #[must_use]
     pub fn is_hard_exceeded(&self) -> bool {
         self.current >= self.hard_limit
     }
 
     /// Check if at critical level (near max limit).
+    #[must_use]
     pub fn is_critical(&self) -> bool {
         self.current >= self.max_limit.saturating_sub(self.max_limit / 20) // Within 5% of max
     }
@@ -149,6 +156,7 @@ pub enum DegradationLevel {
 
 impl DegradationLevel {
     /// Convert to pressure headroom value (0.0-1.0).
+    #[must_use]
     pub fn to_headroom(self) -> f32 {
         match self {
             Self::None => 1.0,
@@ -160,6 +168,7 @@ impl DegradationLevel {
     }
 
     /// Convert from pressure headroom value.
+    #[must_use]
     pub fn from_headroom(headroom: f32) -> Self {
         if headroom > 0.875 {
             Self::None
@@ -192,6 +201,7 @@ pub struct TriggerConfig {
 
 impl TriggerConfig {
     /// Create default trigger configuration.
+    #[must_use]
     pub fn default_for_resource(resource_type: &ResourceType) -> Self {
         match resource_type {
             ResourceType::Memory => Self {
@@ -227,12 +237,13 @@ impl TriggerConfig {
                 hard_threshold: 0.90,
                 hysteresis: 0.05,
                 cooldown: Duration::from_secs(5),
-                enabled: false,       // Must be explicitly enabled
+                enabled: false, // Must be explicitly enabled
             },
         }
     }
 
     /// Calculate degradation level for a measurement.
+    #[must_use]
     pub fn calculate_degradation(&self, measurement: &ResourceMeasurement) -> DegradationLevel {
         let usage_ratio = measurement.usage_ratio();
 
@@ -255,8 +266,13 @@ impl TriggerConfig {
     }
 
     /// Apply hysteresis to prevent oscillation.
-    pub fn apply_hysteresis(&self, new_level: DegradationLevel, current_level: DegradationLevel,
-                          last_change: Instant) -> DegradationLevel {
+    #[must_use]
+    pub fn apply_hysteresis(
+        &self,
+        new_level: DegradationLevel,
+        current_level: DegradationLevel,
+        last_change: Instant,
+    ) -> DegradationLevel {
         // Respect cooldown period
         if last_change.elapsed() < self.cooldown {
             return current_level;
@@ -300,6 +316,7 @@ pub struct ResourcePressure {
 
 impl ResourcePressure {
     /// Create new resource pressure tracker.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             measurements: RwLock::new(HashMap::new()),
@@ -311,17 +328,22 @@ impl ResourcePressure {
     }
 
     /// Update measurement for a resource type.
-    pub fn update_measurement(&self, resource_type: ResourceType, measurement: ResourceMeasurement) {
+    pub fn update_measurement(
+        &self,
+        resource_type: ResourceType,
+        measurement: ResourceMeasurement,
+    ) {
         let start = Instant::now();
 
         {
             let mut measurements = self.measurements.write();
-            measurements.insert(resource_type.clone(), measurement);
+            measurements.insert(resource_type, measurement);
         }
 
         // Update monitoring overhead tracking
         let elapsed_nanos = start.elapsed().as_nanos() as u64;
-        self.monitoring_overhead.fetch_add(elapsed_nanos, Ordering::Relaxed);
+        self.monitoring_overhead
+            .fetch_add(elapsed_nanos, Ordering::Relaxed);
     }
 
     /// Get current measurement for a resource type.
@@ -338,13 +360,21 @@ impl ResourcePressure {
         changes.insert(resource_type, Instant::now());
 
         // Update overall system pressure based on maximum degradation level
-        let max_level = levels.values().max().copied().unwrap_or(DegradationLevel::None);
+        let max_level = levels
+            .values()
+            .max()
+            .copied()
+            .unwrap_or(DegradationLevel::None);
         self.system_pressure.set_headroom(max_level.to_headroom());
     }
 
     /// Get current degradation level for a resource type.
     pub fn get_degradation_level(&self, resource_type: &ResourceType) -> DegradationLevel {
-        self.degradation_levels.read().get(resource_type).copied().unwrap_or(DegradationLevel::None)
+        self.degradation_levels
+            .read()
+            .get(resource_type)
+            .copied()
+            .unwrap_or(DegradationLevel::None)
     }
 
     /// Get overall system pressure.
@@ -360,7 +390,11 @@ impl ResourcePressure {
     /// Calculate composite degradation level across all resources.
     pub fn composite_degradation_level(&self) -> DegradationLevel {
         let levels = self.degradation_levels.read();
-        levels.values().max().copied().unwrap_or(DegradationLevel::None)
+        levels
+            .values()
+            .max()
+            .copied()
+            .unwrap_or(DegradationLevel::None)
     }
 }
 
@@ -371,24 +405,19 @@ impl Default for ResourcePressure {
 }
 
 /// Region priority classification for degradation decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum RegionPriority {
     /// Critical system regions that must never be cancelled.
     Critical = 0,
     /// High priority user-facing work.
     High = 1,
     /// Normal priority work.
+    #[default]
     Normal = 2,
     /// Low priority background work.
     Low = 3,
     /// Best-effort work that can be freely cancelled.
     BestEffort = 4,
-}
-
-impl Default for RegionPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Work shedding decision for a region.
@@ -488,8 +517,11 @@ impl DegradationEngine {
     }
 
     /// Register a custom resource type with configuration.
-    pub fn register_resource_type(&self, resource_type: ResourceType, config: TriggerConfig)
-        -> Result<(), ResourceMonitorError> {
+    pub fn register_resource_type(
+        &self,
+        resource_type: ResourceType,
+        config: TriggerConfig,
+    ) -> Result<(), ResourceMonitorError> {
         let mut configs = self.trigger_configs.write();
         configs.insert(resource_type, config);
         Ok(())
@@ -504,13 +536,16 @@ impl DegradationEngine {
     /// Add a degradation policy for a resource type.
     pub fn add_policy(&self, policy: DegradationPolicy) {
         let mut policies = self.active_policies.write();
-        policies.entry(policy.resource_type.clone())
+        policies
+            .entry(policy.resource_type.clone())
             .or_default()
             .push(policy);
     }
 
     /// Process resource measurements and trigger degradation if needed.
-    pub fn process_measurements(&self) -> Result<Vec<(ResourceType, DegradationLevel)>, ResourceMonitorError> {
+    pub fn process_measurements(
+        &self,
+    ) -> Result<Vec<(ResourceType, DegradationLevel)>, ResourceMonitorError> {
         let start = Instant::now();
         let mut triggered_changes = Vec::new();
 
@@ -525,15 +560,23 @@ impl DegradationEngine {
                 let new_level = config.calculate_degradation(&measurement);
                 let current_level = self.pressure.get_degradation_level(resource_type);
 
-                let last_change = self.pressure.last_changes.read()
+                let last_change = self
+                    .pressure
+                    .last_changes
+                    .read()
                     .get(resource_type)
                     .copied()
-                    .unwrap_or_else(|| Instant::now() - Duration::from_secs(3600));
+                    .unwrap_or_else(|| {
+                        Instant::now()
+                            .checked_sub(Duration::from_secs(3600))
+                            .unwrap()
+                    });
 
                 let final_level = config.apply_hysteresis(new_level, current_level, last_change);
 
                 if final_level != current_level {
-                    self.pressure.update_degradation_level(resource_type.clone(), final_level);
+                    self.pressure
+                        .update_degradation_level(resource_type.clone(), final_level);
                     triggered_changes.push((resource_type.clone(), final_level));
 
                     self.stats.triggers_fired.fetch_add(1, Ordering::Relaxed);
@@ -545,14 +588,19 @@ impl DegradationEngine {
         }
 
         let elapsed_nanos = start.elapsed().as_nanos() as u64;
-        self.stats.decision_time_nanos.fetch_add(elapsed_nanos, Ordering::Relaxed);
+        self.stats
+            .decision_time_nanos
+            .fetch_add(elapsed_nanos, Ordering::Relaxed);
 
         Ok(triggered_changes)
     }
 
     /// Apply degradation policies for a resource type and level.
-    fn apply_policies(&self, resource_type: &ResourceType, level: DegradationLevel)
-        -> Result<(), ResourceMonitorError> {
+    fn apply_policies(
+        &self,
+        resource_type: &ResourceType,
+        level: DegradationLevel,
+    ) -> Result<(), ResourceMonitorError> {
         let policies = self.active_policies.read();
 
         if let Some(resource_policies) = policies.get(resource_type) {
@@ -567,25 +615,28 @@ impl DegradationEngine {
     }
 
     /// Execute a specific policy action.
-    fn execute_policy_action(&self, action: &PolicyAction, level: DegradationLevel)
-        -> Result<(), ResourceMonitorError> {
+    fn execute_policy_action(
+        &self,
+        action: &PolicyAction,
+        _level: DegradationLevel,
+    ) -> Result<(), ResourceMonitorError> {
         match action {
-            PolicyAction::RejectNewWork(priority_threshold) => {
+            PolicyAction::RejectNewWork(_priority_threshold) => {
                 // This would integrate with the runtime's region creation logic
                 // to reject new work below the priority threshold
                 self.stats.requests_rejected.fetch_add(1, Ordering::Relaxed);
             }
-            PolicyAction::CancelRegions(priority_threshold) => {
+            PolicyAction::CancelRegions(_priority_threshold) => {
                 // This would integrate with the runtime to cancel regions
                 // below the priority threshold
                 self.stats.regions_cancelled.fetch_add(1, Ordering::Relaxed);
             }
-            PolicyAction::PauseRegions(priority_threshold) => {
+            PolicyAction::PauseRegions(_priority_threshold) => {
                 // This would integrate with the scheduler to pause regions
                 // below the priority threshold
                 self.stats.regions_paused.fetch_add(1, Ordering::Relaxed);
             }
-            PolicyAction::ReduceLimits { factor } => {
+            PolicyAction::ReduceLimits { factor: _ } => {
                 // This would reduce resource allocation limits
                 // by the specified factor
             }
@@ -604,7 +655,9 @@ impl DegradationEngine {
         let region_priority = priorities.get(&region_id).copied().unwrap_or_default();
 
         match (composite_level, region_priority) {
-            (DegradationLevel::Emergency, RegionPriority::BestEffort) => SheddingDecision::ForceCancel,
+            (DegradationLevel::Emergency, RegionPriority::BestEffort) => {
+                SheddingDecision::ForceCancel
+            }
             (DegradationLevel::Emergency, RegionPriority::Low) => SheddingDecision::Cancel,
             (DegradationLevel::Emergency, RegionPriority::Normal) => SheddingDecision::Pause,
             (DegradationLevel::Emergency, _) => SheddingDecision::Keep,
@@ -649,6 +702,7 @@ pub struct DegradationStatsSnapshot {
 
 impl DegradationStatsSnapshot {
     /// Calculate overhead as percentage of total runtime.
+    #[must_use]
     pub fn overhead_percentage(&self, total_runtime_nanos: u64) -> f64 {
         if total_runtime_nanos == 0 {
             return 0.0;
@@ -682,7 +736,11 @@ impl SystemResourceCollector {
 
     /// Start monitoring system resources.
     pub fn start(&self) -> Result<(), ResourceMonitorError> {
-        if self.active.compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed).is_err() {
+        if self
+            .active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
             return Err(ResourceMonitorError::AlreadyActive);
         }
 
@@ -698,26 +756,30 @@ impl SystemResourceCollector {
 
     /// Manually collect current system resource measurements.
     pub fn collect_now(&self) -> Result<(), ResourceMonitorError> {
-        let start = Instant::now();
+        let _start = Instant::now();
 
         // Memory usage (simplified - would use platform-specific APIs)
         if let Ok(memory_usage) = self.collect_memory_usage() {
-            self.pressure.update_measurement(ResourceType::Memory, memory_usage);
+            self.pressure
+                .update_measurement(ResourceType::Memory, memory_usage);
         }
 
         // File descriptor usage
         if let Ok(fd_usage) = self.collect_fd_usage() {
-            self.pressure.update_measurement(ResourceType::FileDescriptors, fd_usage);
+            self.pressure
+                .update_measurement(ResourceType::FileDescriptors, fd_usage);
         }
 
         // CPU load
         if let Ok(cpu_load) = self.collect_cpu_load() {
-            self.pressure.update_measurement(ResourceType::CpuLoad, cpu_load);
+            self.pressure
+                .update_measurement(ResourceType::CpuLoad, cpu_load);
         }
 
         // Network connections
         if let Ok(network_usage) = self.collect_network_usage() {
-            self.pressure.update_measurement(ResourceType::NetworkConnections, network_usage);
+            self.pressure
+                .update_measurement(ResourceType::NetworkConnections, network_usage);
         }
 
         Ok(())
@@ -730,22 +792,32 @@ impl SystemResourceCollector {
 
         // Mock values for demonstration
         let current_bytes = 512 * 1024 * 1024; // 512 MB
-        let soft_limit = 1024 * 1024 * 1024;   // 1 GB
-        let hard_limit = 1536 * 1024 * 1024;   // 1.5 GB
-        let max_limit = 2048 * 1024 * 1024;    // 2 GB
+        let soft_limit = 1024 * 1024 * 1024; // 1 GB
+        let hard_limit = 1536 * 1024 * 1024; // 1.5 GB
+        let max_limit = 2048 * 1024 * 1024; // 2 GB
 
-        Ok(ResourceMeasurement::new(current_bytes, soft_limit, hard_limit, max_limit))
+        Ok(ResourceMeasurement::new(
+            current_bytes,
+            soft_limit,
+            hard_limit,
+            max_limit,
+        ))
     }
 
     /// Collect file descriptor usage.
     fn collect_fd_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
         // Mock implementation - real version would check ulimits and /proc/self/fd
         let current_fds = 128;
-        let soft_limit = 768;   // 75% of 1024
-        let hard_limit = 922;   // 90% of 1024
-        let max_limit = 1024;   // ulimit -n
+        let soft_limit = 768; // 75% of 1024
+        let hard_limit = 922; // 90% of 1024
+        let max_limit = 1024; // ulimit -n
 
-        Ok(ResourceMeasurement::new(current_fds, soft_limit, hard_limit, max_limit))
+        Ok(ResourceMeasurement::new(
+            current_fds,
+            soft_limit,
+            hard_limit,
+            max_limit,
+        ))
     }
 
     /// Collect CPU load measurement.
@@ -756,18 +828,28 @@ impl SystemResourceCollector {
         let hard_limit = 95;
         let max_limit = 100;
 
-        Ok(ResourceMeasurement::new(load_avg_1min, soft_limit, hard_limit, max_limit))
+        Ok(ResourceMeasurement::new(
+            load_avg_1min,
+            soft_limit,
+            hard_limit,
+            max_limit,
+        ))
     }
 
     /// Collect network connection usage.
     fn collect_network_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
         // Mock implementation - real version would count open sockets
         let current_connections = 50;
-        let soft_limit = 350;  // 70% of 500
-        let hard_limit = 425;  // 85% of 500
-        let max_limit = 500;   // Application limit
+        let soft_limit = 350; // 70% of 500
+        let hard_limit = 425; // 85% of 500
+        let max_limit = 500; // Application limit
 
-        Ok(ResourceMeasurement::new(current_connections, soft_limit, hard_limit, max_limit))
+        Ok(ResourceMeasurement::new(
+            current_connections,
+            soft_limit,
+            hard_limit,
+            max_limit,
+        ))
     }
 
     /// Check if monitoring is active.
@@ -812,10 +894,12 @@ impl Default for MonitorConfig {
 
 impl ResourceMonitor {
     /// Create a new resource monitor.
+    #[must_use]
     pub fn new(config: MonitorConfig) -> Self {
         let pressure = Arc::new(ResourcePressure::new());
         let engine = Arc::new(DegradationEngine::new(Arc::clone(&pressure)));
-        let collector = SystemResourceCollector::new(Arc::clone(&pressure), config.collection_interval);
+        let collector =
+            SystemResourceCollector::new(Arc::clone(&pressure), config.collection_interval);
 
         Self {
             pressure,
@@ -852,7 +936,9 @@ impl ResourceMonitor {
     }
 
     /// Process current measurements and trigger degradation if needed.
-    pub fn process_current_state(&self) -> Result<Vec<(ResourceType, DegradationLevel)>, ResourceMonitorError> {
+    pub fn process_current_state(
+        &self,
+    ) -> Result<Vec<(ResourceType, DegradationLevel)>, ResourceMonitorError> {
         // Collect fresh measurements
         self.collector.collect_now()?;
 
@@ -863,12 +949,15 @@ impl ResourceMonitor {
         let config = self.config.read();
         if config.enable_auto_degradation {
             let stats = self.engine.stats();
-            let overhead_percent = stats.overhead_percentage(Duration::from_secs(1).as_nanos() as u64);
+            let overhead_percent =
+                stats.overhead_percentage(Duration::from_secs(1).as_nanos() as u64);
 
             if overhead_percent > config.max_overhead_percent {
                 // Could trigger a degradation level for monitoring overhead itself
-                eprintln!("Warning: Resource monitoring overhead {:.2}% exceeds limit {:.2}%",
-                         overhead_percent, config.max_overhead_percent);
+                eprintln!(
+                    "Warning: Resource monitoring overhead {:.2}% exceeds limit {:.2}%",
+                    overhead_percent, config.max_overhead_percent
+                );
             }
         }
 
@@ -877,8 +966,10 @@ impl ResourceMonitor {
 
     /// Get comprehensive status report.
     pub fn status_report(&self) -> ResourceMonitorStatus {
-        let measurements: HashMap<ResourceType, ResourceMeasurement> = self.pressure.measurements.read().clone();
-        let degradation_levels: HashMap<ResourceType, DegradationLevel> = self.pressure.degradation_levels.read().clone();
+        let measurements: HashMap<ResourceType, ResourceMeasurement> =
+            self.pressure.measurements.read().clone();
+        let degradation_levels: HashMap<ResourceType, DegradationLevel> =
+            self.pressure.degradation_levels.read().clone();
 
         ResourceMonitorStatus {
             is_active: self.collector.is_active(),
@@ -921,7 +1012,10 @@ mod tests {
         assert_eq!(DegradationLevel::None.to_headroom(), 1.0);
         assert_eq!(DegradationLevel::Emergency.to_headroom(), 0.0);
         assert_eq!(DegradationLevel::from_headroom(0.9), DegradationLevel::None);
-        assert_eq!(DegradationLevel::from_headroom(0.1), DegradationLevel::Emergency);
+        assert_eq!(
+            DegradationLevel::from_headroom(0.1),
+            DegradationLevel::Emergency
+        );
     }
 
     #[test]

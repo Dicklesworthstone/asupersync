@@ -1553,14 +1553,14 @@ mod fuzz {
                 k: 8,
                 symbol_size: 32,
                 seed: 10002,
-                overhead_percent: 75,  // 1.75x overhead
+                overhead_percent: 75, // 1.75x overhead
                 drop_percent: 0,
             },
             FuzzConfig {
                 k: 16,
                 symbol_size: 32,
                 seed: 10003,
-                overhead_percent: 50,  // 1.5x overhead
+                overhead_percent: 50, // 1.5x overhead
                 drop_percent: 0,
             },
             // Medium blocks with sufficient overhead
@@ -1568,7 +1568,7 @@ mod fuzz {
                 k: 32,
                 symbol_size: 64,
                 seed: 10004,
-                overhead_percent: 40,  // RaptorQ overhead bound
+                overhead_percent: 40, // RaptorQ overhead bound
                 drop_percent: 0,
             },
             FuzzConfig {
@@ -1597,13 +1597,17 @@ mod fuzz {
 
         // Every test case must succeed - no tolerance for failures
         for (i, config) in test_cases.iter().enumerate() {
-            run_fuzz_iteration(config, "RQ-U-GUARANTEED-DECODABLE", replay_ref)
-                .unwrap_or_else(|e| {
+            run_fuzz_iteration(config, "RQ-U-GUARANTEED-DECODABLE", replay_ref).unwrap_or_else(
+                |e| {
                     panic!(
                         "Guaranteed decodable test case {} failed (k={}, overhead={}%): {}",
-                        i + 1, config.k, config.overhead_percent, e
+                        i + 1,
+                        config.k,
+                        config.overhead_percent,
+                        e
                     )
-                });
+                },
+            );
         }
     }
 }

@@ -11,11 +11,13 @@
 //! - [`SafePointDetector`]: Coordinator for detecting safe cleanup points
 //! - [`DeferredCleanupQueue`]: Lockless queue for epoch-tagged cleanup work
 
+#![allow(missing_docs)]
+
 use crate::types::{RegionId, TaskId};
 use crate::util::CachePadded;
 use crossbeam_queue::SegQueue;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -110,6 +112,7 @@ pub struct GlobalEpochCounter {
 
 impl GlobalEpochCounter {
     /// Create a new global epoch counter.
+    #[must_use]
     pub fn new(config: EpochConfig) -> Self {
         Self {
             epoch: AtomicU64::new(1), // Start at epoch 1
@@ -136,7 +139,8 @@ impl GlobalEpochCounter {
 
     /// Force epoch advancement (bypasses rate limiting).
     pub fn force_advance(&self) -> u64 {
-        self.advance_epoch(Instant::now()).unwrap_or_else(|| self.current_epoch())
+        self.advance_epoch(Instant::now())
+            .unwrap_or_else(|| self.current_epoch())
     }
 
     /// Check if advancement is needed due to memory pressure.
@@ -150,8 +154,8 @@ impl GlobalEpochCounter {
             current_epoch: self.current_epoch(),
             advance_count: self.advance_count.load(Ordering::Relaxed),
             last_advance: Instant::now(), // Simplified: use current time
-            active_pins: 0, // Filled by coordinator
-            min_pinned_epoch: 0, // Filled by coordinator
+            active_pins: 0,               // Filled by coordinator
+            min_pinned_epoch: 0,          // Filled by coordinator
         }
     }
 
@@ -205,7 +209,7 @@ impl LocalEpochPin {
 
     /// Pin the current epoch, preventing its cleanup.
     #[inline]
-    pub fn pin(&self) -> EpochGuard {
+    pub fn pin(&self) -> EpochGuard<'_> {
         let epoch = self.global.current_epoch();
         self.pinned_epoch.store(epoch, Ordering::Release);
         self.is_active.store(true, Ordering::Release);
@@ -214,10 +218,7 @@ impl LocalEpochPin {
         self.stats.pin_count.fetch_add(1, Ordering::Relaxed);
         self.stats.pin_start.store(0u64, Ordering::Relaxed); // Simplified: placeholder
 
-        EpochGuard {
-            pin: self,
-            epoch,
-        }
+        EpochGuard { pin: self, epoch }
     }
 
     /// Check if this pin is active and its pinned epoch.
@@ -256,7 +257,10 @@ impl LocalEpochPin {
         let start = self.stats.pin_start.load(Ordering::Relaxed);
         if start > 0 {
             let duration = now - start;
-            let _ = self.stats.max_pin_duration.fetch_max(duration, Ordering::Relaxed);
+            let _ = self
+                .stats
+                .max_pin_duration
+                .fetch_max(duration, Ordering::Relaxed);
         }
     }
 }
@@ -277,14 +281,15 @@ pub struct EpochGuard<'a> {
     epoch: u64,
 }
 
-impl<'a> EpochGuard<'a> {
+impl EpochGuard<'_> {
     /// Get the pinned epoch.
+    #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
 }
 
-impl<'a> Drop for EpochGuard<'a> {
+impl Drop for EpochGuard<'_> {
     fn drop(&mut self) {
         self.pin.unpin();
     }
@@ -341,7 +346,9 @@ impl SafePointDetector {
             self.stats.safe_point_count.fetch_add(1, Ordering::Relaxed);
         }
         let elapsed = start.elapsed().as_nanos() as u64;
-        self.stats.check_time_ns.fetch_add(elapsed, Ordering::Relaxed);
+        self.stats
+            .check_time_ns
+            .fetch_add(elapsed, Ordering::Relaxed);
 
         result
     }
@@ -386,8 +393,10 @@ impl SafePointDetector {
         let check_count = self.stats.check_count.load(Ordering::Relaxed);
         let safe_point_count = self.stats.safe_point_count.load(Ordering::Relaxed);
         let check_time = Duration::from_nanos(self.stats.check_time_ns.load(Ordering::Relaxed));
-        let active_pins = self.thread_pins.iter()
-            .map(|pin| if pin.is_active.load(Ordering::Relaxed) { 1 } else { 0 })
+        let active_pins = self
+            .thread_pins
+            .iter()
+            .map(|pin| usize::from(pin.is_active.load(Ordering::Relaxed)))
             .sum();
 
         (check_count, safe_point_count, check_time, active_pins)
@@ -411,47 +420,40 @@ impl std::fmt::Debug for SafePointDetector {
 #[derive(Debug, Clone)]
 pub enum CleanupWork {
     /// Obligation tracking cleanup.
-    Obligation {
-        id: u64,
-        metadata: Vec<u8>
-    },
+    Obligation { id: u64, metadata: Vec<u8> },
     /// Waker deregistration from IO drivers.
-    WakerCleanup {
-        waker_id: u64,
-        source: String
-    },
+    WakerCleanup { waker_id: u64, source: String },
     /// Region state cleanup.
     RegionCleanup {
         region_id: RegionId,
-        task_ids: Vec<TaskId>
+        task_ids: Vec<TaskId>,
     },
     /// Timer cleanup.
-    TimerCleanup {
-        timer_id: u64,
-        timer_type: String
-    },
+    TimerCleanup { timer_id: u64, timer_type: String },
     /// Channel cleanup (wakers, buffers, etc.).
     ChannelCleanup {
         channel_id: u64,
         cleanup_type: String,
-        data: Vec<u8>
+        data: Vec<u8>,
     },
 }
 
 impl CleanupWork {
     /// Estimate memory usage of this work item.
+    #[must_use]
     pub fn memory_usage(&self) -> usize {
-        std::mem::size_of::<Self>() + match self {
-            CleanupWork::Obligation { metadata, .. } => metadata.len(),
-            CleanupWork::WakerCleanup { source, .. } => source.len(),
-            CleanupWork::RegionCleanup { task_ids, .. } => {
-                task_ids.len() * std::mem::size_of::<TaskId>()
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Obligation { metadata, .. } => metadata.len(),
+                Self::WakerCleanup { source, .. } => source.len(),
+                Self::RegionCleanup { task_ids, .. } => {
+                    task_ids.len() * std::mem::size_of::<TaskId>()
+                }
+                Self::TimerCleanup { timer_type, .. } => timer_type.len(),
+                Self::ChannelCleanup {
+                    cleanup_type, data, ..
+                } => cleanup_type.len() + data.len(),
             }
-            CleanupWork::TimerCleanup { timer_type, .. } => timer_type.len(),
-            CleanupWork::ChannelCleanup { cleanup_type, data, .. } => {
-                cleanup_type.len() + data.len()
-            }
-        }
     }
 }
 
@@ -535,16 +537,18 @@ impl DeferredCleanupQueue {
 
         self.queue.push(entry);
         self.enqueue_count.fetch_add(1, Ordering::Relaxed);
-        self.memory_usage.fetch_add(
-            std::mem::size_of::<CleanupEntry>(),
-            Ordering::Relaxed,
-        );
+        self.memory_usage
+            .fetch_add(std::mem::size_of::<CleanupEntry>(), Ordering::Relaxed);
 
         Ok(())
     }
 
     /// Enqueue cleanup work with debugging information.
-    pub fn defer_cleanup_with_debug<F>(&self, cleanup_fn: F, debug_info: String) -> Result<(), CleanupEntry>
+    pub fn defer_cleanup_with_debug<F>(
+        &self,
+        cleanup_fn: F,
+        debug_info: String,
+    ) -> Result<(), CleanupEntry>
     where
         F: FnOnce() + Send + 'static,
     {
@@ -584,7 +588,8 @@ impl DeferredCleanupQueue {
                 (entry.cleanup_fn)();
                 executed += 1;
 
-                self.memory_usage.fetch_sub(entry.memory_usage, Ordering::Relaxed);
+                self.memory_usage
+                    .fetch_sub(entry.memory_usage, Ordering::Relaxed);
             } else {
                 // Not safe yet, will requeue
                 entries_to_requeue.push(entry);
@@ -597,7 +602,8 @@ impl DeferredCleanupQueue {
         }
 
         if executed > 0 {
-            self.execute_count.fetch_add(executed as u64, Ordering::Relaxed);
+            self.execute_count
+                .fetch_add(executed as u64, Ordering::Relaxed);
             let elapsed = start.elapsed().as_nanos() as u64;
             self.cleanup_time_ns.fetch_add(elapsed, Ordering::Relaxed);
         }
@@ -612,9 +618,7 @@ impl DeferredCleanupQueue {
             enqueue_count: self.enqueue_count.load(Ordering::Relaxed),
             execute_count: self.execute_count.load(Ordering::Relaxed),
             memory_usage: self.memory_usage.load(Ordering::Relaxed),
-            total_cleanup_time: Duration::from_nanos(
-                self.cleanup_time_ns.load(Ordering::Relaxed)
-            ),
+            total_cleanup_time: Duration::from_nanos(self.cleanup_time_ns.load(Ordering::Relaxed)),
         }
     }
 
@@ -737,9 +741,11 @@ mod tests {
 
         // Enqueue cleanup
         let executed_clone = executed.clone();
-        queue.defer_cleanup(move || {
-            executed_clone.store(true, Ordering::Relaxed);
-        }).unwrap();
+        queue
+            .defer_cleanup(move || {
+                executed_clone.store(true, Ordering::Relaxed);
+            })
+            .unwrap();
 
         // Should not execute yet (current epoch is not safe)
         let count = queue.execute_safe_cleanups(epoch.current_epoch());
@@ -762,9 +768,11 @@ mod tests {
         // Enqueue cleanups across multiple epochs
         for i in 0..5 {
             let order = executed_order.clone();
-            queue.defer_cleanup(move || {
-                order.lock().unwrap().push(i);
-            }).unwrap();
+            queue
+                .defer_cleanup(move || {
+                    order.lock().unwrap().push(i);
+                })
+                .unwrap();
 
             // Advance epoch between some cleanups
             if i % 2 == 0 {

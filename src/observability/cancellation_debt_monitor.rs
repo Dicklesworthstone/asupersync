@@ -231,6 +231,7 @@ pub struct CancellationDebtMonitor {
 
 impl CancellationDebtMonitor {
     /// Creates a new debt monitor with the given configuration.
+    #[must_use]
     pub fn new(config: CancellationDebtConfig) -> Self {
         Self {
             config,
@@ -244,6 +245,7 @@ impl CancellationDebtMonitor {
     }
 
     /// Creates a debt monitor with default configuration.
+    #[must_use]
     pub fn default() -> Self {
         Self::new(CancellationDebtConfig::default())
     }
@@ -269,8 +271,8 @@ impl CancellationDebtMonitor {
             queued_at: now,
             priority,
             estimated_cost,
-            cancel_reason: format!("{:?}", cancel_reason),
-            cancel_kind: format!("{:?}", cancel_kind),
+            cancel_reason: format!("{cancel_reason:?}"),
+            cancel_kind: format!("{cancel_kind:?}"),
             dependencies,
         };
 
@@ -512,10 +514,7 @@ impl CancellationDebtMonitor {
         if cleaned_count > 0 {
             self.generate_alert(DebtAlert {
                 level: DebtAlertLevel::Emergency,
-                message: format!(
-                    "Emergency cleanup removed {} stale work items",
-                    cleaned_count
-                ),
+                message: format!("Emergency cleanup removed {cleaned_count} stale work items"),
                 work_type: None,
                 entity_id: None,
                 metric_value: cleaned_count as f64,
@@ -674,7 +673,7 @@ impl CancellationDebtMonitor {
             if depth > 1000 {
                 self.generate_alert(DebtAlert {
                     level: DebtAlertLevel::Warning,
-                    message: format!("Entity {} has excessive queue depth: {}", entity_id, depth),
+                    message: format!("Entity {entity_id} has excessive queue depth: {depth}"),
                     work_type: None,
                     entity_id: Some(entity_id.clone()),
                     metric_value: depth as f64,

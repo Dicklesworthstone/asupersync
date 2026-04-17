@@ -359,7 +359,10 @@ impl CancelCorrectnessOracle {
 
         if let Some(existing_state) = task_states.get_mut(&witness.task_id) {
             // Validate transition
-            if self.validate_transition(existing_state, &witness, now).is_err() {
+            if self
+                .validate_transition(existing_state, &witness, now)
+                .is_err()
+            {
                 // Violation already recorded by validate_transition
             }
             existing_state.update_with_witness(witness, now);
@@ -449,7 +452,9 @@ impl CancelCorrectnessOracle {
 
     /// Returns snapshots of the currently tracked task cancellation states.
     pub fn tracked_tasks(&self) -> Vec<TrackedCancelTaskSnapshot> {
-        let mut snapshots = self.task_states.read()
+        let mut snapshots = self
+            .task_states
+            .read()
             .values()
             .map(|state| TrackedCancelTaskSnapshot {
                 task_id: state.task_id,
@@ -544,7 +549,10 @@ impl CancelCorrectnessOracle {
     fn record_violation(&self, violation: CancelCorrectnessViolation) {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
-        assert!(!self.config.panic_on_violation, "Cancel-correctness violation detected: {violation}");
+        assert!(
+            !self.config.panic_on_violation,
+            "Cancel-correctness violation detected: {violation}"
+        );
 
         // Record violation for later inspection
         let mut violations = self.violations.write();

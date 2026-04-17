@@ -33,10 +33,7 @@
 
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
-use asupersync::types::{Budget, Time};
 use futures_lite::future::block_on;
-use std::collections::VecDeque;
-use std::sync::Arc;
 use proptest::prelude::*;
 
 // ============================================================================
@@ -54,13 +51,14 @@ impl TestMessage {
     fn new(id: u32) -> Self {
         Self {
             id,
-            payload: format!("msg_{}", id),
+            payload: format!("msg_{id}"),
         }
     }
 }
 
 /// Channel operation for metamorphic testing.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum ChannelOp {
     Reserve,
     CommitWithValue(TestMessage),
@@ -72,6 +70,7 @@ enum ChannelOp {
 
 /// Channel state snapshot for comparison.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 struct ChannelSnapshot {
     queue_length: usize,
     reserved_count: usize,
@@ -80,17 +79,18 @@ struct ChannelSnapshot {
 }
 
 impl ChannelSnapshot {
-    async fn capture<T: Clone + std::fmt::Debug>(
-        tx: &mpsc::Sender<T>,
-        rx: &mut mpsc::Receiver<T>,
-        received: &[T],
+    #[allow(dead_code)]
+    fn capture<T: Clone + std::fmt::Debug>(
+        _tx: &mpsc::Sender<T>,
+        _rx: &mut mpsc::Receiver<T>,
+        _received: &[T],
     ) -> Self {
         // Note: In a real implementation, we'd need access to internal state
         // For this example, we'll track what we can observe
         Self {
-            queue_length: 0, // Would need internal access
-            reserved_count: 0, // Would need internal access
-            is_disconnected: false, // Would check tx.is_closed() if available
+            queue_length: 0,           // Would need internal access
+            reserved_count: 0,         // Would need internal access
+            is_disconnected: false,    // Would check tx.is_closed() if available
             received_messages: vec![], // Would need proper message tracking
         }
     }
@@ -155,10 +155,12 @@ fn mr1_reserve_commit_commutativity() {
         scenario_a_sorted.sort_by_key(|msg| msg.id);
         scenario_b_sorted.sort_by_key(|msg| msg.id);
 
-        assert_eq!(scenario_a_sorted, scenario_b_sorted,
+        assert_eq!(
+            scenario_a_sorted, scenario_b_sorted,
             "MR1 violated: reserve/commit commutativity failed\n\
-             Scenario A: {:?}\n\
-             Scenario B: {:?}", scenario_a, scenario_b);
+             Scenario A: {scenario_a:?}\n\
+             Scenario B: {scenario_b:?}"
+        );
     });
 }
 
@@ -193,10 +195,12 @@ fn mr2_send_recv_duality() {
         }
 
         // MR2: Send sequence equals receive sequence (FIFO)
-        assert_eq!(original_messages, received_messages,
+        assert_eq!(
+            original_messages, received_messages,
             "MR2 violated: send/recv duality failed\n\
-             Sent: {:?}\n\
-             Received: {:?}", original_messages, received_messages);
+             Sent: {original_messages:?}\n\
+             Received: {received_messages:?}"
+        );
     });
 }
 
@@ -219,21 +223,30 @@ fn mr3_capacity_conservation() {
 
         // Fourth reservation should block (would hang, so we use try_reserve)
         let result = tx.try_reserve();
-        assert!(result.is_err(), "MR3 violated: should not be able to reserve beyond capacity");
+        assert!(
+            result.is_err(),
+            "MR3 violated: should not be able to reserve beyond capacity"
+        );
 
         // Commit one reservation
         permit1.send(TestMessage::new(1));
 
         // Should still be at capacity
         let result = tx.try_reserve();
-        assert!(result.is_err(), "MR3 violated: capacity not conserved after partial commit");
+        assert!(
+            result.is_err(),
+            "MR3 violated: capacity not conserved after partial commit"
+        );
 
         // Receive message, freeing up space
         let _received = rx.recv(&cx).await.unwrap();
 
         // Now should be able to reserve again
         let permit4 = tx.try_reserve();
-        assert!(permit4.is_ok(), "MR3 violated: capacity not freed after receive");
+        assert!(
+            permit4.is_ok(),
+            "MR3 violated: capacity not freed after receive"
+        );
 
         // Clean up remaining permits
         permit2.send(TestMessage::new(2));
@@ -263,18 +276,27 @@ fn mr4_cancel_safety_invariant() {
         // Channel state should be unchanged
         // Should be able to reserve again (capacity freed)
         let permit2 = tx.try_reserve();
-        assert!(permit2.is_ok(), "MR4 violated: cancellation affected capacity");
+        assert!(
+            permit2.is_ok(),
+            "MR4 violated: cancellation affected capacity"
+        );
 
         // Original message should still be receivable
         let received = rx.recv(&cx).await.unwrap();
-        assert_eq!(received.id, 1, "MR4 violated: cancellation affected queued messages");
+        assert_eq!(
+            received.id, 1,
+            "MR4 violated: cancellation affected queued messages"
+        );
 
         // Commit the second permit
         permit2.unwrap().send(TestMessage::new(2));
 
         // Should receive second message
         let received2 = rx.recv(&cx).await.unwrap();
-        assert_eq!(received2.id, 2, "MR4 violated: post-cancel operations failed");
+        assert_eq!(
+            received2.id, 2,
+            "MR4 violated: post-cancel operations failed"
+        );
     });
 }
 
@@ -326,13 +348,18 @@ fn mr5_batch_send_equivalence() {
         }
 
         // MR5: Both approaches should yield identical results
-        assert_eq!(received_a, received_b,
+        assert_eq!(
+            received_a, received_b,
             "MR5 violated: batch send equivalence failed\n\
-             Individual: {:?}\n\
-             Batched: {:?}", received_a, received_b);
+             Individual: {received_a:?}\n\
+             Batched: {received_b:?}"
+        );
 
         // Both should match original message order
-        assert_eq!(messages, received_a, "MR5 violated: individual send order wrong");
+        assert_eq!(
+            messages, received_a,
+            "MR5 violated: individual send order wrong"
+        );
         assert_eq!(messages, received_b, "MR5 violated: batch send order wrong");
     });
 }
@@ -382,10 +409,12 @@ fn mr6_reserve_pool_commutativity() {
         scenario_a_sorted.sort_by_key(|msg| msg.id);
         scenario_b_sorted.sort_by_key(|msg| msg.id);
 
-        assert_eq!(scenario_a_sorted, scenario_b_sorted,
+        assert_eq!(
+            scenario_a_sorted, scenario_b_sorted,
             "MR6 violated: reserve pool commutativity failed\n\
-             Scenario A: {:?}\n\
-             Scenario B: {:?}", scenario_a, scenario_b);
+             Scenario A: {scenario_a:?}\n\
+             Scenario B: {scenario_b:?}"
+        );
     });
 }
 
@@ -397,13 +426,14 @@ fn mr6_reserve_pool_commutativity() {
 #[test]
 fn property_channel_metamorphic_relations() {
     proptest!(|(
-        capacity in 1usize..=10,
+        // Keep capacity >= message_count so the single-threaded block_on
+        // driver doesn't deadlock on tx.send() when the channel is full
+        // (there's no concurrent receiver to drain it).
         message_count in 1usize..=5,
+        extra_slack in 0usize..=5,
         seed in any::<u64>(),
     )| {
-        // Note: This is a simplified version - full property-based testing
-        // would require more sophisticated generators and async test harness
-
+        let capacity = message_count + extra_slack;
         let _seed = seed;
         let (messages, received) = block_on(async {
             let (tx, mut rx) = test_channel(capacity);
@@ -489,7 +519,11 @@ fn stress_test_metamorphic_relations() {
         }
 
         // Verify FIFO order maintained under stress
-        assert_eq!(sent_messages, received_messages,
-            "Stress test failed: FIFO order violated with {} messages", sent_messages.len());
+        assert_eq!(
+            sent_messages,
+            received_messages,
+            "Stress test failed: FIFO order violated with {} messages",
+            sent_messages.len()
+        );
     });
 }

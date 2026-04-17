@@ -80,9 +80,7 @@ pub enum ConformanceResult {
         details: Option<String>,
     },
     /// Test skipped - not applicable or dependencies missing
-    Skipped {
-        reason: String,
-    },
+    Skipped { reason: String },
     /// Expected failure - documented intentional divergence
     ExpectedFailure {
         reason: String,
@@ -93,7 +91,10 @@ pub enum ConformanceResult {
 impl ConformanceResult {
     /// Check if result represents a passing test (Pass or ExpectedFailure)
     pub fn is_passing(&self) -> bool {
-        matches!(self, ConformanceResult::Pass | ConformanceResult::ExpectedFailure { .. })
+        matches!(
+            self,
+            ConformanceResult::Pass | ConformanceResult::ExpectedFailure { .. }
+        )
     }
 
     /// Check if result represents a conformance failure
@@ -107,7 +108,10 @@ impl ConformanceResult {
             ConformanceResult::Pass => "PASS".to_string(),
             ConformanceResult::Fail { reason, .. } => format!("FAIL: {reason}"),
             ConformanceResult::Skipped { reason } => format!("SKIP: {reason}"),
-            ConformanceResult::ExpectedFailure { reason, discrepancy_id } => {
+            ConformanceResult::ExpectedFailure {
+                reason,
+                discrepancy_id,
+            } => {
                 format!("XFAIL: {reason} (see {discrepancy_id})")
             }
         }
@@ -353,7 +357,8 @@ impl ConformanceRunner {
 
     /// Get count of tests by requirement level
     pub fn test_count_by_level(&self, level: RequirementLevel) -> usize {
-        self.tests.iter()
+        self.tests
+            .iter()
             .filter(|test| test.requirement_level() == level)
             .count()
     }
@@ -494,18 +499,21 @@ impl CoverageMatrix {
         // Initialize section data from RFC requirements matrix
         let rfc_sections = load_rfc_section_metadata();
         for (section_id, title) in rfc_sections {
-            sections.insert(section_id.clone(), SectionCoverage {
-                section: section_id,
-                title,
-                must_total: 0,
-                must_passing: 0,
-                should_total: 0,
-                should_passing: 0,
-                may_total: 0,
-                may_passing: 0,
-                score: 0.0,
-                status: ConformanceStatus::NonConformant,
-            });
+            sections.insert(
+                section_id.clone(),
+                SectionCoverage {
+                    section: section_id,
+                    title,
+                    must_total: 0,
+                    must_passing: 0,
+                    should_total: 0,
+                    should_passing: 0,
+                    may_total: 0,
+                    may_passing: 0,
+                    score: 0.0,
+                    status: ConformanceStatus::NonConformant,
+                },
+            );
         }
 
         // Populate coverage data from test results
@@ -561,12 +569,16 @@ impl CoverageMatrix {
 
     /// Check if implementation meets minimum conformance threshold
     pub fn meets_conformance_threshold(&self) -> bool {
-        matches!(self.overall.conformance_status, ConformanceStatus::Conformant)
+        matches!(
+            self.overall.conformance_status,
+            ConformanceStatus::Conformant
+        )
     }
 
     /// Get sections failing conformance requirements
     pub fn failing_sections(&self) -> Vec<&SectionCoverage> {
-        self.sections.values()
+        self.sections
+            .values()
             .filter(|section| matches!(section.status, ConformanceStatus::NonConformant))
             .collect()
     }
@@ -606,8 +618,10 @@ fn calculate_overall_coverage(sections: &BTreeMap<String, SectionCoverage>) -> O
         overall.may_failed += section.may_total - section.may_passing;
     }
 
-    overall.total_requirements = overall.must_requirements + overall.should_requirements + overall.may_requirements;
-    overall.passing_requirements = overall.must_passing + overall.should_passing + overall.may_passing;
+    overall.total_requirements =
+        overall.must_requirements + overall.should_requirements + overall.may_requirements;
+    overall.passing_requirements =
+        overall.must_passing + overall.should_passing + overall.may_passing;
     overall.failed_requirements = overall.must_failed + overall.should_failed + overall.may_failed;
 
     // Calculate weighted conformance score (MUST clauses worth 2x, SHOULD worth 1x)
@@ -678,7 +692,8 @@ pub fn generate_jsonl_logs(executions: &[TestExecution]) -> String {
 
     for execution in executions {
         let entry = ConformanceLogEntry {
-            timestamp: execution.timestamp
+            timestamp: execution
+                .timestamp
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs()

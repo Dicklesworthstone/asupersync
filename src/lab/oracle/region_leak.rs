@@ -269,6 +269,7 @@ pub struct RegionLeakOracle {
 
 impl RegionLeakOracle {
     /// Create a new region leak detection oracle with the given configuration
+    #[must_use]
     pub fn new(config: RegionLeakConfig) -> Self {
         let now = Instant::now();
         Self {
@@ -286,11 +287,13 @@ impl RegionLeakOracle {
     }
 
     /// Create oracle with default configuration
+    #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(RegionLeakConfig::default())
     }
 
     /// Create oracle with stricter timeouts for testing
+    #[must_use]
     pub fn with_strict_timeouts() -> Self {
         Self::new(RegionLeakConfig {
             max_creation_delay: Duration::from_millis(10),
@@ -320,7 +323,7 @@ impl RegionLeakOracle {
                 region_id,
                 detected_at: SystemTime::now(),
                 duration: Duration::from_secs(0),
-                description: format!("Region {} created twice", region_id),
+                description: format!("Region {region_id} created twice"),
                 context: ViolationContext::empty(),
                 suggested_fix: "Check for duplicate region creation logic".to_string(),
             });
@@ -544,11 +547,13 @@ impl RegionLeakOracle {
     }
 
     /// Get all violations detected so far
+    #[must_use]
     pub fn violations(&self) -> &VecDeque<RegionViolation> {
         &self.violations
     }
 
     /// Get summary statistics about the oracle's monitoring
+    #[must_use]
     pub fn statistics(&self) -> RegionLeakStatistics {
         RegionLeakStatistics {
             total_regions_created: self.total_regions_created,
@@ -961,16 +966,16 @@ impl std::fmt::Display for RegionViolation {
 impl std::fmt::Display for ViolationType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ViolationType::StuckCreation => write!(f, "Stuck Creation"),
-            ViolationType::StuckClosing => write!(f, "Stuck Closing"),
-            ViolationType::StuckFinalizing => write!(f, "Stuck Finalizing"),
-            ViolationType::IdleRegion => write!(f, "Idle Region"),
-            ViolationType::LongRunningTask => write!(f, "Long Running Task"),
-            ViolationType::OrphanedChildren => write!(f, "Orphaned Children"),
-            ViolationType::OrphanedTasks => write!(f, "Orphaned Tasks"),
-            ViolationType::FinalizersIncomplete => write!(f, "Finalizers Incomplete"),
-            ViolationType::ResourceLeak => write!(f, "Resource Leak"),
-            ViolationType::CircularDependency => write!(f, "Circular Dependency"),
+            Self::StuckCreation => write!(f, "Stuck Creation"),
+            Self::StuckClosing => write!(f, "Stuck Closing"),
+            Self::StuckFinalizing => write!(f, "Stuck Finalizing"),
+            Self::IdleRegion => write!(f, "Idle Region"),
+            Self::LongRunningTask => write!(f, "Long Running Task"),
+            Self::OrphanedChildren => write!(f, "Orphaned Children"),
+            Self::OrphanedTasks => write!(f, "Orphaned Tasks"),
+            Self::FinalizersIncomplete => write!(f, "Finalizers Incomplete"),
+            Self::ResourceLeak => write!(f, "Resource Leak"),
+            Self::CircularDependency => write!(f, "Circular Dependency"),
         }
     }
 }

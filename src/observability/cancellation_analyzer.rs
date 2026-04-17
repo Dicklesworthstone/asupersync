@@ -251,16 +251,19 @@ pub struct CancellationAnalyzer {
 
 impl CancellationAnalyzer {
     /// Creates a new analyzer with the given configuration.
+    #[must_use]
     pub fn new(config: AnalyzerConfig) -> Self {
         Self { config }
     }
 
     /// Creates an analyzer with default configuration.
+    #[must_use]
     pub fn default() -> Self {
         Self::new(AnalyzerConfig::default())
     }
 
     /// Perform deep performance analysis on a set of traces.
+    #[must_use]
     pub fn analyze_performance(&self, traces: &[CancellationTrace]) -> PerformanceAnalysis {
         if traces.len() < self.config.min_sample_size {
             return self.create_insufficient_data_analysis(traces.len());
@@ -274,7 +277,7 @@ impl CancellationAnalyzer {
             .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0)) // Convert to ms
             .collect();
 
-        let depths: Vec<f64> = traces.iter().map(|t| t.max_depth as f64).collect();
+        let depths: Vec<f64> = traces.iter().map(|t| f64::from(t.max_depth)).collect();
 
         let propagation_time_distribution = self.calculate_distribution_stats(&propagation_times);
         let depth_distribution = self.calculate_distribution_stats(&depths);
@@ -543,7 +546,7 @@ impl CancellationAnalyzer {
         }
 
         // Higher ratio means better parallelization
-        let ratio = total_entities as f64 / total_depth as f64;
+        let ratio = total_entities as f64 / f64::from(total_depth);
         (ratio / 10.0).min(1.0) // Normalize to 0-1
     }
 
@@ -593,7 +596,10 @@ impl CancellationAnalyzer {
             let anomaly_rate = anomaly_count as f64 / times.len() as f64;
 
             // Calculate throughput
-            let total_time_seconds = times.iter().map(|d| d.as_secs_f64()).sum::<f64>();
+            let total_time_seconds = times
+                .iter()
+                .map(std::time::Duration::as_secs_f64)
+                .sum::<f64>();
             let throughput = if total_time_seconds > 0.0 {
                 times.len() as f64 / total_time_seconds
             } else {
@@ -764,7 +770,7 @@ impl CancellationAnalyzer {
             recommendations: vec![OptimizationRecommendation {
                 priority: RecommendationPriority::Low,
                 target: "monitoring".to_string(),
-                description: format!("Collect more data - only {} traces available", trace_count),
+                description: format!("Collect more data - only {trace_count} traces available"),
                 estimated_impact: 0.0,
                 complexity: ImplementationComplexity::Trivial,
             }],

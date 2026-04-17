@@ -4,10 +4,10 @@
 //! scheduling decisions made. Unlike unit tests that check exact outcomes, metamorphic
 //! tests verify relationships between different execution scenarios.
 
-use crate::runtime::scheduler::{ThreeLaneScheduler, LocalQueue};
 use crate::runtime::RuntimeState;
+use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::sync::ContendedMutex;
-use crate::types::{TaskId, RegionId};
+use crate::types::{RegionId, TaskId};
 use crate::util::DetRng;
 use std::sync::Arc;
 
@@ -76,14 +76,14 @@ impl SchedulerTestHarness {
 
     fn spawn_tasks(&mut self, tasks: &[TaskId]) {
         for &task_id in tasks {
-            self.scheduler.spawn(task_id, 100);  // priority = 100
+            self.scheduler.spawn(task_id, 100); // priority = 100
             self.stats.tasks_spawned += 1;
         }
     }
 
     fn wake_tasks(&mut self, tasks: &[TaskId]) {
         for &task_id in tasks {
-            self.scheduler.wake(task_id, 100);  // priority = 100
+            self.scheduler.wake(task_id, 100); // priority = 100
             self.stats.total_wake_calls += 1;
         }
     }
@@ -125,7 +125,7 @@ fn mr_scheduler_work_conservation() {
         // Test run A: Single spawn batch
         let mut harness_a = SchedulerTestHarness::new(worker_count);
         harness_a.spawn_tasks(&tasks);
-        let work_before_a = harness_a.total_work_in_system();
+        let _work_before_a = harness_a.total_work_in_system();
         let processed_a = harness_a.process_available_work();
         let work_after_a = harness_a.total_work_in_system();
 
@@ -139,8 +139,8 @@ fn mr_scheduler_work_conservation() {
                 harness_b.process_available_work();
             }
         }
-        let work_before_b = harness_b.total_work_in_system();
-        let final_processed_b = harness_b.process_available_work();
+        let _work_before_b = harness_b.total_work_in_system();
+        let _final_processed_b = harness_b.process_available_work();
         let work_after_b = harness_b.total_work_in_system();
 
         // METAMORPHIC ASSERTION: Work conservation
@@ -220,7 +220,7 @@ fn mr_scheduler_processing_order_invariance() {
             }
         }
         // Process remaining work
-        let remaining_processed = harness_incremental.process_available_work();
+        let _remaining_processed = harness_incremental.process_available_work();
         let total_incremental = harness_incremental.stats.tasks_processed;
 
         // METAMORPHIC ASSERTION: Total processed work should be the same
@@ -327,7 +327,10 @@ mod validation_tests {
         harness_wake.wake_tasks(&tasks);
         let wake_work = harness_wake.total_work_in_system();
 
-        assert_eq!(spawn_work, wake_work, "Spawn and wake should produce equivalent states");
+        assert_eq!(
+            spawn_work, wake_work,
+            "Spawn and wake should produce equivalent states"
+        );
     }
 
     /// Validate that processing order doesn't affect work conservation

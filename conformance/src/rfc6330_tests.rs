@@ -4,7 +4,7 @@
 //! the ConformanceTest trait implementation for P0 priority requirements.
 
 use crate::raptorq_rfc6330::{
-    ConformanceTest, ConformanceContext, ConformanceResult, RequirementLevel, TestCategory,
+    ConformanceContext, ConformanceResult, ConformanceTest, RequirementLevel, TestCategory,
 };
 
 // ============================================================================
@@ -186,13 +186,15 @@ impl ConformanceTest for SystematicTupleGenerationTest {
     fn run(&self, ctx: &ConformanceContext) -> ConformanceResult {
         if !ctx.enable_differential {
             return ConformanceResult::Skipped {
-                reason: "Differential testing disabled - no reference implementation available".to_string(),
+                reason: "Differential testing disabled - no reference implementation available"
+                    .to_string(),
             };
         }
 
         // TODO: Implement differential testing against reference implementation
         ConformanceResult::Skipped {
-            reason: "Systematic tuple generation differential testing not yet implemented".to_string(),
+            reason: "Systematic tuple generation differential testing not yet implemented"
+                .to_string(),
         }
 
         // When implemented with reference implementation:
@@ -250,7 +252,8 @@ impl ConformanceTest for RepairTupleGenerationTest {
     fn run(&self, ctx: &ConformanceContext) -> ConformanceResult {
         if !ctx.enable_differential {
             return ConformanceResult::Skipped {
-                reason: "Differential testing disabled - no reference implementation available".to_string(),
+                reason: "Differential testing disabled - no reference implementation available"
+                    .to_string(),
             };
         }
 
@@ -265,7 +268,13 @@ impl ConformanceTest for RepairTupleGenerationTest {
     }
 
     fn tags(&self) -> Vec<&str> {
-        vec!["p0", "tuple-generation", "differential", "repair-symbols", "critical"]
+        vec![
+            "p0",
+            "tuple-generation",
+            "differential",
+            "repair-symbols",
+            "critical",
+        ]
     }
 }
 
@@ -340,7 +349,6 @@ pub fn get_all_example_tests() -> Vec<Box<dyn ConformanceTest>> {
         Box::new(SystematicIndexTest),
         Box::new(SystematicTupleGenerationTest),
         Box::new(RepairTupleGenerationTest),
-
         // P1 Tests
         Box::new(KParameterDerivationTest),
     ]
@@ -360,7 +368,8 @@ pub fn get_p0_tests() -> Vec<Box<dyn ConformanceTest>> {
 /// Get tests by section
 pub fn get_section_tests(section: &str) -> Vec<Box<dyn ConformanceTest>> {
     let all_tests = get_all_example_tests();
-    all_tests.into_iter()
+    all_tests
+        .into_iter()
         .filter(|test| test.section() == section)
         .collect()
 }
@@ -368,7 +377,8 @@ pub fn get_section_tests(section: &str) -> Vec<Box<dyn ConformanceTest>> {
 /// Get tests by requirement level
 pub fn get_level_tests(level: RequirementLevel) -> Vec<Box<dyn ConformanceTest>> {
     let all_tests = get_all_example_tests();
-    all_tests.into_iter()
+    all_tests
+        .into_iter()
         .filter(|test| test.requirement_level() == level)
         .collect()
 }

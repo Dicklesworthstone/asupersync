@@ -7,12 +7,12 @@
 //! - Chaos testing for fault tolerance
 //! - Memory leak detection and resource management
 
-use asupersync::runtime::epoch_gc::{EpochCounter, LocalEpoch, CleanupWork, DeferredCleanupQueue};
-use asupersync::types::{TaskId, RegionId};
+use asupersync::runtime::epoch_gc::{CleanupWork, DeferredCleanupQueue, EpochCounter, LocalEpoch};
+use asupersync::types::{RegionId, TaskId};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ============================================================================
 // Unit Tests - Core Components
@@ -56,23 +56,25 @@ fn test_epoch_counter_concurrent_access() {
     let barrier = Arc::new(Barrier::new(4));
     let results = Arc::new(AtomicUsize::new(0));
 
-    let handles: Vec<_> = (0..4).map(|_| {
-        let counter = counter.clone();
-        let barrier = barrier.clone();
-        let results = results.clone();
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let counter = counter.clone();
+            let barrier = barrier.clone();
+            let results = results.clone();
 
-        thread::spawn(move || {
-            barrier.wait();
+            thread::spawn(move || {
+                barrier.wait();
 
-            // Each thread tries to advance
-            for _ in 0..10 {
-                if counter.try_advance().is_some() {
-                    results.fetch_add(1, Ordering::Relaxed);
+                // Each thread tries to advance
+                for _ in 0..10 {
+                    if counter.try_advance().is_some() {
+                        results.fetch_add(1, Ordering::Relaxed);
+                    }
+                    thread::sleep(Duration::from_millis(2));
                 }
-                thread::sleep(Duration::from_millis(2));
-            }
+            })
         })
-    }).collect();
+        .collect();
 
     for handle in handles {
         handle.join().unwrap();
@@ -106,21 +108,23 @@ fn test_local_epoch_thread_safety() {
     let local = Arc::new(LocalEpoch::new());
     let barrier = Arc::new(Barrier::new(3));
 
-    let handles: Vec<_> = (0..3).map(|i| {
-        let local = local.clone();
-        let barrier = barrier.clone();
+    let handles: Vec<_> = (0..3)
+        .map(|i| {
+            let local = local.clone();
+            let barrier = barrier.clone();
 
-        thread::spawn(move || {
-            barrier.wait();
+            thread::spawn(move || {
+                barrier.wait();
 
-            // Each thread syncs to different epoch
-            let epoch = (i + 1) * 10;
-            local.sync_to_global(epoch);
+                // Each thread syncs to different epoch
+                let epoch = (i + 1) * 10;
+                local.sync_to_global(epoch);
 
-            // Verify sync worked
-            assert_eq!(local.current(), epoch);
+                // Verify sync worked
+                assert_eq!(local.current(), epoch);
+            })
         })
-    }).collect();
+        .collect();
 
     for handle in handles {
         handle.join().unwrap();
@@ -165,16 +169,32 @@ fn test_cleanup_work_types() {
             (CleanupWork::Obligation { id: id1, .. }, CleanupWork::Obligation { id: id2, .. }) => {
                 assert_eq!(id1, id2);
             }
-            (CleanupWork::WakerCleanup { waker_id: id1, .. }, CleanupWork::WakerCleanup { waker_id: id2, .. }) => {
+            (
+                CleanupWork::WakerCleanup { waker_id: id1, .. },
+                CleanupWork::WakerCleanup { waker_id: id2, .. },
+            ) => {
                 assert_eq!(id1, id2);
             }
-            (CleanupWork::RegionCleanup { region_id: id1, .. }, CleanupWork::RegionCleanup { region_id: id2, .. }) => {
+            (
+                CleanupWork::RegionCleanup { region_id: id1, .. },
+                CleanupWork::RegionCleanup { region_id: id2, .. },
+            ) => {
                 assert_eq!(id1, id2);
             }
-            (CleanupWork::TimerCleanup { timer_id: id1, .. }, CleanupWork::TimerCleanup { timer_id: id2, .. }) => {
+            (
+                CleanupWork::TimerCleanup { timer_id: id1, .. },
+                CleanupWork::TimerCleanup { timer_id: id2, .. },
+            ) => {
                 assert_eq!(id1, id2);
             }
-            (CleanupWork::ChannelCleanup { channel_id: id1, .. }, CleanupWork::ChannelCleanup { channel_id: id2, .. }) => {
+            (
+                CleanupWork::ChannelCleanup {
+                    channel_id: id1, ..
+                },
+                CleanupWork::ChannelCleanup {
+                    channel_id: id2, ..
+                },
+            ) => {
                 assert_eq!(id1, id2);
             }
             _ => panic!("Mismatched cleanup work variants"),
@@ -200,12 +220,14 @@ fn test_end_to_end_cleanup_latency() {
     };
 
     let current_epoch = counter.current();
-    queue.enqueue(work, current_epoch);
+    let _ = queue.enqueue(work, current_epoch);
     let enqueue_latency = start.elapsed();
 
     // Enqueue should be fast (< 1ms for small work)
-    assert!(enqueue_latency < Duration::from_millis(1),
-        "Enqueue latency too high: {:?}", enqueue_latency);
+    assert!(
+        enqueue_latency < Duration::from_millis(1),
+        "Enqueue latency too high: {enqueue_latency:?}"
+    );
 
     // Advance epoch to make work available
     counter.force_advance();
@@ -217,8 +239,10 @@ fn test_end_to_end_cleanup_latency() {
     let cleanup_latency = start.elapsed();
 
     assert_eq!(cleaned_work.len(), 1);
-    assert!(cleanup_latency < Duration::from_millis(1),
-        "Cleanup collection latency too high: {:?}", cleanup_latency);
+    assert!(
+        cleanup_latency < Duration::from_millis(1),
+        "Cleanup collection latency too high: {cleanup_latency:?}"
+    );
 }
 
 #[test]
@@ -230,63 +254,67 @@ fn test_stress_testing_high_cancellation_rates() {
     let processed_work = Arc::new(AtomicUsize::new(0));
 
     // Spawn producer threads
-    let producers: Vec<_> = (0..4).map(|_| {
-        let queue = queue.clone();
-        let counter = counter.clone();
-        let barrier = barrier.clone();
-        let total_work = total_work.clone();
+    let producers: Vec<_> = (0..4)
+        .map(|_| {
+            let queue = queue.clone();
+            let counter = counter.clone();
+            let barrier = barrier.clone();
+            let total_work = total_work.clone();
 
-        thread::spawn(move || {
-            barrier.wait();
-            let local = LocalEpoch::new();
+            thread::spawn(move || {
+                barrier.wait();
+                let local = LocalEpoch::new();
 
-            // Generate high rate of cleanup work
-            for i in 0..1000 {
-                let work = CleanupWork::WakerCleanup {
-                    waker_id: i as u64,
-                    source: "stress_test".to_string(),
-                };
+                // Generate high rate of cleanup work
+                for i in 0..1000 {
+                    let work = CleanupWork::WakerCleanup {
+                        waker_id: i as u64,
+                        source: "stress_test".to_string(),
+                    };
 
-                local.sync_to_global(counter.current());
-                queue.enqueue(work, local.current());
-                total_work.fetch_add(1, Ordering::Relaxed);
+                    local.sync_to_global(counter.current());
+                    let _ = queue.enqueue(work, local.current());
+                    total_work.fetch_add(1, Ordering::Relaxed);
 
-                // Small delay to create realistic load
-                if i % 100 == 0 {
-                    thread::sleep(Duration::from_micros(10));
+                    // Small delay to create realistic load
+                    if i % 100 == 0 {
+                        thread::sleep(Duration::from_micros(10));
+                    }
                 }
-            }
+            })
         })
-    }).collect();
+        .collect();
 
     // Spawn consumer threads
-    let consumers: Vec<_> = (0..4).map(|_| {
-        let queue = queue.clone();
-        let counter = counter.clone();
-        let barrier = barrier.clone();
-        let processed_work = processed_work.clone();
+    let consumers: Vec<_> = (0..4)
+        .map(|_| {
+            let queue = queue.clone();
+            let counter = counter.clone();
+            let barrier = barrier.clone();
+            let processed_work = processed_work.clone();
 
-        thread::spawn(move || {
-            barrier.wait();
-            let local = LocalEpoch::new();
+            thread::spawn(move || {
+                barrier.wait();
+                let local = LocalEpoch::new();
 
-            // Process cleanup work periodically
-            for _ in 0..100 {
-                // Advance epoch and collect expired work
-                counter.try_advance();
-                local.sync_to_global(counter.current());
+                // Process cleanup work periodically
+                for _ in 0..100 {
+                    // Advance epoch and collect expired work
+                    counter.try_advance();
+                    local.sync_to_global(counter.current());
 
-                // Collect work from previous epochs
-                let current = local.current();
-                if current > 1 {
-                    let expired_work = queue.collect_expired(current - 1);
-                    processed_work.fetch_add(expired_work.len(), Ordering::Relaxed);
+                    // Collect work from previous epochs
+                    let current = local.current();
+                    if current > 1 {
+                        let expired_work = queue.collect_expired(current - 1);
+                        processed_work.fetch_add(expired_work.len(), Ordering::Relaxed);
+                    }
+
+                    thread::sleep(Duration::from_millis(2));
                 }
-
-                thread::sleep(Duration::from_millis(2));
-            }
+            })
         })
-    }).collect();
+        .collect();
 
     // Wait for all threads
     for handle in producers {
@@ -308,11 +336,13 @@ fn test_stress_testing_high_cancellation_rates() {
     let processed = processed_work.load(Ordering::Relaxed);
 
     // All work should be processed (allowing for some in-flight work)
-    assert!(processed >= total * 95 / 100,
-        "Too much work lost: total={}, processed={}", total, processed);
+    assert!(
+        processed >= total * 95 / 100,
+        "Too much work lost: total={total}, processed={processed}"
+    );
 
     // Should have processed significant amount of work
-    assert!(total >= 3000, "Not enough work generated: {}", total);
+    assert!(total >= 3000, "Not enough work generated: {total}");
 }
 
 // ============================================================================
@@ -331,12 +361,16 @@ fn test_benchmark_cleanup_latency_reduction() {
     let sync_p99 = percentile(&sync_latencies, 99.0);
     let async_p99 = percentile(&async_latencies, 99.0);
 
-    println!("Sync P99: {:?}, Async P99: {:?}", sync_p99, async_p99);
+    println!("Sync P99: {sync_p99:?}, Async P99: {async_p99:?}");
 
     // Target: >80% reduction in P99 latency
-    let reduction = (sync_p99.as_nanos() - async_p99.as_nanos()) as f64 / sync_p99.as_nanos() as f64;
-    assert!(reduction > 0.8,
-        "P99 latency reduction {}% < 80% target", reduction * 100.0);
+    let reduction =
+        (sync_p99.as_nanos() - async_p99.as_nanos()) as f64 / sync_p99.as_nanos() as f64;
+    assert!(
+        reduction > 0.8,
+        "P99 latency reduction {}% < 80% target",
+        reduction * 100.0
+    );
 }
 
 #[test]
@@ -350,8 +384,11 @@ fn test_memory_overhead_measurement() {
     let overhead = (with_epoch_gc - baseline) as f64 / baseline as f64;
 
     // Target: <10% memory overhead
-    assert!(overhead < 0.10,
-        "Memory overhead {}% > 10% target", overhead * 100.0);
+    assert!(
+        overhead < 0.10,
+        "Memory overhead {}% > 10% target",
+        overhead * 100.0
+    );
 }
 
 #[test]
@@ -375,11 +412,15 @@ fn test_cpu_overhead_measurement() {
     }
     let epoch_duration = start.elapsed();
 
-    let overhead = (epoch_duration.as_nanos() - baseline_duration.as_nanos()) as f64 / baseline_duration.as_nanos() as f64;
+    let overhead = (epoch_duration.as_nanos() - baseline_duration.as_nanos()) as f64
+        / baseline_duration.as_nanos() as f64;
 
     // Target: <1% CPU overhead
-    assert!(overhead < 0.01,
-        "CPU overhead {}% > 1% target", overhead * 100.0);
+    assert!(
+        overhead < 0.01,
+        "CPU overhead {}% > 1% target",
+        overhead * 100.0
+    );
 }
 
 // ============================================================================
@@ -414,7 +455,7 @@ fn test_random_cancellation_patterns() {
                 };
 
                 local.sync_to_global(counter.current());
-                queue.enqueue(work, local.current());
+                let _ = queue.enqueue(work, local.current());
                 work_count.fetch_add(1, Ordering::Relaxed);
 
                 // Random micro-delay
@@ -438,9 +479,10 @@ fn test_random_cancellation_patterns() {
     let total_work = work_count.load(Ordering::Relaxed);
 
     // Should collect most of the work (allowing for some still in-flight)
-    assert!(total_collected >= total_work * 90 / 100,
-        "Chaos test lost too much work: generated={}, collected={}",
-        total_work, total_collected);
+    assert!(
+        total_collected >= total_work * 90 / 100,
+        "Chaos test lost too much work: generated={total_work}, collected={total_collected}"
+    );
 }
 
 // ============================================================================
@@ -474,7 +516,7 @@ fn measure_deferred_cleanup_latencies(count: usize) -> Vec<Duration> {
         };
 
         local.sync_to_global(counter.current());
-        queue.enqueue(work, local.current());
+        let _ = queue.enqueue(work, local.current());
 
         latencies.push(start.elapsed());
     }
@@ -528,16 +570,20 @@ fn test_epoch_counter_monotonic_property() {
         let current_epoch = counter.current();
 
         // Epoch should be monotonically increasing
-        assert!(current_epoch >= last_epoch,
-            "Epoch went backwards: {} -> {}", last_epoch, current_epoch);
+        assert!(
+            current_epoch >= last_epoch,
+            "Epoch went backwards: {last_epoch} -> {current_epoch}"
+        );
 
         last_epoch = current_epoch;
 
         // Try to advance
         if counter.try_advance().is_some() {
             let new_epoch = counter.current();
-            assert!(new_epoch > last_epoch,
-                "Advance didn't increase epoch: {} -> {}", last_epoch, new_epoch);
+            assert!(
+                new_epoch > last_epoch,
+                "Advance didn't increase epoch: {last_epoch} -> {new_epoch}"
+            );
             last_epoch = new_epoch;
         }
 
@@ -554,11 +600,11 @@ fn test_cleanup_work_preservation_property() {
     for epoch in 1..=10 {
         for i in 0..10 {
             let work = CleanupWork::WakerCleanup {
-                waker_id: (epoch * 100 + i) as u64,
-                source: format!("test_{}", epoch),
+                waker_id: (epoch * 100 + i),
+                source: format!("test_{epoch}"),
             };
 
-            queue.enqueue(work.clone(), epoch);
+            let _ = queue.enqueue(work.clone(), epoch);
             enqueued_work.push((epoch, work));
         }
     }
@@ -573,7 +619,11 @@ fn test_cleanup_work_preservation_property() {
     }
 
     // All work should be preserved
-    assert_eq!(enqueued_work.len(), collected_work.len(),
+    assert_eq!(
+        enqueued_work.len(),
+        collected_work.len(),
         "Work count mismatch: enqueued={}, collected={}",
-        enqueued_work.len(), collected_work.len());
+        enqueued_work.len(),
+        collected_work.len()
+    );
 }

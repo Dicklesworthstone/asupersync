@@ -166,8 +166,13 @@ impl SchedulerInvariant {
     pub fn severity(&self) -> u8 {
         match self {
             Self::QueueDepthMismatch { .. } => 1, // Medium: metrics issue
-            Self::TaskStarvation { .. } | Self::LoadImbalance { .. } | Self::PriorityOrderViolation { .. } | Self::CancelledTaskLeak { .. } => 2,     // High: performance/correctness/resource issues
-            Self::TaskInMultipleQueues { .. } | Self::WorkStealingDoubleExecution { .. } | Self::InvalidStateTransition { .. } => 3, // Critical: corruption/data race/state issues
+            Self::TaskStarvation { .. }
+            | Self::LoadImbalance { .. }
+            | Self::PriorityOrderViolation { .. }
+            | Self::CancelledTaskLeak { .. } => 2, // High: performance/correctness/resource issues
+            Self::TaskInMultipleQueues { .. }
+            | Self::WorkStealingDoubleExecution { .. }
+            | Self::InvalidStateTransition { .. } => 3, // Critical: corruption/data race/state issues
         }
     }
 
@@ -179,9 +184,7 @@ impl SchedulerInvariant {
                 task_id,
                 queue_count,
             } => {
-                format!(
-                    "Task {task_id:?} found in {queue_count} queues simultaneously"
-                )
+                format!("Task {task_id:?} found in {queue_count} queues simultaneously")
             }
             Self::PriorityOrderViolation {
                 high_priority_task,
@@ -208,8 +211,7 @@ impl SchedulerInvariant {
                 load_ratio,
             } => {
                 format!(
-                    "Load imbalance: worker {} has {:.2}x load of worker {}",
-                    overloaded_worker, load_ratio, underloaded_worker
+                    "Load imbalance: worker {overloaded_worker} has {load_ratio:.2}x load of worker {underloaded_worker}"
                 )
             }
             Self::WorkStealingDoubleExecution {
@@ -218,8 +220,7 @@ impl SchedulerInvariant {
                 stealing_worker,
             } => {
                 format!(
-                    "Task {:?} executed on both worker {} and worker {} (double execution)",
-                    task_id, original_worker, stealing_worker
+                    "Task {task_id:?} executed on both worker {original_worker} and worker {stealing_worker} (double execution)"
                 )
             }
             Self::CancelledTaskLeak {
@@ -228,8 +229,7 @@ impl SchedulerInvariant {
                 time_since_cancel_ms,
             } => {
                 format!(
-                    "Cancelled task {:?} still in {} after {}ms",
-                    task_id, queue_name, time_since_cancel_ms
+                    "Cancelled task {task_id:?} still in {queue_name} after {time_since_cancel_ms}ms"
                 )
             }
             Self::QueueDepthMismatch {
@@ -238,8 +238,7 @@ impl SchedulerInvariant {
                 actual_depth,
             } => {
                 format!(
-                    "Queue {} reports depth {} but contains {} items",
-                    queue_name, reported_depth, actual_depth
+                    "Queue {queue_name} reports depth {reported_depth} but contains {actual_depth} items"
                 )
             }
             Self::InvalidStateTransition {
@@ -247,10 +246,7 @@ impl SchedulerInvariant {
                 from_state,
                 to_state,
             } => {
-                format!(
-                    "Task {:?} invalid transition from {} to {}",
-                    task_id, from_state, to_state
-                )
+                format!("Task {task_id:?} invalid transition from {from_state} to {to_state}")
             }
         }
     }
@@ -379,6 +375,7 @@ pub struct SchedulerInvariantMonitor {
 
 impl SchedulerInvariantMonitor {
     /// Creates a new invariant monitor with the given configuration.
+    #[must_use]
     pub fn new(config: InvariantConfig) -> Self {
         Self {
             config,
@@ -392,6 +389,7 @@ impl SchedulerInvariantMonitor {
     }
 
     /// Creates a new invariant monitor with default configuration.
+    #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(InvariantConfig::default())
     }
@@ -672,9 +670,9 @@ impl SchedulerInvariantMonitor {
                 invariant.description()
             );
             if let Some(worker) = worker_id {
-                eprintln!("  Worker: {}", worker);
+                eprintln!("  Worker: {worker}");
             }
-            eprintln!("  Timestamp: {:?}", timestamp);
+            eprintln!("  Timestamp: {timestamp:?}");
             eprintln!(
                 "  Severity: {}",
                 match severity {
@@ -846,7 +844,13 @@ mod tests {
         let now = Time::from_nanos(1000);
 
         // Test priority violation (higher number = lower priority)
-        monitor.verify_priority_ordering(TaskId::new_for_test(1, 0), 5, TaskId::new_for_test(2, 0), 3, now);
+        monitor.verify_priority_ordering(
+            TaskId::new_for_test(1, 0),
+            5,
+            TaskId::new_for_test(2, 0),
+            3,
+            now,
+        );
 
         assert_eq!(monitor.violations.len(), 1);
         match &monitor.violations[0].invariant {
@@ -873,7 +877,11 @@ mod tests {
         let snapshot = QueueSnapshot {
             name: "test_queue".to_string(),
             reported_depth: 5,
-            actual_tasks: vec![TaskId::new_for_test(1, 0), TaskId::new_for_test(2, 0), TaskId::new_for_test(3, 0)],
+            actual_tasks: vec![
+                TaskId::new_for_test(1, 0),
+                TaskId::new_for_test(2, 0),
+                TaskId::new_for_test(3, 0),
+            ],
             priority_range: Some((1, 3)),
             time_range: Some((Time::from_nanos(500), now)),
         };
@@ -940,8 +948,20 @@ mod tests {
         let now = Time::from_nanos(1000);
 
         // Generate some violations
-        monitor.verify_priority_ordering(TaskId::new_for_test(1, 0), 5, TaskId::new_for_test(2, 0), 3, now);
-        monitor.verify_priority_ordering(TaskId::new_for_test(3, 0), 7, TaskId::new_for_test(4, 0), 2, now);
+        monitor.verify_priority_ordering(
+            TaskId::new_for_test(1, 0),
+            5,
+            TaskId::new_for_test(2, 0),
+            3,
+            now,
+        );
+        monitor.verify_priority_ordering(
+            TaskId::new_for_test(3, 0),
+            7,
+            TaskId::new_for_test(4, 0),
+            2,
+            now,
+        );
 
         let stats = monitor.stats();
         assert_eq!(
@@ -962,7 +982,13 @@ mod tests {
         monitor.record_task_enqueue(TaskId::new_for_test(1, 0), "queue", 1, old_time);
 
         // Add old violation
-        monitor.verify_priority_ordering(TaskId::new_for_test(2, 0), 5, TaskId::new_for_test(3, 0), 3, old_time);
+        monitor.verify_priority_ordering(
+            TaskId::new_for_test(2, 0),
+            5,
+            TaskId::new_for_test(3, 0),
+            3,
+            old_time,
+        );
 
         assert_eq!(monitor.task_states.len(), 1);
         assert_eq!(monitor.violations.len(), 1);

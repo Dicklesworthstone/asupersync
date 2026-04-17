@@ -20,13 +20,13 @@
 //! - Work-stealing operations
 //! - Task completion and cancellation
 
-use crate::types::TaskId;
-use crate::runtime::scheduler::worker::WorkerId;
 use crate::runtime::scheduler::priority::DispatchLane;
+use crate::runtime::scheduler::worker::WorkerId;
+use crate::types::TaskId;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Priority level for scheduling decisions
@@ -38,6 +38,7 @@ pub struct ResourceId(u64);
 
 impl ResourceId {
     /// Creates a new resource ID
+    #[must_use]
     pub fn new(id: u64) -> Self {
         Self(id)
     }
@@ -216,11 +217,13 @@ impl Default for InversionOracleConfig {
 
 impl PriorityInversionOracle {
     /// Creates a new priority inversion oracle
+    #[must_use]
     pub fn new() -> Self {
         Self::with_config(InversionOracleConfig::default())
     }
 
     /// Creates a new oracle with custom configuration
+    #[must_use]
     pub fn with_config(config: InversionOracleConfig) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -235,7 +238,13 @@ impl PriorityInversionOracle {
     }
 
     /// Records that a task was spawned
-    pub fn track_task_spawned(&self, task_id: TaskId, priority: Priority, lane: DispatchLane, worker_id: Option<WorkerId>) {
+    pub fn track_task_spawned(
+        &self,
+        task_id: TaskId,
+        priority: Priority,
+        lane: DispatchLane,
+        worker_id: Option<WorkerId>,
+    ) {
         let task_state = TaskState {
             task_id,
             priority,
@@ -271,12 +280,14 @@ impl PriorityInversionOracle {
         let mut tasks = self.tasks.write();
 
         // Update resource state
-        let resource_state = resources.entry(resource_id).or_insert_with(|| ResourceState {
-            resource_id,
-            owner: None,
-            waiters: VecDeque::new(),
-            creation_time: Instant::now(),
-        });
+        let resource_state = resources
+            .entry(resource_id)
+            .or_insert_with(|| ResourceState {
+                resource_id,
+                owner: None,
+                waiters: VecDeque::new(),
+                creation_time: Instant::now(),
+            });
 
         resource_state.owner = Some(task_id);
 
@@ -299,12 +310,14 @@ impl PriorityInversionOracle {
         let mut tasks = self.tasks.write();
 
         // Add to resource waiters
-        let resource_state = resources.entry(resource_id).or_insert_with(|| ResourceState {
-            resource_id,
-            owner: None,
-            waiters: VecDeque::new(),
-            creation_time: Instant::now(),
-        });
+        let resource_state = resources
+            .entry(resource_id)
+            .or_insert_with(|| ResourceState {
+                resource_id,
+                owner: None,
+                waiters: VecDeque::new(),
+                creation_time: Instant::now(),
+            });
 
         resource_state.waiters.push_back(task_id);
 
@@ -362,23 +375,35 @@ impl PriorityInversionOracle {
     }
 
     /// Detects direct priority inversion
-    fn detect_direct_inversion(&self, blocked_task: TaskId, blocked_priority: Priority, blocking_task: TaskId, resource: ResourceId) {
+    fn detect_direct_inversion(
+        &self,
+        blocked_task: TaskId,
+        blocked_priority: Priority,
+        blocking_task: TaskId,
+        resource: ResourceId,
+    ) {
         let tasks = self.tasks.read();
 
         if let Some(blocking_task_state) = tasks.get(&blocking_task) {
             let blocking_priority = blocking_task_state.priority;
 
             // Check if this is actually an inversion (blocked has higher priority)
-            if blocked_priority > blocking_priority &&
-               (blocked_priority - blocking_priority) >= self.config.priority_threshold {
-
+            if blocked_priority > blocking_priority
+                && (blocked_priority - blocking_priority) >= self.config.priority_threshold
+            {
                 drop(tasks);
 
-                let inversion_id = InversionId::new(self.next_inversion_id.fetch_add(1, Ordering::Relaxed));
+                let inversion_id =
+                    InversionId::new(self.next_inversion_id.fetch_add(1, Ordering::Relaxed));
                 let start_time = Instant::now();
 
                 let impact = if self.config.enable_impact_analysis {
-                    self.analyze_inversion_impact(blocked_task, blocking_task, blocked_priority, blocking_priority)
+                    self.analyze_inversion_impact(
+                        blocked_task,
+                        blocking_task,
+                        blocked_priority,
+                        blocking_priority,
+                    )
                 } else {
                     InversionImpact {
                         delay_us: 0,
@@ -404,7 +429,9 @@ impl PriorityInversionOracle {
                 };
 
                 // Record the inversion
-                self.active_inversions.write().insert(inversion_id, inversion.clone());
+                self.active_inversions
+                    .write()
+                    .insert(inversion_id, inversion.clone());
                 self.update_stats_for_new_inversion(&inversion);
 
                 // Optionally detect chain inversions
@@ -424,7 +451,14 @@ impl PriorityInversionOracle {
         let mut visited = HashSet::new();
         let mut chain = Vec::new();
 
-        self.find_blocking_chains(&tasks, &resources, original_blocked, original_priority, &mut visited, &mut chain);
+        self.find_blocking_chains(
+            &tasks,
+            &resources,
+            original_blocked,
+            original_priority,
+            &mut visited,
+            &mut chain,
+        );
     }
 
     /// Recursively finds blocking chains that constitute priority inversions
@@ -450,14 +484,24 @@ impl PriorityInversionOracle {
                     if let Some(owner_task) = resource_state.owner {
                         if let Some(owner_state) = tasks.get(&owner_task) {
                             // Check if this creates a priority inversion
-                            if original_priority > owner_state.priority &&
-                               (original_priority - owner_state.priority) >= self.config.priority_threshold &&
-                               chain.len() > 2 { // Chain inversion needs at least 3 tasks
+                            if original_priority > owner_state.priority
+                                && (original_priority - owner_state.priority)
+                                    >= self.config.priority_threshold
+                                && chain.len() > 2
+                            {
+                                // Chain inversion needs at least 3 tasks
 
-                                let inversion_id = InversionId::new(self.next_inversion_id.fetch_add(1, Ordering::Relaxed));
+                                let inversion_id = InversionId::new(
+                                    self.next_inversion_id.fetch_add(1, Ordering::Relaxed),
+                                );
 
                                 let impact = if self.config.enable_impact_analysis {
-                                    self.analyze_inversion_impact(chain[0], owner_task, original_priority, owner_state.priority)
+                                    self.analyze_inversion_impact(
+                                        chain[0],
+                                        owner_task,
+                                        original_priority,
+                                        owner_state.priority,
+                                    )
                                 } else {
                                     InversionImpact {
                                         delay_us: 0,
@@ -490,7 +534,14 @@ impl PriorityInversionOracle {
                             }
 
                             // Continue chain
-                            self.find_blocking_chains(tasks, resources, owner_task, original_priority, visited, chain);
+                            self.find_blocking_chains(
+                                tasks,
+                                resources,
+                                owner_task,
+                                original_priority,
+                                visited,
+                                chain,
+                            );
                         }
                     }
                 }
@@ -526,8 +577,9 @@ impl PriorityInversionOracle {
         {
             let active = self.active_inversions.read();
             for (inversion_id, inversion) in active.iter() {
-                if (inversion.blocked_task == task_id || inversion.blocking_task == task_id) &&
-                   inversion.duration.is_none() {
+                if (inversion.blocked_task == task_id || inversion.blocking_task == task_id)
+                    && inversion.duration.is_none()
+                {
                     to_resolve.push(*inversion_id);
                 }
             }
@@ -553,7 +605,8 @@ impl PriorityInversionOracle {
                 // Update impact with actual duration
                 if self.config.enable_impact_analysis {
                     inversion.impact.delay_us = duration.as_micros() as u64;
-                    inversion.impact.severity = self.classify_inversion_severity(duration, &inversion);
+                    inversion.impact.severity =
+                        self.classify_inversion_severity(duration, &inversion);
                 }
 
                 // Add to historical record
@@ -573,11 +626,18 @@ impl PriorityInversionOracle {
     }
 
     /// Analyzes the impact of a priority inversion
-    fn analyze_inversion_impact(&self, _blocked_task: TaskId, _blocking_task: TaskId, blocked_priority: Priority, blocking_priority: Priority) -> InversionImpact {
+    fn analyze_inversion_impact(
+        &self,
+        _blocked_task: TaskId,
+        _blocking_task: TaskId,
+        blocked_priority: Priority,
+        blocking_priority: Priority,
+    ) -> InversionImpact {
         let tasks = self.tasks.read();
 
         // Count affected high-priority tasks
-        let affected_tasks = tasks.values()
+        let affected_tasks = tasks
+            .values()
             .filter(|t| t.priority >= blocked_priority)
             .count();
 
@@ -591,8 +651,8 @@ impl PriorityInversionOracle {
             _ => InversionSeverity::Critical,
         };
 
-        let throughput_impact = (priority_diff as f64) * 0.1; // 10% per priority level
-        let fairness_impact = (priority_diff as f64) * 0.05; // 5% per priority level
+        let throughput_impact = f64::from(priority_diff) * 0.1; // 10% per priority level
+        let fairness_impact = f64::from(priority_diff) * 0.05; // 5% per priority level
 
         InversionImpact {
             delay_us: 0, // Will be filled when inversion resolves
@@ -604,7 +664,11 @@ impl PriorityInversionOracle {
     }
 
     /// Classifies inversion severity based on duration and context
-    fn classify_inversion_severity(&self, duration: Duration, inversion: &PriorityInversion) -> InversionSeverity {
+    fn classify_inversion_severity(
+        &self,
+        duration: Duration,
+        inversion: &PriorityInversion,
+    ) -> InversionSeverity {
         let duration_ms = duration.as_millis() as u64;
         let priority_diff = inversion.blocked_priority - inversion.blocking_priority;
 

@@ -33,6 +33,7 @@ struct HpackEncodingGolden {
 
 /// Golden artifact representation of HPACK decoding results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct HpackDecodingGolden {
     /// Description of this test case.
     description: String,
@@ -113,32 +114,74 @@ struct DynamicTableStateGolden {
 fn create_test_headers(scenario: &str) -> Vec<Header> {
     match scenario {
         "basic_get" => vec![
-            Header { name: ":method".to_string(), value: "GET".to_string() },
-            Header { name: ":path".to_string(), value: "/".to_string() },
-            Header { name: ":scheme".to_string(), value: "https".to_string() },
-            Header { name: ":authority".to_string(), value: "example.com".to_string() },
+            Header {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            Header {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            Header {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
+            Header {
+                name: ":authority".to_string(),
+                value: "example.com".to_string(),
+            },
         ],
         "custom_headers" => vec![
-            Header { name: "user-agent".to_string(), value: "asupersync/1.0".to_string() },
-            Header { name: "accept".to_string(), value: "text/html,application/xhtml+xml".to_string() },
-            Header { name: "cache-control".to_string(), value: "no-cache".to_string() },
+            Header {
+                name: "user-agent".to_string(),
+                value: "asupersync/1.0".to_string(),
+            },
+            Header {
+                name: "accept".to_string(),
+                value: "text/html,application/xhtml+xml".to_string(),
+            },
+            Header {
+                name: "cache-control".to_string(),
+                value: "no-cache".to_string(),
+            },
         ],
         "repeated_headers" => vec![
-            Header { name: "set-cookie".to_string(), value: "sessionid=abc123".to_string() },
-            Header { name: "set-cookie".to_string(), value: "userid=456".to_string() },
-            Header { name: "vary".to_string(), value: "Accept-Encoding".to_string() },
+            Header {
+                name: "set-cookie".to_string(),
+                value: "sessionid=abc123".to_string(),
+            },
+            Header {
+                name: "set-cookie".to_string(),
+                value: "userid=456".to_string(),
+            },
+            Header {
+                name: "vary".to_string(),
+                value: "Accept-Encoding".to_string(),
+            },
         ],
         "large_values" => vec![
-            Header { name: "content-type".to_string(), value: "application/json".to_string() },
+            Header {
+                name: "content-type".to_string(),
+                value: "application/json".to_string(),
+            },
             Header {
                 name: "authorization".to_string(),
-                value: format!("Bearer {}", "a".repeat(200)) // Long token
+                value: format!("Bearer {}", "a".repeat(200)), // Long token
             },
         ],
         "empty_and_special" => vec![
-            Header { name: "empty-value".to_string(), value: "".to_string() },
-            Header { name: "special-chars".to_string(), value: "!@#$%^&*()".to_string() },
-            Header { name: "unicode".to_string(), value: "héllo wørld 🌍".to_string() },
+            Header {
+                name: "empty-value".to_string(),
+                value: String::new(),
+            },
+            Header {
+                name: "special-chars".to_string(),
+                value: "!@#$%^&*()".to_string(),
+            },
+            Header {
+                name: "unicode".to_string(),
+                value: "héllo wørld 🌍".to_string(),
+            },
         ],
         _ => vec![],
     }
@@ -185,6 +228,7 @@ fn test_hpack_encoding(
 }
 
 /// Tests HPACK decoding with encoded data.
+#[allow(dead_code)]
 fn test_hpack_decoding(
     encoded_data: &[u8],
     description: &str,
@@ -208,7 +252,7 @@ fn test_hpack_decoding(
                 dynamic_table_state,
             })
         }
-        Err(e) => Err(format!("Decoding failed: {}", e)),
+        Err(e) => Err(format!("Decoding failed: {e}")),
     }
 }
 
@@ -232,8 +276,10 @@ fn test_hpack_round_trip(
 
     let (decoded_headers, round_trip_successful) = match decode_result {
         Ok(decoded) => {
-            let original_golden: Vec<HpackHeaderGolden> = headers.iter().map(HpackHeaderGolden::from).collect();
-            let decoded_golden: Vec<HpackHeaderGolden> = decoded.iter().map(HpackHeaderGolden::from).collect();
+            let original_golden: Vec<HpackHeaderGolden> =
+                headers.iter().map(HpackHeaderGolden::from).collect();
+            let decoded_golden: Vec<HpackHeaderGolden> =
+                decoded.iter().map(HpackHeaderGolden::from).collect();
             let successful = original_golden == decoded_golden;
             (decoded_golden, successful)
         }
@@ -290,22 +336,37 @@ fn test_hpack_repeated_headers_encoding() {
 #[test]
 fn test_hpack_large_values_encoding() {
     let headers = create_test_headers("large_values");
-    let golden = test_hpack_encoding(&headers, true, "Headers with large values (long authorization)");
+    let golden = test_hpack_encoding(
+        &headers,
+        true,
+        "Headers with large values (long authorization)",
+    );
     assert_json_snapshot!("hpack_large_values_encoding", golden);
 }
 
 #[test]
 fn test_hpack_special_characters() {
     let headers = create_test_headers("empty_and_special");
-    let golden = test_hpack_encoding(&headers, true, "Headers with empty values, special chars, unicode");
+    let golden = test_hpack_encoding(
+        &headers,
+        true,
+        "Headers with empty values, special chars, unicode",
+    );
     assert_json_snapshot!("hpack_special_characters", golden);
 }
 
 #[test]
 fn test_hpack_round_trip_basic() {
     let headers = create_test_headers("basic_get");
-    let golden = test_hpack_round_trip(&headers, false, "Basic GET headers round-trip without Huffman");
-    assert!(golden.round_trip_successful, "Round-trip should be successful");
+    let golden = test_hpack_round_trip(
+        &headers,
+        false,
+        "Basic GET headers round-trip without Huffman",
+    );
+    assert!(
+        golden.round_trip_successful,
+        "Round-trip should be successful"
+    );
     assert_json_snapshot!("hpack_round_trip_basic", golden);
 }
 
@@ -313,7 +374,10 @@ fn test_hpack_round_trip_basic() {
 fn test_hpack_round_trip_with_huffman() {
     let headers = create_test_headers("custom_headers");
     let golden = test_hpack_round_trip(&headers, true, "Custom headers round-trip with Huffman");
-    assert!(golden.round_trip_successful, "Round-trip should be successful");
+    assert!(
+        golden.round_trip_successful,
+        "Round-trip should be successful"
+    );
     assert_json_snapshot!("hpack_round_trip_with_huffman", golden);
 }
 
@@ -328,11 +392,26 @@ fn test_hpack_empty_headers() {
 fn test_hpack_static_table_hits() {
     // Headers that should hit the static table exactly
     let headers = vec![
-        Header { name: ":method".to_string(), value: "GET".to_string() },      // Index 2
-        Header { name: ":method".to_string(), value: "POST".to_string() },     // Index 3
-        Header { name: ":path".to_string(), value: "/".to_string() },          // Index 4
-        Header { name: ":scheme".to_string(), value: "https".to_string() },    // Index 7
-        Header { name: ":status".to_string(), value: "200".to_string() },      // Index 8
+        Header {
+            name: ":method".to_string(),
+            value: "GET".to_string(),
+        }, // Index 2
+        Header {
+            name: ":method".to_string(),
+            value: "POST".to_string(),
+        }, // Index 3
+        Header {
+            name: ":path".to_string(),
+            value: "/".to_string(),
+        }, // Index 4
+        Header {
+            name: ":scheme".to_string(),
+            value: "https".to_string(),
+        }, // Index 7
+        Header {
+            name: ":status".to_string(),
+            value: "200".to_string(),
+        }, // Index 8
     ];
     let golden = test_hpack_encoding(&headers, false, "Headers with exact static table matches");
     assert_json_snapshot!("hpack_static_table_hits", golden);
@@ -342,15 +421,31 @@ fn test_hpack_static_table_hits() {
 fn test_hpack_mixed_static_dynamic() {
     let headers = vec![
         // Static table hit
-        Header { name: ":method".to_string(), value: "GET".to_string() },
+        Header {
+            name: ":method".to_string(),
+            value: "GET".to_string(),
+        },
         // Static name, custom value
-        Header { name: ":path".to_string(), value: "/api/v1/users".to_string() },
+        Header {
+            name: ":path".to_string(),
+            value: "/api/v1/users".to_string(),
+        },
         // Completely custom
-        Header { name: "x-custom-header".to_string(), value: "custom-value".to_string() },
+        Header {
+            name: "x-custom-header".to_string(),
+            value: "custom-value".to_string(),
+        },
         // Static table hit
-        Header { name: "accept-encoding".to_string(), value: "gzip, deflate".to_string() },
+        Header {
+            name: "accept-encoding".to_string(),
+            value: "gzip, deflate".to_string(),
+        },
     ];
-    let golden = test_hpack_encoding(&headers, true, "Mix of static exact, static name, and custom headers");
+    let golden = test_hpack_encoding(
+        &headers,
+        true,
+        "Mix of static exact, static name, and custom headers",
+    );
     assert_json_snapshot!("hpack_mixed_static_dynamic", golden);
 }
 
@@ -369,10 +464,21 @@ fn test_hpack_compression_efficiency() {
     let mut results = BTreeMap::new();
     for (scenario, use_huffman) in scenarios {
         let headers = create_test_headers(scenario);
-        let golden = test_hpack_encoding(&headers, use_huffman,
-            &format!("{} headers {} Huffman", scenario, if use_huffman { "with" } else { "without" }));
+        let golden = test_hpack_encoding(
+            &headers,
+            use_huffman,
+            &format!(
+                "{} headers {} Huffman",
+                scenario,
+                if use_huffman { "with" } else { "without" }
+            ),
+        );
 
-        let key = format!("{}_{}", scenario, if use_huffman { "huffman" } else { "no_huffman" });
+        let key = format!(
+            "{}_{}",
+            scenario,
+            if use_huffman { "huffman" } else { "no_huffman" }
+        );
         results.insert(key, golden);
     }
 
@@ -387,8 +493,10 @@ fn test_hpack_deterministic_encoding() {
     let golden1 = test_hpack_encoding(&headers, true, "First encoding");
     let golden2 = test_hpack_encoding(&headers, true, "Second encoding");
 
-    assert_eq!(golden1.encoded_bytes, golden2.encoded_bytes,
-               "HPACK encoding should be deterministic");
+    assert_eq!(
+        golden1.encoded_bytes, golden2.encoded_bytes,
+        "HPACK encoding should be deterministic"
+    );
 
     assert_json_snapshot!("hpack_deterministic_encoding", golden1);
 }

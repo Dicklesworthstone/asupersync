@@ -25,6 +25,7 @@ pub struct DebtRuntimeIntegration {
 
 impl DebtRuntimeIntegration {
     /// Creates a new debt runtime integration.
+    #[must_use]
     pub fn new(config: CancellationDebtConfig) -> Self {
         let monitor = Arc::new(CancellationDebtMonitor::new(config));
         Self {
@@ -36,6 +37,7 @@ impl DebtRuntimeIntegration {
     }
 
     /// Creates integration with default configuration.
+    #[must_use]
     pub fn default() -> Self {
         Self::new(CancellationDebtConfig::default())
     }
@@ -78,11 +80,13 @@ impl DebtRuntimeIntegration {
     }
 
     /// Get reference to the underlying debt monitor.
+    #[must_use]
     pub fn monitor(&self) -> &Arc<CancellationDebtMonitor> {
         &self.monitor
     }
 
     /// Called when a task begins cancellation cleanup.
+    #[must_use]
     pub fn on_task_cleanup_started(
         &self,
         task_id: TaskId,
@@ -92,7 +96,7 @@ impl DebtRuntimeIntegration {
     ) -> u64 {
         self.monitor.queue_work(
             WorkType::TaskCleanup,
-            format!("task-{:?}", task_id),
+            format!("task-{task_id:?}"),
             self.calculate_priority(cancel_kind),
             estimated_cleanup_work,
             cancel_reason,
@@ -102,6 +106,7 @@ impl DebtRuntimeIntegration {
     }
 
     /// Called when a region begins closure.
+    #[must_use]
     pub fn on_region_cleanup_started(
         &self,
         region_id: RegionId,
@@ -111,7 +116,7 @@ impl DebtRuntimeIntegration {
     ) -> u64 {
         self.monitor.queue_work(
             WorkType::RegionCleanup,
-            format!("region-{:?}", region_id),
+            format!("region-{region_id:?}"),
             self.calculate_priority(cancel_kind),
             100, // Baseline region cleanup cost
             cancel_reason,
@@ -121,6 +126,7 @@ impl DebtRuntimeIntegration {
     }
 
     /// Called when waker cleanup is required.
+    #[must_use]
     pub fn on_waker_cleanup_started(
         &self,
         waker_id: String,
@@ -139,6 +145,7 @@ impl DebtRuntimeIntegration {
     }
 
     /// Called when channel cleanup begins.
+    #[must_use]
     pub fn on_channel_cleanup_started(
         &self,
         channel_id: String,
@@ -159,6 +166,7 @@ impl DebtRuntimeIntegration {
     }
 
     /// Called when obligation settlement is needed.
+    #[must_use]
     pub fn on_obligation_settlement_started(
         &self,
         obligation_id: String,
@@ -178,6 +186,7 @@ impl DebtRuntimeIntegration {
     }
 
     /// Called when resource finalization begins.
+    #[must_use]
     pub fn on_resource_finalization_started(
         &self,
         resource_id: String,
@@ -202,26 +211,31 @@ impl DebtRuntimeIntegration {
     }
 
     /// Called when multiple cleanup items complete (batch processing).
+    #[must_use]
     pub fn on_batch_cleanup_completed(&self, work_ids: &[u64]) -> usize {
         self.monitor.complete_work_batch(work_ids)
     }
 
     /// Get current debt status for monitoring dashboards.
+    #[must_use]
     pub fn get_debt_status(&self) -> DebtSnapshot {
         self.monitor.get_debt_snapshot()
     }
 
     /// Get pending work for a specific entity.
+    #[must_use]
     pub fn get_entity_debt(&self, entity_id: &str) -> Vec<PendingWork> {
         self.monitor.get_entity_pending_work(entity_id)
     }
 
     /// Get highest priority pending work.
+    #[must_use]
     pub fn get_priority_cleanup_work(&self, limit: usize) -> Vec<PendingWork> {
         self.monitor.get_priority_work(limit)
     }
 
     /// Check if emergency intervention is needed.
+    #[must_use]
     pub fn check_emergency_intervention(&self) -> bool {
         let snapshot = self.get_debt_status();
         matches!(
@@ -231,11 +245,13 @@ impl DebtRuntimeIntegration {
     }
 
     /// Execute emergency debt relief.
+    #[must_use]
     pub fn execute_emergency_relief(&self, max_work_age: Duration) -> usize {
         self.monitor.emergency_cleanup(max_work_age)
     }
 
     /// Generate a debt health report.
+    #[must_use]
     pub fn generate_debt_report(&self) -> DebtHealthReport {
         let snapshot = self.get_debt_status();
         let recent_alerts = self.monitor.get_recent_alerts(10);
@@ -345,8 +361,7 @@ impl DebtRuntimeIntegration {
         for (entity_id, &depth) in &snapshot.entity_queue_depths {
             if depth > 500 {
                 recommendations.push(format!(
-                    "Entity {} has high queue depth ({}) - investigate",
-                    entity_id, depth
+                    "Entity {entity_id} has high queue depth ({depth}) - investigate"
                 ));
             }
         }
@@ -587,7 +602,7 @@ mod tests {
 
         // Queue enough work to trigger emergency level
         for i in 0..12 {
-            integration.on_task_cleanup_started(
+            let _ = integration.on_task_cleanup_started(
                 TaskId::new_for_test(i, 0),
                 &CancelReason::user("emergency_test"),
                 CancelKind::User,

@@ -48,9 +48,10 @@
 // Default to deny for unsafe code - specific modules (like epoll reactor) can use #[allow(unsafe_code)]
 // when they need to interface with FFI or low-level system APIs
 #![deny(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
+// missing_docs, clippy::pedantic, clippy::nursery, and the large set of
+// targeted `allow` overrides live in `[lints.rust]` / `[lints.clippy]` in
+// Cargo.toml so they propagate to integration tests and benches (crate-level
+// inner attributes don't reach `tests/*.rs`).
 // Phase 0 complete: dead code denied to prevent regressions.
 // Downgraded to warn on Windows: several signal/process/io_uring items are
 // platform-gated and appear dead on non-Unix targets.
@@ -63,6 +64,10 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::duration_suboptimal_units)]
+// Pedantic/nursery/WIP lints that should be silenced are configured via
+// [lints.clippy] in Cargo.toml, which propagates to integration tests and
+// benches too. Crate-level attributes don't reach `tests/*.rs` since each
+// integration test is its own crate root.
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
 // Test harness builds a large test table in one frame.
 #![cfg_attr(test, allow(clippy::large_stack_frames))]

@@ -206,7 +206,7 @@ pub enum WakerDedupViolation {
 impl std::fmt::Display for WakerDedupViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WakerDedupViolation::LostWakeup {
+            Self::LostWakeup {
                 waker_id,
                 channel_id,
                 registered_at,
@@ -215,15 +215,14 @@ impl std::fmt::Display for WakerDedupViolation {
             } => {
                 write!(
                     f,
-                    "Lost wakeup: waker {:?} on channel {:?} registered at {:?}, expected wake at {:?}",
-                    waker_id, channel_id, registered_at, expected_wake_at
+                    "Lost wakeup: waker {waker_id:?} on channel {channel_id:?} registered at {registered_at:?}, expected wake at {expected_wake_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            WakerDedupViolation::SpuriousWakeup {
+            Self::SpuriousWakeup {
                 waker_id,
                 channel_id,
                 woken_at,
@@ -232,15 +231,14 @@ impl std::fmt::Display for WakerDedupViolation {
             } => {
                 write!(
                     f,
-                    "Spurious wakeup: waker {:?} on channel {:?} woken at {:?}, reason: {}",
-                    waker_id, channel_id, woken_at, reason
+                    "Spurious wakeup: waker {waker_id:?} on channel {channel_id:?} woken at {woken_at:?}, reason: {reason}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            WakerDedupViolation::InconsistentQueuedState {
+            Self::InconsistentQueuedState {
                 waker_id,
                 channel_id,
                 expected_queued,
@@ -250,15 +248,14 @@ impl std::fmt::Display for WakerDedupViolation {
             } => {
                 write!(
                     f,
-                    "Inconsistent queued state: waker {:?} on channel {:?} expected queued={}, actual queued={}, detected at {:?}",
-                    waker_id, channel_id, expected_queued, actual_queued, detected_at
+                    "Inconsistent queued state: waker {waker_id:?} on channel {channel_id:?} expected queued={expected_queued}, actual queued={actual_queued}, detected at {detected_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            WakerDedupViolation::RegistrationRace {
+            Self::RegistrationRace {
                 waker_id,
                 channel_id,
                 registration_time,
@@ -267,15 +264,14 @@ impl std::fmt::Display for WakerDedupViolation {
             } => {
                 write!(
                     f,
-                    "Registration race: waker {:?} on channel {:?} registered at {:?}, woken at {:?}",
-                    waker_id, channel_id, registration_time, wakeup_time
+                    "Registration race: waker {waker_id:?} on channel {channel_id:?} registered at {registration_time:?}, woken at {wakeup_time:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            WakerDedupViolation::DoubleWakeup {
+            Self::DoubleWakeup {
                 waker_id,
                 channel_id,
                 first_wake_at,
@@ -284,15 +280,14 @@ impl std::fmt::Display for WakerDedupViolation {
             } => {
                 write!(
                     f,
-                    "Double wakeup: waker {:?} on channel {:?} first woken at {:?}, second at {:?}",
-                    waker_id, channel_id, first_wake_at, second_wake_at
+                    "Double wakeup: waker {waker_id:?} on channel {channel_id:?} first woken at {first_wake_at:?}, second at {second_wake_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            WakerDedupViolation::WakerLeak {
+            Self::WakerLeak {
                 waker_id,
                 channel_id,
                 registered_at,
@@ -301,15 +296,14 @@ impl std::fmt::Display for WakerDedupViolation {
             } => {
                 write!(
                     f,
-                    "Waker leak: waker {:?} on channel {:?} registered at {:?}, detected at {:?}",
-                    waker_id, channel_id, registered_at, detected_at
+                    "Waker leak: waker {waker_id:?} on channel {channel_id:?} registered at {registered_at:?}, detected at {detected_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
-            WakerDedupViolation::UseAfterDrop {
+            Self::UseAfterDrop {
                 waker_id,
                 channel_id,
                 dropped_at,
@@ -319,11 +313,10 @@ impl std::fmt::Display for WakerDedupViolation {
             } => {
                 write!(
                     f,
-                    "Use after drop: waker {:?} on channel {:?} dropped at {:?}, operation '{}' at {:?}",
-                    waker_id, channel_id, dropped_at, operation, operation_at
+                    "Use after drop: waker {waker_id:?} on channel {channel_id:?} dropped at {dropped_at:?}, operation '{operation}' at {operation_at:?}"
                 )?;
                 if let Some(trace) = trace_id {
-                    write!(f, " (trace: {:?})", trace)?;
+                    write!(f, " (trace: {trace:?})")?;
                 }
                 Ok(())
             }
@@ -348,6 +341,7 @@ pub struct ViolationRecord {
 
 impl ViolationRecord {
     /// Create a new violation record with enhanced diagnostics.
+    #[must_use]
     pub fn new(violation: WakerDedupViolation, config: &WakerDedupConfig) -> Self {
         let trace_id = match &violation {
             WakerDedupViolation::LostWakeup { trace_id, .. } => *trace_id,
@@ -366,7 +360,7 @@ impl ViolationRecord {
         };
 
         let replay_command = if config.enable_replay_commands {
-            trace_id.map(|tid| format!("asupersync-replay --trace-id {:?}", tid))
+            trace_id.map(|tid| format!("asupersync-replay --trace-id {tid:?}"))
         } else {
             None
         };
@@ -385,8 +379,7 @@ impl ViolationRecord {
         let timestamp_millis = self
             .timestamp
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis());
 
         eprintln!(
             "{{\"type\":\"waker_dedup_violation\",\"timestamp\":{},\"violation\":\"{}\",\"trace_id\":{:?},\"replay_command\":{:?}}}",
@@ -396,7 +389,7 @@ impl ViolationRecord {
 
     fn capture_stack_trace() -> String {
         // In a real implementation, this would capture the actual stack trace
-        format!("Stack trace capture not implemented in this preview")
+        "Stack trace capture not implemented in this preview".to_string()
     }
 }
 
@@ -491,6 +484,7 @@ impl Default for WakerDedupOracle {
 
 impl WakerDedupOracle {
     /// Create a new oracle with the given configuration
+    #[must_use]
     pub fn new(config: WakerDedupConfig) -> Self {
         Self {
             config,
@@ -505,11 +499,13 @@ impl WakerDedupOracle {
     }
 
     /// Create oracle with default configuration
+    #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(WakerDedupConfig::default())
     }
 
     /// Create oracle for runtime use with enhanced detection
+    #[must_use]
     pub fn for_runtime() -> Self {
         Self::new(WakerDedupConfig {
             track_queued_state: true,
@@ -563,7 +559,7 @@ impl WakerDedupOracle {
         self.wakers.insert(waker_id, state);
         self.channel_wakers
             .entry(channel_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(waker_id);
 
         // Track for race detection
@@ -756,6 +752,7 @@ impl WakerDedupOracle {
     }
 
     /// Get current statistics
+    #[must_use]
     pub fn statistics(&self) -> WakerDedupStatistics {
         self.stats.clone()
     }
@@ -772,6 +769,7 @@ impl WakerDedupOracle {
     }
 
     /// Get violation records with diagnostics
+    #[must_use]
     pub fn violation_records(&self) -> Vec<ViolationRecord> {
         self.violation_records.iter().cloned().collect()
     }
@@ -802,9 +800,9 @@ impl WakerDedupOracle {
         // Apply enforcement mode
         match self.config.enforcement {
             EnforcementMode::Panic => {
-                panic!("Waker deduplication violation detected: {}", violation)
+                panic!("Waker deduplication violation detected: {violation}")
             }
-            EnforcementMode::Warn => eprintln!("⚠️  Waker deduplication violation: {}", violation),
+            EnforcementMode::Warn => eprintln!("⚠️  Waker deduplication violation: {violation}"),
             EnforcementMode::Collect => {} // Just collect, no immediate action
         }
     }

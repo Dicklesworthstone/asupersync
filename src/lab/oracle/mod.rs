@@ -104,8 +104,8 @@ pub use finalizer::{FinalizerId, FinalizerOracle, FinalizerViolation};
 pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
 pub use obligation_leak::{ObligationLeakOracle, ObligationLeakViolation};
 pub use priority_inversion::{
-    PriorityInversionOracle, PriorityInversionConfig, PriorityInversionStatistics,
-    PriorityInversion, InversionType, Priority, ResourceId, InversionId,
+    InversionId, InversionType, Priority, PriorityInversion, PriorityInversionConfig,
+    PriorityInversionOracle, PriorityInversionStatistics, ResourceId,
 };
 pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
 pub use region_leak::{
@@ -243,9 +243,16 @@ impl std::fmt::Display for OracleViolation {
             Self::FabricQuiescence(v) => write!(f, "FABRIC quiescence violation: {v}"),
             #[cfg(feature = "messaging-fabric")]
             Self::FabricRedelivery(v) => write!(f, "FABRIC redelivery violation: {v}"),
-            Self::PriorityInversion(v) => write!(f, "Priority inversion: Task {:?}(P{:?}) blocked by Task {:?}(P{:?}) on Resource {:?} for {:?}",
-                v.blocked_task, v.blocked_priority, v.blocking_task, v.blocking_priority, v.resource_id,
-                v.duration.unwrap_or_else(|| v.start_time.elapsed())),
+            Self::PriorityInversion(v) => write!(
+                f,
+                "Priority inversion: Task {:?}(P{:?}) blocked by Task {:?}(P{:?}) on Resource {:?} for {:?}",
+                v.blocked_task,
+                v.blocked_priority,
+                v.blocking_task,
+                v.blocking_priority,
+                v.resource_id,
+                v.duration.unwrap_or_else(|| v.start_time.elapsed())
+            ),
         }
     }
 }
@@ -512,16 +519,13 @@ impl OracleSuite {
         }
 
         let region_leak_violations = self.region_leak.check_for_violations();
-        match region_leak_violations {
-            Ok(violations_vec) => {
-                for violation in violations_vec {
-                    violations.push(OracleViolation::RegionLeak(violation));
-                }
+        if let Ok(violations_vec) = region_leak_violations {
+            for violation in violations_vec {
+                violations.push(OracleViolation::RegionLeak(violation));
             }
-            Err(_) => {
-                // Handle case where oracle fails - this would be a critical error
-                // For now, we'll skip adding violations
-            }
+        } else {
+            // Handle case where oracle fails - this would be a critical error
+            // For now, we'll skip adding violations
         }
 
         if let Err(v) = self.ambient_authority.check() {
@@ -553,29 +557,23 @@ impl OracleSuite {
         }
 
         let channel_atomicity_violations = self.channel_atomicity.check_for_violations();
-        match channel_atomicity_violations {
-            Ok(violations_vec) => {
-                for violation in violations_vec {
-                    violations.push(OracleViolation::ChannelAtomicity(violation));
-                }
+        if let Ok(violations_vec) = channel_atomicity_violations {
+            for violation in violations_vec {
+                violations.push(OracleViolation::ChannelAtomicity(violation));
             }
-            Err(_) => {
-                // Handle case where oracle fails - this would be a critical error
-                // For now, we'll skip adding violations
-            }
+        } else {
+            // Handle case where oracle fails - this would be a critical error
+            // For now, we'll skip adding violations
         }
 
         let waker_dedup_violations = self.waker_dedup.check_for_violations();
-        match waker_dedup_violations {
-            Ok(violations_vec) => {
-                for violation in violations_vec {
-                    violations.push(OracleViolation::WakerDedup(violation));
-                }
+        if let Ok(violations_vec) = waker_dedup_violations {
+            for violation in violations_vec {
+                violations.push(OracleViolation::WakerDedup(violation));
             }
-            Err(_) => {
-                // Handle case where oracle fails - this would be a critical error
-                // For now, we'll skip adding violations
-            }
+        } else {
+            // Handle case where oracle fails - this would be a critical error
+            // For now, we'll skip adding violations
         }
 
         if let Err(v) = self.actor_leak.check(now) {

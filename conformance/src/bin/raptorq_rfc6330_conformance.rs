@@ -29,9 +29,8 @@ use std::time::Duration;
 
 // Import conformance types
 use asupersync_conformance::raptorq_rfc6330::{
-    ConformanceContext, ConformanceRunner, CoverageMatrix, ConformanceResult,
-    TestExecution, generate_jsonl_logs, RequirementLevel, TestCategory,
-    ConformanceStatus
+    ConformanceContext, ConformanceResult, ConformanceRunner, ConformanceStatus, CoverageMatrix,
+    RequirementLevel, TestCategory, TestExecution, generate_jsonl_logs,
 };
 
 // All conformance types are now imported from the main module
@@ -139,9 +138,18 @@ fn main() {
     if verbose && !ci_mode {
         println!("RFC 6330 RaptorQ Conformance Test Runner");
         println!("Registered tests: {}", runner.test_count());
-        println!("MUST tests: {}", runner.test_count_by_level(RequirementLevel::Must));
-        println!("SHOULD tests: {}", runner.test_count_by_level(RequirementLevel::Should));
-        println!("MAY tests: {}", runner.test_count_by_level(RequirementLevel::May));
+        println!(
+            "MUST tests: {}",
+            runner.test_count_by_level(RequirementLevel::Must)
+        );
+        println!(
+            "SHOULD tests: {}",
+            runner.test_count_by_level(RequirementLevel::Should)
+        );
+        println!(
+            "MAY tests: {}",
+            runner.test_count_by_level(RequirementLevel::May)
+        );
         println!();
     }
 
@@ -193,7 +201,9 @@ fn main() {
         }
         runner.run_all_tests()
     } else {
-        eprintln!("Error: Must specify --run-all, --section, --level, --category, or --generate-report");
+        eprintln!(
+            "Error: Must specify --run-all, --section, --level, --category, or --generate-report"
+        );
         process::exit(1);
     };
 
@@ -265,11 +275,7 @@ fn register_all_tests(runner: &mut ConformanceRunner) {
 }
 
 /// Print test execution results in human-readable format
-fn print_test_results(
-    executions: &[TestExecution],
-    coverage: &CoverageMatrix,
-    verbose: bool,
-) {
+fn print_test_results(executions: &[TestExecution], coverage: &CoverageMatrix, verbose: bool) {
     let mut passed = 0;
     let mut failed = 0;
     let mut skipped = 0;
@@ -301,8 +307,7 @@ fn print_test_results(
         if verbose || matches!(execution.result, ConformanceResult::Fail { .. }) {
             println!(
                 "[{status:>5}] {}: {}",
-                execution.rfc_clause,
-                execution.description,
+                execution.rfc_clause, execution.description,
             );
 
             if let ConformanceResult::Fail { reason, details } = &execution.result {
@@ -333,7 +338,10 @@ fn print_test_results(
 fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecution]) {
     println!("# RFC 6330 Conformance Coverage Report");
     println!();
-    println!("**Generated:** {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"));
+    println!(
+        "**Generated:** {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
     println!("**Implementation:** asupersync RaptorQ module");
     println!("**RFC Version:** RFC 6330 - RaptorQ Forward Error Correction Scheme");
     println!();
@@ -361,7 +369,8 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
         coverage.overall.should_passing,
         coverage.overall.should_requirements,
         if coverage.overall.should_requirements > 0 {
-            coverage.overall.should_passing as f64 / coverage.overall.should_requirements as f64 * 100.0
+            coverage.overall.should_passing as f64 / coverage.overall.should_requirements as f64
+                * 100.0
         } else {
             100.0
         }
@@ -371,8 +380,12 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
     // Section-by-section breakdown
     println!("## Section Coverage Matrix");
     println!();
-    println!("| Section | MUST (pass/total) | SHOULD (pass/total) | MAY (pass/total) | Score | Status |");
-    println!("|---------|-------------------|---------------------|------------------|-------|--------|");
+    println!(
+        "| Section | MUST (pass/total) | SHOULD (pass/total) | MAY (pass/total) | Score | Status |"
+    );
+    println!(
+        "|---------|-------------------|---------------------|------------------|-------|--------|"
+    );
 
     for section in coverage.sections.values() {
         println!(
@@ -429,10 +442,7 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
             for section in coverage.failing_sections() {
                 println!(
                     "- Fix section {} ({}) - {}/{} MUST clauses passing",
-                    section.section,
-                    section.title,
-                    section.must_passing,
-                    section.must_total
+                    section.section, section.title, section.must_passing, section.must_total
                 );
             }
         }
@@ -443,10 +453,7 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
             for section in coverage.failing_sections() {
                 println!(
                     "- Address section {} ({}) failures - {}/{} MUST clauses passing",
-                    section.section,
-                    section.title,
-                    section.must_passing,
-                    section.must_total
+                    section.section, section.title, section.must_passing, section.must_total
                 );
             }
         }

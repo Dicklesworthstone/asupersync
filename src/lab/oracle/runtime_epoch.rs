@@ -53,6 +53,7 @@ pub enum RuntimeModule {
 
 impl RuntimeModule {
     /// Returns the module name as a string.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Scheduler => "scheduler",
@@ -66,7 +67,8 @@ impl RuntimeModule {
     }
 
     /// Returns all runtime modules.
-    pub fn all_modules() -> &'static [RuntimeModule] {
+    #[must_use]
+    pub fn all_modules() -> &'static [Self] {
         &[
             Self::Scheduler,
             Self::RegionTable,
@@ -432,6 +434,7 @@ impl Default for RuntimeEpochOracle {
 
 impl RuntimeEpochOracle {
     /// Creates a new runtime epoch oracle with the given configuration.
+    #[must_use]
     pub fn new(config: RuntimeEpochConfig) -> Self {
         let oracle = Self {
             config,
@@ -457,6 +460,7 @@ impl RuntimeEpochOracle {
     }
 
     /// Creates a new oracle with default configuration.
+    #[must_use]
     pub fn with_default_config() -> Self {
         Self::new(RuntimeEpochConfig::default())
     }
@@ -523,8 +527,7 @@ impl RuntimeEpochOracle {
             let states = self.module_states.read();
             states
                 .get(&module)
-                .map(|s| s.current_epoch)
-                .unwrap_or(EpochId::new(1))
+                .map_or(EpochId::new(1), |s| s.current_epoch)
         };
 
         // Check for stale epoch usage
@@ -684,9 +687,10 @@ impl RuntimeEpochOracle {
     fn record_violation(&self, violation: RuntimeEpochViolation) {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
-        if self.config.panic_on_violation {
-            panic!("Runtime epoch violation detected: {}", violation);
-        }
+        assert!(
+            !self.config.panic_on_violation,
+            "Runtime epoch violation detected: {violation}"
+        );
 
         // Record violation for later inspection
         let mut violations = self.violations.write();

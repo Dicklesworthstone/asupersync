@@ -1995,7 +1995,7 @@ impl LabRuntime {
         if let Some(record) = self.state.task_mut(task_id) {
             if !record.state.is_terminal() {
                 let old_state = record.state.clone();
-                record.request_cancel_with_budget(reason.clone(), Budget::ZERO);
+                record.request_cancel_with_budget(reason, Budget::ZERO);
 
                 // Record the state transition in the oracle after mutation is complete
                 if self.config.has_cancellation_oracle() {
@@ -2116,7 +2116,7 @@ impl LabRuntime {
         if let Err(ref violation) = result {
             if self.config.panic_on_cancellation_violation {
                 // Configurable enforcement: panic in enforce mode
-                panic!("Cancellation protocol violation detected: {}", violation);
+                panic!("Cancellation protocol violation detected: {violation}");
             } else {
                 // Warn mode: log the violation
                 crate::tracing_compat::warn!(

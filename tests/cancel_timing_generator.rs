@@ -55,7 +55,7 @@ pub struct CancelTimingPattern {
 }
 
 /// Categories of cancellation patterns
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PatternCategory {
     BasicCancelPoints,
     NestedCancellation,
@@ -260,9 +260,9 @@ pub mod generators {
         )
             .prop_map(
                 |(seed, cancel_time, source, hierarchy)| CancelTimingPattern {
-                    pattern_id: format!("basic-cancel-{:08x}", seed),
+                    pattern_id: format!("basic-cancel-{seed:08x}"),
                     category: PatternCategory::BasicCancelPoints,
-                    description: format!("Cancel at {}ms from {source:?}", cancel_time),
+                    description: format!("Cancel at {cancel_time}ms from {source:?}"),
                     timing_events: vec![TimingEvent {
                         event_type: EventType::CancelRequest,
                         virtual_time_ms: cancel_time,
@@ -293,11 +293,10 @@ pub mod generators {
                 let timing_events = create_cascading_cancel_events(&hierarchy, cascade_mode);
 
                 CancelTimingPattern {
-                    pattern_id: format!("nested-cancel-{:08x}", seed),
+                    pattern_id: format!("nested-cancel-{seed:08x}"),
                     category: PatternCategory::NestedCancellation,
                     description: format!(
-                        "{} level nested cancellation with {cascade_mode:?}",
-                        levels
+                        "{levels} level nested cancellation with {cascade_mode:?}"
                     ),
                     timing_events,
                     region_hierarchy: hierarchy,
@@ -336,11 +335,10 @@ pub mod generators {
                 }
 
                 CancelTimingPattern {
-                    pattern_id: format!("concurrent-cancel-{:08x}", seed),
+                    pattern_id: format!("concurrent-cancel-{seed:08x}"),
                     category: PatternCategory::ConcurrentCancellation,
                     description: format!(
-                        "{} concurrent cancellers within {}ms window",
-                        num_cancellers, time_window
+                        "{num_cancellers} concurrent cancellers within {time_window}ms window"
                     ),
                     timing_events,
                     region_hierarchy: hierarchy,
@@ -401,12 +399,9 @@ pub mod generators {
                 }
 
                 CancelTimingPattern {
-                    pattern_id: format!("two-phase-stress-{:08x}", seed),
+                    pattern_id: format!("two-phase-stress-{seed:08x}"),
                     category: PatternCategory::TwoPhasePressure,
-                    description: format!(
-                        "{} two-phase ops with cancel at {cancel_point:?}",
-                        num_ops
-                    ),
+                    description: format!("{num_ops} two-phase ops with cancel at {cancel_point:?}"),
                     timing_events,
                     region_hierarchy: hierarchy,
                     budget_config: BudgetConfig::renewable(50, 25),
@@ -487,9 +482,9 @@ pub mod generators {
                 }
 
                 CancelTimingPattern {
-                    pattern_id: format!("budget-interaction-{:08x}", seed),
+                    pattern_id: format!("budget-interaction-{seed:08x}"),
                     category: PatternCategory::BudgetInteractions,
-                    description: format!("Budget {} with {exhaustion_scenario:?}", budget_amount),
+                    description: format!("Budget {budget_amount} with {exhaustion_scenario:?}"),
                     timing_events,
                     region_hierarchy: hierarchy,
                     budget_config: BudgetConfig::fixed(budget_amount),
@@ -518,7 +513,7 @@ pub mod generators {
                     .collect();
 
                 CancelTimingPattern {
-                    pattern_id: format!("chaos-{:08x}", seed),
+                    pattern_id: format!("chaos-{seed:08x}"),
                     category: PatternCategory::ChaosTesting,
                     description: "Random chaos events testing robustness".to_string(),
                     timing_events,
@@ -551,7 +546,7 @@ pub mod generators {
                 }
 
                 CancelTimingPattern {
-                    pattern_id: format!("comprehensive-{:08x}", seed),
+                    pattern_id: format!("comprehensive-{seed:08x}"),
                     category: PatternCategory::ChaosTesting,
                     description: format!("Mixed scenario with {} components", components.len()),
                     timing_events,
@@ -647,11 +642,11 @@ pub enum TwoPhaseCancelPoint {
 impl TwoPhaseCancelPoint {
     fn time_offset(&self, base_time: u64) -> Option<u64> {
         match self {
-            TwoPhaseCancelPoint::BeforeReserve => Some(base_time - 10),
-            TwoPhaseCancelPoint::DuringReserve => Some(base_time + 20),
-            TwoPhaseCancelPoint::BetweenReserveCommit => Some(base_time + 25),
-            TwoPhaseCancelPoint::DuringCommit => Some(base_time + 60),
-            TwoPhaseCancelPoint::AfterCommit => None, // No cancel for this pattern
+            Self::BeforeReserve => Some(base_time - 10),
+            Self::DuringReserve => Some(base_time + 20),
+            Self::BetweenReserveCommit => Some(base_time + 25),
+            Self::DuringCommit => Some(base_time + 60),
+            Self::AfterCommit => None, // No cancel for this pattern
         }
     }
 }
@@ -675,7 +670,7 @@ pub enum ChaosEvent {
 impl ChaosEvent {
     fn to_timing_event(&self, time: u64, target: RegionId) -> TimingEvent {
         match self {
-            ChaosEvent::SpuriousWakeup => TimingEvent {
+            Self::SpuriousWakeup => TimingEvent {
                 event_type: EventType::TaskCompletion,
                 virtual_time_ms: time,
                 target_region: target,
@@ -683,7 +678,7 @@ impl ChaosEvent {
                 trigger_condition: Some(TriggerCondition::Probability(0.3)),
                 expected_propagation: vec![],
             },
-            ChaosEvent::TimeoutFire => TimingEvent {
+            Self::TimeoutFire => TimingEvent {
                 event_type: EventType::TimeoutExpiry,
                 virtual_time_ms: time + 10,
                 target_region: target,
@@ -714,7 +709,7 @@ pub enum ScenarioComponent {
 impl ScenarioComponent {
     fn generate_events(&self, base_time: u64, hierarchy: &RegionHierarchy) -> Vec<TimingEvent> {
         match self {
-            ScenarioComponent::NestedCancel => vec![TimingEvent {
+            Self::NestedCancel => vec![TimingEvent {
                 event_type: EventType::CancelRequest,
                 virtual_time_ms: base_time,
                 target_region: hierarchy.root_region,
@@ -728,11 +723,11 @@ impl ScenarioComponent {
 
     fn required_invariants(&self) -> Vec<ExpectedInvariant> {
         match self {
-            ScenarioComponent::NestedCancel => vec![
+            Self::NestedCancel => vec![
                 ExpectedInvariant::structured_concurrency(),
                 ExpectedInvariant::no_task_orphans(),
             ],
-            ScenarioComponent::TwoPhasePressure => vec![
+            Self::TwoPhasePressure => vec![
                 ExpectedInvariant::two_phase_correctness(),
                 ExpectedInvariant::resources_freed(),
             ],
@@ -840,7 +835,7 @@ impl RegionHierarchy {
                 level as RegionId,
                 RegionInfo {
                     id: level as RegionId,
-                    name: format!("level-{}", level),
+                    name: format!("level-{level}"),
                     expected_task_count: 1,
                     cleanup_complexity: if level == 0 {
                         CleanupComplexity::Trivial
@@ -883,7 +878,7 @@ impl RegionHierarchy {
                 i as RegionId,
                 RegionInfo {
                     id: i as RegionId,
-                    name: format!("sibling-{}", i),
+                    name: format!("sibling-{i}"),
                     expected_task_count: 1,
                     cleanup_complexity: CleanupComplexity::Simple,
                 },

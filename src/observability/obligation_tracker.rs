@@ -441,7 +441,7 @@ impl ObligationTracker {
         let region_obligations = self.by_region(region_id);
         let active_obligations: Vec<_> = region_obligations
             .into_iter()
-            .filter(|o| o.is_active())
+            .filter(ObligationInfo::is_active)
             .collect();
 
         if !active_obligations.is_empty() {

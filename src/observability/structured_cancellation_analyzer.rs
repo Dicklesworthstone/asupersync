@@ -130,6 +130,7 @@ pub struct StructuredCancellationAnalyzer {
 
 impl StructuredCancellationAnalyzer {
     /// Creates a new structured cancellation analyzer.
+    #[must_use]
     pub fn new(config: StructuredCancellationConfig) -> Self {
         let tracer = CancellationTracer::new(config.tracer_config.clone());
         let visualizer = CancellationVisualizer::new(config.visualizer_config.clone());
@@ -154,6 +155,7 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Creates an analyzer with default configuration.
+    #[must_use]
     pub fn default() -> Self {
         Self::new(StructuredCancellationConfig::default())
     }
@@ -246,21 +248,19 @@ impl StructuredCancellationAnalyzer {
     /// Visualize a specific trace as a tree.
     pub fn visualize_trace(&self, trace_id: crate::observability::TraceId) -> Option<String> {
         let traces = self.tracer.completed_traces();
-        if let Some(trace) = traces.iter().find(|t| t.trace_id == trace_id) {
-            Some(self.visualizer.visualize_trace_tree(trace))
-        } else {
-            None
-        }
+        traces
+            .iter()
+            .find(|t| t.trace_id == trace_id)
+            .map(|trace| self.visualizer.visualize_trace_tree(trace))
     }
 
     /// Generate timeline visualization for a trace.
     pub fn visualize_timeline(&self, trace_id: crate::observability::TraceId) -> Option<String> {
         let traces = self.tracer.completed_traces();
-        if let Some(trace) = traces.iter().find(|t| t.trace_id == trace_id) {
-            Some(self.visualizer.visualize_timeline(trace))
-        } else {
-            None
-        }
+        traces
+            .iter()
+            .find(|t| t.trace_id == trace_id)
+            .map(|trace| self.visualizer.visualize_timeline(trace))
     }
 
     /// Export traces as graphviz dot format.
@@ -359,8 +359,7 @@ impl StructuredCancellationAnalyzer {
                 alert_type: AlertType::SlowPropagation,
                 severity: AlertSeverity::Warning,
                 message: format!(
-                    "Entity {} showing consistently slow cancellation propagation",
-                    entity_id
+                    "Entity {entity_id} showing consistently slow cancellation propagation"
                 ),
                 entity_id: Some(entity_id.to_string()),
                 metric_value: slow_count as f64 / entity_traces.len() as f64 * 100.0,
@@ -380,7 +379,7 @@ impl StructuredCancellationAnalyzer {
             self.trigger_alert(&CancellationAlert {
                 alert_type: AlertType::AnomalySpike,
                 severity: AlertSeverity::Error,
-                message: format!("High anomaly rate detected for entity {}", entity_id),
+                message: format!("High anomaly rate detected for entity {entity_id}"),
                 entity_id: Some(entity_id.to_string()),
                 metric_value: total_anomalies as f64 / entity_traces.len() as f64,
                 threshold: 1.0,

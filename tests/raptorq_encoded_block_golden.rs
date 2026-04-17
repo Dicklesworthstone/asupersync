@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 
 use asupersync::config::EncodingConfig;
 use asupersync::encoding::EncodingPipeline;
+use asupersync::types::Symbol;
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::symbol::{ObjectId, SymbolKind};
-use asupersync::types::Symbol;
 use asupersync::util::DetRng;
 
 /// Golden artifact representation of an encoded symbol.
@@ -160,7 +160,12 @@ fn test_encode_small_block_no_repair() {
     let config = create_test_encoding_config(1280, 0.0); // No repair symbols
     let seed = 42;
 
-    let golden = encode_to_golden(input, config, seed, "Small single-symbol block with no repair");
+    let golden = encode_to_golden(
+        input,
+        config,
+        seed,
+        "Small single-symbol block with no repair",
+    );
 
     assert_json_snapshot!("encode_small_block_no_repair", golden);
 }
@@ -172,12 +177,7 @@ fn test_encode_small_block_with_repair() {
     let config = create_test_encoding_config(1280, 0.25); // 25% repair overhead
     let seed = 123;
 
-    let golden = encode_to_golden(
-        input,
-        config,
-        seed,
-        "Small block with 25% repair overhead"
-    );
+    let golden = encode_to_golden(input, config, seed, "Small block with 25% repair overhead");
 
     assert_json_snapshot!("encode_small_block_with_repair", golden);
 }
@@ -193,7 +193,7 @@ fn test_encode_multi_symbol_block() {
         &input,
         config,
         seed,
-        "Multi-symbol block (3KB data, 1KB symbols) with 10% repair"
+        "Multi-symbol block (3KB data, 1KB symbols) with 10% repair",
     );
 
     assert_json_snapshot!("encode_multi_symbol_block", golden);
@@ -211,7 +211,7 @@ fn test_encode_boundary_conditions() {
         &input_exact,
         config.clone(),
         seed,
-        "Exactly one symbol size with 50% repair overhead"
+        "Exactly one symbol size with 50% repair overhead",
     );
 
     assert_json_snapshot!("encode_boundary_exact", golden_exact);
@@ -222,7 +222,7 @@ fn test_encode_boundary_conditions() {
         &input_over,
         config,
         seed + 1,
-        "One byte over symbol size with 50% repair overhead"
+        "One byte over symbol size with 50% repair overhead",
     );
 
     assert_json_snapshot!("encode_boundary_over", golden_over);
@@ -273,7 +273,7 @@ fn test_encode_varying_sizes() {
             &input,
             config.clone(),
             base_seed + i as u64,
-            &format!("Size {} bytes", size)
+            &format!("Size {size} bytes"),
         );
         goldens.insert(size, golden);
     }
@@ -292,7 +292,7 @@ fn test_encode_systematic_properties() {
         input,
         config,
         seed,
-        "Systematic encoding with 100% repair overhead"
+        "Systematic encoding with 100% repair overhead",
     );
 
     // Verify we have both source and repair symbols

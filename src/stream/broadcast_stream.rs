@@ -61,7 +61,7 @@ impl<T: Clone> BroadcastStream<T> {
         // Use ptr::read to extract inner without running Drop
         // SAFETY: We've manually performed the cleanup that Drop would do,
         // and we use mem::forget to prevent Drop from running again.
-        let inner = unsafe { ptr::read(&self.inner) };
+        let inner = unsafe { ptr::read(&raw const self.inner) };
 
         // Prevent Drop from running
         std::mem::forget(self);

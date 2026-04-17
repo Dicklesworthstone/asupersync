@@ -358,6 +358,7 @@ impl Default for CancelOrderingOracle {
 
 impl CancelOrderingOracle {
     /// Creates a new cancel signal ordering oracle with the given configuration.
+    #[must_use]
     pub fn new(config: CancelOrderingConfig) -> Self {
         Self {
             config,
@@ -370,6 +371,7 @@ impl CancelOrderingOracle {
     }
 
     /// Creates a new oracle with default configuration.
+    #[must_use]
     pub fn with_default_config() -> Self {
         Self::new(CancelOrderingConfig::default())
     }
@@ -580,9 +582,10 @@ impl CancelOrderingOracle {
     fn record_violation(&self, violation: CancelOrderingViolation) {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
-        if self.config.panic_on_violation {
-            panic!("Cancel ordering violation detected: {}", violation);
-        }
+        assert!(
+            !self.config.panic_on_violation,
+            "Cancel ordering violation detected: {violation}"
+        );
 
         // Record violation for later inspection
         let mut violations = self.violations.write();

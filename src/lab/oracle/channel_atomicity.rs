@@ -358,6 +358,7 @@ pub struct ViolationRecord {
 
 impl ViolationRecord {
     /// Creates a new violation record with metadata from the given violation and config.
+    #[must_use]
     pub fn new(violation: ChannelAtomicityViolation, config: &ChannelAtomicityConfig) -> Self {
         let trace_id = match &violation {
             ChannelAtomicityViolation::ReservationLeak { trace_id, .. } => *trace_id,
@@ -377,7 +378,7 @@ impl ViolationRecord {
         };
 
         let replay_command = if config.enable_replay_commands {
-            trace_id.map(|tid| format!("asupersync-replay --trace-id {:?}", tid))
+            trace_id.map(|tid| format!("asupersync-replay --trace-id {tid:?}"))
         } else {
             None
         };
@@ -396,8 +397,7 @@ impl ViolationRecord {
         let timestamp_millis = self
             .timestamp
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis());
 
         eprintln!(
             "{{\"type\":\"channel_atomicity_violation\",\"timestamp\":{},\"violation\":\"{}\",\"trace_id\":{:?},\"replay_command\":{:?}}}",
@@ -408,7 +408,7 @@ impl ViolationRecord {
     fn capture_stack_trace() -> String {
         // In a real implementation, this would capture the actual stack trace
         // For now, we provide a placeholder
-        format!("Stack trace capture not implemented in this preview")
+        "Stack trace capture not implemented in this preview".to_string()
     }
 }
 
@@ -518,6 +518,7 @@ impl Default for ChannelAtomicityOracle {
 
 impl ChannelAtomicityOracle {
     /// Create a new oracle with the given configuration
+    #[must_use]
     pub fn new(config: ChannelAtomicityConfig) -> Self {
         Self {
             config,
@@ -532,11 +533,13 @@ impl ChannelAtomicityOracle {
     }
 
     /// Create oracle with default configuration
+    #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(ChannelAtomicityConfig::default())
     }
 
     /// Create oracle for runtime use with enhanced enforcement
+    #[must_use]
     pub fn for_runtime() -> Self {
         Self::new(ChannelAtomicityConfig {
             track_reservations: true,
@@ -573,7 +576,7 @@ impl ChannelAtomicityOracle {
         self.reservations.insert(reservation_id, state);
         self.channel_reservations
             .entry(channel_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(reservation_id);
 
         self.stats.total_reservations_created += 1;
@@ -688,7 +691,7 @@ impl ChannelAtomicityOracle {
         self.wakers.insert(waker_id, state);
         self.channel_wakers
             .entry(channel_id)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(waker_id);
 
         self.stats.total_wakers_registered += 1;
@@ -769,6 +772,7 @@ impl ChannelAtomicityOracle {
     }
 
     /// Get current statistics
+    #[must_use]
     pub fn statistics(&self) -> ChannelAtomicityStatistics {
         self.stats.clone()
     }
@@ -785,6 +789,7 @@ impl ChannelAtomicityOracle {
     }
 
     /// Get violation records with diagnostics
+    #[must_use]
     pub fn violation_records(&self) -> Vec<ViolationRecord> {
         self.violation_records.iter().cloned().collect()
     }
@@ -814,8 +819,8 @@ impl ChannelAtomicityOracle {
 
         // Apply enforcement mode
         match self.config.enforcement {
-            EnforcementMode::Panic => panic!("Channel atomicity violation detected: {}", violation),
-            EnforcementMode::Warn => eprintln!("⚠️  Channel atomicity violation: {}", violation),
+            EnforcementMode::Panic => panic!("Channel atomicity violation detected: {violation}"),
+            EnforcementMode::Warn => eprintln!("⚠️  Channel atomicity violation: {violation}"),
             EnforcementMode::Collect => {} // Just collect, no immediate action
         }
     }
@@ -862,13 +867,13 @@ impl ChannelAtomicityOracle {
     /// Clean up old reservations to prevent memory leaks
     fn cleanup_old_reservations(&mut self) {
         // Clean up per-channel reservation tracking
-        for (_channel_id, reservation_set) in &mut self.channel_reservations {
+        for reservation_set in self.channel_reservations.values_mut() {
             if reservation_set.len() > self.config.max_reservations_per_channel {
                 // Remove oldest reservations (this is a simplified cleanup)
                 let to_remove: Vec<ReservationId> = reservation_set
                     .iter()
                     .take(reservation_set.len() - self.config.max_reservations_per_channel)
-                    .cloned()
+                    .copied()
                     .collect();
 
                 for reservation_id in to_remove {

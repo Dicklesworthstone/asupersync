@@ -27,6 +27,8 @@
 //!     .build()?;
 //! ```
 
+#![allow(missing_docs)]
+
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{HashMap, HashSet};
 
@@ -34,17 +36,17 @@ use std::collections::{HashMap, HashSet};
 use crate::observability::context::{DiagnosticContext, SpanId};
 #[cfg(feature = "metrics")]
 use opentelemetry::{
-    trace::{Span, SpanKind, Status, Tracer},
     KeyValue, Value,
+    trace::{Span, SpanKind, Status, Tracer},
 };
 #[cfg(feature = "metrics")]
 use parking_lot::{Mutex, RwLock};
 #[cfg(feature = "metrics")]
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "metrics")]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "metrics")]
 use std::sync::Arc;
+#[cfg(feature = "metrics")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Entity identifier for span tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,12 +72,13 @@ pub enum SpanType {
 
 impl SpanType {
     /// Returns the default span name for this span type.
+    #[must_use]
     pub fn default_name(self) -> &'static str {
         match self {
-            SpanType::Region => "region_lifecycle",
-            SpanType::Task => "task_execution",
-            SpanType::Operation => "operation",
-            SpanType::Cancel => "cancellation_event",
+            Self::Region => "region_lifecycle",
+            Self::Task => "task_execution",
+            Self::Operation => "operation",
+            Self::Cancel => "cancellation_event",
         }
     }
 }
@@ -226,7 +229,7 @@ impl PendingSpan {
         span_builder = span_builder.with_kind(match self.span_type {
             SpanType::Region => SpanKind::Internal,
             SpanType::Task => SpanKind::Internal,
-            SpanType::Operation => SpanKind::Client,  // Most operations are outbound
+            SpanType::Operation => SpanKind::Client, // Most operations are outbound
             SpanType::Cancel => SpanKind::Internal,
         });
 
@@ -348,7 +351,10 @@ impl SpanStorage {
         }
 
         // Check span-type specific rate
-        let sample_rate = self.config.span_type_rates.get(&span_type)
+        let sample_rate = self
+            .config
+            .span_type_rates
+            .get(&span_type)
             .copied()
             .unwrap_or(self.config.global_sample_rate);
 
@@ -376,7 +382,9 @@ impl SpanStorage {
     ) -> bool {
         // Check sampling
         if !self.should_sample(span_type) {
-            self.stats.spans_dropped_sampling.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .spans_dropped_sampling
+                .fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
@@ -385,19 +393,15 @@ impl SpanStorage {
             let pending = self.pending_spans.read();
             let active = self.active_spans.read();
             if pending.len() + active.len() >= self.config.max_active_spans {
-                self.stats.spans_dropped_overflow.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .spans_dropped_overflow
+                    .fetch_add(1, Ordering::Relaxed);
                 return false;
             }
         }
 
         // Create pending span
-        let pending_span = PendingSpan::new(
-            span_type,
-            entity_id,
-            name,
-            start_time,
-            parent_context,
-        );
+        let pending_span = PendingSpan::new(span_type, entity_id, name, start_time, parent_context);
 
         let mut pending_spans = self.pending_spans.write();
         pending_spans.insert(entity_id, pending_span);
@@ -407,11 +411,7 @@ impl SpanStorage {
     }
 
     /// Materializes a pending span if it meets the lazy threshold.
-    pub fn maybe_materialize_span(
-        &self,
-        entity_id: EntityId,
-        tracer: &dyn Tracer,
-    ) -> bool {
+    pub fn maybe_materialize_span(&self, entity_id: EntityId, tracer: &dyn Tracer) -> bool {
         let should_materialize = {
             let pending_spans = self.pending_spans.read();
             if let Some(pending) = pending_spans.get(&entity_id) {
@@ -437,18 +437,18 @@ impl SpanStorage {
 
         if let Some(pending) = pending_span {
             let span = pending.materialize(tracer);
-            let active_span = ActiveSpan::new(
-                span,
-                pending.span_type,
-                entity_id,
-                pending.start_time,
-            );
+            let active_span =
+                ActiveSpan::new(span, pending.span_type, entity_id, pending.start_time);
 
             let mut active_spans = self.active_spans.write();
             active_spans.insert(entity_id, active_span);
 
-            self.stats.spans_materialized.fetch_add(1, Ordering::Relaxed);
-            self.stats.lazy_materializations.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .spans_materialized
+                .fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .lazy_materializations
+                .fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -508,20 +508,20 @@ pub struct SpanStorage;
 
 #[cfg(not(feature = "metrics"))]
 impl SpanStorage {
+    #[must_use]
     pub fn new(_config: OtelStructuredConcurrencyConfig) -> Self {
         Self
     }
 
+    #[must_use]
     pub fn create_pending_span(
         &self,
         _span_type: SpanType,
         _entity_id: EntityId,
         _name: String,
         _start_time: Time,
-        #[cfg(feature = "metrics")]
-        _parent_context: Option<opentelemetry::Context>,
-        #[cfg(not(feature = "metrics"))]
-        _parent_context: Option<()>,
+        #[cfg(feature = "metrics")] _parent_context: Option<opentelemetry::Context>,
+        #[cfg(not(feature = "metrics"))] _parent_context: Option<()>,
     ) -> bool {
         false
     }
@@ -534,6 +534,7 @@ impl SpanStorage {
 
     pub fn add_span_operation(&self, _entity_id: EntityId) {}
 
+    #[must_use]
     pub fn stats(&self) -> (u64, u64, u64, u64, u64, u64) {
         (0, 0, 0, 0, 0, 0)
     }
@@ -596,7 +597,14 @@ mod tests {
         let config = OtelStructuredConcurrencyConfig::default();
         let storage = SpanStorage::new(config);
 
-        let (created, materialized, dropped_overflow, dropped_sampling, context_propagations, lazy_materializations) = storage.stats();
+        let (
+            created,
+            materialized,
+            dropped_overflow,
+            dropped_sampling,
+            context_propagations,
+            lazy_materializations,
+        ) = storage.stats();
         assert_eq!(created, 0);
         assert_eq!(materialized, 0);
         assert_eq!(dropped_overflow, 0);

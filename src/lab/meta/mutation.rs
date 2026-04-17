@@ -80,7 +80,14 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_AMBIENT_AUTHORITY,
     INVARIANT_FINALIZER,
     INVARIANT_REGION_TREE,
+    "region_leak",
     INVARIANT_DEADLINE_MONOTONE,
+    INVARIANT_CANCEL_CORRECTNESS,
+    INVARIANT_CANCEL_DEBT,
+    INVARIANT_CANCEL_ORDERING,
+    INVARIANT_RUNTIME_EPOCH,
+    INVARIANT_CHANNEL_ATOMICITY,
+    INVARIANT_WAKER_DEDUP,
     INVARIANT_ACTOR_LEAK,
     INVARIANT_SUPERVISION,
     INVARIANT_MAILBOX,
@@ -89,6 +96,10 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_REGISTRY_LEASE,
     INVARIANT_DOWN_ORDER,
     INVARIANT_SUPERVISOR_QUIESCENCE,
+    // Note: INVARIANT_PRIORITY_INVERSION exists as an OracleViolation variant
+    // but the PriorityInversionOracle is not yet wired into OracleSuite::report,
+    // so it isn't counted in the oracle_report tests. Leave it out here until
+    // the oracle is integrated.
     #[cfg(feature = "messaging-fabric")]
     INVARIANT_FABRIC_PUBLISH,
     #[cfg(feature = "messaging-fabric")]

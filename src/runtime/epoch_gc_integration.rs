@@ -4,8 +4,9 @@
 //! the various runtime components that need cleanup, ensuring that cleanup
 //! operations are properly deferred and batched for optimal performance.
 
+#![allow(missing_docs)]
+
 use crate::runtime::epoch_gc::{CleanupWork, EpochGC};
-use crate::runtime::{ObligationTable, RegionTable, TaskTable};
 use crate::types::{RegionId, TaskId};
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +60,7 @@ impl Default for EpochGCIntegrationConfig {
 
 impl EpochGCIntegrationConfig {
     /// Create a configuration with all epoch GC disabled (direct cleanup only).
+    #[must_use]
     pub fn disabled() -> Self {
         Self {
             enable_obligation_gc: false,
@@ -73,6 +75,7 @@ impl EpochGCIntegrationConfig {
     }
 
     /// Enable all epoch GC features.
+    #[must_use]
     pub fn enable_all(mut self) -> Self {
         self.enable_obligation_gc = true;
         self.enable_waker_gc = true;
@@ -83,6 +86,7 @@ impl EpochGCIntegrationConfig {
     }
 
     /// Disable all epoch GC features.
+    #[must_use]
     pub fn disable_all(mut self) -> Self {
         self.enable_obligation_gc = false;
         self.enable_waker_gc = false;
@@ -93,6 +97,7 @@ impl EpochGCIntegrationConfig {
     }
 
     /// Enable integration logging.
+    #[must_use]
     pub fn with_logging(mut self) -> Self {
         self.enable_integration_logging = true;
         self
@@ -128,6 +133,7 @@ pub struct ObligationTableEpochGC {
 
 impl ObligationTableEpochGC {
     /// Create a new obligation table epoch GC integration.
+    #[must_use]
     pub fn new(epoch_gc: Option<Arc<EpochGC>>, config: EpochGCIntegrationConfig) -> Self {
         Self { epoch_gc, config }
     }
@@ -145,7 +151,8 @@ impl ObligationTableEpochGC {
         };
 
         match self.try_defer_cleanup(work) {
-            Ok(()) => {
+            Ok(()) =>
+            {
                 #[cfg(feature = "tracing-integration")]
                 if self.config.enable_integration_logging {
                     tracing::debug!(
@@ -168,7 +175,7 @@ impl ObligationTableEpochGC {
     }
 
     /// Direct cleanup implementation for obligations.
-    fn direct_cleanup_obligation(&self, obligation_id: u64, metadata: &[u8]) {
+    fn direct_cleanup_obligation(&self, _obligation_id: u64, _metadata: &[u8]) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
@@ -216,6 +223,7 @@ pub struct IODriverWakerEpochGC {
 
 impl IODriverWakerEpochGC {
     /// Create a new IO driver waker epoch GC integration.
+    #[must_use]
     pub fn new(epoch_gc: Option<Arc<EpochGC>>, config: EpochGCIntegrationConfig) -> Self {
         Self { epoch_gc, config }
     }
@@ -233,13 +241,11 @@ impl IODriverWakerEpochGC {
         };
 
         match self.try_defer_cleanup(work) {
-            Ok(()) => {
+            Ok(()) =>
+            {
                 #[cfg(feature = "tracing-integration")]
                 if self.config.enable_integration_logging {
-                    tracing::debug!(
-                        waker_id = waker_id,
-                        "Deferred waker cleanup to epoch GC"
-                    );
+                    tracing::debug!(waker_id = waker_id, "Deferred waker cleanup to epoch GC");
                 }
             }
             Err(work) => {
@@ -256,14 +262,10 @@ impl IODriverWakerEpochGC {
     }
 
     /// Direct cleanup implementation for wakers.
-    fn direct_cleanup_waker(&self, waker_id: u64, source: &str) {
+    fn direct_cleanup_waker(&self, _waker_id: u64, source: &str) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
-            tracing::debug!(
-                waker_id = waker_id,
-                source = source,
-                "Direct waker cleanup"
-            );
+            tracing::debug!(waker_id = waker_id, source = source, "Direct waker cleanup");
         }
 
         // Platform-specific direct cleanup
@@ -317,6 +319,7 @@ pub struct RegionStateEpochGC {
 
 impl RegionStateEpochGC {
     /// Create a new region state epoch GC integration.
+    #[must_use]
     pub fn new(epoch_gc: Option<Arc<EpochGC>>, config: EpochGCIntegrationConfig) -> Self {
         Self { epoch_gc, config }
     }
@@ -328,10 +331,14 @@ impl RegionStateEpochGC {
             return;
         }
 
-        let work = CleanupWork::RegionCleanup { region_id, task_ids };
+        let work = CleanupWork::RegionCleanup {
+            region_id,
+            task_ids,
+        };
 
         match self.try_defer_cleanup(work) {
-            Ok(()) => {
+            Ok(()) =>
+            {
                 #[cfg(feature = "tracing-integration")]
                 if self.config.enable_integration_logging {
                     tracing::debug!(
@@ -354,7 +361,7 @@ impl RegionStateEpochGC {
     }
 
     /// Direct cleanup implementation for regions.
-    fn direct_cleanup_region(&self, region_id: RegionId, task_ids: &[TaskId]) {
+    fn direct_cleanup_region(&self, _region_id: RegionId, task_ids: &[TaskId]) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
@@ -365,7 +372,7 @@ impl RegionStateEpochGC {
         }
 
         // Direct cleanup of region state
-        for &task_id in task_ids {
+        for &_task_id in task_ids {
             // task_table.remove_task(task_id);
             // obligation_table.cleanup_task_obligations(task_id);
         }
@@ -385,7 +392,11 @@ impl EpochCleanupIntegration for RegionStateEpochGC {
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
-        if let CleanupWork::RegionCleanup { region_id, task_ids } = work {
+        if let CleanupWork::RegionCleanup {
+            region_id,
+            task_ids,
+        } = work
+        {
             self.direct_cleanup_region(region_id, &task_ids);
         }
     }
@@ -407,6 +418,7 @@ pub struct TimerEpochGC {
 
 impl TimerEpochGC {
     /// Create a new timer epoch GC integration.
+    #[must_use]
     pub fn new(epoch_gc: Option<Arc<EpochGC>>, config: EpochGCIntegrationConfig) -> Self {
         Self { epoch_gc, config }
     }
@@ -424,13 +436,11 @@ impl TimerEpochGC {
         };
 
         match self.try_defer_cleanup(work) {
-            Ok(()) => {
+            Ok(()) =>
+            {
                 #[cfg(feature = "tracing-integration")]
                 if self.config.enable_integration_logging {
-                    tracing::debug!(
-                        timer_id = timer_id,
-                        "Deferred timer cleanup to epoch GC"
-                    );
+                    tracing::debug!(timer_id = timer_id, "Deferred timer cleanup to epoch GC");
                 }
             }
             Err(work) => {
@@ -447,7 +457,7 @@ impl TimerEpochGC {
     }
 
     /// Direct cleanup implementation for timers.
-    fn direct_cleanup_timer(&self, timer_id: u64, timer_type: &str) {
+    fn direct_cleanup_timer(&self, _timer_id: u64, timer_type: &str) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
@@ -476,7 +486,10 @@ impl TimerEpochGC {
             }
             _ => {
                 #[cfg(feature = "tracing-integration")]
-                tracing::warn!(timer_type = timer_type, "Unknown timer type for direct cleanup");
+                tracing::warn!(
+                    timer_type = timer_type,
+                    "Unknown timer type for direct cleanup"
+                );
             }
         }
     }
@@ -492,7 +505,11 @@ impl EpochCleanupIntegration for TimerEpochGC {
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
-        if let CleanupWork::TimerCleanup { timer_id, timer_type } = work {
+        if let CleanupWork::TimerCleanup {
+            timer_id,
+            timer_type,
+        } = work
+        {
             self.direct_cleanup_timer(timer_id, &timer_type);
         }
     }
@@ -514,17 +531,13 @@ pub struct ChannelEpochGC {
 
 impl ChannelEpochGC {
     /// Create a new channel epoch GC integration.
+    #[must_use]
     pub fn new(epoch_gc: Option<Arc<EpochGC>>, config: EpochGCIntegrationConfig) -> Self {
         Self { epoch_gc, config }
     }
 
     /// Clean up channel state, using epoch GC if available.
-    pub fn cleanup_channel(
-        &self,
-        channel_id: u64,
-        cleanup_type: impl Into<String>,
-        data: Vec<u8>,
-    ) {
+    pub fn cleanup_channel(&self, channel_id: u64, cleanup_type: impl Into<String>, data: Vec<u8>) {
         if !self.config.enable_channel_gc {
             self.direct_cleanup_channel(channel_id, &cleanup_type.into(), &data);
             return;
@@ -537,7 +550,8 @@ impl ChannelEpochGC {
         };
 
         match self.try_defer_cleanup(work) {
-            Ok(()) => {
+            Ok(()) =>
+            {
                 #[cfg(feature = "tracing-integration")]
                 if self.config.enable_integration_logging {
                     tracing::debug!(
@@ -560,7 +574,7 @@ impl ChannelEpochGC {
     }
 
     /// Direct cleanup implementation for channels.
-    fn direct_cleanup_channel(&self, channel_id: u64, cleanup_type: &str, data: &[u8]) {
+    fn direct_cleanup_channel(&self, _channel_id: u64, cleanup_type: &str, _data: &[u8]) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
@@ -612,7 +626,12 @@ impl EpochCleanupIntegration for ChannelEpochGC {
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
-        if let CleanupWork::ChannelCleanup { channel_id, cleanup_type, data } = work {
+        if let CleanupWork::ChannelCleanup {
+            channel_id,
+            cleanup_type,
+            data,
+        } = work
+        {
             self.direct_cleanup_channel(channel_id, &cleanup_type, &data);
         }
     }
@@ -638,21 +657,20 @@ pub struct RuntimeEpochGCIntegration {
 
 impl RuntimeEpochGCIntegration {
     /// Create a new unified runtime epoch GC integration.
-    pub fn new(
-        epoch_gc: Option<Arc<EpochGC>>,
-        config: EpochGCIntegrationConfig,
-    ) -> Self {
+    #[must_use]
+    pub fn new(epoch_gc: Option<Arc<EpochGC>>, config: EpochGCIntegrationConfig) -> Self {
         Self {
             obligation_gc: ObligationTableEpochGC::new(epoch_gc.clone(), config.clone()),
             waker_gc: IODriverWakerEpochGC::new(epoch_gc.clone(), config.clone()),
             region_gc: RegionStateEpochGC::new(epoch_gc.clone(), config.clone()),
             timer_gc: TimerEpochGC::new(epoch_gc.clone(), config.clone()),
-            channel_gc: ChannelEpochGC::new(epoch_gc.clone(), config.clone()),
+            channel_gc: ChannelEpochGC::new(epoch_gc.clone(), config),
             epoch_gc,
         }
     }
 
     /// Create integration with epoch GC disabled (direct cleanup only).
+    #[must_use]
     pub fn disabled() -> Self {
         let config = EpochGCIntegrationConfig::disabled();
         Self::new(None, config)
@@ -660,6 +678,7 @@ impl RuntimeEpochGCIntegration {
 
     /// Trigger epoch advancement and cleanup processing.
     /// This should be called periodically from the runtime scheduler.
+    #[must_use]
     pub fn try_advance_epoch(&self) -> usize {
         if let Some(ref epoch_gc) = self.epoch_gc {
             epoch_gc.try_advance_and_cleanup()
@@ -679,28 +698,29 @@ impl RuntimeEpochGCIntegration {
     }
 
     /// Get epoch GC statistics.
+    #[must_use]
     pub fn stats(&self) -> Option<&crate::runtime::epoch_gc::CleanupStats> {
         self.epoch_gc.as_ref().map(|gc| gc.stats())
     }
 
     /// Check if epoch GC is enabled.
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.epoch_gc.is_some()
     }
 
     /// Check if the cleanup queue is near capacity.
+    #[must_use]
     pub fn is_near_capacity(&self) -> bool {
         self.epoch_gc
             .as_ref()
-            .map(|gc| gc.is_cleanup_queue_near_capacity())
-            .unwrap_or(false)
+            .is_some_and(|gc| gc.is_cleanup_queue_near_capacity())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::epoch_gc::CleanupConfig;
 
     #[test]
     fn test_integration_config_defaults() {

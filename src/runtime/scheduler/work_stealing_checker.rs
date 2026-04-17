@@ -15,12 +15,14 @@
 //! 4. **Ownership Transfer**: Stealing transfers ownership atomically
 //! 5. **LIFO/FIFO Ordering**: Owner uses LIFO, stealers use FIFO
 
-use crate::types::TaskId;
+#![allow(missing_docs)]
+
 use crate::runtime::scheduler::worker::WorkerId;
+use crate::types::TaskId;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Statistics for work-stealing operations.
@@ -166,7 +168,12 @@ impl WorkStealingChecker {
     }
 
     /// Records the start of a steal operation.
-    pub fn track_steal_start(&self, task_id: TaskId, from_worker: WorkerId, to_worker: WorkerId) -> Option<StealTracker> {
+    pub fn track_steal_start(
+        &self,
+        task_id: TaskId,
+        from_worker: WorkerId,
+        to_worker: WorkerId,
+    ) -> Option<StealTracker<'_>> {
         if !self.enabled {
             return None;
         }
@@ -176,7 +183,10 @@ impl WorkStealingChecker {
             if let Some(state) = owners.get_mut(&task_id) {
                 match state {
                     OwnershipState::Owned(owner) if *owner == from_worker => {
-                        *state = OwnershipState::Stealing { from: from_worker, to: to_worker };
+                        *state = OwnershipState::Stealing {
+                            from: from_worker,
+                            to: to_worker,
+                        };
                     }
                     _ => {
                         // Ownership violation - task not owned by expected worker
@@ -205,12 +215,20 @@ impl WorkStealingChecker {
     }
 
     /// Records successful completion of a steal operation.
-    fn track_steal_success(&self, task_id: TaskId, from_worker: WorkerId, to_worker: WorkerId, duration: Duration) {
+    fn track_steal_success(
+        &self,
+        task_id: TaskId,
+        from_worker: WorkerId,
+        to_worker: WorkerId,
+        duration: Duration,
+    ) {
         {
             let mut owners = self.task_owners.write();
             if let Some(state) = owners.get_mut(&task_id) {
                 match state {
-                    OwnershipState::Stealing { from, to } if *from == from_worker && *to == to_worker => {
+                    OwnershipState::Stealing { from, to }
+                        if *from == from_worker && *to == to_worker =>
+                    {
                         *state = OwnershipState::Owned(to_worker);
                     }
                     _ => {
@@ -301,7 +319,7 @@ impl WorkStealingChecker {
     }
 
     /// Records that a task has completed execution.
-    pub fn track_task_execution_complete(&self, task_id: TaskId, worker_id: WorkerId) {
+    pub fn track_task_execution_complete(&self, task_id: TaskId, _worker_id: WorkerId) {
         if !self.enabled {
             return;
         }
@@ -332,8 +350,8 @@ impl WorkStealingChecker {
             ViolationType::MultipleOwners { .. } => stats.ownership_violations += 1,
             ViolationType::DoubleExecution { .. } => stats.double_execution_violations += 1,
             ViolationType::LostWork { .. } => stats.lost_work_violations += 1,
-            ViolationType::SlowSteal { .. } => {}, // Not counted as violation, just warning
-            ViolationType::OrderingViolation { .. } => {}, // Not counted as violation, just warning
+            ViolationType::SlowSteal { .. } => {} // Not counted as violation, just warning
+            ViolationType::OrderingViolation { .. } => {} // Not counted as violation, just warning
         }
     }
 
@@ -360,7 +378,7 @@ impl WorkStealingChecker {
     }
 
     /// Validates queue ordering (LIFO for owner, FIFO for stealers).
-    pub fn validate_ordering(&self, task_id: TaskId, is_owner: bool, worker_id: WorkerId) {
+    pub fn validate_ordering(&self, task_id: TaskId, is_owner: bool, _worker_id: WorkerId) {
         if !self.enabled {
             return;
         }
@@ -368,9 +386,9 @@ impl WorkStealingChecker {
         // This is a simplified ordering check - in a full implementation,
         // we would need more sophisticated tracking of queue operations
         let sequences = self.task_sequences.read();
-        if let Some(&task_sequence) = sequences.get(&task_id) {
+        if let Some(&_task_sequence) = sequences.get(&task_id) {
             // Owner should get newer tasks (higher sequence), thieves get older tasks
-            let expected_order = if is_owner { "LIFO" } else { "FIFO" };
+            let _expected_order = if is_owner { "LIFO" } else { "FIFO" };
 
             // For demonstration - in practice, this would require more complex
             // tracking of which tasks were added when and how they're being accessed
@@ -400,23 +418,26 @@ pub struct StealTracker<'a> {
     checker: &'a WorkStealingChecker,
 }
 
-impl<'a> StealTracker<'a> {
+impl StealTracker<'_> {
     /// Records successful steal completion.
     pub fn success(self) {
         let duration = self.start_time.elapsed();
-        self.checker.track_steal_success(self.task_id, self.from_worker, self.to_worker, duration);
+        self.checker
+            .track_steal_success(self.task_id, self.from_worker, self.to_worker, duration);
     }
 
     /// Records failed steal attempt.
     pub fn failure(self) {
-        self.checker.track_steal_failure(self.task_id, self.from_worker, self.to_worker);
+        self.checker
+            .track_steal_failure(self.task_id, self.from_worker, self.to_worker);
     }
 }
 
-impl<'a> Drop for StealTracker<'a> {
+impl Drop for StealTracker<'_> {
     fn drop(&mut self) {
         // If not explicitly completed, assume failure
-        self.checker.track_steal_failure(self.task_id, self.from_worker, self.to_worker);
+        self.checker
+            .track_steal_failure(self.task_id, self.from_worker, self.to_worker);
     }
 }
 
@@ -428,7 +449,7 @@ mod tests {
     fn test_basic_ownership_tracking() {
         let checker = WorkStealingChecker::new();
         let worker1 = 1;
-        let worker2 = 2;
+        let _worker2 = 2;
         let task = TaskId::new_for_test(100, 0);
 
         // Queue task on worker 1

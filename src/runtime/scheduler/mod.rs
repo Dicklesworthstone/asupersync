@@ -21,8 +21,8 @@ pub mod priority;
 pub mod priority_inversion_oracle;
 pub mod stealing;
 pub mod three_lane;
-pub mod worker;
 pub mod work_stealing_checker;
+pub mod worker;
 
 pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
@@ -37,12 +37,14 @@ pub use priority::{
     DispatchLane, ScheduleCertificate, Scheduler as PriorityScheduler, SchedulerMode,
 };
 pub use priority_inversion_oracle::{
-    Priority, PriorityInversion, PriorityInversionOracle, InversionType, InversionSeverity,
-    InversionImpact, InversionStats, InversionOracleConfig, ResourceId, InversionId,
+    InversionId, InversionImpact, InversionOracleConfig, InversionSeverity, InversionStats,
+    InversionType, Priority, PriorityInversion, PriorityInversionOracle, ResourceId,
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
+pub use work_stealing_checker::{
+    OwnershipState, StealingStats, ViolationType, WorkStealingChecker,
+};
 pub use worker::{Parker, Worker};
-pub use work_stealing_checker::{OwnershipState, StealingStats, ViolationType, WorkStealingChecker};
 
 use crate::types::TaskId;
 

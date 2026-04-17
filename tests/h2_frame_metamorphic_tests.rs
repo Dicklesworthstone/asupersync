@@ -14,8 +14,8 @@
 //! Implementation follows Pattern 1 (Differential Testing) from the testing-metamorphic skill.
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::frame::*;
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::*;
 use proptest::prelude::*;
 
 /// Maximum reasonable test frame size to avoid excessive memory usage.
@@ -69,12 +69,13 @@ fn arb_error_code() -> impl Strategy<Value = ErrorCode> {
 
 /// Strategy for generating PrioritySpec.
 fn arb_priority_spec() -> impl Strategy<Value = PrioritySpec> {
-    (any::<bool>(), arb_stream_id_or_zero(), any::<u8>())
-        .prop_map(|(exclusive, dependency, weight)| PrioritySpec {
+    (any::<bool>(), arb_stream_id_or_zero(), any::<u8>()).prop_map(
+        |(exclusive, dependency, weight)| PrioritySpec {
             exclusive,
             dependency,
             weight,
-        })
+        },
+    )
 }
 
 /// Strategy for generating Setting.
@@ -108,11 +109,13 @@ fn arb_headers_frame() -> impl Strategy<Value = HeadersFrame> {
         any::<bool>(),
         proptest::option::of(arb_priority_spec()),
     )
-        .prop_map(|(stream_id, header_block, end_stream, end_headers, priority)| {
-            let mut frame = HeadersFrame::new(stream_id, header_block, end_stream, end_headers);
-            frame.priority = priority;
-            frame
-        })
+        .prop_map(
+            |(stream_id, header_block, end_stream, end_headers, priority)| {
+                let mut frame = HeadersFrame::new(stream_id, header_block, end_stream, end_headers);
+                frame.priority = priority;
+                frame
+            },
+        )
 }
 
 /// Strategy for generating PriorityFrame.
@@ -121,7 +124,10 @@ fn arb_priority_frame() -> impl Strategy<Value = PriorityFrame> {
         .prop_filter("stream cannot depend on itself", |(stream_id, priority)| {
             priority.dependency != *stream_id
         })
-        .prop_map(|(stream_id, priority)| PriorityFrame { stream_id, priority })
+        .prop_map(|(stream_id, priority)| PriorityFrame {
+            stream_id,
+            priority,
+        })
 }
 
 /// Strategy for generating RstStreamFrame.
@@ -134,8 +140,7 @@ fn arb_rst_stream_frame() -> impl Strategy<Value = RstStreamFrame> {
 fn arb_settings_frame() -> impl Strategy<Value = SettingsFrame> {
     prop_oneof![
         // Regular settings frame
-        prop::collection::vec(arb_setting(), 0..10)
-            .prop_map(SettingsFrame::new),
+        prop::collection::vec(arb_setting(), 0..10).prop_map(SettingsFrame::new),
         // ACK frame
         Just(SettingsFrame::ack()),
     ]
@@ -144,12 +149,7 @@ fn arb_settings_frame() -> impl Strategy<Value = SettingsFrame> {
 /// Strategy for generating PingFrame.
 fn arb_ping_frame() -> impl Strategy<Value = PingFrame> {
     any::<[u8; 8]>()
-        .prop_flat_map(|data| {
-            prop_oneof![
-                Just(PingFrame::new(data)),
-                Just(PingFrame::ack(data)),
-            ]
-        })
+        .prop_flat_map(|data| prop_oneof![Just(PingFrame::new(data)), Just(PingFrame::ack(data)),])
 }
 
 /// Strategy for generating GoAwayFrame.
@@ -205,11 +205,12 @@ fn arb_frame() -> impl Strategy<Value = Frame> {
             }),
             arb_stream_id_or_zero(),
             arb_frame_payload(1024),
-        ).prop_map(|(frame_type, stream_id, payload)| Frame::Unknown {
-            frame_type,
-            stream_id,
-            payload,
-        }),
+        )
+            .prop_map(|(frame_type, stream_id, payload)| Frame::Unknown {
+                frame_type,
+                stream_id,
+                payload,
+            }),
     ]
 }
 
@@ -318,7 +319,7 @@ proptest! {
         pad_length in 0..=255_u8,
     ) {
         // Skip cases where padding would exceed frame limits
-        prop_assume!(pad_length as usize + data.len() + 1 <= MAX_FRAME_SIZE as usize);
+        prop_assume!(pad_length as usize + data.len() < MAX_FRAME_SIZE as usize);
 
         // Create unpadded frame
         let original = DataFrame::new(stream_id, data.clone(), end_stream);
@@ -367,7 +368,7 @@ proptest! {
         pad_length in 0..=255_u8,
     ) {
         // Skip cases where padding would exceed frame limits
-        prop_assume!(pad_length as usize + header_block.len() + 1 <= MAX_FRAME_SIZE as usize);
+        prop_assume!(pad_length as usize + header_block.len() < MAX_FRAME_SIZE as usize);
 
         // Create unpadded frame
         let original = HeadersFrame::new(stream_id, header_block.clone(), end_stream, end_headers);
@@ -562,7 +563,7 @@ proptest! {
         increment2 in 1..=0x3FFF_FFFF_u32,
     ) {
         // Ensure no overflow when combining increments
-        prop_assume!(increment1 as u64 + increment2 as u64 <= 0x7FFF_FFFF_u64);
+        prop_assume!(u64::from(increment1) + u64::from(increment2) <= 0x7FFF_FFFF_u64);
 
         let update1 = WindowUpdateFrame::new(stream_id, increment1);
         let update2 = WindowUpdateFrame::new(stream_id, increment2);
@@ -675,7 +676,7 @@ proptest! {
     ) {
         // Extract all stream IDs from frames
         let mut all_stream_ids: Vec<u32> = frames.iter()
-            .map(|f| f.stream_id())
+            .map(asupersync::http::h2::Frame::stream_id)
             .collect();
         all_stream_ids.sort_unstable();
 
@@ -684,7 +685,7 @@ proptest! {
         let subset_frames: Vec<Frame> = frames.into_iter().take(subset_size).collect();
 
         let mut subset_stream_ids: Vec<u32> = subset_frames.iter()
-            .map(|f| f.stream_id())
+            .map(asupersync::http::h2::Frame::stream_id)
             .collect();
         subset_stream_ids.sort_unstable();
 
@@ -747,28 +748,22 @@ proptest! {
         let superset_result = DataFrame::parse(&header_superset, data.clone());
         let subset_result = DataFrame::parse(&header_subset, data);
 
-        match superset_result {
-            Ok(_) => {
-                // If superset is valid, subset flags should be at least as permissive
-                match subset_result {
-                    Ok(_) => {
-                        // Both valid - check that subset flags are actually a subset
-                        prop_assert_eq!(
-                            subset_flags & base_flags,
-                            subset_flags,
-                            "Subset flags should be contained within base flags"
-                        );
-                    },
-                    Err(_) => {
-                        // Subset invalid but superset valid might indicate flag interaction bugs
-                        // This is acceptable for this property test
-                    }
-                }
-            },
-            Err(_) => {
-                // If superset is invalid, subset may or may not be valid
-                // This is acceptable - we're not testing absolute validity
+        if let Ok(_) = superset_result {
+            // If superset is valid, subset flags should be at least as permissive
+            if subset_result.is_ok() {
+                // Both valid - check that subset flags are actually a subset
+                prop_assert_eq!(
+                    subset_flags & base_flags,
+                    subset_flags,
+                    "Subset flags should be contained within base flags"
+                );
+            } else {
+                // Subset invalid but superset valid might indicate flag interaction bugs
+                // This is acceptable for this property test
             }
+        } else {
+            // If superset is invalid, subset may or may not be valid
+            // This is acceptable - we're not testing absolute validity
         }
 
     }
@@ -869,113 +864,194 @@ fn assert_frame_equivalent(original: &Frame, decoded: &Frame) -> Result<(), Stri
     match (original, decoded) {
         (Frame::Data(orig), Frame::Data(dec)) => {
             if orig.stream_id != dec.stream_id {
-                return Err(format!("DATA frame stream_id mismatch: {} vs {}", orig.stream_id, dec.stream_id));
+                return Err(format!(
+                    "DATA frame stream_id mismatch: {} vs {}",
+                    orig.stream_id, dec.stream_id
+                ));
             }
             if orig.data != dec.data {
-                return Err(format!("DATA frame data mismatch: {:?} vs {:?}", orig.data, dec.data));
+                return Err(format!(
+                    "DATA frame data mismatch: {:?} vs {:?}",
+                    orig.data, dec.data
+                ));
             }
             if orig.end_stream != dec.end_stream {
-                return Err(format!("DATA frame end_stream mismatch: {} vs {}", orig.end_stream, dec.end_stream));
+                return Err(format!(
+                    "DATA frame end_stream mismatch: {} vs {}",
+                    orig.end_stream, dec.end_stream
+                ));
             }
         }
         (Frame::Headers(orig), Frame::Headers(dec)) => {
             if orig.stream_id != dec.stream_id {
-                return Err(format!("HEADERS frame stream_id mismatch: {} vs {}", orig.stream_id, dec.stream_id));
+                return Err(format!(
+                    "HEADERS frame stream_id mismatch: {} vs {}",
+                    orig.stream_id, dec.stream_id
+                ));
             }
             if orig.header_block != dec.header_block {
-                return Err(format!("HEADERS frame header_block mismatch"));
+                return Err("HEADERS frame header_block mismatch".to_string());
             }
             if orig.end_stream != dec.end_stream {
-                return Err(format!("HEADERS frame end_stream mismatch: {} vs {}", orig.end_stream, dec.end_stream));
+                return Err(format!(
+                    "HEADERS frame end_stream mismatch: {} vs {}",
+                    orig.end_stream, dec.end_stream
+                ));
             }
             if orig.end_headers != dec.end_headers {
-                return Err(format!("HEADERS frame end_headers mismatch: {} vs {}", orig.end_headers, dec.end_headers));
+                return Err(format!(
+                    "HEADERS frame end_headers mismatch: {} vs {}",
+                    orig.end_headers, dec.end_headers
+                ));
             }
             if orig.priority != dec.priority {
-                return Err(format!("HEADERS frame priority mismatch: {:?} vs {:?}", orig.priority, dec.priority));
+                return Err(format!(
+                    "HEADERS frame priority mismatch: {:?} vs {:?}",
+                    orig.priority, dec.priority
+                ));
             }
         }
         (Frame::Priority(orig), Frame::Priority(dec)) => {
             if orig.stream_id != dec.stream_id {
-                return Err(format!("PRIORITY frame stream_id mismatch: {} vs {}", orig.stream_id, dec.stream_id));
+                return Err(format!(
+                    "PRIORITY frame stream_id mismatch: {} vs {}",
+                    orig.stream_id, dec.stream_id
+                ));
             }
             if orig.priority != dec.priority {
-                return Err(format!("PRIORITY frame priority mismatch: {:?} vs {:?}", orig.priority, dec.priority));
+                return Err(format!(
+                    "PRIORITY frame priority mismatch: {:?} vs {:?}",
+                    orig.priority, dec.priority
+                ));
             }
         }
         (Frame::RstStream(orig), Frame::RstStream(dec)) => {
             if orig.stream_id != dec.stream_id {
-                return Err(format!("RST_STREAM frame stream_id mismatch: {} vs {}", orig.stream_id, dec.stream_id));
+                return Err(format!(
+                    "RST_STREAM frame stream_id mismatch: {} vs {}",
+                    orig.stream_id, dec.stream_id
+                ));
             }
             if orig.error_code != dec.error_code {
-                return Err(format!("RST_STREAM frame error_code mismatch: {:?} vs {:?}", orig.error_code, dec.error_code));
+                return Err(format!(
+                    "RST_STREAM frame error_code mismatch: {:?} vs {:?}",
+                    orig.error_code, dec.error_code
+                ));
             }
         }
         (Frame::Settings(orig), Frame::Settings(dec)) => {
             if orig.ack != dec.ack {
-                return Err(format!("SETTINGS frame ack mismatch: {} vs {}", orig.ack, dec.ack));
+                return Err(format!(
+                    "SETTINGS frame ack mismatch: {} vs {}",
+                    orig.ack, dec.ack
+                ));
             }
             if orig.settings.len() != dec.settings.len() {
-                return Err(format!("SETTINGS frame settings count mismatch: {} vs {}", orig.settings.len(), dec.settings.len()));
+                return Err(format!(
+                    "SETTINGS frame settings count mismatch: {} vs {}",
+                    orig.settings.len(),
+                    dec.settings.len()
+                ));
             }
             for (orig_setting, dec_setting) in orig.settings.iter().zip(&dec.settings) {
                 if orig_setting != dec_setting {
-                    return Err(format!("SETTINGS frame setting mismatch: {:?} vs {:?}", orig_setting, dec_setting));
+                    return Err(format!(
+                        "SETTINGS frame setting mismatch: {orig_setting:?} vs {dec_setting:?}"
+                    ));
                 }
             }
         }
         (Frame::Ping(orig), Frame::Ping(dec)) => {
             if orig.opaque_data != dec.opaque_data {
-                return Err(format!("PING frame opaque_data mismatch: {:?} vs {:?}", orig.opaque_data, dec.opaque_data));
+                return Err(format!(
+                    "PING frame opaque_data mismatch: {:?} vs {:?}",
+                    orig.opaque_data, dec.opaque_data
+                ));
             }
             if orig.ack != dec.ack {
-                return Err(format!("PING frame ack mismatch: {} vs {}", orig.ack, dec.ack));
+                return Err(format!(
+                    "PING frame ack mismatch: {} vs {}",
+                    orig.ack, dec.ack
+                ));
             }
         }
         (Frame::GoAway(orig), Frame::GoAway(dec)) => {
             if orig.last_stream_id != dec.last_stream_id {
-                return Err(format!("GOAWAY frame last_stream_id mismatch: {} vs {}", orig.last_stream_id, dec.last_stream_id));
+                return Err(format!(
+                    "GOAWAY frame last_stream_id mismatch: {} vs {}",
+                    orig.last_stream_id, dec.last_stream_id
+                ));
             }
             if orig.error_code != dec.error_code {
-                return Err(format!("GOAWAY frame error_code mismatch: {:?} vs {:?}", orig.error_code, dec.error_code));
+                return Err(format!(
+                    "GOAWAY frame error_code mismatch: {:?} vs {:?}",
+                    orig.error_code, dec.error_code
+                ));
             }
             if orig.debug_data != dec.debug_data {
-                return Err(format!("GOAWAY frame debug_data mismatch"));
+                return Err("GOAWAY frame debug_data mismatch".to_string());
             }
         }
         (Frame::WindowUpdate(orig), Frame::WindowUpdate(dec)) => {
             if orig.stream_id != dec.stream_id {
-                return Err(format!("WINDOW_UPDATE frame stream_id mismatch: {} vs {}", orig.stream_id, dec.stream_id));
+                return Err(format!(
+                    "WINDOW_UPDATE frame stream_id mismatch: {} vs {}",
+                    orig.stream_id, dec.stream_id
+                ));
             }
             if orig.increment != dec.increment {
-                return Err(format!("WINDOW_UPDATE frame increment mismatch: {} vs {}", orig.increment, dec.increment));
+                return Err(format!(
+                    "WINDOW_UPDATE frame increment mismatch: {} vs {}",
+                    orig.increment, dec.increment
+                ));
             }
         }
         (Frame::Continuation(orig), Frame::Continuation(dec)) => {
             if orig.stream_id != dec.stream_id {
-                return Err(format!("CONTINUATION frame stream_id mismatch: {} vs {}", orig.stream_id, dec.stream_id));
+                return Err(format!(
+                    "CONTINUATION frame stream_id mismatch: {} vs {}",
+                    orig.stream_id, dec.stream_id
+                ));
             }
             if orig.header_block != dec.header_block {
-                return Err(format!("CONTINUATION frame header_block mismatch"));
+                return Err("CONTINUATION frame header_block mismatch".to_string());
             }
             if orig.end_headers != dec.end_headers {
-                return Err(format!("CONTINUATION frame end_headers mismatch: {} vs {}", orig.end_headers, dec.end_headers));
+                return Err(format!(
+                    "CONTINUATION frame end_headers mismatch: {} vs {}",
+                    orig.end_headers, dec.end_headers
+                ));
             }
         }
-        (Frame::Unknown { frame_type: orig_type, stream_id: orig_stream, payload: orig_payload },
-         Frame::Unknown { frame_type: dec_type, stream_id: dec_stream, payload: dec_payload }) => {
+        (
+            Frame::Unknown {
+                frame_type: orig_type,
+                stream_id: orig_stream,
+                payload: orig_payload,
+            },
+            Frame::Unknown {
+                frame_type: dec_type,
+                stream_id: dec_stream,
+                payload: dec_payload,
+            },
+        ) => {
             if orig_type != dec_type {
-                return Err(format!("Unknown frame type mismatch: {} vs {}", orig_type, dec_type));
+                return Err(format!(
+                    "Unknown frame type mismatch: {orig_type} vs {dec_type}"
+                ));
             }
             if orig_stream != dec_stream {
-                return Err(format!("Unknown frame stream_id mismatch: {} vs {}", orig_stream, dec_stream));
+                return Err(format!(
+                    "Unknown frame stream_id mismatch: {orig_stream} vs {dec_stream}"
+                ));
             }
             if orig_payload != dec_payload {
-                return Err(format!("Unknown frame payload mismatch"));
+                return Err("Unknown frame payload mismatch".to_string());
             }
         }
         _ => {
-            return Err(format!("Frame type mismatch: {:?} vs {:?}",
+            return Err(format!(
+                "Frame type mismatch: {:?} vs {:?}",
                 std::mem::discriminant(original),
                 std::mem::discriminant(decoded)
             ));
@@ -986,7 +1062,10 @@ fn assert_frame_equivalent(original: &Frame, decoded: &Frame) -> Result<(), Stri
 
 /// Helper function to create frame_length with proper bounds checking.
 fn frame_length(len: usize) -> u32 {
-    assert!(len <= MAX_FRAME_SIZE as usize, "Frame length {len} exceeds maximum {MAX_FRAME_SIZE}");
+    assert!(
+        len <= MAX_FRAME_SIZE as usize,
+        "Frame length {len} exceeds maximum {MAX_FRAME_SIZE}"
+    );
     len as u32
 }
 

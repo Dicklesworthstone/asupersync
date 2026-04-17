@@ -1811,6 +1811,7 @@ pub struct FairnessMonitor {
 
 impl FairnessMonitor {
     /// Creates a new fairness monitor with the given configuration.
+    #[must_use]
     pub fn new(config: FairnessConfig) -> Self {
         let window_size = config.analysis_window_size;
         Self {
@@ -1826,6 +1827,7 @@ impl FairnessMonitor {
     }
 
     /// Creates a new fairness monitor with default configuration.
+    #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(FairnessConfig::default())
     }
@@ -1951,6 +1953,7 @@ impl FairnessMonitor {
     }
 
     /// Detects if there's a starvation pattern in the current window.
+    #[must_use]
     pub fn detect_starvation_pattern(&self, current_time_ns: u64) -> bool {
         const PATTERN_WINDOW_NS: u64 = 1_000_000_000; // 1 second
         const MIN_EVENTS_FOR_PATTERN: u32 = 10;
@@ -1963,6 +1966,7 @@ impl FairnessMonitor {
     }
 
     /// Returns the number of currently starved tasks.
+    #[must_use]
     pub fn count_starved_tasks(&self, current_time_ns: u64) -> u32 {
         self.tracked_tasks
             .values()
@@ -1971,6 +1975,7 @@ impl FairnessMonitor {
     }
 
     /// Returns starvation statistics for monitoring.
+    #[must_use]
     pub fn starvation_stats(&self, current_time_ns: u64) -> StarvationStats {
         let currently_starved = self.count_starved_tasks(current_time_ns);
         let total_tracked_wait_time_ns = self
@@ -1981,10 +1986,10 @@ impl FairnessMonitor {
                     .max(info.current_wait_time_ns(current_time_ns))
             })
             .sum::<u64>();
-        let avg_wait_time_ns = if !self.tracked_tasks.is_empty() {
-            total_tracked_wait_time_ns / self.tracked_tasks.len() as u64
-        } else {
+        let avg_wait_time_ns = if self.tracked_tasks.is_empty() {
             0
+        } else {
+            total_tracked_wait_time_ns / self.tracked_tasks.len() as u64
         };
         let oldest_tracked_task = self
             .tracked_tasks
@@ -3255,11 +3260,7 @@ impl ThreeLaneWorker {
     /// shared across workers and can race with other workers' pops.
     #[cfg(any(test, feature = "test-internals"))]
     pub fn ready_count(&self) -> usize {
-        let local_ready = self
-            .local_ready
-            .try_lock()
-            .map(|q| q.len())
-            .unwrap_or(0);
+        let local_ready = self.local_ready.try_lock().map_or(0, |q| q.len());
         let fast = self.fast_queue.len();
         let global = self.global.ready_count();
         local_ready + fast + global

@@ -3121,8 +3121,8 @@ mod tests {
             runtime.state.store_spawned_task(task_id, stored);
 
             {
-            runtime.scheduler.lock().schedule(task_id, 0);
-        }
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
             runtime.run_until_idle();
 
             // 5 resets then disconnect
@@ -3132,8 +3132,8 @@ mod tests {
             handle.stop();
 
             {
-            runtime.scheduler.lock().schedule(task_id, 0);
-        }
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
             runtime.run_until_quiescent();
 
             final_count.load(Ordering::SeqCst)
@@ -3513,14 +3513,14 @@ mod tests {
                 runtime.scheduler.lock().schedule(task_id_b, 0);
             }
             {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
+                runtime.scheduler.lock().schedule(server_task_id, 0);
+            }
 
             runtime.run_until_quiescent();
             drop(handle);
             {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
+                runtime.scheduler.lock().schedule(server_task_id, 0);
+            }
             runtime.run_until_quiescent();
 
             events.lock().clone()
@@ -4793,8 +4793,8 @@ mod tests {
             // Stop and drain.
             handle.stop();
             {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
+                runtime.scheduler.lock().schedule(server_task_id, 0);
+            }
             runtime.run_until_quiescent();
 
             results.lock().clone()

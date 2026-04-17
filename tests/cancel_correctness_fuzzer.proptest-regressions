@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2008e47f16aa75c3d88e6a193df9529b55879f46decd95bf226a6fc4db4f0c55 # shrinks to scenario = CancelScenario { scenario_id: "fuzz-race2-00000000", seed: 0, combinator_type: Race2, cancel_timing: Early, participant_count: 2, expected_winner: None, chaos_config: ChaosConfig { inject_delays: false, inject_panics: false, inject_spurious_wakes: false, max_delay_ms: 1, panic_probability: 0.0 } }
+cc 311d94c2247668465236064133247b899769526bdd4a16017d21247a35391781 # shrinks to scenario = CancelScenario { scenario_id: "fuzz-timeout-00000000", seed: 0, combinator_type: Timeout, cancel_timing: Early, participant_count: 2, expected_winner: None, chaos_config: ChaosConfig { inject_delays: false, inject_panics: false, inject_spurious_wakes: false, max_delay_ms: 1, panic_probability: 0.0 } }

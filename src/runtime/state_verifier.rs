@@ -148,6 +148,7 @@ pub struct StateTransitionVerifier {
 
 impl StateTransitionVerifier {
     /// Creates a new state transition verifier with the given configuration.
+    #[must_use]
     pub fn new(config: StateVerifierConfig) -> Self {
         Self {
             config,
@@ -279,15 +280,14 @@ impl StateTransitionVerifier {
             }
         }
 
-        if self.config.panic_on_violation {
-            panic!(
-                "Invalid state transition: {} {} -> {} (context: {})",
-                violation.entity_type as u8,
-                violation.from_state,
-                violation.to_state,
-                violation.context
-            );
-        }
+        assert!(
+            !self.config.panic_on_violation,
+            "Invalid state transition: {} {} -> {} (context: {})",
+            violation.entity_type as u8,
+            violation.from_state,
+            violation.to_state,
+            violation.context
+        );
     }
 
     /// Gets current statistics.
@@ -300,7 +300,7 @@ impl StateTransitionVerifier {
     pub fn violations(&self) -> Vec<StateViolation> {
         self.violations
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -344,7 +344,7 @@ impl RegionStateTransitions for RegionState {
     /// - `Finalizing → Closed` when all finalizers complete.
     /// - `Closed` is terminal; no further transitions are valid.
     fn is_valid_transition(self, next: Self) -> bool {
-        use RegionState::*;
+        use RegionState::{Closed, Closing, Draining, Finalizing, Open};
         matches!(
             (self, next),
             // Open → Closing (begin close sequence)
@@ -388,7 +388,7 @@ impl ObligationStateTransitions for ObligationState {
     /// - `Reserved → Leaked` for error case (holder completed without resolving).
     /// - All terminal states are absorbing.
     fn is_valid_transition(self, next: Self) -> bool {
-        use ObligationState::*;
+        use ObligationState::{Aborted, Committed, Leaked, Reserved};
         matches!(
             (self, next),
             // Reserved → Committed | Aborted | Leaked

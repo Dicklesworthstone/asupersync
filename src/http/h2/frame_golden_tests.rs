@@ -103,10 +103,10 @@ fn test_frame_header_golden_max_values() {
 
     // Test maximum allowed values
     let header = FrameHeader {
-        length: MAX_FRAME_SIZE,      // 16777215 = 0xFFFFFF
+        length: MAX_FRAME_SIZE, // 16777215 = 0xFFFFFF
         frame_type: 0xFF,
         flags: 0xFF,
-        stream_id: 0x7FFFFFFF,       // Maximum 31-bit value
+        stream_id: 0x7FFFFFFF, // Maximum 31-bit value
     };
 
     tester.assert_header_golden(&header, "max_header", "fffffffffff7fffffff");
@@ -151,9 +151,9 @@ fn test_data_frame_golden_with_end_stream() {
     let tester = FrameGoldenTester::new();
 
     let frame = Frame::Data(DataFrame::new(
-        0x1,                                 // stream_id
-        Bytes::from_static(b"EOF"),          // 3 bytes
-        true,                                // end_stream (flag 0x1)
+        0x1,                        // stream_id
+        Bytes::from_static(b"EOF"), // 3 bytes
+        true,                       // end_stream (flag 0x1)
     ));
 
     // Golden: header with END_STREAM flag set
@@ -165,9 +165,9 @@ fn test_data_frame_golden_empty() {
     let tester = FrameGoldenTester::new();
 
     let frame = Frame::Data(DataFrame::new(
-        0x7FFFFFFF,                          // max stream_id
-        Bytes::new(),                        // empty data
-        true,                                // end_stream
+        0x7FFFFFFF,   // max stream_id
+        Bytes::new(), // empty data
+        true,         // end_stream
     ));
 
     // Golden: empty DATA frame with END_STREAM
@@ -206,7 +206,9 @@ fn test_settings_frame_golden_ack() {
 fn test_ping_frame_golden_request() {
     let tester = FrameGoldenTester::new();
 
-    let frame = Frame::Ping(PingFrame::new([0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]));
+    let frame = Frame::Ping(PingFrame::new([
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+    ]));
 
     // Golden: PING frame (type 6, flags 0, stream_id 0, 8-byte payload)
     tester.assert_frame_golden(&frame, "ping_request", "000008060000000000123456789abcdef");
@@ -216,7 +218,9 @@ fn test_ping_frame_golden_request() {
 fn test_ping_frame_golden_ack() {
     let tester = FrameGoldenTester::new();
 
-    let frame = Frame::Ping(PingFrame::ack([0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10]));
+    let frame = Frame::Ping(PingFrame::ack([
+        0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+    ]));
 
     // Golden: PING ACK frame (type 6, flags 0x1, stream_id 0, 8-byte payload)
     tester.assert_frame_golden(&frame, "ping_ack", "000008060100000000fedcba9876543210");
@@ -243,12 +247,11 @@ fn test_basic_frame_sequence_golden() {
     let frames = vec![
         // 1. SETTINGS frame (connection setup)
         Frame::Settings(SettingsFrame::new(Vec::new())),
-
         // 2. DATA frame (request body)
         Frame::Data(DataFrame::new(
-            1,                               // stream_id
-            Bytes::from_static(b"test"),     // payload
-            false,                           // end_stream
+            1,                           // stream_id
+            Bytes::from_static(b"test"), // payload
+            false,                       // end_stream
         )),
     ];
 
@@ -263,7 +266,10 @@ fn test_basic_frame_sequence_golden() {
         println!("SEQUENCE GOLDEN UPDATE: {}", actual_hex);
     } else {
         // This is a simplified test - in practice, exact hex would be verified
-        assert!(!actual_hex.is_empty(), "Frame sequence should produce output");
+        assert!(
+            !actual_hex.is_empty(),
+            "Frame sequence should produce output"
+        );
         assert!(actual_hex.len() >= 18); // At least 2 frame headers (9 bytes each)
     }
 }
@@ -277,7 +283,7 @@ fn test_unknown_frame_golden() {
     let tester = FrameGoldenTester::new();
 
     let frame = Frame::Unknown {
-        frame_type: 0xFF,                    // Unknown frame type
+        frame_type: 0xFF, // Unknown frame type
         stream_id: 0x12345678,
         payload: Bytes::from_static(b"ext"),
     };
@@ -302,7 +308,7 @@ mod validation_tests {
 
     #[test]
     fn validate_golden_test_infrastructure() {
-        let tester = FrameGoldenTester::new();
+        let _tester = FrameGoldenTester::new();
 
         // Test that tester correctly encodes a simple frame
         let frame = Frame::Data(DataFrame::new(1, Bytes::from_static(b"test"), false));

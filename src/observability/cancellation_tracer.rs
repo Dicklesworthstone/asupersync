@@ -60,6 +60,7 @@ impl TraceId {
     }
 
     /// Returns the inner trace ID value.
+    #[must_use]
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -268,6 +269,7 @@ pub struct CancellationTracer {
 
 impl CancellationTracer {
     /// Creates a new cancellation tracer.
+    #[must_use]
     pub fn new(config: CancellationTracerConfig) -> Self {
         Self {
             config,
@@ -401,9 +403,7 @@ impl CancellationTracer {
                 in_progress_trace
                     .entity_to_step
                     .insert(entity_id.clone(), step_id);
-                in_progress_trace
-                    .depth_by_entity
-                    .insert(entity_id.clone(), depth);
+                in_progress_trace.depth_by_entity.insert(entity_id, depth);
                 in_progress_trace.trace.max_depth = in_progress_trace.trace.max_depth.max(depth);
                 in_progress_trace.trace.entities_cancelled += 1;
 
@@ -460,7 +460,7 @@ impl CancellationTracer {
     pub fn completed_traces(&self) -> Vec<CancellationTrace> {
         self.completed_traces
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .cloned()
             .collect()
@@ -470,7 +470,7 @@ impl CancellationTracer {
     pub fn in_progress_traces(&self) -> Vec<TraceId> {
         self.in_progress
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .keys()
             .copied()
             .collect()
@@ -480,7 +480,7 @@ impl CancellationTracer {
     pub fn traces_for_entity(&self, entity_id: &str) -> Vec<TraceId> {
         self.entity_traces
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(entity_id)
             .cloned()
             .unwrap_or_default()
@@ -489,7 +489,9 @@ impl CancellationTracer {
     /// Detects anomalies in cancellation propagation.
     fn check_for_anomalies(&self, step: &CancellationTraceStep, trace: &mut InProgressTrace) {
         // Check for slow propagation
-        if step.elapsed_since_prev.as_millis() > self.config.slow_propagation_threshold_ms as u128 {
+        if step.elapsed_since_prev.as_millis()
+            > u128::from(self.config.slow_propagation_threshold_ms)
+        {
             let anomaly = PropagationAnomaly::SlowPropagation {
                 step_id: step.step_id,
                 entity_id: step.entity_id.clone(),
@@ -542,7 +544,7 @@ impl CancellationTracer {
 
         self.stats
             .avg_trace_depth
-            .store(trace.max_depth as u64, Ordering::Relaxed);
+            .store(u64::from(trace.max_depth), Ordering::Relaxed);
     }
 
     /// Hash function for sampling decisions.
@@ -589,6 +591,7 @@ pub struct CancellationAnalysis {
 }
 
 /// Analyzes cancellation traces to extract insights.
+#[must_use]
 pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> CancellationAnalysis {
     if traces.is_empty() {
         return CancellationAnalysis {
@@ -607,7 +610,7 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
 
     let total_steps: usize = traces.iter().map(|t| t.steps.len()).sum();
     let avg_depth: f64 =
-        traces.iter().map(|t| t.max_depth as f64).sum::<f64>() / traces.len() as f64;
+        traces.iter().map(|t| f64::from(t.max_depth)).sum::<f64>() / traces.len() as f64;
 
     let avg_propagation_time = traces
         .iter()
@@ -689,8 +692,7 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
         if slow_count > traces.len() / 20 {
             // Appears in >5% of traces with slow propagation
             bottlenecks.push(format!(
-                "Slow propagation bottleneck: {} (involved in {} slow propagations)",
-                entity_id, slow_count
+                "Slow propagation bottleneck: {entity_id} (involved in {slow_count} slow propagations)"
             ));
         }
     }
@@ -708,8 +710,7 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
         if stuck_count > 0 {
             // Any stuck cancellation is a bottleneck
             bottlenecks.push(format!(
-                "Stuck cancellation bottleneck: {} ({} instances)",
-                entity_id, stuck_count
+                "Stuck cancellation bottleneck: {entity_id} ({stuck_count} instances)"
             ));
         }
     }
@@ -723,15 +724,14 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
                 let current_avg = depth_bottlenecks
                     .entry(first_step.entity_id.clone())
                     .or_insert(0.0);
-                *current_avg = (*current_avg + trace.steps.len() as f64) / 2.0; // Running average
+                *current_avg = f64::midpoint(*current_avg, trace.steps.len() as f64); // Running average
             }
         }
     }
     for (entity_id, avg_depth_caused) in depth_bottlenecks {
         if avg_depth_caused > avg_depth * 1.5 {
             bottlenecks.push(format!(
-                "Deep cancellation tree origin: {} (avg depth: {:.1})",
-                entity_id, avg_depth_caused
+                "Deep cancellation tree origin: {entity_id} (avg depth: {avg_depth_caused:.1})"
             ));
         }
     }

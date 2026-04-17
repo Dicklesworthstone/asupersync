@@ -32,10 +32,10 @@
 //! - Memory safety is maintained during cleanup deferral
 
 use crate::sync::ContendedMutex;
-use crate::types::{TaskId, RegionId};
+use crate::types::{RegionId, TaskId};
 use crossbeam_queue::SegQueue;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,7 @@ impl Default for EpochCounter {
 
 impl EpochCounter {
     /// Create a new epoch counter with the given advance interval.
+    #[must_use]
     pub fn new(advance_interval: Duration) -> Self {
         Self {
             global: AtomicU64::new(1), // Start at 1 so epoch 0 can be special
@@ -129,6 +130,7 @@ pub struct LocalEpoch {
 
 impl LocalEpoch {
     /// Create a new local epoch tracker.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             local: AtomicU64::new(0), // Start at 0 to force initial sync
@@ -206,35 +208,47 @@ pub enum CleanupWork {
 
 impl CleanupWork {
     /// Get a debug description of this cleanup work.
+    #[must_use]
     pub fn description(&self) -> String {
         match self {
-            CleanupWork::Obligation { id, .. } => format!("obligation:{}", id),
-            CleanupWork::WakerCleanup { waker_id, source } => format!("waker:{}:{}", source, waker_id),
-            CleanupWork::RegionCleanup { region_id, task_ids } => {
+            Self::Obligation { id, .. } => format!("obligation:{id}"),
+            Self::WakerCleanup { waker_id, source } => format!("waker:{source}:{waker_id}"),
+            Self::RegionCleanup {
+                region_id,
+                task_ids,
+            } => {
                 format!("region:{}:tasks:{}", region_id, task_ids.len())
             }
-            CleanupWork::TimerCleanup { timer_id, timer_type } => {
-                format!("timer:{}:{}", timer_type, timer_id)
+            Self::TimerCleanup {
+                timer_id,
+                timer_type,
+            } => {
+                format!("timer:{timer_type}:{timer_id}")
             }
-            CleanupWork::ChannelCleanup { channel_id, cleanup_type, .. } => {
-                format!("channel:{}:{}", cleanup_type, channel_id)
+            Self::ChannelCleanup {
+                channel_id,
+                cleanup_type,
+                ..
+            } => {
+                format!("channel:{cleanup_type}:{channel_id}")
             }
         }
     }
 
     /// Estimate memory usage of this cleanup work item.
+    #[must_use]
     pub fn memory_usage(&self) -> usize {
         let base_size = std::mem::size_of::<Self>();
         match self {
-            CleanupWork::Obligation { metadata, .. } => base_size + metadata.len(),
-            CleanupWork::WakerCleanup { source, .. } => base_size + source.len(),
-            CleanupWork::RegionCleanup { task_ids, .. } => {
+            Self::Obligation { metadata, .. } => base_size + metadata.len(),
+            Self::WakerCleanup { source, .. } => base_size + source.len(),
+            Self::RegionCleanup { task_ids, .. } => {
                 base_size + task_ids.len() * std::mem::size_of::<TaskId>()
             }
-            CleanupWork::TimerCleanup { timer_type, .. } => base_size + timer_type.len(),
-            CleanupWork::ChannelCleanup { cleanup_type, data, .. } => {
-                base_size + cleanup_type.len() + data.len()
-            }
+            Self::TimerCleanup { timer_type, .. } => base_size + timer_type.len(),
+            Self::ChannelCleanup {
+                cleanup_type, data, ..
+            } => base_size + cleanup_type.len() + data.len(),
         }
     }
 }
@@ -363,11 +377,13 @@ impl Default for DeferredCleanupQueue {
 
 impl DeferredCleanupQueue {
     /// Create a new deferred cleanup queue with default configuration.
+    #[must_use]
     pub fn new() -> Self {
         Self::with_config(CleanupConfig::default())
     }
 
     /// Create a new deferred cleanup queue with the given configuration.
+    #[must_use]
     pub fn with_config(config: CleanupConfig) -> Self {
         Self {
             queue: SegQueue::new(),
@@ -420,17 +436,17 @@ impl DeferredCleanupQueue {
         self.queue.push(epoch_work);
         let new_size = self.size.fetch_add(1, Ordering::Relaxed) + 1;
         self.stats.total_enqueued.fetch_add(1, Ordering::Relaxed);
-        self.stats.current_queue_size.store(new_size, Ordering::Relaxed);
+        self.stats
+            .current_queue_size
+            .store(new_size, Ordering::Relaxed);
 
         // Update peak queue size
         let current_peak = self.stats.peak_queue_size.load(Ordering::Relaxed);
         if new_size > current_peak {
-            self.stats.peak_queue_size.compare_exchange_weak(
-                current_peak,
-                new_size,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ).ok(); // Ignore race condition
+            self.stats
+                .peak_queue_size
+                .compare_exchange_weak(current_peak, new_size, Ordering::Relaxed, Ordering::Relaxed)
+                .ok(); // Ignore race condition
         }
 
         Ok(())
@@ -473,11 +489,15 @@ impl DeferredCleanupQueue {
         // Process the collected batch
         if !batch.is_empty() {
             self.process_cleanup_batch(batch);
-            self.stats.total_processed.fetch_add(processed_count as u64, Ordering::Relaxed);
+            self.stats
+                .total_processed
+                .fetch_add(processed_count as u64, Ordering::Relaxed);
             self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
 
             let batch_time_us = start_time.elapsed().as_micros() as u64;
-            self.stats.total_cleanup_time.fetch_add(batch_time_us, Ordering::Relaxed);
+            self.stats
+                .total_cleanup_time
+                .fetch_add(batch_time_us, Ordering::Relaxed);
 
             if self.config.enable_logging && processed_count >= self.config.min_batch_size {
                 #[cfg(feature = "tracing-integration")]
@@ -492,7 +512,9 @@ impl DeferredCleanupQueue {
 
         // Update current queue size
         let current_size = self.size.load(Ordering::Relaxed);
-        self.stats.current_queue_size.store(current_size, Ordering::Relaxed);
+        self.stats
+            .current_queue_size
+            .store(current_size, Ordering::Relaxed);
 
         processed_count
     }
@@ -525,15 +547,25 @@ impl DeferredCleanupQueue {
                 // Call into IO driver waker cleanup
                 self.cleanup_waker(*waker_id, source);
             }
-            CleanupWork::RegionCleanup { region_id, task_ids } => {
+            CleanupWork::RegionCleanup {
+                region_id,
+                task_ids,
+            } => {
                 // Call into region state cleanup
                 self.cleanup_region(*region_id, task_ids);
             }
-            CleanupWork::TimerCleanup { timer_id, timer_type } => {
+            CleanupWork::TimerCleanup {
+                timer_id,
+                timer_type,
+            } => {
                 // Call into timer cleanup
                 self.cleanup_timer(*timer_id, timer_type);
             }
-            CleanupWork::ChannelCleanup { channel_id, cleanup_type, .. } => {
+            CleanupWork::ChannelCleanup {
+                channel_id,
+                cleanup_type,
+                ..
+            } => {
                 // Call into channel cleanup
                 self.cleanup_channel(*channel_id, cleanup_type);
             }
@@ -541,12 +573,15 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up an obligation.
-    fn cleanup_obligation(&self, id: u64) {
+    fn cleanup_obligation(&self, _id: u64) {
         // Integrate with obligation tracking system
         // Note: This is a simplified implementation - real integration would
         // require access to the ObligationTable and proper error handling
         #[cfg(feature = "tracing-integration")]
-        tracing::debug!(obligation_id = id, "Cleaning up obligation in deferred cleanup");
+        tracing::debug!(
+            obligation_id = id,
+            "Cleaning up obligation in deferred cleanup"
+        );
 
         // In practice, this would call something like:
         // obligation_table.cleanup_obligation(id);
@@ -554,7 +589,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up a waker.
-    fn cleanup_waker(&self, waker_id: u64, source: &str) {
+    fn cleanup_waker(&self, _waker_id: u64, source: &str) {
         // Integrate with IO driver waker cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -585,7 +620,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up region state.
-    fn cleanup_region(&self, region_id: RegionId, task_ids: &[TaskId]) {
+    fn cleanup_region(&self, _region_id: RegionId, task_ids: &[TaskId]) {
         // Integrate with region table cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -595,7 +630,7 @@ impl DeferredCleanupQueue {
         );
 
         // Clean up region metadata and associated tasks
-        for &task_id in task_ids {
+        for &_task_id in task_ids {
             #[cfg(feature = "tracing-integration")]
             tracing::trace!(
                 task_id = task_id.as_u64(),
@@ -614,7 +649,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up a timer.
-    fn cleanup_timer(&self, timer_id: u64, timer_type: &str) {
+    fn cleanup_timer(&self, _timer_id: u64, timer_type: &str) {
         // Integrate with timer wheel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -654,7 +689,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up channel state.
-    fn cleanup_channel(&self, channel_id: u64, cleanup_type: &str) {
+    fn cleanup_channel(&self, _channel_id: u64, cleanup_type: &str) {
         // Integrate with channel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -755,11 +790,13 @@ pub struct EpochGC {
 
 impl EpochGC {
     /// Create a new epoch GC system with default configuration.
+    #[must_use]
     pub fn new() -> Self {
         Self::with_config(CleanupConfig::default())
     }
 
     /// Create a new epoch GC system with custom configuration.
+    #[must_use]
     pub fn with_config(config: CleanupConfig) -> Self {
         Self {
             epoch_counter: Arc::new(EpochCounter::default()),
@@ -769,8 +806,9 @@ impl EpochGC {
     }
 
     /// Create a disabled epoch GC system (for backwards compatibility).
+    #[must_use]
     pub fn disabled() -> Self {
-        let mut system = Self::new();
+        let system = Self::new();
         system.enabled.store(0, Ordering::Relaxed);
         system
     }
@@ -964,9 +1002,18 @@ mod tests {
         let queue = DeferredCleanupQueue::with_config(config);
 
         // Enqueue work from different epochs
-        let work1 = CleanupWork::Obligation { id: 1, metadata: vec![] };
-        let work2 = CleanupWork::Obligation { id: 2, metadata: vec![] };
-        let work3 = CleanupWork::Obligation { id: 3, metadata: vec![] };
+        let work1 = CleanupWork::Obligation {
+            id: 1,
+            metadata: vec![],
+        };
+        let work2 = CleanupWork::Obligation {
+            id: 2,
+            metadata: vec![],
+        };
+        let work3 = CleanupWork::Obligation {
+            id: 3,
+            metadata: vec![],
+        };
 
         assert!(queue.enqueue(work1, 1).is_ok());
         assert!(queue.enqueue(work2, 2).is_ok());
@@ -997,7 +1044,10 @@ mod tests {
         };
         let queue = DeferredCleanupQueue::with_config(config);
 
-        let work = CleanupWork::Obligation { id: 1, metadata: vec![] };
+        let work = CleanupWork::Obligation {
+            id: 1,
+            metadata: vec![],
+        };
 
         // Fill queue to capacity
         assert!(queue.enqueue(work.clone(), 1).is_ok());
@@ -1017,7 +1067,10 @@ mod tests {
         assert!(gc.is_enabled());
 
         // Defer some cleanup work
-        let work = CleanupWork::Obligation { id: 123, metadata: vec![] };
+        let work = CleanupWork::Obligation {
+            id: 123,
+            metadata: vec![],
+        };
         assert!(gc.defer_cleanup(work).is_ok());
 
         // Force advance and process
@@ -1035,7 +1088,10 @@ mod tests {
         assert!(!gc.is_enabled());
 
         // Deferred cleanup should fail and fall back to direct cleanup
-        let work = CleanupWork::Obligation { id: 123, metadata: vec![] };
+        let work = CleanupWork::Obligation {
+            id: 123,
+            metadata: vec![],
+        };
         assert!(gc.defer_cleanup(work).is_err());
 
         // Advance should do nothing
@@ -1050,7 +1106,10 @@ mod tests {
 
         // Enqueue and process some work
         for i in 0..10 {
-            let work = CleanupWork::Obligation { id: i, metadata: vec![] };
+            let work = CleanupWork::Obligation {
+                id: i,
+                metadata: vec![],
+            };
             let _ = queue.enqueue(work, 1);
         }
 
@@ -1070,7 +1129,7 @@ mod tests {
             max_batch_size: 1000,
             ..CleanupConfig::default()
         };
-        let queue = Arc::new(DeferredCleanupQueue::with_config(config));
+        let _queue = Arc::new(DeferredCleanupQueue::with_config(config));
         let epoch_gc = Arc::new(EpochGC::with_config(CleanupConfig {
             max_queue_size: 100_000,
             max_batch_size: 1000,
@@ -1107,8 +1166,9 @@ mod tests {
             let mut total_processed = 0;
             let start = Instant::now();
 
-            while start.elapsed() < Duration::from_secs(10) &&
-                  total_processed < NUM_THREADS * WORK_ITEMS_PER_THREAD {
+            while start.elapsed() < Duration::from_secs(10)
+                && total_processed < NUM_THREADS * WORK_ITEMS_PER_THREAD
+            {
                 let processed = gc_consumer.force_advance_and_cleanup();
                 total_processed += processed;
 
@@ -1127,8 +1187,11 @@ mod tests {
         let total_processed = consumer_handle.join().unwrap();
 
         // Verify all work was processed
-        assert!(total_processed >= NUM_THREADS * WORK_ITEMS_PER_THREAD * 9 / 10,
-               "Should process at least 90% of work items, got {}", total_processed);
+        assert!(
+            total_processed >= NUM_THREADS * WORK_ITEMS_PER_THREAD * 9 / 10,
+            "Should process at least 90% of work items, got {}",
+            total_processed
+        );
 
         let stats = epoch_gc.stats();
         assert!(stats.efficiency_percent() >= 90.0);
@@ -1137,7 +1200,6 @@ mod tests {
 
     #[test]
     fn stress_test_memory_usage_extended_operation() {
-        use std::alloc::{GlobalAlloc, Layout, System};
         use std::sync::atomic::AtomicUsize;
 
         // Simple memory usage tracker
@@ -1177,14 +1239,20 @@ mod tests {
                 let memory_growth = current_memory.saturating_sub(start_memory);
 
                 // Memory growth should be bounded (less than 1MB)
-                assert!(memory_growth < 1_000_000,
-                       "Memory growth {} exceeds limit at iteration {}",
-                       memory_growth, iteration);
+                assert!(
+                    memory_growth < 1_000_000,
+                    "Memory growth {} exceeds limit at iteration {}",
+                    memory_growth,
+                    iteration
+                );
 
                 // Queue should not grow unbounded
-                assert!(epoch_gc.cleanup_queue.len() < 1000,
-                       "Queue size {} too large at iteration {}",
-                       epoch_gc.cleanup_queue.len(), iteration);
+                assert!(
+                    epoch_gc.cleanup_queue.len() < 1000,
+                    "Queue size {} too large at iteration {}",
+                    epoch_gc.cleanup_queue.len(),
+                    iteration
+                );
             }
         }
 
@@ -1237,8 +1305,10 @@ mod tests {
         // Deferred cleanup should be faster for large batches
         // (Note: This is a simplified benchmark - real-world performance
         //  would depend on actual cleanup costs and batching efficiency)
-        println!("Direct cleanup: {:?}, Deferred cleanup: {:?}",
-                direct_duration, deferred_duration);
+        println!(
+            "Direct cleanup: {:?}, Deferred cleanup: {:?}",
+            direct_duration, deferred_duration
+        );
 
         let stats = epoch_gc.stats();
         assert!(stats.total_processed.load(Ordering::Relaxed) as usize >= NUM_OPERATIONS);
@@ -1251,7 +1321,7 @@ mod tests {
         use std::sync::atomic::AtomicU64;
 
         let epoch_gc = Arc::new(EpochGC::new());
-        let processed_counter = Arc::new(AtomicU64::new(0));
+        let _processed_counter = Arc::new(AtomicU64::new(0));
 
         const NUM_WORK_ITEMS: u64 = 5000;
 
@@ -1306,7 +1376,10 @@ mod tests {
 
         // Verify no work was lost
         let stats = epoch_gc.stats();
-        assert_eq!(stats.total_processed.load(Ordering::Relaxed), NUM_WORK_ITEMS);
+        assert_eq!(
+            stats.total_processed.load(Ordering::Relaxed),
+            NUM_WORK_ITEMS
+        );
         assert_eq!(stats.total_dropped.load(Ordering::Relaxed), 0);
         assert_eq!(stats.efficiency_percent(), 100.0);
     }
@@ -1319,7 +1392,10 @@ mod tests {
         };
         let queue = DeferredCleanupQueue::with_config(config);
 
-        let work = CleanupWork::Obligation { id: 1, metadata: vec![0; 1000] };
+        let work = CleanupWork::Obligation {
+            id: 1,
+            metadata: vec![0; 1000],
+        };
 
         // Fill queue to capacity
         let mut enqueued = 0;
@@ -1332,13 +1408,19 @@ mod tests {
             }
         }
 
-        assert!(enqueued <= 100, "Should not enqueue more than max_queue_size");
+        assert!(
+            enqueued <= 100,
+            "Should not enqueue more than max_queue_size"
+        );
         assert!(rejected > 0, "Should reject some items when full");
         assert!(queue.is_near_capacity(), "Should detect near capacity");
 
         // Verify backpressure statistics
         let stats = queue.stats();
-        assert_eq!(stats.total_dropped.load(Ordering::Relaxed) as usize, rejected);
+        assert_eq!(
+            stats.total_dropped.load(Ordering::Relaxed) as usize,
+            rejected
+        );
     }
 
     #[test]
@@ -1350,7 +1432,10 @@ mod tests {
 
         // Enqueue work in current epoch
         for i in 0..10 {
-            let work = CleanupWork::Obligation { id: i, metadata: vec![] };
+            let work = CleanupWork::Obligation {
+                id: i,
+                metadata: vec![],
+            };
             gc.defer_cleanup(work).unwrap();
         }
 
@@ -1360,6 +1445,9 @@ mod tests {
 
         // Force advance and verify work is processed
         let processed = gc.force_advance_and_cleanup();
-        assert_eq!(processed, 10, "Should process all work after forced advance");
+        assert_eq!(
+            processed, 10,
+            "Should process all work after forced advance"
+        );
     }
 }

@@ -59,8 +59,8 @@ pub use protocol_state_machines::{
 pub use protocol_validator_test_suite::{
     BugInjectionConfig, BugInjectionStats, BugInjector, CancelProtocolTestSuite,
     FalsePositiveTestHarness, IntegrationTestConfig, IntegrationTestHarness,
-    PerformanceMeasurement, PerformanceTestConfig, PerformanceTestHarness,
-    PropertyTestHarness, ProtocolViolationType,
+    PerformanceMeasurement, PerformanceTestConfig, PerformanceTestHarness, PropertyTestHarness,
+    ProtocolViolationType,
 };
 pub use symbol_cancel::{
     CancelBroadcastMetrics, CancelBroadcaster, CancelListener, CancelMessage, CancelSink,

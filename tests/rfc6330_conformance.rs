@@ -49,7 +49,7 @@ pub enum RequirementLevel {
     May,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -246,8 +246,7 @@ fn test_rand_function_determinism(vector: &GoldenVector<(u32, u8, u32), u32>) ->
         ),
         error_details: if verdict == TestVerdict::Fail {
             Some(format!(
-                "Non-deterministic: {} != {} != {}",
-                result1, result2, result3
+                "Non-deterministic: {result1} != {result2} != {result3}"
             ))
         } else {
             None
@@ -306,7 +305,7 @@ fn test_tuple_function_determinism(
         verdict: verdict.clone(),
         description: format!("{}: tuple({}, {}) determinism", vector.description, k, x),
         error_details: if verdict == TestVerdict::Fail {
-            Some(format!("Non-deterministic tuple results"))
+            Some("Non-deterministic tuple results".to_string())
         } else {
             None
         },
@@ -331,19 +330,18 @@ fn test_intermediate_symbol_generation() -> Vec<ConformanceResult> {
     let symbol_size = 4;
     let seed = 12345u64;
 
-    let encoder = match SystematicEncoder::new(&source_data, symbol_size, seed) {
-        Some(enc) => enc,
-        None => {
-            results.push(ConformanceResult {
-                test_id: "RFC6330-5.4.2.1-001".to_string(),
-                rfc_section: "5.4.2.1".to_string(),
-                requirement_level: RequirementLevel::Must,
-                verdict: TestVerdict::Fail,
-                description: "Intermediate symbols generation setup".to_string(),
-                error_details: Some("Encoder creation failed".to_string()),
-            });
-            return results;
-        }
+    let encoder = if let Some(enc) = SystematicEncoder::new(&source_data, symbol_size, seed) {
+        enc
+    } else {
+        results.push(ConformanceResult {
+            test_id: "RFC6330-5.4.2.1-001".to_string(),
+            rfc_section: "5.4.2.1".to_string(),
+            requirement_level: RequirementLevel::Must,
+            verdict: TestVerdict::Fail,
+            description: "Intermediate symbols generation setup".to_string(),
+            error_details: Some("Encoder creation failed".to_string()),
+        });
+        return results;
     };
 
     let params = encoder.params();
@@ -360,11 +358,11 @@ fn test_intermediate_symbol_generation() -> Vec<ConformanceResult> {
         };
 
         results.push(ConformanceResult {
-            test_id: format!("RFC6330-5.4.2.1-DET-{:03}", i),
+            test_id: format!("RFC6330-5.4.2.1-DET-{i:03}"),
             rfc_section: "5.4.2.1".to_string(),
             requirement_level: RequirementLevel::Must,
             verdict: verdict.clone(),
-            description: format!("Intermediate symbol {} determinism", i),
+            description: format!("Intermediate symbol {i} determinism"),
             error_details: if verdict == TestVerdict::Fail {
                 Some("Intermediate symbol computation not deterministic".to_string())
             } else {
@@ -379,7 +377,7 @@ fn test_intermediate_symbol_generation() -> Vec<ConformanceResult> {
         let valid_size = sym.len() == symbol_size;
 
         results.push(ConformanceResult {
-            test_id: format!("RFC6330-5.4.2.1-SIZE-{:03}", i),
+            test_id: format!("RFC6330-5.4.2.1-SIZE-{i:03}"),
             rfc_section: "5.4.2.1".to_string(),
             requirement_level: RequirementLevel::Must,
             verdict: if valid_size {
@@ -387,11 +385,11 @@ fn test_intermediate_symbol_generation() -> Vec<ConformanceResult> {
             } else {
                 TestVerdict::Fail
             },
-            description: format!("Intermediate symbol {} size validation", i),
-            error_details: if !valid_size {
-                Some(format!("Expected size {}, got {}", symbol_size, sym.len()))
-            } else {
+            description: format!("Intermediate symbol {i} size validation"),
+            error_details: if valid_size {
                 None
+            } else {
+                Some(format!("Expected size {}, got {}", symbol_size, sym.len()))
             },
         });
     }
@@ -440,7 +438,7 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
         };
 
         results.push(ConformanceResult {
-            test_id: format!("RFC6330-5.4.2.2-EDGE-{:03}", test_idx),
+            test_id: format!("RFC6330-5.4.2.2-EDGE-{test_idx:03}"),
             rfc_section: "5.4.2.2".to_string(),
             requirement_level: RequirementLevel::Must,
             verdict: verdict.clone(),
@@ -470,7 +468,7 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
         let deterministic = indices1 == indices2;
 
         results.push(ConformanceResult {
-            test_id: format!("RFC6330-5.4.2.2-DET-{:03}", test_idx),
+            test_id: format!("RFC6330-5.4.2.2-DET-{test_idx:03}"),
             rfc_section: "5.4.2.2".to_string(),
             requirement_level: RequirementLevel::Must,
             verdict: if deterministic {
@@ -478,11 +476,11 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
             } else {
                 TestVerdict::Fail
             },
-            description: format!("Repair equation ESI={} determinism", esi),
-            error_details: if !deterministic {
-                Some("Repair equation generation not deterministic".to_string())
-            } else {
+            description: format!("Repair equation ESI={esi} determinism"),
+            error_details: if deterministic {
                 None
+            } else {
+                Some("Repair equation generation not deterministic".to_string())
             },
         });
     }
@@ -539,10 +537,10 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
                 .iter()
                 .filter(|r| r.verdict == TestVerdict::Fail)
                 .count();
-            let coverage = if !must_tests.is_empty() {
-                (pass_count as f64 / must_tests.len() as f64 * 100.0) as u32
-            } else {
+            let coverage = if must_tests.is_empty() {
                 0
+            } else {
+                (pass_count as f64 / must_tests.len() as f64 * 100.0) as u32
             };
 
             report.push_str(&format!(
@@ -566,10 +564,10 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
         .iter()
         .filter(|r| r.verdict == TestVerdict::Pass)
         .count();
-    let overall_coverage = if !all_must_tests.is_empty() {
-        total_pass as f64 / all_must_tests.len() as f64 * 100.0
-    } else {
+    let overall_coverage = if all_must_tests.is_empty() {
         0.0
+    } else {
+        total_pass as f64 / all_must_tests.len() as f64 * 100.0
     };
 
     report.push_str(&format!(
@@ -590,7 +588,7 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
     report.push_str("## Detailed Results\n\n");
     for (section, desc) in &sections {
         if let Some(section_results) = by_section.get(*section) {
-            report.push_str(&format!("### {} - {}\n\n", section, desc));
+            report.push_str(&format!("### {section} - {desc}\n\n"));
             for result in section_results {
                 let status_icon = match result.verdict {
                     TestVerdict::Pass => "✅",
@@ -603,10 +601,10 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
                     status_icon, result.test_id, result.description
                 ));
                 if let Some(error) = &result.error_details {
-                    report.push_str(&format!("  - **Error**: {}\n", error));
+                    report.push_str(&format!("  - **Error**: {error}\n"));
                 }
             }
-            report.push_str("\n");
+            report.push('\n');
         }
     }
 
@@ -636,7 +634,7 @@ mod tests {
 
         // Generate detailed report
         let report = generate_conformance_report(&results);
-        println!("{}", report);
+        println!("{report}");
 
         // Output structured results using GAP-D7 schema foundation
         output_structured_logs(&results);
@@ -652,7 +650,7 @@ mod tests {
             for failure in &failures {
                 eprintln!("  ❌ {} - {}", failure.test_id, failure.description);
                 if let Some(details) = &failure.error_details {
-                    eprintln!("     Error: {}", details);
+                    eprintln!("     Error: {details}");
                 }
             }
             panic!("{} conformance test(s) failed", failures.len());

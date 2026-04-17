@@ -110,7 +110,7 @@ pub use otel::{
     MetricsSnapshot, MultiExporter, NullExporter, OtelMetrics, SamplingConfig, StdoutExporter,
 };
 pub use otel_structured_concurrency::{
-    EntityId, SpanType, OtelStructuredConcurrencyConfig, SpanStorage,
+    EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
 };
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,

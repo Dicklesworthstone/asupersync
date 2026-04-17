@@ -12,7 +12,7 @@
 #[cfg(test)]
 mod tests {
     use asupersync::raptorq::gf256::{
-        Gf256, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
+        Gf256, gf256_addmul_slice, gf256_mul_slice, gf256_mul_slices2,
     };
     use std::time::Instant;
 
@@ -44,8 +44,7 @@ mod tests {
 
             assert_eq!(
                 reference_data, optimized_data,
-                "Bit-exactness violation for c={} (0x{:02x})",
-                c_val, c_val
+                "Bit-exactness violation for c={c_val} (0x{c_val:02x})"
             );
         }
     }
@@ -82,8 +81,7 @@ mod tests {
 
             assert_eq!(
                 dst_reference, dst_test,
-                "Addmul bit-exactness violation for c={}",
-                c_val
+                "Addmul bit-exactness violation for c={c_val}"
             );
         }
     }
@@ -157,21 +155,19 @@ mod tests {
 
         // Log performance for CI monitoring
         println!(
-            "GF256 mul_slice performance: {:?} for {} iterations on {}B",
-            optimized_duration, ITERATIONS, BENCH_SIZE
+            "GF256 mul_slice performance: {optimized_duration:?} for {ITERATIONS} iterations on {BENCH_SIZE}B"
         );
 
         // Throughput calculation (bytes/second)
         let total_bytes = BENCH_SIZE * ITERATIONS;
         let throughput_gbps = (total_bytes as f64) / optimized_duration.as_secs_f64() / 1e9;
 
-        println!("GF256 mul_slice throughput: {:.2} GB/s", throughput_gbps);
+        println!("GF256 mul_slice throughput: {throughput_gbps:.2} GB/s");
 
         // Basic regression protection: should be faster than 100 MB/s (very conservative)
         assert!(
             throughput_gbps > 0.1,
-            "Performance regression detected: {:.2} GB/s",
-            throughput_gbps
+            "Performance regression detected: {throughput_gbps:.2} GB/s"
         );
     }
 
@@ -192,12 +188,11 @@ mod tests {
 
             assert_eq!(
                 data, data2,
-                "Non-deterministic kernel behavior for size {}",
-                size
+                "Non-deterministic kernel behavior for size {size}"
             );
 
             // Log kernel selection for debugging
-            println!("Size {} bytes: kernel selection deterministic ✓", size);
+            println!("Size {size} bytes: kernel selection deterministic ✓");
         }
     }
 }

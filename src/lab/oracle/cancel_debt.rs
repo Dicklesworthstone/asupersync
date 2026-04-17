@@ -376,7 +376,8 @@ impl QueueState {
     }
 
     fn stall_duration(&self, now: Time) -> u64 {
-        self.last_completion.map_or(0, |last| now.as_nanos().saturating_sub(last.as_nanos()))
+        self.last_completion
+            .map_or(0, |last| now.as_nanos().saturating_sub(last.as_nanos()))
     }
 }
 
@@ -439,7 +440,7 @@ impl CancelDebtOracle {
         let item = CleanupWorkItem {
             task_id,
             region_id,
-            work_type: work_type.clone(),
+            work_type,
             created_at,
             estimated_size_bytes: work_type.estimated_size_bytes(),
         };
@@ -502,8 +503,11 @@ impl CancelDebtOracle {
         let states = self.queue_states.read();
         let violations = self.violations.read();
 
-        let total_debt: usize = states.values().map(|s| s.current_debt()).sum();
-        let total_memory_usage: usize = states.values().map(|s| s.estimated_memory_usage()).sum();
+        let total_debt: usize = states.values().map(QueueState::current_debt).sum();
+        let total_memory_usage: usize = states
+            .values()
+            .map(QueueState::estimated_memory_usage)
+            .sum();
 
         CancelDebtStatistics {
             work_items_tracked: self.work_items_tracked.load(Ordering::Relaxed),
@@ -627,9 +631,10 @@ impl CancelDebtOracle {
     fn record_violation(&self, violation: CancelDebtViolation) {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
-        if self.config.panic_on_violation {
-            panic!("Cancellation debt violation detected: {}", violation);
-        }
+        assert!(
+            !self.config.panic_on_violation,
+            "Cancellation debt violation detected: {violation}"
+        );
 
         // Record violation for later inspection
         let mut violations = self.violations.write();

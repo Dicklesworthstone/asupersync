@@ -7,16 +7,17 @@
 #![allow(unused_imports, unused_variables)] // Temporary for development
 
 use super::protocol_state_machines::{
-    CancelProtocolValidator, CancelStateMachine, ValidationLevel,
-    RegionStateMachine, TaskStateMachine, ObligationStateMachine,
-    RegionState, RegionEvent, RegionContext,
-    TaskState, TaskEvent, TaskContext,
-    ObligationState, ObligationEvent, ObligationContext,
-    TransitionResult,
+    CancelProtocolValidator, CancelStateMachine, ObligationContext, ObligationEvent,
+    ObligationState, ObligationStateMachine, RegionContext, RegionEvent, RegionState,
+    RegionStateMachine, TaskContext, TaskEvent, TaskState, TaskStateMachine, TransitionResult,
+    ValidationLevel,
 };
-use crate::types::{RegionId, TaskId, ObligationId};
+use crate::types::{ObligationId, RegionId, TaskId};
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -110,7 +111,11 @@ impl BugInjector {
         BugInjectionStats {
             bugs_injected: injected,
             bugs_detected: detected,
-            detection_rate: if injected == 0 { 1.0 } else { detected as f64 / injected as f64 },
+            detection_rate: if injected == 0 {
+                1.0
+            } else {
+                detected as f64 / injected as f64
+            },
         }
     }
 }
@@ -150,7 +155,8 @@ pub fn task_event_strategy() -> impl Strategy<Value = TaskEvent> {
         Just(TaskEvent::RequestCancel),
         Just(TaskEvent::AcknowledgeCancel),
         Just(TaskEvent::CompleteDrain),
-        prop::string::string_regex(r"[a-zA-Z0-9 ]{1,50}").unwrap()
+        prop::string::string_regex(r"[a-zA-Z0-9 ]{1,50}")
+            .unwrap()
             .prop_map(|msg| TaskEvent::Panic { message: msg }),
     ]
 }
@@ -236,7 +242,8 @@ impl PropertyTestHarness {
             has_cleanup: false,
         };
 
-        let mut state_machine = TaskStateMachine::new(task_id, region_id, self.validator.validation_level);
+        let mut state_machine =
+            TaskStateMachine::new(task_id, region_id, self.validator.validation_level);
 
         for (i, event) in events.iter().enumerate() {
             // Inject bugs if configured
@@ -245,7 +252,8 @@ impl PropertyTestHarness {
                     if matches!(state_machine.current_state(), TaskState::CancelRequested) {
                         if matches!(event, TaskEvent::Complete) {
                             // Complete after cancel (bug injection)
-                            injector.record_injection(ProtocolViolationType::TaskCompleteAfterCancel);
+                            injector
+                                .record_injection(ProtocolViolationType::TaskCompleteAfterCancel);
                             // Force the invalid transition
                         }
                     }
@@ -271,25 +279,32 @@ impl PropertyTestHarness {
     }
 
     /// Test a sequence of obligation state transitions.
-    pub fn test_obligation_transitions(&mut self, events: Vec<ObligationEvent>) -> Result<(), String> {
+    pub fn test_obligation_transitions(
+        &mut self,
+        events: Vec<ObligationEvent>,
+    ) -> Result<(), String> {
         let obligation_id = ObligationId::new();
         let context = ObligationContext {
             region_state: RegionState::Active,
             permits_available: 1,
         };
 
-        let mut state_machine = ObligationStateMachine::new(obligation_id, self.validator.validation_level);
+        let mut state_machine =
+            ObligationStateMachine::new(obligation_id, self.validator.validation_level);
 
         for (i, event) in events.iter().enumerate() {
             // Inject bugs if configured
             if let Some(ref injector) = self.bug_injector {
-                let should_inject_double_commit = injector.should_inject(ProtocolViolationType::ObligationDoubleCommit);
-                let should_inject_double_abort = injector.should_inject(ProtocolViolationType::ObligationDoubleAbort);
+                let should_inject_double_commit =
+                    injector.should_inject(ProtocolViolationType::ObligationDoubleCommit);
+                let should_inject_double_abort =
+                    injector.should_inject(ProtocolViolationType::ObligationDoubleAbort);
 
                 if should_inject_double_commit || should_inject_double_abort {
                     match (state_machine.current_state(), event) {
                         (ObligationState::Committed, ObligationEvent::Commit) => {
-                            injector.record_injection(ProtocolViolationType::ObligationDoubleCommit);
+                            injector
+                                .record_injection(ProtocolViolationType::ObligationDoubleCommit);
                         }
                         (ObligationState::Aborted, ObligationEvent::Abort) => {
                             injector.record_injection(ProtocolViolationType::ObligationDoubleAbort);
@@ -363,7 +378,8 @@ impl PerformanceTestHarness {
             0.0
         } else {
             ((with_validation.total_time_ns - without_validation.total_time_ns) as f64
-                / without_validation.total_time_ns as f64) * 100.0
+                / without_validation.total_time_ns as f64)
+                * 100.0
         };
 
         PerformanceMeasurement {
@@ -422,7 +438,10 @@ impl PerformanceTestHarness {
     }
 
     /// Simulate a typical cancel protocol operation for benchmarking.
-    fn simulate_cancel_protocol_operation(&self, validator: &mut CancelProtocolValidator) -> Result<(), String> {
+    fn simulate_cancel_protocol_operation(
+        &self,
+        validator: &mut CancelProtocolValidator,
+    ) -> Result<(), String> {
         // Create a region
         let region_id = RegionId::new();
         validator.track_region(region_id)?;
@@ -762,10 +781,8 @@ impl CancelProtocolTestSuite {
         };
 
         let bug_injector = BugInjector::new(bug_injection_config);
-        let mut property_harness = PropertyTestHarness::new(
-            ValidationLevel::Development,
-            Some(bug_injector)
-        );
+        let mut property_harness =
+            PropertyTestHarness::new(ValidationLevel::Development, Some(bug_injector));
 
         // Run property-based tests with bug injection
         total_tests += 1;
@@ -794,7 +811,7 @@ impl CancelProtocolTestSuite {
         // 3. False Positive Testing
         let mut fp_harness = FalsePositiveTestHarness::new(ValidationLevel::Development);
         match fp_harness.test_valid_sequences() {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 // If a valid sequence failed, it's a false positive
                 false_positives += 1;
@@ -857,7 +874,11 @@ impl CancelProtocolTestSuite {
 "#,
             self.total_tests_run,
             self.false_positive_count,
-            if self.bug_injection.bugs_injected > 0 { self.bug_injection.detection_rate * 100.0 } else { 100.0 },
+            if self.bug_injection.bugs_injected > 0 {
+                self.bug_injection.detection_rate * 100.0
+            } else {
+                100.0
+            },
             self.bug_injection.bugs_injected,
             self.bug_injection.bugs_detected,
             self.bug_injection.detection_rate * 100.0,
@@ -876,7 +897,8 @@ impl CancelProtocolTestSuite {
         let mut recommendations = Vec::new();
 
         if self.bug_injection.detection_rate < 1.0 {
-            recommendations.push("- Improve bug detection: some injected violations were not caught");
+            recommendations
+                .push("- Improve bug detection: some injected violations were not caught");
         }
 
         if self.performance.validation_overhead_pct > 5.0 {
@@ -884,7 +906,8 @@ impl CancelProtocolTestSuite {
         }
 
         if self.false_positive_count > 0 {
-            recommendations.push("- Fix false positives: valid operations should never trigger assertions");
+            recommendations
+                .push("- Fix false positives: valid operations should never trigger assertions");
         }
 
         if self.performance.memory_overhead_bytes > 1024 * 1024 {

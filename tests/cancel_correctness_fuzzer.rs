@@ -261,8 +261,7 @@ pub mod generators {
             Just(CancelTiming::MidDrain),
             Just(CancelTiming::NaturalCompletion),
             (0u32..100).prop_map(|delay| CancelTiming::Precise { delay_ms: delay }),
-            prop::collection::vec(any::<bool>(), 2..=8)
-                .prop_map(|completed| CancelTiming::Partial(completed)),
+            prop::collection::vec(any::<bool>(), 2..=8).prop_map(CancelTiming::Partial),
         ]
     }
 
@@ -289,15 +288,15 @@ pub mod generators {
 impl CombinatorType {
     fn name(&self) -> &'static str {
         match self {
-            CombinatorType::Join2 => "join2",
-            CombinatorType::Join3 => "join3",
-            CombinatorType::JoinAll => "join_all",
-            CombinatorType::Race2 => "race2",
-            CombinatorType::Race3 => "race3",
-            CombinatorType::RaceAll => "race_all",
-            CombinatorType::Timeout => "timeout",
-            CombinatorType::Select => "select",
-            CombinatorType::TryJoin => "try_join",
+            Self::Join2 => "join2",
+            Self::Join3 => "join3",
+            Self::JoinAll => "join_all",
+            Self::Race2 => "race2",
+            Self::Race3 => "race3",
+            Self::RaceAll => "race_all",
+            Self::Timeout => "timeout",
+            Self::Select => "select",
+            Self::TryJoin => "try_join",
         }
     }
 }
@@ -391,19 +390,18 @@ impl CancelCorrectnessFuzzer {
     fn test_race2(
         &mut self,
         scenario: &CancelScenario,
-        region: RegionId,
+        _region: RegionId,
         trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         use asupersync::cx::Cx;
-        use asupersync::types::{Budget, Outcome};
+
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::Duration;
 
         trace.task_count = 2;
 
         // Create root Cx for testing
-        let cx = Cx::for_testing();
+        let _cx = Cx::for_testing();
 
         // Create controllable futures for deterministic testing
         let fut1 = ControllableFuture::new(1);
@@ -412,8 +410,8 @@ impl CancelCorrectnessFuzzer {
         // Track drain status
         let fut1_ready = Arc::clone(&fut1.ready);
         let fut2_ready = Arc::clone(&fut2.ready);
-        let fut1_drained = Arc::new(AtomicBool::new(false));
-        let fut2_drained = Arc::new(AtomicBool::new(false));
+        let _fut1_drained = Arc::new(AtomicBool::new(false));
+        let _fut2_drained = Arc::new(AtomicBool::new(false));
 
         // Apply cancel timing pattern from scenario
         match &scenario.cancel_timing {
@@ -493,7 +491,7 @@ impl CancelCorrectnessFuzzer {
         trace.cancellation_events.push(CancellationEvent {
             task_id: TaskId::testing_default(),
             timestamp_ms: 0,
-            event_type: format!("race2_completed_winner_{}", result),
+            event_type: format!("race2_completed_winner_{result}"),
             details: serde_json::json!({
                 "winner": result,
                 "fut1_drained": fut1_was_drained,
@@ -508,18 +506,18 @@ impl CancelCorrectnessFuzzer {
     fn test_race3(
         &mut self,
         scenario: &CancelScenario,
-        region: RegionId,
+        _region: RegionId,
         trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         use asupersync::cx::Cx;
-        use asupersync::types::Budget;
+
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::Ordering;
 
         trace.task_count = 3;
 
         // Create root Cx for testing
-        let cx = Cx::for_testing();
+        let _cx = Cx::for_testing();
 
         // Create three controllable futures
         let fut1 = ControllableFuture::new(1);
@@ -629,7 +627,7 @@ impl CancelCorrectnessFuzzer {
         trace.cancellation_events.push(CancellationEvent {
             task_id: TaskId::testing_default(),
             timestamp_ms: 0,
-            event_type: format!("race3_completed_winner_{}", winner),
+            event_type: format!("race3_completed_winner_{winner}"),
             details: serde_json::json!({
                 "winner": winner,
                 "fut1_drained": fut1_drained,
@@ -667,7 +665,7 @@ impl CancelCorrectnessFuzzer {
 
         let budget = Budget::INFINITE;
         let task = TaskId::testing_default();
-        let cx: Cx = Cx::new(region, task, budget);
+        let _cx: Cx = Cx::new(region, task, budget);
 
         // Create two controllable futures for join test
         let fut1 = ControllableFuture::new(1);
@@ -787,25 +785,25 @@ impl CancelCorrectnessFuzzer {
     fn test_timeout(
         &mut self,
         scenario: &CancelScenario,
-        region: RegionId,
+        _region: RegionId,
         trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
         use asupersync::cx::Cx;
-        use asupersync::types::{Budget, Outcome};
+
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::Ordering;
         use std::time::Duration;
 
         trace.task_count = 1;
 
         // Create root Cx for testing
-        let cx = Cx::for_testing();
+        let _cx = Cx::for_testing();
 
         // Create a controllable future that may or may not complete before timeout
         let fut = ControllableFuture::new(42);
         let fut_ready = Arc::clone(&fut.ready);
 
-        let timeout_duration = Duration::from_millis(100);
+        let _timeout_duration = Duration::from_millis(100);
         let mut timed_out = false;
 
         // Apply scenario timing
@@ -881,6 +879,7 @@ impl CancelCorrectnessFuzzer {
         Ok(oracle_results)
     }
 
+    #[allow(dead_code)]
     fn apply_cancel_timing(
         &mut self,
         scenario: &CancelScenario,
@@ -907,7 +906,7 @@ impl CancelCorrectnessFuzzer {
                 // Cancel after specific delay
                 trace.cancellation_events.push(CancellationEvent {
                     task_id: task_ids[0],
-                    timestamp_ms: *delay_ms as u64,
+                    timestamp_ms: u64::from(*delay_ms),
                     event_type: "precise_cancel".to_string(),
                     details: serde_json::json!({"delay_ms": delay_ms}),
                 });
@@ -980,21 +979,21 @@ impl OracleResults {
 impl InvariantViolation {
     fn from_oracle_results(results: &OracleResults) -> Self {
         if !results.loser_drain_violations.is_empty() {
-            InvariantViolation {
+            Self {
                 violation_type: ViolationType::LoserNotDrained,
                 description: results.loser_drain_violations.join("; "),
                 affected_tasks: Vec::new(),
                 evidence: serde_json::json!(results.loser_drain_violations),
             }
         } else if !results.cancellation_violations.is_empty() {
-            InvariantViolation {
+            Self {
                 violation_type: ViolationType::CancelProtocolViolation,
                 description: results.cancellation_violations.join("; "),
                 affected_tasks: Vec::new(),
                 evidence: serde_json::json!(results.cancellation_violations),
             }
         } else {
-            InvariantViolation {
+            Self {
                 violation_type: ViolationType::ResourceLeak,
                 description: results.resource_violations.join("; "),
                 affected_tasks: Vec::new(),
@@ -1051,10 +1050,10 @@ mod tests {
                 );
             }
             FuzzOutcome::Fail { violation } => {
-                panic!("Unexpected failure: {:?}", violation);
+                panic!("Unexpected failure: {violation:?}");
             }
             FuzzOutcome::Error { error } => {
-                panic!("Fuzzer error: {}", error);
+                panic!("Fuzzer error: {error}");
             }
             FuzzOutcome::Timeout => {
                 panic!("Unexpected timeout");
@@ -1086,7 +1085,7 @@ mod tests {
                 assert!(!result.execution_trace.cancellation_events.is_empty());
             }
             other => {
-                println!("Timeout test result: {:?}", other);
+                println!("Timeout test result: {other:?}");
                 // Don't fail - this is expected behavior for timeout scenarios
             }
         }
@@ -1099,7 +1098,7 @@ mod tests {
         // Run a few scenarios
         for i in 0..3 {
             let scenario = CancelScenario {
-                scenario_id: format!("test_scenario_{}", i),
+                scenario_id: format!("test_scenario_{i}"),
                 seed: 42 + i,
                 combinator_type: CombinatorType::Race2,
                 cancel_timing: CancelTiming::NaturalCompletion,
@@ -1114,7 +1113,7 @@ mod tests {
         let report = fuzzer.generate_report();
         assert!(report.contains("Cancel-Correctness Fuzz Report"));
         assert!(report.contains("Total scenarios: 3"));
-        println!("Generated report:\n{}", report);
+        println!("Generated report:\n{report}");
     }
 
     proptest! {
@@ -1144,14 +1143,14 @@ mod tests {
                     }
                     FuzzOutcome::Fail { violation } => {
                         // Log the violation for analysis
-                        println!("Invariant violation: {:?}", violation);
+                        println!("Invariant violation: {violation:?}");
                         // For property test, we want to catch violations
                         if matches!(violation.violation_type, ViolationType::LoserNotDrained) {
                             panic!("Critical loser drain violation in race2: {}", violation.description);
                         }
                     }
                     FuzzOutcome::Error { error } => {
-                        panic!("Fuzzer error: {}", error);
+                        panic!("Fuzzer error: {error}");
                     }
                     FuzzOutcome::Timeout => {
                         panic!("Fuzzer timeout - this should not happen in unit tests");
@@ -1180,7 +1179,7 @@ mod tests {
                         }
                     }
                     FuzzOutcome::Error { error } => {
-                        panic!("Timeout test error: {}", error);
+                        panic!("Timeout test error: {error}");
                     }
                     FuzzOutcome::Timeout => {
                         panic!("Timeout test itself timed out");

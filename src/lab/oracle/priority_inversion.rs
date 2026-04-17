@@ -7,10 +7,10 @@
 //! Priority inversions violate scheduling guarantees and can cause
 //! unpredictable latency spikes in real-time systems.
 
+use crate::types::TaskId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use crate::types::TaskId;
 
 /// Detects and reports priority inversion violations in the scheduler.
 #[derive(Debug)]
@@ -194,6 +194,7 @@ pub struct PriorityInversionStatistics {
 
 impl PriorityInversionOracle {
     /// Create a new priority inversion oracle.
+    #[must_use]
     pub fn new(config: PriorityInversionConfig) -> Self {
         Self {
             config,
@@ -209,6 +210,7 @@ impl PriorityInversionOracle {
     }
 
     /// Create oracle with default configuration.
+    #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(PriorityInversionConfig::default())
     }
@@ -249,7 +251,7 @@ impl PriorityInversionOracle {
             task_info.state = TaskState::Completed;
 
             // Release all resources held by this task
-            let held_resources: Vec<_> = task_info.held_resources.iter().cloned().collect();
+            let held_resources: Vec<_> = task_info.held_resources.iter().copied().collect();
             for resource_id in held_resources {
                 self.release_resource_internal(&mut state, task_id, resource_id);
             }
@@ -375,7 +377,11 @@ impl PriorityInversionOracle {
 
             // Apply priority inheritance if enabled
             if self.config.track_priority_inheritance {
-                self.apply_priority_inheritance(state, lock_info.holder, waiting_task_info.priority);
+                self.apply_priority_inheritance(
+                    state,
+                    lock_info.holder,
+                    waiting_task_info.priority,
+                );
             }
         }
 
@@ -423,7 +429,10 @@ impl PriorityInversionOracle {
         // Check if we have a transitive inversion
         if blocking_chain.len() > 1 {
             let waiting_task_info = state.active_tasks.get(&waiting_task).unwrap();
-            let final_blocker_info = state.active_tasks.get(blocking_chain.last().unwrap()).unwrap();
+            let final_blocker_info = state
+                .active_tasks
+                .get(blocking_chain.last().unwrap())
+                .unwrap();
 
             if waiting_task_info.priority > final_blocker_info.priority {
                 let inversion_id = InversionId(state.next_inversion_id);
@@ -475,10 +484,10 @@ impl PriorityInversionOracle {
 
             let is_resolved = match (blocked_task_info, blocking_task_info) {
                 (Some(blocked), Some(blocking)) => {
-                    blocked.state == TaskState::Running ||
-                    blocked.state == TaskState::Completed ||
-                    blocking.state == TaskState::Completed ||
-                    !blocked.waiting_for.contains(&inversion.resource_id)
+                    blocked.state == TaskState::Running
+                        || blocked.state == TaskState::Completed
+                        || blocking.state == TaskState::Completed
+                        || !blocked.waiting_for.contains(&inversion.resource_id)
                 }
                 _ => true, // One of the tasks is gone
             };
@@ -503,7 +512,8 @@ impl PriorityInversionOracle {
                 }
 
                 // Update average duration
-                let total_resolved = state.statistics.total_inversions - state.statistics.active_inversion_count;
+                let total_resolved =
+                    state.statistics.total_inversions - state.statistics.active_inversion_count;
                 if total_resolved > 0 {
                     state.statistics.avg_inversion_duration =
                         state.statistics.total_inversion_duration / total_resolved as u32;
@@ -525,18 +535,21 @@ impl PriorityInversionOracle {
     }
 
     /// Get current priority inversion statistics.
+    #[must_use]
     pub fn statistics(&self) -> PriorityInversionStatistics {
         let state = self.state.lock().unwrap();
         state.statistics.clone()
     }
 
     /// Get list of currently active priority inversions.
+    #[must_use]
     pub fn active_inversions(&self) -> Vec<PriorityInversion> {
         let state = self.state.lock().unwrap();
         state.active_inversions.values().cloned().collect()
     }
 
     /// Check for any active priority inversions.
+    #[must_use]
     pub fn has_active_inversions(&self) -> bool {
         let state = self.state.lock().unwrap();
         !state.active_inversions.is_empty()
@@ -554,6 +567,7 @@ impl PriorityInversionOracle {
     }
 
     /// Generate a detailed report of priority inversion status.
+    #[must_use]
     pub fn generate_report(&self) -> String {
         let state = self.state.lock().unwrap();
         let stats = &state.statistics;
@@ -562,12 +576,30 @@ impl PriorityInversionOracle {
         report.push_str("=== Priority Inversion Oracle Report ===\n");
         report.push_str(&format!("Total Inversions: {}\n", stats.total_inversions));
         report.push_str(&format!("Direct Inversions: {}\n", stats.direct_inversions));
-        report.push_str(&format!("Transitive Inversions: {}\n", stats.transitive_inversions));
-        report.push_str(&format!("Inheritance Failures: {}\n", stats.inheritance_failures));
-        report.push_str(&format!("Active Inversions: {}\n", stats.active_inversion_count));
-        report.push_str(&format!("Total Inversion Duration: {:?}\n", stats.total_inversion_duration));
-        report.push_str(&format!("Max Inversion Duration: {:?}\n", stats.max_inversion_duration));
-        report.push_str(&format!("Avg Inversion Duration: {:?}\n", stats.avg_inversion_duration));
+        report.push_str(&format!(
+            "Transitive Inversions: {}\n",
+            stats.transitive_inversions
+        ));
+        report.push_str(&format!(
+            "Inheritance Failures: {}\n",
+            stats.inheritance_failures
+        ));
+        report.push_str(&format!(
+            "Active Inversions: {}\n",
+            stats.active_inversion_count
+        ));
+        report.push_str(&format!(
+            "Total Inversion Duration: {:?}\n",
+            stats.total_inversion_duration
+        ));
+        report.push_str(&format!(
+            "Max Inversion Duration: {:?}\n",
+            stats.max_inversion_duration
+        ));
+        report.push_str(&format!(
+            "Avg Inversion Duration: {:?}\n",
+            stats.avg_inversion_duration
+        ));
 
         if !state.active_inversions.is_empty() {
             report.push_str("\n=== Active Inversions ===\n");
@@ -715,9 +747,9 @@ mod tests {
 impl std::fmt::Display for Priority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Priority::Cooperative => write!(f, "Cooperative"),
-            Priority::Normal => write!(f, "Normal"),
-            Priority::High => write!(f, "High"),
+            Self::Cooperative => write!(f, "Cooperative"),
+            Self::Normal => write!(f, "Normal"),
+            Self::High => write!(f, "High"),
         }
     }
 }
@@ -725,9 +757,9 @@ impl std::fmt::Display for Priority {
 impl std::fmt::Display for InversionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InversionType::Direct => write!(f, "Direct"),
-            InversionType::Transitive => write!(f, "Transitive"),
-            InversionType::InheritanceFailure => write!(f, "InheritanceFailure"),
+            Self::Direct => write!(f, "Direct"),
+            Self::Transitive => write!(f, "Transitive"),
+            Self::InheritanceFailure => write!(f, "InheritanceFailure"),
         }
     }
 }

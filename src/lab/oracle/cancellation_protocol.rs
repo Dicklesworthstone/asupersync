@@ -133,8 +133,7 @@ impl ViolationRecord {
         };
 
         let replay_command = Some(format!(
-            "asupersync test --oracle cancel-correctness --trace-id {}",
-            trace_id
+            "asupersync test --oracle cancel-correctness --trace-id {trace_id}"
         ));
 
         Self {
@@ -482,7 +481,7 @@ impl TaskProtocolRecord {
 ///
 /// Enhanced for runtime use with configurable enforcement, structured logging,
 /// stack trace capture, and thread-safe violation tracking.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CancellationProtocolOracle {
     /// Per-task protocol records.
     tasks: BTreeMap<TaskId, TaskProtocolRecord>,
@@ -500,21 +499,6 @@ pub struct CancellationProtocolOracle {
     violation_records: Vec<ViolationRecord>,
     /// Configuration for runtime behavior.
     config: CancelCorrectnessConfig,
-}
-
-impl Default for CancellationProtocolOracle {
-    fn default() -> Self {
-        Self {
-            tasks: BTreeMap::new(),
-            region_parents: BTreeMap::new(),
-            region_children: BTreeMap::new(),
-            cancelled_regions: BTreeMap::new(),
-            task_regions: BTreeMap::new(),
-            violations: Vec::new(),
-            violation_records: Vec::new(),
-            config: CancelCorrectnessConfig::default(),
-        }
-    }
 }
 
 impl CancellationProtocolOracle {
@@ -571,16 +555,16 @@ impl CancellationProtocolOracle {
         // Apply enforcement mode
         match self.config.enforcement {
             EnforcementMode::Panic => {
-                panic!("Cancel protocol violation detected: {}", violation);
+                panic!("Cancel protocol violation detected: {violation}");
             }
             EnforcementMode::Warn => {
-                eprintln!("⚠️  Cancel protocol violation: {}", violation);
+                eprintln!("⚠️  Cancel protocol violation: {violation}");
                 if let Some(stack) = self
                     .violation_records
                     .last()
                     .and_then(|r| r.stack_trace.as_ref())
                 {
-                    eprintln!("   Stack trace: {}", stack);
+                    eprintln!("   Stack trace: {stack}");
                 }
             }
             EnforcementMode::Collect => {
@@ -1095,7 +1079,7 @@ impl CancellationProtocolOracle {
                 let mut counts = std::collections::HashMap::new();
                 for record in &self.violation_records {
                     let violation_type = std::mem::discriminant(&record.violation);
-                    *counts.entry(format!("{:?}", violation_type)).or_insert(0) += 1;
+                    *counts.entry(format!("{violation_type:?}")).or_insert(0) += 1;
                 }
                 counts
             },

@@ -695,8 +695,7 @@ mod validation_tests {
                 .build()
                 .expect("sender build");
 
-            let outcome = sender.send_object(&cx, object_id, &data)
-                .expect("encoding");
+            let outcome = sender.send_object(&cx, object_id, &data).expect("encoding");
             let symbols = sender.transport_mut().symbols().to_vec();
 
             let k = outcome.source_symbols;
@@ -714,7 +713,10 @@ mod validation_tests {
 
         // Both should decode to the same result (orthogonality)
         if results.len() == 2 {
-            assert_eq!(results[0], results[1], "Repair symbol orthogonality test validation");
+            assert_eq!(
+                results[0], results[1],
+                "Repair symbol orthogonality test validation"
+            );
             assert_eq!(results[0], data, "Identity preservation test validation");
         }
     }
@@ -743,8 +745,7 @@ mod validation_tests {
             .build()
             .expect("sender build");
 
-        let outcome = sender.send_object(&cx, object_id, &data)
-            .expect("encoding");
+        let outcome = sender.send_object(&cx, object_id, &data).expect("encoding");
         let symbols = sender.transport_mut().symbols().to_vec();
 
         let k = outcome.source_symbols;
@@ -759,7 +760,7 @@ mod validation_tests {
         minimal_erasures.drain(2..4); // Remove 2 symbols
         let minimal_received = symbols_to_received(
             &minimal_erasures[..std::cmp::min(minimal_erasures.len(), original_count - 2)],
-            k
+            k,
         );
 
         // More erasures
@@ -767,7 +768,7 @@ mod validation_tests {
         more_erasures.drain(2..6); // Remove 4 symbols
         let more_received = symbols_to_received(
             &more_erasures[..std::cmp::min(more_erasures.len(), original_count - 4)],
-            k
+            k,
         );
 
         let minimal_result = decoder.decode(&minimal_received);

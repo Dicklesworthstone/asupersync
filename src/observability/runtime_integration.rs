@@ -28,6 +28,7 @@ pub struct CancellationTracerIntegration {
 
 impl CancellationTracerIntegration {
     /// Creates a new tracer integration with the given configuration.
+    #[must_use]
     pub fn new(config: CancellationTracerConfig) -> Self {
         Self {
             tracer: Arc::new(CancellationTracer::new(config)),
@@ -37,6 +38,7 @@ impl CancellationTracerIntegration {
     }
 
     /// Gets a reference to the underlying tracer.
+    #[must_use]
     pub fn tracer(&self) -> &Arc<CancellationTracer> {
         &self.tracer
     }
@@ -265,11 +267,13 @@ impl CancellationTracerIntegration {
     }
 
     /// Gets traces currently being tracked for tasks.
+    #[must_use]
     pub fn active_task_traces(&self) -> HashMap<TaskId, TraceId> {
         self.task_traces.read().clone()
     }
 
     /// Gets traces currently being tracked for regions.
+    #[must_use]
     pub fn active_region_traces(&self) -> HashMap<RegionId, TraceId> {
         self.region_traces.read().clone()
     }

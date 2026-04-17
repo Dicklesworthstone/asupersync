@@ -21,9 +21,11 @@
 //! - [`IoStateMachine`]: IO operation states including cancellation cleanup
 //! - [`TimerStateMachine`]: Timer lifecycle with cancellation support
 
-use crate::types::{RegionId, TaskId, ObligationId, Time};
-use std::fmt::{self, Debug, Display};
+#![allow(missing_docs)]
+
+use crate::types::{ObligationId, RegionId, TaskId, Time};
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 // ============================================================================
 // State Machine Framework
@@ -54,10 +56,7 @@ pub enum TransitionResult {
         attempted_transition: String,
     },
     /// Transition would be valid but violates an invariant.
-    InvariantViolation {
-        invariant: String,
-        context: String,
-    },
+    InvariantViolation { invariant: String, context: String },
 }
 
 /// Trait for all cancel protocol state machines.
@@ -106,15 +105,13 @@ pub enum RegionState {
         cancel_reason: String,
     },
     /// All tasks drained, finalizers running.
-    Finalizing {
-        running_finalizers: u32,
-    },
+    Finalizing { running_finalizers: u32 },
     /// Region fully quiesced and finalized.
     Finalized,
     /// Error state - protocol violation detected.
     Error {
         violation: String,
-        last_valid_state: Box<RegionState>,
+        last_valid_state: Box<Self>,
     },
 }
 
@@ -167,6 +164,7 @@ pub struct RegionStateMachine {
 
 impl RegionStateMachine {
     /// Create a new region state machine.
+    #[must_use]
     pub fn new(region_id: RegionId, validation_level: ValidationLevel) -> Self {
         Self {
             state: RegionState::Created,
@@ -177,6 +175,7 @@ impl RegionStateMachine {
     }
 
     /// Get the number of active tasks.
+    #[must_use]
     pub fn active_task_count(&self) -> u32 {
         match &self.state {
             RegionState::Active { active_tasks, .. } => *active_tasks,
@@ -186,35 +185,51 @@ impl RegionStateMachine {
     }
 
     /// Check if the region is quiesced (no active tasks, no finalizers).
+    #[must_use]
     pub fn is_quiesced(&self) -> bool {
         matches!(self.state, RegionState::Finalized)
     }
 
     /// Check region-specific invariants.
-    fn check_region_invariants(&self, context: &RegionContext) -> Result<(), String> {
+    fn check_region_invariants(&self, _context: &RegionContext) -> Result<(), String> {
         match &self.state {
             RegionState::Created => {
                 // Created region should have no tasks or finalizers
                 Ok(())
             }
-            RegionState::Active { active_tasks, pending_finalizers } => {
+            RegionState::Active {
+                active_tasks,
+                pending_finalizers,
+            } => {
                 // Active region invariants
                 if *active_tasks == 0 && *pending_finalizers == 0 {
-                    return Err("Active region with no tasks or finalizers should be closed".to_string());
+                    return Err(
+                        "Active region with no tasks or finalizers should be closed".to_string()
+                    );
                 }
                 Ok(())
             }
-            RegionState::Cancelling { draining_tasks, pending_finalizers, .. } => {
+            RegionState::Cancelling {
+                draining_tasks,
+                pending_finalizers,
+                ..
+            } => {
                 // Cancelling region should eventually drain all tasks
                 if *draining_tasks == 0 && *pending_finalizers == 0 {
-                    return Err("Cancelling region with no tasks should transition to finalizing".to_string());
+                    return Err(
+                        "Cancelling region with no tasks should transition to finalizing"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
             RegionState::Finalizing { running_finalizers } => {
                 // Finalizing region should eventually complete all finalizers
                 if *running_finalizers == 0 {
-                    return Err("Finalizing region with no running finalizers should be finalized".to_string());
+                    return Err(
+                        "Finalizing region with no running finalizers should be finalized"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -243,23 +258,34 @@ impl CancelStateMachine for RegionStateMachine {
         let old_state = self.state.clone();
         let new_state = match (&self.state, &event) {
             // Created -> Active
-            (RegionState::Created, RegionEvent::Activate) => {
-                RegionState::Active { active_tasks: 0, pending_finalizers: 0 }
-            }
+            (RegionState::Created, RegionEvent::Activate) => RegionState::Active {
+                active_tasks: 0,
+                pending_finalizers: 0,
+            },
 
             // Active state transitions
-            (RegionState::Active { active_tasks, pending_finalizers }, RegionEvent::TaskSpawned) => {
+            (
                 RegionState::Active {
-                    active_tasks: active_tasks + 1,
-                    pending_finalizers: *pending_finalizers,
-                }
-            }
-            (RegionState::Active { active_tasks, pending_finalizers }, RegionEvent::TaskCompleted) => {
+                    active_tasks,
+                    pending_finalizers,
+                },
+                RegionEvent::TaskSpawned,
+            ) => RegionState::Active {
+                active_tasks: active_tasks + 1,
+                pending_finalizers: *pending_finalizers,
+            },
+            (
+                RegionState::Active {
+                    active_tasks,
+                    pending_finalizers,
+                },
+                RegionEvent::TaskCompleted,
+            ) => {
                 if *active_tasks == 0 {
                     return TransitionResult::Invalid {
                         reason: "Cannot complete task in region with no active tasks".to_string(),
                         current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{:?}", event),
+                        attempted_transition: format!("{event:?}"),
                     };
                 }
                 RegionState::Active {
@@ -267,44 +293,67 @@ impl CancelStateMachine for RegionStateMachine {
                     pending_finalizers: *pending_finalizers,
                 }
             }
-            (RegionState::Active { active_tasks, pending_finalizers }, RegionEvent::FinalizerRegistered) => {
+            (
                 RegionState::Active {
-                    active_tasks: *active_tasks,
-                    pending_finalizers: pending_finalizers + 1,
-                }
-            }
-            (RegionState::Active { active_tasks, pending_finalizers }, RegionEvent::Cancel { reason }) => {
-                RegionState::Cancelling {
-                    draining_tasks: *active_tasks,
-                    pending_finalizers: *pending_finalizers,
-                    cancel_reason: reason.clone(),
-                }
-            }
-            (RegionState::Active { active_tasks, pending_finalizers }, RegionEvent::RequestClose) => {
+                    active_tasks,
+                    pending_finalizers,
+                },
+                RegionEvent::FinalizerRegistered,
+            ) => RegionState::Active {
+                active_tasks: *active_tasks,
+                pending_finalizers: pending_finalizers + 1,
+            },
+            (
+                RegionState::Active {
+                    active_tasks,
+                    pending_finalizers,
+                },
+                RegionEvent::Cancel { reason },
+            ) => RegionState::Cancelling {
+                draining_tasks: *active_tasks,
+                pending_finalizers: *pending_finalizers,
+                cancel_reason: reason.clone(),
+            },
+            (
+                RegionState::Active {
+                    active_tasks,
+                    pending_finalizers,
+                },
+                RegionEvent::RequestClose,
+            ) => {
                 if *active_tasks > 0 || *pending_finalizers > 0 {
                     return TransitionResult::Invalid {
                         reason: "Cannot close active region with pending work".to_string(),
                         current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{:?}", event),
+                        attempted_transition: format!("{event:?}"),
                     };
                 }
                 RegionState::Finalized
             }
 
             // Cancelling state transitions
-            (RegionState::Cancelling { draining_tasks, pending_finalizers, cancel_reason }, RegionEvent::TaskDrained) => {
+            (
+                RegionState::Cancelling {
+                    draining_tasks,
+                    pending_finalizers,
+                    cancel_reason,
+                },
+                RegionEvent::TaskDrained,
+            ) => {
                 if *draining_tasks == 0 {
                     return TransitionResult::Invalid {
                         reason: "Cannot drain task in region with no draining tasks".to_string(),
                         current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{:?}", event),
+                        attempted_transition: format!("{event:?}"),
                     };
                 }
                 let new_draining = draining_tasks - 1;
                 if new_draining == 0 && *pending_finalizers == 0 {
                     RegionState::Finalized
                 } else if new_draining == 0 {
-                    RegionState::Finalizing { running_finalizers: *pending_finalizers }
+                    RegionState::Finalizing {
+                        running_finalizers: *pending_finalizers,
+                    }
                 } else {
                     RegionState::Cancelling {
                         draining_tasks: new_draining,
@@ -313,16 +362,25 @@ impl CancelStateMachine for RegionStateMachine {
                     }
                 }
             }
-            (RegionState::Cancelling { draining_tasks, pending_finalizers, cancel_reason }, RegionEvent::FinalizerStarted) => {
+            (
+                RegionState::Cancelling {
+                    draining_tasks,
+                    pending_finalizers,
+                    cancel_reason,
+                },
+                RegionEvent::FinalizerStarted,
+            ) => {
                 if *pending_finalizers == 0 {
                     return TransitionResult::Invalid {
                         reason: "Cannot start finalizer with no pending finalizers".to_string(),
                         current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{:?}", event),
+                        attempted_transition: format!("{event:?}"),
                     };
                 }
                 if *draining_tasks == 0 {
-                    RegionState::Finalizing { running_finalizers: *pending_finalizers }
+                    RegionState::Finalizing {
+                        running_finalizers: *pending_finalizers,
+                    }
                 } else {
                     RegionState::Cancelling {
                         draining_tasks: *draining_tasks,
@@ -338,14 +396,16 @@ impl CancelStateMachine for RegionStateMachine {
                     return TransitionResult::Invalid {
                         reason: "Cannot complete finalizer with no running finalizers".to_string(),
                         current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{:?}", event),
+                        attempted_transition: format!("{event:?}"),
                     };
                 }
                 let new_running = running_finalizers - 1;
                 if new_running == 0 {
                     RegionState::Finalized
                 } else {
-                    RegionState::Finalizing { running_finalizers: new_running }
+                    RegionState::Finalizing {
+                        running_finalizers: new_running,
+                    }
                 }
             }
 
@@ -354,23 +414,26 @@ impl CancelStateMachine for RegionStateMachine {
                 return TransitionResult::Invalid {
                     reason: "Cannot transition from finalized state".to_string(),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
             (RegionState::Error { .. }, _) => {
                 return TransitionResult::Invalid {
                     reason: "Cannot transition from error state".to_string(),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
 
             // Invalid transitions
             _ => {
                 return TransitionResult::Invalid {
-                    reason: format!("Invalid transition from {:?} with event {:?}", self.state, event),
+                    reason: format!(
+                        "Invalid transition from {:?} with event {:?}",
+                        self.state, event
+                    ),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
         };
@@ -390,14 +453,18 @@ impl CancelStateMachine for RegionStateMachine {
 
         // Record transition if validation is enabled
         if self.validation_level != ValidationLevel::None {
-            self.transition_history.push((context.created_at, event, new_state.clone()));
+            self.transition_history
+                .push((context.created_at, event, new_state));
         }
 
         TransitionResult::Valid
     }
 
     fn is_terminal(&self) -> bool {
-        matches!(self.state, RegionState::Finalized | RegionState::Error { .. })
+        matches!(
+            self.state,
+            RegionState::Finalized | RegionState::Error { .. }
+        )
     }
 
     fn valid_transitions(&self) -> Vec<Self::Event> {
@@ -407,16 +474,15 @@ impl CancelStateMachine for RegionStateMachine {
                 RegionEvent::TaskSpawned,
                 RegionEvent::TaskCompleted,
                 RegionEvent::FinalizerRegistered,
-                RegionEvent::Cancel { reason: "example".to_string() },
+                RegionEvent::Cancel {
+                    reason: "example".to_string(),
+                },
                 RegionEvent::RequestClose,
             ],
-            RegionState::Cancelling { .. } => vec![
-                RegionEvent::TaskDrained,
-                RegionEvent::FinalizerStarted,
-            ],
-            RegionState::Finalizing { .. } => vec![
-                RegionEvent::FinalizerCompleted,
-            ],
+            RegionState::Cancelling { .. } => {
+                vec![RegionEvent::TaskDrained, RegionEvent::FinalizerStarted]
+            }
+            RegionState::Finalizing { .. } => vec![RegionEvent::FinalizerCompleted],
             RegionState::Finalized | RegionState::Error { .. } => vec![],
         }
     }
@@ -428,18 +494,27 @@ impl CancelStateMachine for RegionStateMachine {
     fn state_description(&self) -> String {
         match &self.state {
             RegionState::Created => "Created - ready for activation".to_string(),
-            RegionState::Active { active_tasks, pending_finalizers } => {
-                format!("Active - {} tasks, {} finalizers", active_tasks, pending_finalizers)
+            RegionState::Active {
+                active_tasks,
+                pending_finalizers,
+            } => {
+                format!("Active - {active_tasks} tasks, {pending_finalizers} finalizers")
             }
-            RegionState::Cancelling { draining_tasks, pending_finalizers, cancel_reason } => {
-                format!("Cancelling ({}) - {} draining, {} finalizers", cancel_reason, draining_tasks, pending_finalizers)
+            RegionState::Cancelling {
+                draining_tasks,
+                pending_finalizers,
+                cancel_reason,
+            } => {
+                format!(
+                    "Cancelling ({cancel_reason}) - {draining_tasks} draining, {pending_finalizers} finalizers"
+                )
             }
             RegionState::Finalizing { running_finalizers } => {
-                format!("Finalizing - {} finalizers running", running_finalizers)
+                format!("Finalizing - {running_finalizers} finalizers running")
             }
             RegionState::Finalized => "Finalized - terminal state".to_string(),
             RegionState::Error { violation, .. } => {
-                format!("Error - {}", violation)
+                format!("Error - {violation}")
             }
         }
     }
@@ -506,6 +581,7 @@ pub struct TaskStateMachine {
 
 impl TaskStateMachine {
     /// Create a new task state machine.
+    #[must_use]
     pub fn new(task_id: TaskId, region_id: RegionId, validation_level: ValidationLevel) -> Self {
         Self {
             state: TaskState::Spawned,
@@ -516,11 +592,13 @@ impl TaskStateMachine {
     }
 
     /// Check if the task is in a state where it can be cancelled.
+    #[must_use]
     pub fn is_cancellable(&self) -> bool {
         matches!(self.state, TaskState::Spawned | TaskState::Running)
     }
 
     /// Check if the task has completed (successfully, cancelled, or panicked).
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         matches!(
             self.state,
@@ -553,32 +631,42 @@ impl CancelStateMachine for TaskStateMachine {
             (TaskState::Running, TaskEvent::RequestCancel) => TaskState::CancelRequested,
 
             // Running -> Panicked
-            (TaskState::Running, TaskEvent::Panic { message }) => TaskState::Panicked { message: message.clone() },
+            (TaskState::Running, TaskEvent::Panic { message }) => TaskState::Panicked {
+                message: message.clone(),
+            },
 
             // CancelRequested -> Draining (task acknowledges cancel and starts cleanup)
             (TaskState::CancelRequested, TaskEvent::DrainComplete) => TaskState::Cancelled,
 
             // CancelRequested -> Panicked (task panics during cancel)
-            (TaskState::CancelRequested, TaskEvent::Panic { message }) => TaskState::Panicked { message: message.clone() },
+            (TaskState::CancelRequested, TaskEvent::Panic { message }) => TaskState::Panicked {
+                message: message.clone(),
+            },
 
             // Terminal states - no transitions
-            (TaskState::Completed, _) |
-            (TaskState::Cancelled, _) |
-            (TaskState::Panicked { .. }, _) |
-            (TaskState::Error { .. }, _) => {
+            (
+                TaskState::Completed
+                | TaskState::Cancelled
+                | TaskState::Panicked { .. }
+                | TaskState::Error { .. },
+                _,
+            ) => {
                 return TransitionResult::Invalid {
                     reason: "Cannot transition from terminal state".to_string(),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
 
             // Invalid transitions
             _ => {
                 return TransitionResult::Invalid {
-                    reason: format!("Invalid transition from {:?} with event {:?}", self.state, event),
+                    reason: format!(
+                        "Invalid transition from {:?} with event {:?}",
+                        self.state, event
+                    ),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
         };
@@ -590,7 +678,10 @@ impl CancelStateMachine for TaskStateMachine {
     fn is_terminal(&self) -> bool {
         matches!(
             self.state,
-            TaskState::Completed | TaskState::Cancelled | TaskState::Panicked { .. } | TaskState::Error { .. }
+            TaskState::Completed
+                | TaskState::Cancelled
+                | TaskState::Panicked { .. }
+                | TaskState::Error { .. }
         )
     }
 
@@ -600,11 +691,15 @@ impl CancelStateMachine for TaskStateMachine {
             TaskState::Running => vec![
                 TaskEvent::Complete,
                 TaskEvent::RequestCancel,
-                TaskEvent::Panic { message: "example".to_string() },
+                TaskEvent::Panic {
+                    message: "example".to_string(),
+                },
             ],
             TaskState::CancelRequested => vec![
                 TaskEvent::DrainComplete,
-                TaskEvent::Panic { message: "example".to_string() },
+                TaskEvent::Panic {
+                    message: "example".to_string(),
+                },
             ],
             _ => vec![],
         }
@@ -630,8 +725,8 @@ impl CancelStateMachine for TaskStateMachine {
             TaskState::Draining => "Draining - completing cleanup".to_string(),
             TaskState::Completed => "Completed - finished successfully".to_string(),
             TaskState::Cancelled => "Cancelled - drained and terminated".to_string(),
-            TaskState::Panicked { message } => format!("Panicked - {}", message),
-            TaskState::Error { violation } => format!("Error - {}", violation),
+            TaskState::Panicked { message } => format!("Panicked - {message}"),
+            TaskState::Error { violation } => format!("Error - {violation}"),
         }
     }
 }
@@ -686,6 +781,7 @@ pub struct ObligationStateMachine {
 
 impl ObligationStateMachine {
     /// Create a new obligation state machine.
+    #[must_use]
     pub fn new(obligation_id: ObligationId, validation_level: ValidationLevel) -> Self {
         Self {
             state: ObligationState::Created,
@@ -695,11 +791,13 @@ impl ObligationStateMachine {
     }
 
     /// Check if the obligation is currently reserved.
+    #[must_use]
     pub fn is_reserved(&self) -> bool {
         matches!(self.state, ObligationState::Reserved { .. })
     }
 
     /// Check if the obligation is fulfilled (committed or aborted).
+    #[must_use]
     pub fn is_fulfilled(&self) -> bool {
         matches!(
             self.state,
@@ -721,7 +819,9 @@ impl CancelStateMachine for ObligationStateMachine {
         let new_state = match (&self.state, &event) {
             // Created -> Reserved
             (ObligationState::Created, ObligationEvent::Reserve { token }) => {
-                ObligationState::Reserved { reservation_token: *token }
+                ObligationState::Reserved {
+                    reservation_token: *token,
+                }
             }
 
             // Reserved -> Committed
@@ -731,26 +831,34 @@ impl CancelStateMachine for ObligationStateMachine {
 
             // Reserved -> Aborted
             (ObligationState::Reserved { .. }, ObligationEvent::Abort { reason }) => {
-                ObligationState::Aborted { reason: reason.clone() }
+                ObligationState::Aborted {
+                    reason: reason.clone(),
+                }
             }
 
             // Terminal states - no transitions
-            (ObligationState::Committed, _) |
-            (ObligationState::Aborted { .. }, _) |
-            (ObligationState::Error { .. }, _) => {
+            (
+                ObligationState::Committed
+                | ObligationState::Aborted { .. }
+                | ObligationState::Error { .. },
+                _,
+            ) => {
                 return TransitionResult::Invalid {
                     reason: "Cannot transition from terminal obligation state".to_string(),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
 
             // Invalid transitions
             _ => {
                 return TransitionResult::Invalid {
-                    reason: format!("Invalid obligation transition from {:?} with event {:?}", self.state, event),
+                    reason: format!(
+                        "Invalid obligation transition from {:?} with event {:?}",
+                        self.state, event
+                    ),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
         };
@@ -762,18 +870,20 @@ impl CancelStateMachine for ObligationStateMachine {
     fn is_terminal(&self) -> bool {
         matches!(
             self.state,
-            ObligationState::Committed | ObligationState::Aborted { .. } | ObligationState::Error { .. }
+            ObligationState::Committed
+                | ObligationState::Aborted { .. }
+                | ObligationState::Error { .. }
         )
     }
 
     fn valid_transitions(&self) -> Vec<Self::Event> {
         match &self.state {
-            ObligationState::Created => vec![
-                ObligationEvent::Reserve { token: 0 },
-            ],
+            ObligationState::Created => vec![ObligationEvent::Reserve { token: 0 }],
             ObligationState::Reserved { .. } => vec![
                 ObligationEvent::Commit,
-                ObligationEvent::Abort { reason: "example".to_string() },
+                ObligationEvent::Abort {
+                    reason: "example".to_string(),
+                },
             ],
             _ => vec![],
         }
@@ -795,14 +905,14 @@ impl CancelStateMachine for ObligationStateMachine {
         match &self.state {
             ObligationState::Created => "Created - ready for reservation".to_string(),
             ObligationState::Reserved { reservation_token } => {
-                format!("Reserved - token {}", reservation_token)
+                format!("Reserved - token {reservation_token}")
             }
             ObligationState::Committed => "Committed - obligation fulfilled".to_string(),
             ObligationState::Aborted { reason } => {
-                format!("Aborted - {}", reason)
+                format!("Aborted - {reason}")
             }
             ObligationState::Error { violation } => {
-                format!("Error - {}", violation)
+                format!("Error - {violation}")
             }
         }
     }
@@ -856,23 +966,30 @@ pub struct ChannelStateMachine {
 
 impl ChannelStateMachine {
     /// Create a new channel state machine.
+    #[must_use]
     pub fn new(channel_id: u64, validation_level: ValidationLevel) -> Self {
         Self {
-            state: ChannelState::Open { pending_reservations: 0 },
+            state: ChannelState::Open {
+                pending_reservations: 0,
+            },
             channel_id,
             validation_level,
         }
     }
 
     /// Check if the channel is accepting new operations.
+    #[must_use]
     pub fn is_accepting_ops(&self) -> bool {
         matches!(self.state, ChannelState::Open { .. })
     }
 
     /// Get the number of pending operations.
+    #[must_use]
     pub fn pending_ops(&self) -> u32 {
         match &self.state {
-            ChannelState::Open { pending_reservations } => *pending_reservations,
+            ChannelState::Open {
+                pending_reservations,
+            } => *pending_reservations,
             ChannelState::Closing { draining_ops } => *draining_ops,
             _ => 0,
         }
@@ -891,24 +1008,44 @@ impl CancelStateMachine for ChannelStateMachine {
     fn transition(&mut self, event: Self::Event, _context: &Self::Context) -> TransitionResult {
         let new_state = match (&self.state, &event) {
             // Open state transitions
-            (ChannelState::Open { pending_reservations }, ChannelEvent::OperationStarted) => {
-                ChannelState::Open { pending_reservations: pending_reservations + 1 }
-            }
-            (ChannelState::Open { pending_reservations }, ChannelEvent::OperationCompleted) => {
+            (
+                ChannelState::Open {
+                    pending_reservations,
+                },
+                ChannelEvent::OperationStarted,
+            ) => ChannelState::Open {
+                pending_reservations: pending_reservations + 1,
+            },
+            (
+                ChannelState::Open {
+                    pending_reservations,
+                },
+                ChannelEvent::OperationCompleted,
+            ) => {
                 if *pending_reservations == 0 {
                     return TransitionResult::Invalid {
-                        reason: "Cannot complete operation with no pending reservations".to_string(),
+                        reason: "Cannot complete operation with no pending reservations"
+                            .to_string(),
                         current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{:?}", event),
+                        attempted_transition: format!("{event:?}"),
                     };
                 }
-                ChannelState::Open { pending_reservations: pending_reservations - 1 }
+                ChannelState::Open {
+                    pending_reservations: pending_reservations - 1,
+                }
             }
-            (ChannelState::Open { pending_reservations }, ChannelEvent::InitiateClose) => {
+            (
+                ChannelState::Open {
+                    pending_reservations,
+                },
+                ChannelEvent::InitiateClose,
+            ) => {
                 if *pending_reservations == 0 {
                     ChannelState::Closed
                 } else {
-                    ChannelState::Closing { draining_ops: *pending_reservations }
+                    ChannelState::Closing {
+                        draining_ops: *pending_reservations,
+                    }
                 }
             }
 
@@ -918,42 +1055,46 @@ impl CancelStateMachine for ChannelStateMachine {
                     return TransitionResult::Invalid {
                         reason: "Cannot complete operation with no draining ops".to_string(),
                         current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{:?}", event),
+                        attempted_transition: format!("{event:?}"),
                     };
                 }
                 let new_draining = draining_ops - 1;
                 if new_draining == 0 {
                     ChannelState::Closed
                 } else {
-                    ChannelState::Closing { draining_ops: new_draining }
+                    ChannelState::Closing {
+                        draining_ops: new_draining,
+                    }
                 }
             }
             (ChannelState::Closing { draining_ops }, ChannelEvent::AllOperationsDrained) => {
                 if *draining_ops != 0 {
                     return TransitionResult::InvariantViolation {
                         invariant: "All operations must be drained before this event".to_string(),
-                        context: format!("Still {} draining ops", draining_ops),
+                        context: format!("Still {draining_ops} draining ops"),
                     };
                 }
                 ChannelState::Closed
             }
 
             // Terminal/error states - no transitions
-            (ChannelState::Closed, _) |
-            (ChannelState::Error { .. }, _) => {
+            (ChannelState::Closed | ChannelState::Error { .. }, _) => {
                 return TransitionResult::Invalid {
                     reason: "Cannot transition from terminal channel state".to_string(),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
 
             // Invalid transitions
             _ => {
                 return TransitionResult::Invalid {
-                    reason: format!("Invalid channel transition from {:?} with event {:?}", self.state, event),
+                    reason: format!(
+                        "Invalid channel transition from {:?} with event {:?}",
+                        self.state, event
+                    ),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
         };
@@ -963,7 +1104,10 @@ impl CancelStateMachine for ChannelStateMachine {
     }
 
     fn is_terminal(&self) -> bool {
-        matches!(self.state, ChannelState::Closed | ChannelState::Error { .. })
+        matches!(
+            self.state,
+            ChannelState::Closed | ChannelState::Error { .. }
+        )
     }
 
     fn valid_transitions(&self) -> Vec<Self::Event> {
@@ -985,7 +1129,10 @@ impl CancelStateMachine for ChannelStateMachine {
         match &self.state {
             ChannelState::Closing { draining_ops } => {
                 if *draining_ops == 0 {
-                    return Err("Closing channel should transition to closed when no ops remain".to_string());
+                    return Err(
+                        "Closing channel should transition to closed when no ops remain"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -995,15 +1142,17 @@ impl CancelStateMachine for ChannelStateMachine {
 
     fn state_description(&self) -> String {
         match &self.state {
-            ChannelState::Open { pending_reservations } => {
-                format!("Open - {} pending operations", pending_reservations)
+            ChannelState::Open {
+                pending_reservations,
+            } => {
+                format!("Open - {pending_reservations} pending operations")
             }
             ChannelState::Closing { draining_ops } => {
-                format!("Closing - {} operations draining", draining_ops)
+                format!("Closing - {draining_ops} operations draining")
             }
             ChannelState::Closed => "Closed - terminal state".to_string(),
             ChannelState::Error { violation } => {
-                format!("Error - {}", violation)
+                format!("Error - {violation}")
             }
         }
     }
@@ -1060,6 +1209,7 @@ pub struct IoStateMachine {
 
 impl IoStateMachine {
     /// Create a new IO operation state machine.
+    #[must_use]
     pub fn new(operation_id: u64, io_handle: u64, validation_level: ValidationLevel) -> Self {
         Self {
             state: IoState::Pending { io_handle },
@@ -1069,11 +1219,13 @@ impl IoStateMachine {
     }
 
     /// Check if the operation is still pending.
+    #[must_use]
     pub fn is_pending(&self) -> bool {
         matches!(self.state, IoState::Pending { .. })
     }
 
     /// Check if the operation completed successfully.
+    #[must_use]
     pub fn completed_successfully(&self) -> bool {
         matches!(self.state, IoState::Completed { .. })
     }
@@ -1091,38 +1243,35 @@ impl CancelStateMachine for IoStateMachine {
     fn transition(&mut self, event: Self::Event, _context: &Self::Context) -> TransitionResult {
         let new_state = match (&self.state, &event) {
             // Pending state transitions
-            (IoState::Pending { .. }, IoEvent::Complete { result_size }) => {
-                IoState::Completed { result_size: *result_size }
-            }
-            (IoState::Pending { .. }, IoEvent::Cancel) => {
-                IoState::Cancelled
-            }
-            (IoState::Pending { .. }, IoEvent::IoError { error }) => {
-                IoState::Error { io_error: error.clone() }
-            }
+            (IoState::Pending { .. }, IoEvent::Complete { result_size }) => IoState::Completed {
+                result_size: *result_size,
+            },
+            (IoState::Pending { .. }, IoEvent::Cancel) => IoState::Cancelled,
+            (IoState::Pending { .. }, IoEvent::IoError { error }) => IoState::Error {
+                io_error: error.clone(),
+            },
 
             // Cancelled -> Cleanup
-            (IoState::Cancelled, IoEvent::CleanupComplete) => {
-                IoState::Cleanup
-            }
+            (IoState::Cancelled, IoEvent::CleanupComplete) => IoState::Cleanup,
 
             // Terminal states - no transitions
-            (IoState::Completed { .. }, _) |
-            (IoState::Error { .. }, _) |
-            (IoState::Cleanup, _) => {
+            (IoState::Completed { .. } | IoState::Error { .. } | IoState::Cleanup, _) => {
                 return TransitionResult::Invalid {
                     reason: "Cannot transition from terminal IO state".to_string(),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
 
             // Invalid transitions
             _ => {
                 return TransitionResult::Invalid {
-                    reason: format!("Invalid IO transition from {:?} with event {:?}", self.state, event),
+                    reason: format!(
+                        "Invalid IO transition from {:?} with event {:?}",
+                        self.state, event
+                    ),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
         };
@@ -1143,11 +1292,11 @@ impl CancelStateMachine for IoStateMachine {
             IoState::Pending { .. } => vec![
                 IoEvent::Complete { result_size: 0 },
                 IoEvent::Cancel,
-                IoEvent::IoError { error: "example".to_string() },
+                IoEvent::IoError {
+                    error: "example".to_string(),
+                },
             ],
-            IoState::Cancelled => vec![
-                IoEvent::CleanupComplete,
-            ],
+            IoState::Cancelled => vec![IoEvent::CleanupComplete],
             _ => vec![],
         }
     }
@@ -1161,15 +1310,15 @@ impl CancelStateMachine for IoStateMachine {
     fn state_description(&self) -> String {
         match &self.state {
             IoState::Pending { io_handle } => {
-                format!("Pending - handle {}", io_handle)
+                format!("Pending - handle {io_handle}")
             }
             IoState::Cancelled => "Cancelled - awaiting cleanup".to_string(),
             IoState::Cleanup => "Cleanup complete - terminal".to_string(),
             IoState::Completed { result_size } => {
-                format!("Completed - {} bytes", result_size)
+                format!("Completed - {result_size} bytes")
             }
             IoState::Error { io_error } => {
-                format!("Error - {}", io_error)
+                format!("Error - {io_error}")
             }
         }
     }
@@ -1222,6 +1371,7 @@ pub struct TimerStateMachine {
 
 impl TimerStateMachine {
     /// Create a new timer state machine.
+    #[must_use]
     pub fn new(timer_id: u64, deadline: Time, validation_level: ValidationLevel) -> Self {
         Self {
             state: TimerState::Scheduled { deadline },
@@ -1231,11 +1381,13 @@ impl TimerStateMachine {
     }
 
     /// Check if the timer is still scheduled.
+    #[must_use]
     pub fn is_scheduled(&self) -> bool {
         matches!(self.state, TimerState::Scheduled { .. })
     }
 
     /// Get the timer deadline if scheduled.
+    #[must_use]
     pub fn deadline(&self) -> Option<Time> {
         match &self.state {
             TimerState::Scheduled { deadline } => Some(*deadline),
@@ -1261,26 +1413,25 @@ impl CancelStateMachine for TimerStateMachine {
                 if context.current_time < *deadline {
                     return TransitionResult::InvariantViolation {
                         invariant: "Timer should not fire before deadline".to_string(),
-                        context: format!("Current: {:?}, Deadline: {:?}", context.current_time, deadline),
+                        context: format!(
+                            "Current: {:?}, Deadline: {:?}",
+                            context.current_time, deadline
+                        ),
                     };
                 }
                 TimerState::Fired
             }
-            (TimerState::Scheduled { .. }, TimerEvent::Cancel) => {
-                TimerState::Cancelled
-            }
-            (TimerState::Scheduled { .. }, TimerEvent::TimerError { error }) => {
-                TimerState::Error { violation: error.clone() }
-            }
+            (TimerState::Scheduled { .. }, TimerEvent::Cancel) => TimerState::Cancelled,
+            (TimerState::Scheduled { .. }, TimerEvent::TimerError { error }) => TimerState::Error {
+                violation: error.clone(),
+            },
 
             // Terminal states - no transitions
-            (TimerState::Cancelled, _) |
-            (TimerState::Fired, _) |
-            (TimerState::Error { .. }, _) => {
+            (TimerState::Cancelled | TimerState::Fired | TimerState::Error { .. }, _) => {
                 return TransitionResult::Invalid {
                     reason: "Cannot transition from terminal timer state".to_string(),
                     current_state: format!("{:?}", self.state),
-                    attempted_transition: format!("{:?}", event),
+                    attempted_transition: format!("{event:?}"),
                 };
             }
         };
@@ -1301,7 +1452,9 @@ impl CancelStateMachine for TimerStateMachine {
             TimerState::Scheduled { .. } => vec![
                 TimerEvent::Fire,
                 TimerEvent::Cancel,
-                TimerEvent::TimerError { error: "example".to_string() },
+                TimerEvent::TimerError {
+                    error: "example".to_string(),
+                },
             ],
             _ => vec![],
         }
@@ -1325,12 +1478,12 @@ impl CancelStateMachine for TimerStateMachine {
     fn state_description(&self) -> String {
         match &self.state {
             TimerState::Scheduled { deadline } => {
-                format!("Scheduled - deadline {:?}", deadline)
+                format!("Scheduled - deadline {deadline:?}")
             }
             TimerState::Cancelled => "Cancelled - will not fire".to_string(),
             TimerState::Fired => "Fired - timer completed".to_string(),
             TimerState::Error { violation } => {
-                format!("Error - {}", violation)
+                format!("Error - {violation}")
             }
         }
     }
@@ -1355,6 +1508,7 @@ pub struct CancelProtocolValidator {
 
 impl CancelProtocolValidator {
     /// Create a new cancel protocol validator.
+    #[must_use]
     pub fn new(validation_level: ValidationLevel) -> Self {
         Self {
             validation_level,
@@ -1413,20 +1567,25 @@ impl CancelProtocolValidator {
     ) -> TransitionResult {
         if let Some(machine) = self.region_machines.get_mut(&region_id) {
             let result = machine.transition(event, context);
-            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } = &result {
+            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
+                &result
+            {
                 self.violation_count += 1;
 
                 // In debug/full validation, we could log or assert here
-                if matches!(self.validation_level, ValidationLevel::Debug | ValidationLevel::Full) {
-                    eprintln!("Cancel protocol violation in region {:?}: {:?}", region_id, result);
+                if matches!(
+                    self.validation_level,
+                    ValidationLevel::Debug | ValidationLevel::Full
+                ) {
+                    eprintln!("Cancel protocol violation in region {region_id:?}: {result:?}");
                 }
             }
             result
         } else {
             TransitionResult::Invalid {
-                reason: format!("Region {:?} not registered with validator", region_id),
+                reason: format!("Region {region_id:?} not registered with validator"),
                 current_state: "Unknown".to_string(),
-                attempted_transition: format!("{:?}", event),
+                attempted_transition: format!("{event:?}"),
             }
         }
     }
@@ -1440,35 +1599,47 @@ impl CancelProtocolValidator {
     ) -> TransitionResult {
         if let Some(machine) = self.task_machines.get_mut(&task_id) {
             let result = machine.transition(event, context);
-            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } = &result {
+            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
+                &result
+            {
                 self.violation_count += 1;
 
                 // In debug/full validation, we could log or assert here
-                if matches!(self.validation_level, ValidationLevel::Debug | ValidationLevel::Full) {
-                    eprintln!("Cancel protocol violation in task {:?}: {:?}", task_id, result);
+                if matches!(
+                    self.validation_level,
+                    ValidationLevel::Debug | ValidationLevel::Full
+                ) {
+                    eprintln!("Cancel protocol violation in task {task_id:?}: {result:?}");
                 }
             }
             result
         } else {
             TransitionResult::Invalid {
-                reason: format!("Task {:?} not registered with validator", task_id),
+                reason: format!("Task {task_id:?} not registered with validator"),
                 current_state: "Unknown".to_string(),
-                attempted_transition: format!("{:?}", event),
+                attempted_transition: format!("{event:?}"),
             }
         }
     }
 
     /// Get the current state of a region.
+    #[must_use]
     pub fn region_state(&self, region_id: RegionId) -> Option<&RegionState> {
-        self.region_machines.get(&region_id).map(|m| m.current_state())
+        self.region_machines
+            .get(&region_id)
+            .map(CancelStateMachine::current_state)
     }
 
     /// Get the current state of a task.
+    #[must_use]
     pub fn task_state(&self, task_id: TaskId) -> Option<&TaskState> {
-        self.task_machines.get(&task_id).map(|m| m.current_state())
+        self.task_machines
+            .get(&task_id)
+            .map(CancelStateMachine::current_state)
     }
 
     /// Get the total number of protocol violations detected.
+    #[must_use]
     pub fn violation_count(&self) -> u64 {
         self.violation_count
     }
@@ -1482,18 +1653,25 @@ impl CancelProtocolValidator {
     ) -> TransitionResult {
         if let Some(machine) = self.obligation_machines.get_mut(&obligation_id) {
             let result = machine.transition(event, context);
-            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } = &result {
+            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
+                &result
+            {
                 self.violation_count += 1;
-                if matches!(self.validation_level, ValidationLevel::Debug | ValidationLevel::Full) {
-                    eprintln!("Cancel protocol violation in obligation {:?}: {:?}", obligation_id, result);
+                if matches!(
+                    self.validation_level,
+                    ValidationLevel::Debug | ValidationLevel::Full
+                ) {
+                    eprintln!(
+                        "Cancel protocol violation in obligation {obligation_id:?}: {result:?}"
+                    );
                 }
             }
             result
         } else {
             TransitionResult::Invalid {
-                reason: format!("Obligation {:?} not registered with validator", obligation_id),
+                reason: format!("Obligation {obligation_id:?} not registered with validator"),
                 current_state: "Unknown".to_string(),
-                attempted_transition: format!("{:?}", event),
+                attempted_transition: format!("{event:?}"),
             }
         }
     }
@@ -1507,18 +1685,23 @@ impl CancelProtocolValidator {
     ) -> TransitionResult {
         if let Some(machine) = self.channel_machines.get_mut(&channel_id) {
             let result = machine.transition(event, context);
-            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } = &result {
+            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
+                &result
+            {
                 self.violation_count += 1;
-                if matches!(self.validation_level, ValidationLevel::Debug | ValidationLevel::Full) {
-                    eprintln!("Cancel protocol violation in channel {}: {:?}", channel_id, result);
+                if matches!(
+                    self.validation_level,
+                    ValidationLevel::Debug | ValidationLevel::Full
+                ) {
+                    eprintln!("Cancel protocol violation in channel {channel_id}: {result:?}");
                 }
             }
             result
         } else {
             TransitionResult::Invalid {
-                reason: format!("Channel {} not registered with validator", channel_id),
+                reason: format!("Channel {channel_id} not registered with validator"),
                 current_state: "Unknown".to_string(),
-                attempted_transition: format!("{:?}", event),
+                attempted_transition: format!("{event:?}"),
             }
         }
     }
@@ -1532,18 +1715,25 @@ impl CancelProtocolValidator {
     ) -> TransitionResult {
         if let Some(machine) = self.io_machines.get_mut(&operation_id) {
             let result = machine.transition(event, context);
-            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } = &result {
+            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
+                &result
+            {
                 self.violation_count += 1;
-                if matches!(self.validation_level, ValidationLevel::Debug | ValidationLevel::Full) {
-                    eprintln!("Cancel protocol violation in IO operation {}: {:?}", operation_id, result);
+                if matches!(
+                    self.validation_level,
+                    ValidationLevel::Debug | ValidationLevel::Full
+                ) {
+                    eprintln!(
+                        "Cancel protocol violation in IO operation {operation_id}: {result:?}"
+                    );
                 }
             }
             result
         } else {
             TransitionResult::Invalid {
-                reason: format!("IO operation {} not registered with validator", operation_id),
+                reason: format!("IO operation {operation_id} not registered with validator"),
                 current_state: "Unknown".to_string(),
-                attempted_transition: format!("{:?}", event),
+                attempted_transition: format!("{event:?}"),
             }
         }
     }
@@ -1557,23 +1747,29 @@ impl CancelProtocolValidator {
     ) -> TransitionResult {
         if let Some(machine) = self.timer_machines.get_mut(&timer_id) {
             let result = machine.transition(event, context);
-            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } = &result {
+            if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
+                &result
+            {
                 self.violation_count += 1;
-                if matches!(self.validation_level, ValidationLevel::Debug | ValidationLevel::Full) {
-                    eprintln!("Cancel protocol violation in timer {}: {:?}", timer_id, result);
+                if matches!(
+                    self.validation_level,
+                    ValidationLevel::Debug | ValidationLevel::Full
+                ) {
+                    eprintln!("Cancel protocol violation in timer {timer_id}: {result:?}");
                 }
             }
             result
         } else {
             TransitionResult::Invalid {
-                reason: format!("Timer {} not registered with validator", timer_id),
+                reason: format!("Timer {timer_id} not registered with validator"),
                 current_state: "Unknown".to_string(),
-                attempted_transition: format!("{:?}", event),
+                attempted_transition: format!("{event:?}"),
             }
         }
     }
 
     /// Get validation statistics.
+    #[must_use]
     pub fn stats(&self) -> (usize, usize, usize, usize, usize, usize, u64) {
         (
             self.region_machines.len(),
@@ -1607,7 +1803,10 @@ mod tests {
             machine.transition(RegionEvent::Activate, &context),
             TransitionResult::Valid
         );
-        assert!(matches!(machine.current_state(), RegionState::Active { .. }));
+        assert!(matches!(
+            machine.current_state(),
+            RegionState::Active { .. }
+        ));
 
         // Spawn and complete a task
         assert_eq!(
@@ -1675,10 +1874,17 @@ mod tests {
 
         // Spawned -> Running -> CancelRequested -> Cancelled
         machine.transition(TaskEvent::Start, &context).unwrap();
-        machine.transition(TaskEvent::RequestCancel, &context).unwrap();
-        assert!(matches!(machine.current_state(), TaskState::CancelRequested));
+        machine
+            .transition(TaskEvent::RequestCancel, &context)
+            .unwrap();
+        assert!(matches!(
+            machine.current_state(),
+            TaskState::CancelRequested
+        ));
 
-        machine.transition(TaskEvent::DrainComplete, &context).unwrap();
+        machine
+            .transition(TaskEvent::DrainComplete, &context)
+            .unwrap();
         assert!(matches!(machine.current_state(), TaskState::Cancelled));
         assert!(machine.is_terminal());
     }
@@ -1748,17 +1954,27 @@ mod tests {
         assert!(machine.is_accepting_ops());
 
         // Start some operations
-        machine.transition(ChannelEvent::OperationStarted, &context).unwrap();
-        machine.transition(ChannelEvent::OperationStarted, &context).unwrap();
+        machine
+            .transition(ChannelEvent::OperationStarted, &context)
+            .unwrap();
+        machine
+            .transition(ChannelEvent::OperationStarted, &context)
+            .unwrap();
         assert_eq!(machine.pending_ops(), 2);
 
         // Initiate close while operations are pending
-        machine.transition(ChannelEvent::InitiateClose, &context).unwrap();
+        machine
+            .transition(ChannelEvent::InitiateClose, &context)
+            .unwrap();
         assert!(!machine.is_accepting_ops());
 
         // Complete operations
-        machine.transition(ChannelEvent::OperationCompleted, &context).unwrap();
-        machine.transition(ChannelEvent::OperationCompleted, &context).unwrap();
+        machine
+            .transition(ChannelEvent::OperationCompleted, &context)
+            .unwrap();
+        machine
+            .transition(ChannelEvent::OperationCompleted, &context)
+            .unwrap();
 
         assert!(machine.is_terminal());
         assert!(matches!(machine.current_state(), ChannelState::Closed));
@@ -1778,7 +1994,9 @@ mod tests {
         assert!(machine.is_pending());
 
         // Complete successfully
-        machine.transition(IoEvent::Complete { result_size: 1024 }, &context).unwrap();
+        machine
+            .transition(IoEvent::Complete { result_size: 1024 }, &context)
+            .unwrap();
         assert!(machine.completed_successfully());
         assert!(machine.is_terminal());
     }
@@ -1796,7 +2014,9 @@ mod tests {
 
         // Cancel and cleanup
         machine.transition(IoEvent::Cancel, &context).unwrap();
-        machine.transition(IoEvent::CleanupComplete, &context).unwrap();
+        machine
+            .transition(IoEvent::CleanupComplete, &context)
+            .unwrap();
 
         assert!(machine.is_terminal());
         assert!(matches!(machine.current_state(), IoState::Cleanup));
@@ -1818,7 +2038,10 @@ mod tests {
 
         // Try to fire before deadline (should fail)
         let result = machine.transition(TimerEvent::Fire, &context);
-        assert!(matches!(result, TransitionResult::InvariantViolation { .. }));
+        assert!(matches!(
+            result,
+            TransitionResult::InvariantViolation { .. }
+        ));
 
         // Update context time and fire
         let context = TimerContext {
@@ -1883,12 +2106,20 @@ mod tests {
         ));
 
         assert!(matches!(
-            validator.validate_obligation_transition(obligation_id, ObligationEvent::Reserve { token: 123 }, &obligation_context),
+            validator.validate_obligation_transition(
+                obligation_id,
+                ObligationEvent::Reserve { token: 123 },
+                &obligation_context
+            ),
             TransitionResult::Valid
         ));
 
         assert!(matches!(
-            validator.validate_channel_transition(channel_id, ChannelEvent::OperationStarted, &channel_context),
+            validator.validate_channel_transition(
+                channel_id,
+                ChannelEvent::OperationStarted,
+                &channel_context
+            ),
             TransitionResult::Valid
         ));
 
@@ -1906,14 +2137,13 @@ mod tests {
 
 impl TransitionResult {
     /// Check if the transition was successful.
+    #[must_use]
     pub fn is_valid(&self) -> bool {
-        matches!(self, TransitionResult::Valid)
+        matches!(self, Self::Valid)
     }
 
     /// Unwrap a valid transition result, panicking on invalid transitions.
     pub fn unwrap(self) {
-        if !self.is_valid() {
-            panic!("Transition failed: {:?}", self);
-        }
+        assert!(self.is_valid(), "Transition failed: {self:?}");
     }
 }

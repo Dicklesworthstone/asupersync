@@ -4,10 +4,11 @@
 //! to validate substantial performance wins over baseline scalar implementation.
 
 use asupersync::raptorq::gf256::{
-    Gf256, Gf256Kernel, active_kernel, dual_addmul_kernel_decision_detail, dual_kernel_policy_snapshot,
+    Gf256, active_kernel, dual_addmul_kernel_decision_detail, dual_kernel_policy_snapshot,
     gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::hint::black_box as hint_black_box;
 
 /// Benchmark configurations for different operation sizes.
@@ -255,6 +256,7 @@ fn bench_scalar_sensitivity(c: &mut Criterion) {
 }
 
 /// Print benchmark environment information
+#[allow(dead_code)]
 fn print_bench_info() {
     println!("=== GF(256) Kernel Benchmark Environment ===");
     println!("Active kernel: {:?}", active_kernel());

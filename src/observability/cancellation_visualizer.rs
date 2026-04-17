@@ -68,7 +68,7 @@ pub struct CancellationTreeNode {
     /// List of detected anomalies or issues during cancellation.
     pub anomalies: Vec<String>,
     /// Child nodes in the cancellation tree.
-    pub children: Vec<CancellationTreeNode>,
+    pub children: Vec<Self>,
     /// Whether cancellation has completed for this entity.
     pub completed: bool,
 }
@@ -157,22 +157,26 @@ pub struct CancellationVisualizer {
 
 impl CancellationVisualizer {
     /// Creates a new visualizer with the given configuration.
+    #[must_use]
     pub fn new(config: VisualizerConfig) -> Self {
         Self { config }
     }
 
     /// Creates a visualizer with default configuration.
+    #[must_use]
     pub fn default() -> Self {
         Self::new(VisualizerConfig::default())
     }
 
     /// Generate a tree visualization of a cancellation trace.
+    #[must_use]
     pub fn visualize_trace_tree(&self, trace: &CancellationTrace) -> String {
         let tree = self.build_tree(trace);
         self.format_tree(&tree, 0)
     }
 
     /// Generate a timeline visualization showing propagation order.
+    #[must_use]
     pub fn visualize_timeline(&self, trace: &CancellationTrace) -> String {
         let mut output = String::new();
         output.push_str(&format!(
@@ -200,7 +204,7 @@ impl CancellationVisualizer {
             };
 
             let parent_info = match &step.parent_entity {
-                Some(parent) => format!(" ← {}", parent),
+                Some(parent) => format!(" ← {parent}"),
                 None => String::new(),
             };
 
@@ -259,6 +263,7 @@ impl CancellationVisualizer {
     }
 
     /// Generate a dot graph for use with graphviz.
+    #[must_use]
     pub fn generate_dot_graph(&self, traces: &[CancellationTrace]) -> String {
         let mut output = String::new();
         output.push_str("digraph cancellation_traces {\n");
@@ -305,6 +310,7 @@ impl CancellationVisualizer {
     }
 
     /// Generate a real-time dashboard view.
+    #[must_use]
     pub fn generate_dashboard(&self, traces: &[CancellationTrace]) -> CancellationDashboard {
         let now = std::time::SystemTime::now();
         let active_traces = traces.iter().filter(|t| !t.is_complete).count();
@@ -322,7 +328,7 @@ impl CancellationVisualizer {
             Duration::from_nanos(total / propagation_times.len() as u64)
         };
 
-        let mut sorted_times = propagation_times.clone();
+        let mut sorted_times = propagation_times;
         sorted_times.sort();
         let p95_propagation_latency = if sorted_times.is_empty() {
             Duration::ZERO
@@ -512,7 +518,7 @@ impl CancellationVisualizer {
             TimingFormat::Auto => {
                 let nanos = duration.as_nanos();
                 if nanos < 1_000 {
-                    format!("{}ns", nanos)
+                    format!("{nanos}ns")
                 } else if nanos < 1_000_000 {
                     format!("{:.1}μs", nanos as f64 / 1_000.0)
                 } else if nanos < 1_000_000_000 {
@@ -547,16 +553,13 @@ impl CancellationVisualizer {
                 child_entity,
                 ..
             } => {
-                format!(
-                    "Incorrect ordering: parent {} before child {}",
-                    parent_entity, child_entity
-                )
+                format!("Incorrect ordering: parent {parent_entity} before child {child_entity}")
             }
             PropagationAnomaly::UnexpectedPropagation { description, .. } => {
-                format!("Unexpected propagation: {}", description)
+                format!("Unexpected propagation: {description}")
             }
             PropagationAnomaly::ExcessiveDepth { depth, entity_id } => {
-                format!("Excessive depth: {} levels for entity {}", depth, entity_id)
+                format!("Excessive depth: {depth} levels for entity {entity_id}")
             }
         }
     }
