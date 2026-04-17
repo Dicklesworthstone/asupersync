@@ -6845,6 +6845,7 @@ fn g1_performance_gates_script_validation() {
     );
 
     // Validate required modes
+    #[allow(clippy::literal_string_with_formatting_args)]
     assert!(
         RAPTORQ_PERF_GATES_SCRIPT.contains(r#"mode="${1:-full}""#),
         "script must support mode parameter"
