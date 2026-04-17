@@ -354,59 +354,220 @@ fn test_channel_binding(channel_data: &[u8]) -> Result<String, String> {
     Ok(data_binding)
 }
 
-/// Test various SCRAM-SHA-256 parsing edge cases
-fn test_scram_edge_cases(data: &[u8]) {
-    // Test with empty data
+/// Test comprehensive SCRAM-SHA-256 functionality
+fn test_scram_comprehensive(data: &[u8]) {
     if data.is_empty() {
         return;
     }
 
-    // Test username extraction from various formats
-    if let Ok(s) = std::str::from_utf8(data) {
-        // Test as username
-        let _ = generate_client_first(s, "testnonce123");
+    // Test 1: PBKDF2 boundary conditions
+    test_pbkdf2_boundaries(data);
 
-        // Test as nonce
-        let _ = generate_client_first("testuser", s);
+    // Test 2: Nonce concatenation scenarios
+    test_nonce_scenarios(data);
 
-        // Test as server-first message
-        let _ = parse_server_first(data);
+    // Test 3: Channel binding extensions
+    test_channel_binding_scenarios(data);
 
-        // Test as server-final message
-        let _ = parse_server_final(data);
+    // Test 4: Signature verification with constant-time compare
+    test_signature_verification(data);
+
+    // Test 5: Complete SCRAM message flow
+    test_full_scram_flow(data);
+}
+
+/// Test PBKDF2 boundary conditions specifically
+fn test_pbkdf2_boundaries(data: &[u8]) {
+    if data.len() < 8 {
+        return;
     }
 
-    // Test PBKDF2 with fuzzed inputs
-    let iterations = if data.len() >= 4 {
-        u32::from_be_bytes([
-            data[0],
-            data.get(1).copied().unwrap_or(0),
-            data.get(2).copied().unwrap_or(0),
-            data.get(3).copied().unwrap_or(0),
-        ])
-    } else {
-        4096
-    };
+    // Extract iteration count from first 4 bytes
+    let iterations = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
-    let (password_data, salt_data) = if data.len() > 4 {
-        data[4..].split_at(data[4..].len() / 2)
-    } else {
-        (data, &[0u8; 1][..])
-    };
+    // Split remaining data between password and salt
+    let remaining = &data[4..];
+    let split_point = remaining.len() / 2;
+    let (password_data, salt_data) = remaining.split_at(split_point);
 
-    let _ = pbkdf2_sha256_test(password_data, salt_data, iterations);
+    // Test various boundary conditions
+    let test_cases = [
+        (password_data, salt_data, iterations),
+        (password_data, salt_data, 1),           // Minimum iterations
+        (password_data, salt_data, 4096),        // PostgreSQL default
+        (password_data, salt_data, 600_000),     // Maximum safe iterations
+        (password_data, salt_data, 600_001),     // Just over maximum (should fail gracefully)
+        (b"", salt_data, iterations),            // Empty password
+        (password_data, b"", iterations),        // Empty salt
+        (b"a", b"s", 4096),                      // Minimal valid case
+    ];
+
+    for (pwd, salt, iter) in test_cases {
+        let _ = pbkdf2_sha256_test(pwd, salt, iter);
+    }
+}
+
+/// Test nonce concatenation and validation scenarios
+fn test_nonce_scenarios(data: &[u8]) {
+    if data.len() < 2 {
+        return;
+    }
+
+    let split_point = data.len() / 2;
+    let (client_part, server_part) = data.split_at(split_point);
+
+    // Test nonce concatenation boundary conditions
+    let _ = test_nonce_concatenation(client_part, server_part);
+
+    // Test edge cases
+    let _ = test_nonce_concatenation(b"", server_part);
+    let _ = test_nonce_concatenation(client_part, b"");
+    let _ = test_nonce_concatenation(b"short", b"shortlong");
+    let _ = test_nonce_concatenation(b"long", b"short");
+
+    // Test with repeated client nonce pattern
+    if client_part.len() > 0 {
+        let mut server_with_client = client_part.to_vec();
+        server_with_client.extend_from_slice(server_part);
+        let _ = test_nonce_concatenation(client_part, &server_with_client);
+    }
+}
+
+/// Test channel binding extension scenarios
+fn test_channel_binding_scenarios(data: &[u8]) {
+    // Test various channel binding data sizes and formats
+    let _ = test_channel_binding(data);
+    let _ = test_channel_binding(b"");
+    let _ = test_channel_binding(b"tls-unique-data");
+
+    // Test channel binding with fuzzer data
+    if data.len() > 0 {
+        let chunks = [
+            &data[..data.len().min(16)],
+            &data[..data.len().min(64)],
+            &data[..data.len().min(256)],
+            data,
+        ];
+
+        for chunk in chunks {
+            let _ = test_channel_binding(chunk);
+        }
+    }
+}
+
+/// Test signature verification with constant-time comparison
+fn test_signature_verification(data: &[u8]) {
+    if data.len() < 64 {
+        return;
+    }
+
+    // Split data into two 32-byte signatures for comparison
+    let (sig1, sig2) = data.split_at(32);
+    let sig1_32 = &sig1[..32];
+    let sig2_32 = &sig2[..32.min(sig2.len())];
+
+    // Test constant-time comparison
+    let _ = constant_time_compare_test(sig1_32, sig2_32);
+
+    // Test edge cases
+    let _ = constant_time_compare_test(sig1_32, sig1_32); // Same signature
+    let _ = constant_time_compare_test(sig1_32, &[0u8; 32]); // Zero signature
+    let _ = constant_time_compare_test(sig1_32, &[0xffu8; 32]); // All-ones signature
+
+    // Test different lengths (should fail gracefully)
+    let _ = constant_time_compare_test(sig1_32, &sig2[..16.min(sig2.len())]);
+    let _ = constant_time_compare_test(&sig1[..16], sig2_32);
+
+    // Test with computed HMAC signatures
+    if data.len() >= 96 {
+        let key = &data[64..96];
+        let message = &data[..64];
+
+        let computed_sig = hmac_sha256_test(key, message);
+        let _ = constant_time_compare_test(sig1_32, &computed_sig);
+    }
+}
+
+/// Test complete SCRAM authentication flow
+fn test_full_scram_flow(data: &[u8]) {
+    if data.len() < 32 {
+        return;
+    }
+
+    // Extract components for full SCRAM flow simulation
+    let username_len = (data[0] as usize % 16) + 1;
+    let password_len = (data[1] as usize % 16) + 1;
+    let salt_len = (data[2] as usize % 16) + 1;
+
+    if data.len() < 3 + username_len + password_len + salt_len {
+        return;
+    }
+
+    let mut pos = 3;
+    let username_bytes = &data[pos..pos + username_len];
+    pos += username_len;
+    let password_bytes = &data[pos..pos + password_len];
+    pos += password_len;
+    let salt_bytes = &data[pos..pos + salt_len];
+
+    // Convert to strings for username
+    if let Ok(username) = std::str::from_utf8(username_bytes) {
+        if let Ok(password) = std::str::from_utf8(password_bytes) {
+            // Simulate client-first generation
+            let client_nonce = "fuzzed_nonce";
+            let _ = generate_client_first(username, client_nonce);
+
+            // Simulate server-first parsing with generated salt
+            use base64::Engine;
+            let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes);
+            let iterations = 4096u32;
+            let server_nonce = format!("{client_nonce}server_part");
+
+            let server_first = format!("r={server_nonce},s={salt_b64},i={iterations}");
+            let _ = parse_server_first(server_first.as_bytes());
+
+            // Test PBKDF2 with these parameters
+            let _ = pbkdf2_sha256_test(password.as_bytes(), salt_bytes, iterations);
+
+            // Simulate signature computation and verification
+            let salted_password = pbkdf2_sha256_test(password.as_bytes(), salt_bytes, iterations);
+            let client_key = hmac_sha256_test(&salted_password, b"Client Key");
+            let server_key = hmac_sha256_test(&salted_password, b"Server Key");
+            let stored_key = sha256_test(&client_key);
+
+            // Test auth message construction
+            let client_first_bare = format!("n={username},r={client_nonce}");
+            let channel_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
+            let client_final_without_proof = format!("c={channel_binding},r={server_nonce}");
+            let auth_message = format!("{client_first_bare},{server_first},{client_final_without_proof}");
+
+            // Test signature computations
+            let client_signature = hmac_sha256_test(&stored_key, auth_message.as_bytes());
+            let server_signature = hmac_sha256_test(&server_key, auth_message.as_bytes());
+
+            // Test constant-time verification
+            let _ = constant_time_compare_test(&server_signature, &server_signature);
+
+            // Test server-final message
+            let server_sig_b64 = base64::engine::general_purpose::STANDARD.encode(&server_signature);
+            let server_final = format!("v={server_sig_b64}");
+            let _ = parse_server_final(server_final.as_bytes());
+        }
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
-    // Limit input size to prevent timeouts
-    if data.len() > 10_000 {
+    // Limit input size to prevent timeouts (1h clean target)
+    if data.len() > 8_192 {
         return;
     }
+
+    // ===== CORE SCRAM-SHA-256 COVERAGE =====
 
     // Test 1: Parse as SASL mechanism list
     let _ = parse_sasl_mechanisms(data);
 
-    // Test 2: Parse as SCRAM server-first message
+    // Test 2: Parse as SCRAM server-first message (client-first/server-first message parsing)
     let _ = parse_server_first(data);
 
     // Test 3: Parse as SCRAM server-final message
@@ -415,32 +576,70 @@ fuzz_target!(|data: &[u8]| {
     // Test 4: Parse as client-final message
     let _ = parse_client_final(data);
 
-    // Test 5: SCRAM edge cases and malformed inputs
-    test_scram_edge_cases(data);
+    // ===== ENHANCED SCRAM BOUNDARY TESTING =====
+
+    // Test 5: Comprehensive SCRAM functionality covering all bead requirements:
+    // - nonce concatenation
+    // - salted password PBKDF2 boundary
+    // - channel-binding extension
+    // - signature verification with constant-time compare
+    test_scram_comprehensive(data);
+
+    // ===== ADDITIONAL EDGE CASE COVERAGE =====
 
     // Test 6: Username and nonce validation
     if let Ok(s) = std::str::from_utf8(data) {
-        // Split data into username and nonce parts
         let parts: Vec<&str> = s.splitn(2, ',').collect();
         if parts.len() == 2 {
             let _ = generate_client_first(parts[0], parts[1]);
         }
     }
 
-    // Test 7: Base64 decoding edge cases
+    // Test 7: Base64 decoding edge cases with various formats
     if let Ok(s) = std::str::from_utf8(data) {
         use base64::Engine;
         let _ = base64::engine::general_purpose::STANDARD.decode(s);
         let _ = base64::engine::general_purpose::URL_SAFE.decode(s);
         let _ = base64::engine::general_purpose::STANDARD_NO_PAD.decode(s);
+        let _ = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s);
     }
 
-    // Test 8: Parser state machine with truncated inputs
+    // Test 8: Parser state machine with truncated and malformed inputs
     let mut parser = ScramParser::new(data);
     while parser.remaining() > 0 {
         let _ = parser.read_until(b',');
         let _ = parser.read_until(b'=');
         let _ = parser.read_until(b'\0');
+        let _ = parser.read_until(b'\n');
+        let _ = parser.read_until(b'\r');
     }
     let _ = parser.read_to_end();
+
+    // Test 9: Large input boundary conditions
+    if data.len() >= 1024 {
+        // Test with progressively larger chunks to find buffer boundary issues
+        for chunk_size in [256, 512, 1024, 2048, 4096] {
+            if data.len() >= chunk_size {
+                let chunk = &data[..chunk_size];
+                let _ = parse_server_first(chunk);
+                let _ = parse_server_final(chunk);
+                test_scram_comprehensive(chunk);
+            }
+        }
+    }
+
+    // Test 10: UTF-8 validation edge cases
+    // Test various UTF-8 boundary conditions that could affect username/password handling
+    match std::str::from_utf8(data) {
+        Ok(valid_utf8) => {
+            // Test with valid UTF-8 strings
+            if !valid_utf8.is_empty() && valid_utf8.len() <= 63 {
+                let _ = generate_client_first(valid_utf8, "test_nonce");
+            }
+        }
+        Err(_) => {
+            // Test error handling for invalid UTF-8
+            let _ = std::str::from_utf8(data);
+        }
+    }
 });

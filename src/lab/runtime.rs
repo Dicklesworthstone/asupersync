@@ -5228,6 +5228,416 @@ mod tests {
     }
 
     #[test]
+    // ================================================================
+    // CONFORMANCE TESTS: LabRuntime Deterministic Seed Reproduction
+    // ================================================================
+    //
+    // Golden tests verifying the non-negotiable determinism invariants:
+    // (1) Same seed produces byte-identical execution trace
+    // (2) Virtual-time advances in same order across replays
+    // (3) Scheduler lottery with same seed picks same tasks
+    // (4) Chaos injection with same seed identical
+    // (5) Cross-thread panic semantics preserved
+    //
+    // These conformance tests ensure LabRuntime provides reproducible
+    // execution for debugging, testing, and formal verification.
+
+    /// CONFORMANCE: Same seed produces byte-identical execution trace.
+    ///
+    /// Verifies that identical configuration and program produce identical
+    /// trace fingerprints, event counts, and schedule certificates.
+    #[test]
+    fn conformance_identical_seed_identical_trace() {
+        init_test("conformance_identical_seed_identical_trace");
+
+        let seed = 42_u64;
+        let config = LabConfig::new(seed).worker_count(2).max_steps(1000);
+
+        // Run same program with same seed twice
+        let mut reports = Vec::new();
+        for run_id in 0..2 {
+            let mut runtime = LabRuntime::new(config.clone());
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+
+            // Create deterministic workload with multiple tasks
+            for i in 0..5 {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        // Simulate work with deterministic operations
+                        for j in 0..10 {
+                            crate::cx::yield_now().await;
+                            if (i + j) % 3 == 0 {
+                                crate::time::sleep(Duration::from_millis(1)).await;
+                            }
+                        }
+                        i * 100 + run_id
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
+
+            runtime.run_until_quiescent();
+            let report = runtime.generate_report();
+            reports.push(report);
+        }
+
+        // Verify identical traces
+        let report1 = &reports[0];
+        let report2 = &reports[1];
+
+        crate::assert_with_log!(
+            report1.seed == report2.seed,
+            "seeds should be identical",
+            report1.seed,
+            report2.seed
+        );
+
+        crate::assert_with_log!(
+            report1.trace_fingerprint == report2.trace_fingerprint,
+            "trace fingerprints should be identical",
+            report1.trace_fingerprint,
+            report2.trace_fingerprint
+        );
+
+        crate::assert_with_log!(
+            report1.trace_certificate.event_hash == report2.trace_certificate.event_hash,
+            "event hashes should be identical",
+            report1.trace_certificate.event_hash,
+            report2.trace_certificate.event_hash
+        );
+
+        crate::assert_with_log!(
+            report1.trace_certificate.event_count == report2.trace_certificate.event_count,
+            "event counts should be identical",
+            report1.trace_certificate.event_count,
+            report2.trace_certificate.event_count
+        );
+
+        crate::assert_with_log!(
+            report1.trace_certificate.schedule_hash == report2.trace_certificate.schedule_hash,
+            "schedule hashes should be identical",
+            report1.trace_certificate.schedule_hash,
+            report2.trace_certificate.schedule_hash
+        );
+
+        crate::test_complete!("conformance_identical_seed_identical_trace");
+    }
+
+    /// CONFORMANCE: Virtual-time advances in same order across replays.
+    ///
+    /// Verifies that virtual time progression and auto-advancement
+    /// behavior is deterministic across runs with the same seed.
+    #[test]
+    fn conformance_virtual_time_deterministic_advancement() {
+        init_test("conformance_virtual_time_deterministic_advancement");
+
+        let config = LabConfig::new(123).worker_count(1);
+
+        crate::lab::assert_deterministic(config, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let initial_time = runtime.now();
+
+            // Create tasks that sleep for different durations to test time advancement
+            let durations = [
+                Duration::from_millis(10),
+                Duration::from_millis(5),
+                Duration::from_millis(15),
+                Duration::from_millis(1),
+            ];
+
+            for (i, duration) in durations.iter().enumerate() {
+                let dur = *duration;
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        crate::time::sleep(dur).await;
+                        i
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
+
+            // Use auto-advance to let virtual time progress deterministically
+            let vtime_report = runtime.run_with_auto_advance(1000);
+
+            // Verify time advanced
+            crate::assert_with_log!(
+                vtime_report.time_end > initial_time,
+                "virtual time should have advanced",
+                vtime_report.time_end,
+                initial_time
+            );
+
+            crate::assert_with_log!(
+                vtime_report.auto_advances > 0,
+                "should have auto-advanced virtual time",
+                vtime_report.auto_advances,
+                0
+            );
+
+            crate::assert_with_log!(
+                vtime_report.termination == AutoAdvanceTermination::Quiescent,
+                "should reach quiescence",
+                vtime_report.termination,
+                AutoAdvanceTermination::Quiescent
+            );
+        });
+
+        crate::test_complete!("conformance_virtual_time_deterministic_advancement");
+    }
+
+    /// CONFORMANCE: Scheduler lottery with same seed picks same tasks.
+    ///
+    /// Verifies that scheduler decisions (task selection, worker assignment)
+    /// are deterministic given the same random seed.
+    #[test]
+    fn conformance_scheduler_deterministic_lottery() {
+        init_test("conformance_scheduler_deterministic_lottery");
+
+        let config = LabConfig::new(456).worker_count(4);
+
+        let mut schedule_sequences = Vec::new();
+
+        // Run same workload multiple times to capture scheduler decisions
+        for run in 0..2 {
+            let mut runtime = LabRuntime::new(config.clone());
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let mut task_order = Vec::new();
+
+            // Create many competing tasks to stress scheduler lottery
+            for task_idx in 0..20 {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        // Add some yield points to allow preemption
+                        for _ in 0..3 {
+                            crate::cx::yield_now().await;
+                        }
+                        task_idx
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
+
+            // Execute and capture schedule certificate
+            runtime.run_until_quiescent();
+            let cert = runtime.certificate_snapshot();
+            task_order.push((run, cert.decisions_count(), cert.hash()));
+            schedule_sequences.push(task_order);
+        }
+
+        // Verify scheduler made same decisions across runs
+        let seq1 = &schedule_sequences[0];
+        let seq2 = &schedule_sequences[1];
+
+        crate::assert_with_log!(
+            seq1.len() == seq2.len(),
+            "should have same number of scheduling decision points",
+            seq1.len(),
+            seq2.len()
+        );
+
+        for (i, ((run1, count1, hash1), (run2, count2, hash2))) in seq1.iter().zip(seq2.iter()).enumerate() {
+            crate::assert_with_log!(
+                count1 == count2,
+                &format!("decision count should be identical at point {}", i),
+                count1,
+                count2
+            );
+
+            crate::assert_with_log!(
+                hash1 == hash2,
+                &format!("schedule hash should be identical at point {}", i),
+                hash1,
+                hash2
+            );
+        }
+
+        crate::test_complete!("conformance_scheduler_deterministic_lottery");
+    }
+
+    /// CONFORMANCE: Chaos injection with same seed produces identical outcomes.
+    ///
+    /// Verifies that chaos injection (cancellation, delays, errors) is
+    /// deterministically reproducible with the same chaos seed.
+    #[test]
+    fn conformance_chaos_injection_deterministic() {
+        init_test("conformance_chaos_injection_deterministic");
+
+        let chaos_config = super::chaos::ChaosConfig::new(789)
+            .with_cancel_probability(0.1)
+            .with_delay_probability(0.05)
+            .with_io_error_probability(0.02);
+        let config = LabConfig::new(999).with_chaos(chaos_config);
+
+        crate::lab::assert_deterministic(config, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+
+            // Create workload susceptible to chaos injection
+            for i in 0..10 {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        // Multiple poll points where chaos can be injected
+                        for j in 0..20 {
+                            crate::cx::yield_now().await;
+                            if j % 5 == 0 {
+                                crate::time::sleep(Duration::from_millis(1)).await;
+                            }
+                        }
+                        i
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
+
+            runtime.run_until_quiescent();
+
+            // Verify chaos was actually applied
+            let chaos_stats = runtime.chaos_stats();
+            let total_decisions = chaos_stats.cancel_decision_points
+                + chaos_stats.delay_decision_points
+                + chaos_stats.wakeup_storm_decision_points;
+
+            crate::assert_with_log!(
+                total_decisions > 0,
+                "chaos should have made some decisions",
+                total_decisions,
+                0
+            );
+        });
+
+        crate::test_complete!("conformance_chaos_injection_deterministic");
+    }
+
+    /// CONFORMANCE: Cross-thread panic semantics are preserved deterministically.
+    ///
+    /// Verifies that panic propagation and cleanup across workers/regions
+    /// follows the same deterministic pattern with identical seeds.
+    #[test]
+    fn conformance_panic_semantics_deterministic() {
+        init_test("conformance_panic_semantics_deterministic");
+
+        let config = LabConfig::new(333)
+            .worker_count(3)
+            .panic_on_leak(false); // Allow test to complete despite intentional panic
+
+        crate::lab::assert_deterministic(config, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+
+            // Create tasks where one will panic
+            for i in 0..5 {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        // Task 2 will deterministically panic
+                        if i == 2 {
+                            panic!("deterministic panic in task {}", i);
+                        }
+
+                        // Other tasks continue working
+                        for j in 0..10 {
+                            crate::cx::yield_now().await;
+                        }
+                        i * 10
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
+
+            runtime.run_until_quiescent();
+
+            // Verify panic was recorded in trace
+            let report = runtime.generate_report();
+            let trace_events = runtime.snapshot_trace();
+
+            let panic_events: Vec<_> = trace_events
+                .events
+                .iter()
+                .filter(|event| matches!(event.data, TraceData::TaskPanicked { .. }))
+                .collect();
+
+            crate::assert_with_log!(
+                !panic_events.is_empty(),
+                "should have recorded panic event",
+                panic_events.len(),
+                0
+            );
+
+            // Verify deterministic cleanup occurred
+            crate::assert_with_log!(
+                report.quiescent,
+                "runtime should reach quiescence despite panic",
+                report.quiescent,
+                false
+            );
+        });
+
+        crate::test_complete!("conformance_panic_semantics_deterministic");
+    }
+
+    /// CONFORMANCE: Comprehensive multi-run determinism verification.
+    ///
+    /// Combines all previous conformance aspects into a stress test
+    /// that verifies determinism across many execution runs.
+    #[test]
+    fn conformance_comprehensive_determinism_stress() {
+        init_test("conformance_comprehensive_determinism_stress");
+
+        let chaos_config = super::chaos::ChaosConfig::new(555)
+            .with_cancel_probability(0.05)
+            .with_delay_probability(0.03);
+        let config = LabConfig::new(777)
+            .worker_count(4)
+            .with_chaos(chaos_config)
+            .max_steps(5000);
+
+        // Use assert_deterministic_multi for extra confidence
+        crate::lab::assert_deterministic_multi(&config, 3, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+
+            // Complex workload mixing all runtime features
+            for i in 0..15 {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        // Mix of operations: yields, sleeps, work
+                        for j in 0..30 {
+                            match (i + j) % 4 {
+                                0 => crate::cx::yield_now().await,
+                                1 => crate::time::sleep(Duration::from_millis(j as u64 % 5)).await,
+                                2 => {
+                                    // Simulate CPU work
+                                    let mut sum = 0_u64;
+                                    for k in 0..100 {
+                                        sum = sum.wrapping_add(k);
+                                    }
+                                    sum
+                                },
+                                _ => crate::cx::yield_now().await,
+                            };
+                        }
+                        i * 1000 + 42
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
+
+            // Use auto-advance for time progression
+            let vtime_report = runtime.run_with_auto_advance(10000);
+
+            crate::assert_with_log!(
+                vtime_report.termination == AutoAdvanceTermination::Quiescent,
+                "comprehensive workload should reach quiescence",
+                vtime_report.termination,
+                AutoAdvanceTermination::Quiescent
+            );
+        });
+
+        crate::test_complete!("conformance_comprehensive_determinism_stress");
+    }
+
     #[allow(clippy::literal_string_with_formatting_args)]
     fn non_test_lab_runtime_paths_do_not_use_stray_stdout_debug_prints() {
         let source =
