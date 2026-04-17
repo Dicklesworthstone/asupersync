@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::fmt;
 
 /// Configuration for round-trip test execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoundTripConfig {
     /// Number of source symbols (K)
     pub source_symbols: usize,
