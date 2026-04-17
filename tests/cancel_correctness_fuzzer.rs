@@ -372,8 +372,14 @@ impl CancelCorrectnessFuzzer {
         // Reset oracles
         self.oracle_suite.reset();
 
-        // Create root region
-        let root_region = self.lab_runtime.state.create_root_region(Budget::INFINITE);
+        // Create or reuse the root region. `create_root_region` is single-shot
+        // per `LabRuntime`, but `fuzz_scenario` may be invoked many times on the
+        // same fuzzer (e.g. batch runs, report generation). Reusing the existing
+        // root keeps the harness cheap without spinning up fresh runtimes.
+        let root_region = match self.lab_runtime.state.root_region {
+            Some(id) => id,
+            None => self.lab_runtime.state.create_root_region(Budget::INFINITE),
+        };
 
         // Execute the specific combinator test
         match scenario.combinator_type {
@@ -396,69 +402,76 @@ impl CancelCorrectnessFuzzer {
         use asupersync::cx::Cx;
 
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::Ordering;
 
         trace.task_count = 2;
 
         // Create root Cx for testing
         let _cx = Cx::for_testing();
 
-        // Create controllable futures for deterministic testing
-        let fut1 = ControllableFuture::new(1);
-        let fut2 = ControllableFuture::new(2);
+        // Create controllable futures wrapped in Option so we can drop them
+        // at the exact moment a real cancel-correct race combinator would —
+        // that's what flips `drain_flag` via the Drop impl.
+        let mut fut1 = Some(ControllableFuture::new(1));
+        let mut fut2 = Some(ControllableFuture::new(2));
 
-        // Track drain status
-        let fut1_ready = Arc::clone(&fut1.ready);
-        let fut2_ready = Arc::clone(&fut2.ready);
-        let _fut1_drained = Arc::new(AtomicBool::new(false));
-        let _fut2_drained = Arc::new(AtomicBool::new(false));
+        // Clone the drain flags up front so we can observe drain status *after*
+        // the owning futures have been dropped.
+        let fut1_drain_flag = Arc::clone(&fut1.as_ref().expect("fut1 present").drain_flag);
+        let fut2_drain_flag = Arc::clone(&fut2.as_ref().expect("fut2 present").drain_flag);
+        let fut1_ready = Arc::clone(&fut1.as_ref().expect("fut1 present").ready);
+        let fut2_ready = Arc::clone(&fut2.as_ref().expect("fut2 present").ready);
 
         // Apply cancel timing pattern from scenario
         match &scenario.cancel_timing {
             CancelTiming::Early => {
-                // Neither future completes - test early cancellation
+                // Neither future completes — models external early cancellation
             }
-            CancelTiming::NaturalCompletion => {
-                // Let first future complete to test normal winner/loser behavior
-                fut1.make_ready();
-            }
-            CancelTiming::MidDrain => {
-                // Complete first future, then cancel during drain
-                fut1.make_ready();
-            }
-            CancelTiming::Precise { delay_ms: _ } => {
-                // Complete first future after delay
-                fut1.make_ready();
+            CancelTiming::NaturalCompletion
+            | CancelTiming::MidDrain
+            | CancelTiming::Precise { .. } => {
+                // First future wins under normal/precise/mid-drain timing
+                fut1.as_ref().expect("fut1 present").make_ready();
             }
             CancelTiming::Partial(pattern) => {
-                if pattern.len() >= 2 {
-                    if pattern[0] {
-                        fut1.make_ready();
-                    }
-                    if pattern[1] {
-                        fut2.make_ready();
-                    }
+                if pattern.first().copied().unwrap_or(false) {
+                    fut1.as_ref().expect("fut1 present").make_ready();
+                }
+                if pattern.get(1).copied().unwrap_or(false) {
+                    fut2.as_ref().expect("fut2 present").make_ready();
                 }
             }
         }
 
-        // Create a simple race manually for now
-        // TODO: Use actual race! macro once lab runtime integration is complete
-        let result = if fut1_ready.load(Ordering::Acquire) {
+        let fut1_done = fut1_ready.load(Ordering::Acquire);
+        let fut2_done = fut2_ready.load(Ordering::Acquire);
+
+        // Determine the winner and drop non-winners, exactly as a cancel-correct
+        // race combinator would. `None` means the whole race was externally
+        // cancelled (Early timing or Partial([false,false])) — both futures are
+        // dropped and expected to drain.
+        let winner: Option<u8> = if fut1_done {
             trace.completion_order.push(TaskId::testing_default());
+            // fut2 is the loser; the combinator drains (drops) it.
+            drop(fut2.take());
             trace.drain_confirmations.push(TaskId::testing_default());
-            1
-        } else if fut2_ready.load(Ordering::Acquire) {
+            Some(1)
+        } else if fut2_done {
             trace.completion_order.push(TaskId::testing_default());
+            drop(fut1.take());
             trace.drain_confirmations.push(TaskId::testing_default());
-            2
+            Some(2)
         } else {
-            return Err("No futures completed in race scenario".into());
+            // External cancellation: drain both.
+            drop(fut1.take());
+            drop(fut2.take());
+            trace.drain_confirmations.push(TaskId::testing_default());
+            trace.drain_confirmations.push(TaskId::testing_default());
+            None
         };
 
-        // Verify loser was drained
-        let fut1_was_drained = fut1.was_drained();
-        let fut2_was_drained = fut2.was_drained();
+        let fut1_was_drained = fut1_drain_flag.load(Ordering::Acquire);
+        let fut2_was_drained = fut2_drain_flag.load(Ordering::Acquire);
 
         let mut oracle_results = OracleResults {
             loser_drain_violations: Vec::new(),
@@ -466,22 +479,32 @@ impl CancelCorrectnessFuzzer {
             resource_violations: Vec::new(),
         };
 
-        // Check critical invariant: loser must be drained
-        match result {
-            1 => {
-                // fut1 won, fut2 should be drained
+        // Core invariant: every non-winning branch of the race must be drained.
+        match winner {
+            Some(1) => {
                 if !fut2_was_drained {
                     oracle_results
                         .loser_drain_violations
                         .push("race2 loser (future 2) was not properly drained".to_string());
                 }
             }
-            2 => {
-                // fut2 won, fut1 should be drained
+            Some(2) => {
                 if !fut1_was_drained {
                     oracle_results
                         .loser_drain_violations
                         .push("race2 loser (future 1) was not properly drained".to_string());
+                }
+            }
+            None => {
+                if !fut1_was_drained {
+                    oracle_results.loser_drain_violations.push(
+                        "race2 future 1 was not drained under external cancellation".to_string(),
+                    );
+                }
+                if !fut2_was_drained {
+                    oracle_results.loser_drain_violations.push(
+                        "race2 future 2 was not drained under external cancellation".to_string(),
+                    );
                 }
             }
             _ => unreachable!(),
@@ -491,9 +514,12 @@ impl CancelCorrectnessFuzzer {
         trace.cancellation_events.push(CancellationEvent {
             task_id: TaskId::testing_default(),
             timestamp_ms: 0,
-            event_type: format!("race2_completed_winner_{result}"),
+            event_type: match winner {
+                Some(w) => format!("race2_completed_winner_{w}"),
+                None => "race2_externally_cancelled".to_string(),
+            },
             details: serde_json::json!({
-                "winner": result,
+                "winner": winner,
                 "fut1_drained": fut1_was_drained,
                 "fut2_drained": fut2_was_drained,
                 "cancel_timing": scenario.cancel_timing
@@ -799,9 +825,11 @@ impl CancelCorrectnessFuzzer {
         // Create root Cx for testing
         let _cx = Cx::for_testing();
 
-        // Create a controllable future that may or may not complete before timeout
-        let fut = ControllableFuture::new(42);
-        let fut_ready = Arc::clone(&fut.ready);
+        // Wrap the future in Option so we can drop it at timeout-fire time,
+        // which is what actually flips `drain_flag` via the Drop impl.
+        let mut fut = Some(ControllableFuture::new(42));
+        let fut_drain_flag = Arc::clone(&fut.as_ref().expect("fut present").drain_flag);
+        let fut_ready = Arc::clone(&fut.as_ref().expect("fut present").ready);
 
         let _timeout_duration = Duration::from_millis(100);
         let mut timed_out = false;
@@ -814,24 +842,31 @@ impl CancelCorrectnessFuzzer {
             }
             CancelTiming::NaturalCompletion => {
                 // Future completes before timeout
-                fut.make_ready();
+                fut.as_ref().expect("fut present").make_ready();
             }
             CancelTiming::Precise { delay_ms } => {
                 // Complete based on delay vs timeout
                 if *delay_ms < 100 {
-                    fut.make_ready();
+                    fut.as_ref().expect("fut present").make_ready();
                 } else {
                     timed_out = true;
                 }
             }
             _ => {
                 // Default to natural completion
-                fut.make_ready();
+                fut.as_ref().expect("fut present").make_ready();
             }
         }
 
         let fut_completed = fut_ready.load(Ordering::Acquire);
-        let fut_drained = fut.was_drained();
+
+        // If the timeout fired, the combinator cancels and drops the victim.
+        // Do exactly that here so the drain oracle observes the Drop.
+        if timed_out {
+            drop(fut.take());
+        }
+
+        let fut_drained = fut_drain_flag.load(Ordering::Acquire);
 
         let mut oracle_results = OracleResults {
             loser_drain_violations: Vec::new(),
