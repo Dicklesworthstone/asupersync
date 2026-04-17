@@ -324,3 +324,10 @@ path = "fuzz_targets/raptorq_matrix_elimination.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_local_queue"
+path = "fuzz_targets/local_queue.rs"
+test = false
+doc = false
+bench = false
