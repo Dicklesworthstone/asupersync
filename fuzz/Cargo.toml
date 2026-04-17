@@ -282,3 +282,10 @@ path = "fuzz_targets/bytes_codec_framing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_raptorq_symbol_authentication"
+path = "fuzz_targets/raptorq_symbol_authentication.rs"
+test = false
+doc = false
+bench = false
