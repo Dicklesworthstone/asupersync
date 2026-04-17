@@ -20,16 +20,42 @@
 //! scenarios to verify EDF scheduler behavior under various priority inversion conditions,
 //! resource contention patterns, and deadline distributions.
 
-use crate::runtime::scheduler::priority::{DispatchLane, PriorityScheduler};
+use crate::runtime::scheduler::priority::Scheduler;
 use crate::runtime::scheduler::priority_inversion_oracle::{
-    PriorityInversionOracle, PriorityInversion, InversionType, InversionSeverity,
+    PriorityInversion, InversionType, InversionSeverity, InversionId,
     ResourceId, Priority
 };
-use crate::types::{TaskId, Time, RegionId};
+use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Helper trait to add range generation to DetRng
+trait DetRngExt {
+    /// Generate a random value in the given range (inclusive of start, exclusive of end)
+    fn gen_range(&mut self, range: std::ops::Range<u64>) -> u64;
+
+    /// Generate a random value in the given inclusive range
+    fn gen_range_inclusive(&mut self, start: u64, end: u64) -> u64;
+}
+
+impl DetRngExt for DetRng {
+    fn gen_range(&mut self, range: std::ops::Range<u64>) -> u64 {
+        if range.start >= range.end {
+            return range.start;
+        }
+        let range_size = range.end - range.start;
+        range.start + (self.next_u64() % range_size)
+    }
+
+    fn gen_range_inclusive(&mut self, start: u64, end: u64) -> u64 {
+        if start >= end {
+            return start;
+        }
+        let range_size = end - start + 1;
+        start + (self.next_u64() % range_size)
+    }
+}
 
 /// Configuration for EDF priority inversion metamorphic testing.
 #[derive(Debug, Clone)]
@@ -110,7 +136,7 @@ impl EdfTestTask {
     /// Calculate urgency score (combination of priority and deadline proximity).
     pub fn urgency_score(&self, current_time: Time) -> f64 {
         let deadline_proximity = if self.deadline > current_time {
-            let remaining = self.deadline.saturating_sub(current_time);
+            let remaining = self.deadline.duration_since(current_time);
             1.0 / (remaining.as_millis() as f64 + 1.0)
         } else {
             1000.0 // Past deadline - very urgent
@@ -389,12 +415,22 @@ fn find_blocking_task(
     None
 }
 
-/// Create a test priority inversion record.
-fn create_test_inversion(blocked_task: &EdfTestTask, blocking_task: &EdfTestTask) -> PriorityInversion {
-    use crate::runtime::scheduler::priority_inversion_oracle::{InversionId, InversionImpact};
+/// Simple test inversion record for metamorphic testing.
+#[derive(Debug, Clone)]
+struct TestInversion {
+    blocked_task: TaskId,
+    blocked_priority: Priority,
+    blocking_task: TaskId,
+    blocking_priority: Priority,
+    resource: ResourceId,
+    start_time: Instant,
+    duration: Option<Duration>,
+    inversion_type: InversionType,
+}
 
-    PriorityInversion {
-        inversion_id: InversionId::new(42), // Test ID
+/// Create a test priority inversion record.
+fn create_test_inversion(blocked_task: &EdfTestTask, blocking_task: &EdfTestTask) -> TestInversion {
+    TestInversion {
         blocked_task: blocked_task.task_id,
         blocked_priority: blocked_task.priority,
         blocking_task: blocking_task.task_id,
@@ -403,14 +439,6 @@ fn create_test_inversion(blocked_task: &EdfTestTask, blocking_task: &EdfTestTask
         start_time: Instant::now(),
         duration: Some(Duration::from_micros(100)), // Simulated short inversion
         inversion_type: InversionType::Direct,
-        task_chain: vec![blocked_task.task_id, blocking_task.task_id],
-        impact: InversionImpact {
-            delay_us: 100,
-            affected_tasks: 1,
-            severity: InversionSeverity::Low,
-            throughput_impact: 0.01,
-            fairness_impact: 0.02,
-        },
     }
 }
 
