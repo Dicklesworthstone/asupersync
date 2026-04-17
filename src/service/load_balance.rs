@@ -2307,15 +2307,15 @@ mod tests {
             vec![ReadyArmService::new(42)],
         );
 
-        // Start a request that will be pending
-        let call_fut = lb.call_balanced(());
-        let mut call_fut = Box::pin(call_fut);
-
-        // Poll once to initiate the call
-        let waker = Waker::noop();
+        // Start a request
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("ready backend should dispatch successfully");
+        let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
 
-        match call_fut.as_mut().poll(&mut cx) {
+        match output {
             Poll::Ready(Ok(response)) => {
                 assert_eq!(response, 42, "call should complete successfully");
             }
@@ -2372,17 +2372,16 @@ mod tests {
         }
 
         // Test load metric tracking with actual load simulation
-        let mut guards = Vec::new();
+        let load_metrics = {
+            let backends = lb.backends.lock();
+            backends.iter().map(|b| b.load.clone()).collect::<Vec<_>>()
+        };
 
         // Increment load on each backend to simulate in-flight requests
-        for i in 0..3 {
-            let backend_idx = i;
-            let load_metric = &lb.backends.lock()[backend_idx].load_metric;
-
+        for load_metric in &load_metrics {
             // Simulate 2 in-flight requests per backend
             load_metric.increment();
             load_metric.increment();
-            guards.push(load_metric.clone());
         }
 
         // Verify load metrics reflect in-flight requests
@@ -2390,7 +2389,7 @@ mod tests {
         assert_eq!(current_loads, [2, 2, 2]);
 
         // Simulate request completion
-        for load_metric in guards {
+        for load_metric in &load_metrics {
             load_metric.decrement();
             load_metric.decrement();
         }
