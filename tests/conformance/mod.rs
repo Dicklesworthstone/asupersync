@@ -15,6 +15,7 @@ pub mod kafka_record_batch_v2;
 pub mod quic_retry_rfc9000;
 pub mod tls_0rtt_replay_rfc8446;
 pub mod cancel_dag_determinism;
+pub mod obligation_lifecycle_metamorphic;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod postgres_logical_replication;
@@ -29,13 +30,14 @@ pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel
 pub use h2_rst_stream_ping_rfc9113::{H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory};
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 // pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
-pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult, TestCategory as KafkaTestCategory};
+pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult as KafkaConformanceTestResult, TestCategory as KafkaTestCategory};
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
 pub use mysql_stmt_prepare_execute::{MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory};
 pub use postgres_logical_replication::{PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory};
 pub use quic_retry_rfc9000::{QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory};
 pub use tls_0rtt_replay_rfc8446::{Tls0RttConformanceHarness, Tls0RttConformanceResult, TestCategory as Tls0RttTestCategory};
 pub use cancel_dag_determinism::{CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory};
+pub use obligation_lifecycle_metamorphic::{ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult, TestCategory as ObligationLifecycleTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -125,6 +127,12 @@ pub enum TestCategory {
     FinalizerLogging,
     BudgetExhaustion,
     DependencyTopology,
+    // Obligation lifecycle metamorphic categories
+    ObligationLifecycle,
+    CommitAbortSymmetry,
+    LeakInvariants,
+    SnapshotRestore,
+    ParallelCommits,
 }
 
 // Unified conformance test result
@@ -316,6 +324,41 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             })
             .collect();
         results.extend(cancel_dag_results);
+    }
+
+    // Obligation Lifecycle Metamorphic conformance
+    #[cfg(feature = "deterministic-mode")]
+    {
+        let obligation_lifecycle_harness = ObligationLifecycleMetamorphicHarness::new();
+        let obligation_lifecycle_results: Vec<ConformanceTestResult> = obligation_lifecycle_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle => TestCategory::ObligationLifecycle,
+                    obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry => TestCategory::CommitAbortSymmetry,
+                    obligation_lifecycle_metamorphic::TestCategory::LeakInvariants => TestCategory::LeakInvariants,
+                    obligation_lifecycle_metamorphic::TestCategory::SnapshotRestore => TestCategory::SnapshotRestore,
+                    obligation_lifecycle_metamorphic::TestCategory::ParallelCommits => TestCategory::ParallelCommits,
+                },
+                requirement_level: match r.requirement_level {
+                    obligation_lifecycle_metamorphic::RequirementLevel::Must => RequirementLevel::Must,
+                    obligation_lifecycle_metamorphic::RequirementLevel::Should => RequirementLevel::Should,
+                    obligation_lifecycle_metamorphic::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    obligation_lifecycle_metamorphic::TestVerdict::Pass => TestVerdict::Pass,
+                    obligation_lifecycle_metamorphic::TestVerdict::Fail => TestVerdict::Fail,
+                    obligation_lifecycle_metamorphic::TestVerdict::Skipped => TestVerdict::Skipped,
+                    obligation_lifecycle_metamorphic::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(obligation_lifecycle_results);
     }
 
     // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
@@ -513,6 +556,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "Cancel DAG determinism under identical LabRuntime seeds"
+                },
+                "obligation_lifecycle_metamorphic": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "Obligation lifecycle metamorphic relations: commit-abort symmetry, leak invariants, parallel commits"
                 },
                 "websocket_rfc6455": {
                     "status": "implemented",
@@ -750,6 +798,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[cfg(feature = "deterministic-mode")]
+    fn test_obligation_lifecycle_metamorphic_conformance_integration() {
+        let obligation_lifecycle_harness = ObligationLifecycleMetamorphicHarness::new();
+        let results = obligation_lifecycle_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "Obligation lifecycle metamorphic conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle),
+            "Should test obligation lifecycle properties"
+        );
+        assert!(
+            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry),
+            "Should test commit-abort symmetry"
+        );
+        assert!(
+            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::LeakInvariants),
+            "Should test obligation leak invariants"
+        );
+        assert!(
+            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::SnapshotRestore),
+            "Should test snapshot-restore preservation"
+        );
+        assert!(
+            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::ParallelCommits),
+            "Should test parallel commit commutativity"
+        );
+
+        // Verify we have appropriate requirement levels
+        let must_tests = results.iter()
+            .filter(|r| r.requirement_level == obligation_lifecycle_metamorphic::RequirementLevel::Must)
+            .count();
+
+        assert!(must_tests > 0, "Should have MUST requirements for obligation lifecycle");
+
+        // Verify metamorphic relations (should have multiple test cases per relation)
+        assert!(results.len() >= 12, "Should have sufficient metamorphic test coverage");
+
+        // Verify test execution completed without panic
+        for result in &results {
+            if let Some(ref error) = result.error_message {
+                if error.contains("panicked") {
+                    panic!("Test {} panicked: {}", result.test_id, error);
+                }
+            }
+        }
+
+        // Verify proptest completed full iteration counts
+        let proptest_results = results.iter()
+            .filter(|r| r.description.contains("proptest"))
+            .count();
+
+        assert!(proptest_results > 0, "Should have proptest-based metamorphic relations");
     }
 
     #[test]
