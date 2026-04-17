@@ -55,6 +55,7 @@ use crate::obligation::lyapunov::{
 use crate::observability::spectral_health::{SpectralHealthMonitor, SpectralThresholds};
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_injector::GlobalInjector;
+use crate::runtime::scheduler::invariant_monitor::{InvariantCategory, SchedulerInvariant};
 use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
@@ -976,9 +977,10 @@ impl ThreeLaneScheduler {
                     None
                 },
                 decision_sequence: 0,
-                fairness_monitor: FairnessMonitor::with_defaults(),
-                invariant_monitor:
+                fairness_monitor: Mutex::new(FairnessMonitor::with_defaults()),
+                invariant_monitor: Mutex::new(
                     super::invariant_monitor::SchedulerInvariantMonitor::with_defaults(),
+                ),
             });
         }
 
@@ -1511,9 +1513,9 @@ pub struct ThreeLaneWorker {
     /// Monotone sequence for deterministic decision IDs and timestamps.
     decision_sequence: u64,
     /// Enhanced fairness monitoring for starvation and priority inversion detection.
-    fairness_monitor: FairnessMonitor,
+    fairness_monitor: Mutex<FairnessMonitor>,
     /// Scheduler invariant monitor for comprehensive correctness verification.
-    invariant_monitor: super::invariant_monitor::SchedulerInvariantMonitor,
+    invariant_monitor: Mutex<super::invariant_monitor::SchedulerInvariantMonitor>,
 }
 
 /// Per-worker metrics tracking cancel-lane preemption and fairness.
@@ -2231,37 +2233,110 @@ impl ThreeLaneWorker {
             .map_or(0, |timer| timer.now().as_nanos())
     }
 
-    /// Returns a reference to the fairness monitor for this worker.
-    #[must_use]
-    pub fn fairness_monitor(&self) -> &FairnessMonitor {
-        &self.fairness_monitor
+    /// Executes a closure with access to the fairness monitor for this worker.
+    pub fn with_fairness_monitor<T>(&self, f: impl FnOnce(&FairnessMonitor) -> T) -> T {
+        f(&self.fairness_monitor.lock())
     }
 
     /// Returns starvation statistics from the fairness monitor.
     #[must_use]
     pub fn starvation_stats(&self) -> StarvationStats {
         let current_time = self.current_time_ns();
-        self.fairness_monitor.starvation_stats(current_time)
+        self.fairness_monitor.lock().starvation_stats(current_time)
     }
 
-    /// Returns a reference to the invariant monitor for this worker.
-    #[must_use]
-    pub fn invariant_monitor(&self) -> &super::invariant_monitor::SchedulerInvariantMonitor {
-        &self.invariant_monitor
-    }
 
     /// Returns invariant statistics from the monitor.
     #[must_use]
     pub fn invariant_stats(&self) -> super::invariant_monitor::InvariantStats {
-        self.invariant_monitor.stats()
+        self.invariant_monitor.lock().stats()
     }
 
     /// Returns all recorded invariant violations.
     #[must_use]
     pub fn invariant_violations(
         &self,
-    ) -> &std::collections::VecDeque<super::invariant_monitor::InvariantViolation> {
-        self.invariant_monitor.violations()
+    ) -> std::collections::VecDeque<super::invariant_monitor::InvariantViolation> {
+        self.invariant_monitor.lock().violations().clone()
+    }
+
+    /// Performs comprehensive scheduler invariant verification.
+    ///
+    /// This method checks queue consistency, task ownership, and other scheduler
+    /// invariants that can be verified from current state. Should be called
+    /// periodically in production to catch invariant violations.
+    pub fn verify_scheduler_invariants(&mut self) {
+        if !self.invariant_monitor.lock().is_enabled() {
+            return;
+        }
+
+        let current_time = Time::from_nanos(self.current_time_ns());
+
+        // Verify local queue consistency
+        {
+            let local_guard = self.local.lock();
+            let local_ready_guard = self.local_ready.lock();
+
+            // Check ready queue consistency
+            let ready_snapshot = super::invariant_monitor::QueueSnapshot {
+                name: "local_ready_queue".to_string(),
+                reported_depth: local_guard.len(),
+                actual_tasks: local_ready_guard.iter().copied().collect(),
+                priority_range: if local_ready_guard.is_empty() {
+                    None
+                } else {
+                    Some((0, 255)) // Conservative range for local tasks
+                },
+                time_range: Some((current_time, current_time)), // Snapshot time
+            };
+
+            drop(local_ready_guard);
+            drop(local_guard);
+
+            self.invariant_monitor.lock().verify_queue_consistency(&ready_snapshot, current_time);
+        }
+
+        // Verify fast queue consistency
+        let fast_queue_depth = self.fast_queue.len();
+        let fast_snapshot = super::invariant_monitor::QueueSnapshot {
+            name: "fast_queue".to_string(),
+            reported_depth: fast_queue_depth,
+            actual_tasks: vec![], // Fast queue doesn't expose iterator
+            priority_range: None,
+            time_range: Some((current_time, current_time)),
+        };
+        self.invariant_monitor.lock().verify_queue_consistency(&fast_snapshot, current_time);
+    }
+
+    /// Records task completion for invariant monitoring.
+    ///
+    /// This should be called when a task finishes execution to track
+    /// task lifecycle and detect any invariant violations related
+    /// to task completion.
+    pub fn record_task_completion(&mut self, task: TaskId) {
+        if !self.invariant_monitor.lock().is_enabled() {
+            return;
+        }
+
+        let current_time = Time::from_nanos(self.current_time_ns());
+        self.invariant_monitor.lock().record_task_complete(
+            task,
+            self.id,
+            current_time
+        );
+    }
+
+    /// Records task cancellation for invariant monitoring.
+    ///
+    /// This should be called when a task is cancelled to track
+    /// cancellation handling and detect leaked cancelled tasks.
+    pub fn record_task_cancellation(&mut self, task: TaskId) {
+        if !self.invariant_monitor.lock().is_enabled() {
+            return;
+        }
+
+        let current_time = Time::from_nanos(self.current_time_ns());
+        self.invariant_monitor.lock().record_task_cancel(task, current_time);
     }
 
     /// Runs a closure against the task table, using the sharded task table
@@ -2930,20 +3005,20 @@ impl ThreeLaneWorker {
         if gap > self.preemption_metrics.max_ready_priority_inversion_gap {
             self.preemption_metrics.max_ready_priority_inversion_gap = gap;
         }
-        self.invariant_monitor.record_task_enqueue(
+        self.invariant_monitor.lock().record_task_enqueue(
             blocked_task,
             "local_ready_heap",
             blocked_priority,
             timestamp,
         );
-        self.invariant_monitor.verify_priority_ordering(
+        self.invariant_monitor.lock().verify_priority_ordering(
             executing_task,
             executing_priority,
             blocked_task,
             blocked_priority,
             timestamp,
         );
-        self.fairness_monitor.record_priority_inversion(
+        self.fairness_monitor.lock().record_priority_inversion(
             blocked_task,
             blocked_priority,
             executing_task,
@@ -2960,6 +3035,17 @@ impl ThreeLaneWorker {
     #[inline]
     fn finish_dispatch(&mut self, task: TaskId) -> TaskId {
         self.adaptive_on_dispatch();
+
+        // Record task dispatch for fairness monitoring
+        let current_time = self.current_time_ns();
+        self.fairness_monitor
+            .lock()
+            .record_task_dispatch(task, current_time);
+
+        // Record task dequeue for invariant verification
+        self.invariant_monitor.lock()
+            .record_task_dequeue(task, "scheduler_dispatch", Time::from_nanos(current_time));
+
         task
     }
 
@@ -3339,6 +3425,14 @@ impl ThreeLaneWorker {
                         }),
                         "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
                     );
+
+                    // Record work-stealing for invariant verification
+                    self.invariant_monitor.lock().record_task_dequeue(
+                        task,
+                        "fast_steal",
+                        Time::from_nanos(self.current_time_ns())
+                    );
+
                     return Some(task);
                 }
             }
@@ -3379,10 +3473,25 @@ impl ThreeLaneWorker {
                     // Take the first task to execute
                     let (first_task, _) = self.steal_buffer[0];
 
+                    // Record work-stealing for invariant verification
+                    self.invariant_monitor.lock().record_task_dequeue(
+                        first_task,
+                        "priority_steal",
+                        Time::from_nanos(self.current_time_ns())
+                    );
+
                     // Push remaining stolen tasks to our fast queue
                     if stolen_count > 1 {
                         for &(task, _priority) in self.steal_buffer[1..].iter().rev() {
                             self.fast_queue.push(task);
+
+                            // Record enqueue to our fast queue for stolen tasks
+                            self.invariant_monitor.lock().record_task_enqueue(
+                                task,
+                                "fast_queue_stolen",
+                                _priority,
+                                Time::from_nanos(self.current_time_ns())
+                            );
                         }
                     }
 
@@ -3416,6 +3525,23 @@ impl ThreeLaneWorker {
         if should_schedule {
             let mut local = self.local.lock();
             local.schedule(task, priority);
+
+            // Record task enqueue for fairness monitoring
+            let current_time = self.current_time_ns();
+            self.fairness_monitor.lock().record_task_enqueue(
+                task,
+                priority,
+                current_time,
+                2, // Ready lane = 2
+            );
+
+            // Record task enqueue for invariant verification
+            self.invariant_monitor.lock().record_task_enqueue(
+                task,
+                "local_ready_queue",
+                priority,
+                Time::from_nanos(current_time),
+            );
         }
     }
 
@@ -3442,6 +3568,23 @@ impl ThreeLaneWorker {
             drop(local_ready_guard);
             let mut local = self.local.lock();
             local.move_to_cancel_lane(task, priority);
+
+            // Record task enqueue for fairness monitoring
+            let current_time = self.current_time_ns();
+            self.fairness_monitor.lock().record_task_enqueue(
+                task,
+                priority,
+                current_time,
+                0, // Cancel lane = 0
+            );
+
+            // Record task enqueue for invariant verification
+            self.invariant_monitor.lock().record_task_enqueue(
+                task,
+                "local_cancel_queue",
+                priority,
+                Time::from_nanos(current_time),
+            );
         }
         self.parker.unpark();
     }
@@ -3467,6 +3610,23 @@ impl ThreeLaneWorker {
         if should_schedule {
             let mut local = self.local.lock();
             local.schedule_timed(task, deadline);
+
+            // Record task enqueue for fairness monitoring
+            let current_time = self.current_time_ns();
+            self.fairness_monitor.lock().record_task_enqueue(
+                task,
+                0, // Timed tasks don't have explicit priority, use 0
+                current_time,
+                1, // Timed lane = 1
+            );
+
+            // Record task enqueue for invariant verification
+            self.invariant_monitor.lock().record_task_enqueue(
+                task,
+                "local_timed_queue",
+                0, // Timed tasks use priority 0
+                Time::from_nanos(current_time),
+            );
         }
     }
 
@@ -6508,8 +6668,8 @@ mod tests {
             invariant_stats.violations_by_category[&InvariantCategory::PriorityOrdering],
             1
         );
-        let invariant_violation = worker
-            .invariant_violations()
+        let violations = worker.invariant_violations();
+        let invariant_violation = violations
             .back()
             .expect("priority-order violation should be recorded");
         match &invariant_violation.invariant {
@@ -6684,7 +6844,7 @@ mod tests {
         // Case 2: Single event with boundary conditions
         window.record_event(1000);
         assert_eq!(window.events_in_window(1, 1000), 1); // Exact match
-        assert_eq!(window.events_in_window(1, 999), 0);  // Event outside window
+        assert_eq!(window.events_in_window(1, 999), 0); // Event outside window
         assert_eq!(window.events_in_window(1, 1001), 1); // Event inside window
 
         // Case 3: Fill exactly to buffer size (8 events)
@@ -6696,7 +6856,8 @@ mod tests {
 
         // Case 4: Overfill buffer (9+ events, should wrap and ignore zeros)
         let mut overfull_window = StarvationAnalysisWindow::new(4);
-        for i in 0..6 {  // 6 events in 4-slot buffer
+        for i in 0..6 {
+            // 6 events in 4-slot buffer
             overfull_window.record_event(1000 + i * 100);
         }
         // Should only count the 4 most recent events, not uninitialized zeros
@@ -6719,6 +6880,148 @@ mod tests {
         }
         assert!(pattern_window.is_pattern_detected(10, 1_000_000, 500_000));
         assert!(!pattern_window.is_pattern_detected(11, 1_000_000, 500_000));
+    }
+
+    #[test]
+    fn fairness_monitor_integration_tracks_enqueue_and_dispatch() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        // Create test tasks
+        let task1 = TaskId::new_for_test(100, 1);
+        let task2 = TaskId::new_for_test(101, 1);
+
+        // Check initial fairness state - should have no tracked tasks
+        worker.with_fairness_monitor(|monitor| {
+            assert_eq!(monitor.tracked_tasks.len(), 0);
+        });
+
+        // Schedule tasks and verify they are tracked
+        worker.schedule_local(task1, 50);
+        worker.schedule_local_cancel(task2, 100);
+
+        // Verify tasks are now being tracked
+        worker.with_fairness_monitor(|monitor| {
+            assert_eq!(monitor.tracked_tasks.len(), 2);
+            assert!(monitor.tracked_tasks.contains_key(&task1));
+            assert!(monitor.tracked_tasks.contains_key(&task2));
+
+            // Verify lane assignments
+            assert_eq!(monitor.tracked_tasks[&task1].current_lane, 2); // Ready lane
+            assert_eq!(monitor.tracked_tasks[&task2].current_lane, 0); // Cancel lane
+        });
+
+        // Dispatch a task and verify it's removed from tracking
+        if let Some(dispatched_task) = worker.next_task() {
+            worker.with_fairness_monitor(|monitor| {
+                assert_eq!(monitor.tracked_tasks.len(), 1);
+                assert!(!monitor.tracked_tasks.contains_key(&dispatched_task));
+            });
+        }
+    }
+
+    #[test]
+    fn comprehensive_invariant_monitor_integration() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        // Create test tasks
+        let task1 = TaskId::new_for_test(100, 1);
+        let task2 = TaskId::new_for_test(101, 1);
+        let task3 = TaskId::new_for_test(102, 1);
+
+        // Verify initial invariant monitor state
+        assert!(worker.invariant_monitor.lock().tracked_tasks().is_empty());
+        assert_eq!(worker.invariant_stats().operations_monitored, 0);
+
+        // Test scheduling to different lanes with invariant monitoring
+        worker.schedule_local(task1, 50);    // Ready lane
+        worker.schedule_local_cancel(task2, 100); // Cancel lane
+        worker.schedule_local_timed(task3, Time::from_nanos(5000)); // Timed lane
+
+        // Verify tasks are tracked by invariant monitor
+        let tracked = worker.invariant_monitor.lock().tracked_tasks();
+        assert_eq!(tracked.len(), 3);
+
+        // Find each task in tracked state
+        let task1_tracked = tracked.iter().find(|t| t.task_id == task1).unwrap();
+        let task2_tracked = tracked.iter().find(|t| t.task_id == task2).unwrap();
+        let task3_tracked = tracked.iter().find(|t| t.task_id == task3).unwrap();
+
+        // Verify queue assignments
+        assert!(task1_tracked.queues.contains(&"local_ready_queue".to_string()));
+        assert!(task2_tracked.queues.contains(&"local_cancel_queue".to_string()));
+        assert!(task3_tracked.queues.contains(&"local_timed_queue".to_string()));
+
+        // Test task dispatch tracking
+        if let Some(dispatched_task) = worker.next_task() {
+            // The cancel lane should have priority, so task2 should be dispatched
+            assert_eq!(dispatched_task, task2);
+
+            // After dispatch, task should be dequeued from tracking
+            let tracked_after = worker.invariant_monitor.lock().tracked_tasks();
+            assert_eq!(tracked_after.len(), 2);
+            assert!(!tracked_after.iter().any(|t| t.task_id == task2));
+        }
+
+        // Test invariant verification
+        worker.verify_scheduler_invariants();
+        assert!(worker.invariant_violations().is_empty()); // Should have no violations
+
+        // Test task completion tracking
+        worker.record_task_completion(task2);
+        worker.record_task_cancellation(task1);
+
+        // Verify statistics tracking
+        let stats = worker.invariant_stats();
+        assert!(stats.operations_monitored > 0);
+        assert_eq!(stats.violations_by_severity, [0, 0, 0, 0]); // No violations
+    }
+
+    #[test]
+    fn invariant_monitor_detects_violations() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        // Create tasks with different priorities for priority violation testing
+        let low_priority_task = TaskId::new_for_test(200, 1);
+        let high_priority_task = TaskId::new_for_test(201, 1);
+
+        // Test priority ordering violation detection
+        worker.invariant_monitor.lock().verify_priority_ordering(
+            low_priority_task,
+            10, // Low priority
+            high_priority_task,
+            50, // High priority - should be scheduled first
+            Time::from_nanos(1000)
+        );
+
+        // Should have detected a priority violation
+        let violations = worker.invariant_violations();
+        assert_eq!(violations.len(), 1);
+
+        let violation = &violations[0];
+        match &violation.invariant {
+            SchedulerInvariant::PriorityOrderViolation {
+                high_priority_task: hp_task,
+                high_priority: hp,
+                low_priority_task: lp_task,
+                low_priority: lp,
+            } => {
+                assert_eq!(*hp_task, high_priority_task);
+                assert_eq!(*hp, 50);
+                assert_eq!(*lp_task, low_priority_task);
+                assert_eq!(*lp, 10);
+            }
+            _ => panic!("Expected PriorityOrderViolation"),
+        }
+
+        // Verify violation statistics
+        let stats = worker.invariant_stats();
+        assert_eq!(stats.violations_by_severity[2], 1); // One high-severity violation
     }
 
     #[test]
