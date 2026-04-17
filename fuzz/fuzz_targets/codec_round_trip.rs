@@ -23,11 +23,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::{
-    BytesCodec, Decoder, Encoder, LengthDelimitedCodec, LinesCodec, LinesCodecError,
-};
+use asupersync::codec::{BytesCodec, Decoder, Encoder, LinesCodec};
 use libfuzzer_sys::fuzz_target;
-use std::io::{Error as IoError, ErrorKind};
 
 /// Fuzzable codec types for round-trip testing
 #[derive(Arbitrary, Debug, Clone)]
@@ -282,7 +279,7 @@ fn fuzz_round_trip(codec_type: CodecType, test_data: TestData) {
                 _ => 8,
             };
 
-            let mut codec = asupersync::codec::LengthDelimitedCodecBuilder::new()
+            let mut codec = asupersync::codec::LengthDelimitedCodec::builder()
                 .length_field_length(length_len)
                 .max_frame_length(max_frame)
                 .big_endian(big_endian)
@@ -458,7 +455,7 @@ fn fuzz_error_recovery(codec_type: CodecType, invalid_data: Vec<u8>, recovery_da
 /// (4) BytesMut capacity growth testing
 fn fuzz_capacity_growth(codec_type: CodecType, initial_capacity: u16, growth_pattern: Vec<TestData>) {
     let mut encode_buf = BytesMut::with_capacity(initial_capacity as usize);
-    let initial_cap = encode_buf.capacity();
+    let _initial_cap = encode_buf.capacity();
 
     match codec_type {
         CodecType::Bytes => {

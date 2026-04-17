@@ -24,3 +24,6 @@ pub use framed_write::FramedWrite;
 pub use length_delimited::{LengthDelimitedCodec, LengthDelimitedCodecBuilder};
 pub use lines::{LinesCodec, LinesCodecError};
 pub use raptorq::{EncodedSymbol, EncodingConfig, EncodingError, EncodingPipeline};
+
+#[cfg(test)]
+mod tests;

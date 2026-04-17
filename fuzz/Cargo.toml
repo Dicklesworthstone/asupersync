@@ -450,3 +450,10 @@ path = "fuzz_targets/trace_streaming.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_trace_recorder_concurrent_writer"
+path = "fuzz_targets/fuzz_trace_recorder_concurrent_writer.rs"
+test = false
+doc = false
+bench = false
