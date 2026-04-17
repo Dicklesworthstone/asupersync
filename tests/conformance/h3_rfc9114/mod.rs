@@ -167,3 +167,52 @@ impl Default for H3ConformanceHarness {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn test_h3_conformance_harness_integration() {
+        let harness = H3ConformanceHarness::new();
+        let results = harness.run_all_tests();
+
+        // Verify we have all expected tests
+        assert_eq!(results.len(), 4, "Should have 4 connection preface tests");
+
+        // Verify all tests have proper structure
+        for result in &results {
+            assert!(!result.test_id.is_empty());
+            assert!(!result.description.is_empty());
+            assert_eq!(result.requirement_level, RequirementLevel::Must);
+            assert!(result.elapsed_ms > 0);
+        }
+
+        // Verify test IDs are unique
+        let mut test_ids: Vec<&str> = results.iter().map(|r| r.test_id.as_str()).collect();
+        test_ids.sort();
+        test_ids.dedup();
+        assert_eq!(test_ids.len(), 4, "All test IDs should be unique");
+
+        // Verify coverage report
+        let coverage = harness.coverage_report();
+        assert_eq!(coverage.total_tests, 4);
+        assert!(coverage.must_coverage >= 0.0);
+    }
+
+    #[test]
+    fn test_h3_conformance_categories() {
+        let harness = H3ConformanceHarness::new();
+        let results = harness.run_all_tests();
+
+        // Verify we have tests for all major categories
+        let categories: std::collections::HashSet<TestCategory> = results
+            .iter()
+            .map(|r| r.category)
+            .collect();
+
+        assert!(categories.contains(&TestCategory::ConnectionPreface));
+        assert!(categories.contains(&TestCategory::Settings));
+        assert!(categories.contains(&TestCategory::StreamTypes));
+    }
+}

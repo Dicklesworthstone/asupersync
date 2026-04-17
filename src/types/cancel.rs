@@ -434,7 +434,7 @@ pub struct CancelReason {
     /// When the cancellation was requested.
     pub timestamp: Time,
     /// Optional human-readable message (static for determinism).
-    pub message: Option<&'static str>,
+    pub message: Option<String>,
     /// The parent cause of this cancellation (for building chains).
     pub cause: Option<Box<Self>>,
     /// True if the cause chain was truncated due to limits.
@@ -488,13 +488,13 @@ impl CancelReason {
     /// Creates a user cancellation reason with a message.
     #[inline]
     #[must_use]
-    pub const fn user(message: &'static str) -> Self {
+    pub fn user(message: &'static str) -> Self {
         Self {
             kind: CancelKind::User,
             origin_region: RegionId::testing_default(),
             origin_task: None,
             timestamp: Time::ZERO,
-            message: Some(message),
+            message: Some(message.to_string()),
             cause: None,
             truncated: false,
             truncated_at_depth: None,
@@ -606,8 +606,8 @@ impl CancelReason {
     /// Sets a message for this cancellation reason.
     #[inline]
     #[must_use]
-    pub const fn with_message(mut self, message: &'static str) -> Self {
-        self.message = Some(message);
+    pub fn with_message(mut self, message: &'static str) -> Self {
+        self.message = Some(message.to_string());
         self
     }
 
@@ -895,7 +895,7 @@ impl CancelReason {
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
-            self.message = other.message;
+            self.message = other.message.clone();
             self.cause.clone_from(&other.cause);
             self.truncated = other.truncated;
             self.truncated_at_depth = other.truncated_at_depth;
@@ -913,7 +913,7 @@ impl CancelReason {
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
-            self.message = other.message;
+            self.message = other.message.clone();
             self.cause.clone_from(&other.cause);
             self.truncated = other.truncated;
             self.truncated_at_depth = other.truncated_at_depth;
@@ -925,7 +925,7 @@ impl CancelReason {
         }
 
         // Same timestamp: fallback to message comparison
-        let should_replace = match (self.message, other.message) {
+        let should_replace = match (&self.message, &other.message) {
             (None, Some(_)) => true,
             (Some(current), Some(candidate)) if candidate < current => true,
             _ => false,
@@ -935,7 +935,7 @@ impl CancelReason {
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
-            self.message = other.message;
+            self.message = other.message.clone();
             self.cause.clone_from(&other.cause);
             self.truncated = other.truncated;
             self.truncated_at_depth = other.truncated_at_depth;
@@ -1013,8 +1013,8 @@ impl CancelReason {
     /// Returns the message associated with this cancellation (if any).
     #[inline]
     #[must_use]
-    pub const fn message(&self) -> Option<&'static str> {
-        self.message
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
     }
 
     /// Returns a reference to the parent cause (if any).
@@ -1075,7 +1075,7 @@ impl Default for CancelReason {
 impl fmt::Display for CancelReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)?;
-        if let Some(msg) = self.message {
+        if let Some(msg) = &self.message {
             write!(f, ": {msg}")?;
         }
         // Include origin attribution in alternate mode

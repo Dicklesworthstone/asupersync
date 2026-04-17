@@ -568,6 +568,192 @@ fn mr_parameter_consistency() {
     });
 }
 
+/// MR7: Repair Symbol Substitutability (Equivalence)
+/// Property: decode(sources[0..k-n] + repair[0..n]) = decode(sources[0..k])
+/// Catches: Source/repair symbol interaction bugs, ESI mapping issues
+#[test]
+fn mr_repair_symbol_substitutability() {
+    proptest!(|(
+        data_size in 128usize..384,
+        seed in any::<u64>(),
+        substitution_count in 1usize..4,
+    )| {
+        let cx = Cx::for_testing();
+        let data = generate_test_data(data_size, seed);
+        let object_id = ObjectId::new_for_test(seed);
+
+        // Encode with generous repair overhead for substitution testing
+        let config = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                repair_overhead: 1.30, // 30% overhead for substitution
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let sink = CollectorSink::new();
+        let mut sender = RaptorQSenderBuilder::new()
+            .config(config.clone())
+            .transport(sink)
+            .build()
+            .expect("sender build");
+
+        let outcome = sender.send_object(&cx, object_id, &data)
+            .expect("encoding");
+        let symbols = sender.transport_mut().symbols().to_vec();
+
+        let k = outcome.source_symbols;
+        let symbol_size = config.encoding.symbol_size as usize;
+        let decoder = create_test_decoder(k, symbol_size);
+
+        // Ensure we have enough symbols for substitution
+        if symbols.len() < k + substitution_count {
+            return Ok(());
+        }
+
+        // Create two symbol sets:
+        // 1. All source symbols (systematic)
+        let systematic_symbols = symbols_to_received(&symbols[..k], k);
+
+        // 2. Source symbols with some replaced by repair symbols
+        let mut substituted_indices = Vec::new();
+        for i in 0..substitution_count {
+            substituted_indices.push(i);
+        }
+
+        let mut substituted_symbols = Vec::new();
+        for i in 0..k {
+            if substituted_indices.contains(&i) {
+                // Replace this source symbol with a repair symbol
+                let repair_index = k + i; // Use repair symbol at offset
+                if repair_index < symbols.len() {
+                    substituted_symbols.push(&symbols[repair_index]);
+                } else {
+                    substituted_symbols.push(&symbols[i]); // Fallback to source
+                }
+            } else {
+                substituted_symbols.push(&symbols[i]);
+            }
+        }
+
+        let substituted_received = symbols_to_received(&substituted_symbols.iter().copied().cloned().collect::<Vec<_>>(), k);
+
+        let systematic_result = decoder.decode(&systematic_symbols);
+        let substituted_result = decoder.decode(&substituted_received);
+
+        // METAMORPHIC ASSERTION: Both symbol sets should decode to same result
+        match (systematic_result, substituted_result) {
+            (Ok(sys_decoded), Ok(sub_decoded)) => {
+                let sys_data = flatten_source_symbols(&sys_decoded.source, data.len());
+                let sub_data = flatten_source_symbols(&sub_decoded.source, data.len());
+                prop_assert_eq!(
+                    sys_data.clone(), sub_data,
+                    "MR7 VIOLATION: repair symbol substitution changed decode result"
+                );
+                prop_assert_eq!(
+                    sys_data, data,
+                    "MR7 VIOLATION: systematic decode failed identity check"
+                );
+            }
+            (Ok(_), Err(e)) => {
+                prop_assert!(
+                    false,
+                    "MR7 VIOLATION: repair substitution caused decode failure: {:?}",
+                    e
+                );
+            }
+            (Err(_), Ok(_)) => {
+                prop_assert!(
+                    false,
+                    "MR7 VIOLATION: substitution succeeded where systematic failed"
+                );
+            }
+            (Err(_), Err(_)) => {
+                // Both failed - this can happen with insufficient repair symbols
+                // or edge cases, so we don't assert failure here
+            }
+        }
+    });
+}
+
+/// MR8: Symbol Duplication Idempotence (Equivalence)
+/// Property: decode(symbols) = decode(symbols + duplicate_symbols)
+/// Catches: Duplicate symbol handling bugs, redundancy processing issues
+#[test]
+fn mr_symbol_duplication_idempotence() {
+    proptest!(|(
+        data_size in 128usize..256,
+        seed in any::<u64>(),
+        duplicate_count in 1usize..3,
+    )| {
+        let cx = Cx::for_testing();
+        let data = generate_test_data(data_size, seed);
+        let object_id = ObjectId::new_for_test(seed);
+
+        // Encode with standard configuration
+        let config = RaptorQConfig::default();
+        let sink = CollectorSink::new();
+        let mut sender = RaptorQSenderBuilder::new()
+            .config(config.clone())
+            .transport(sink)
+            .build()
+            .expect("sender build");
+
+        let outcome = sender.send_object(&cx, object_id, &data)
+            .expect("encoding");
+        let symbols = sender.transport_mut().symbols().to_vec();
+
+        let k = outcome.source_symbols;
+        let symbol_size = config.encoding.symbol_size as usize;
+        let decoder = create_test_decoder(k, symbol_size);
+
+        // Create decodable symbol set
+        let symbol_count = std::cmp::min(symbols.len(), k + 5);
+        let original_received = symbols_to_received(&symbols[..symbol_count], k);
+
+        // Create duplicated symbol set (add duplicates of first few symbols)
+        let mut with_duplicates = original_received.clone();
+        for i in 0..std::cmp::min(duplicate_count, original_received.len()) {
+            with_duplicates.push(original_received[i].clone());
+        }
+
+        let original_result = decoder.decode(&original_received);
+        let duplicate_result = decoder.decode(&with_duplicates);
+
+        // METAMORPHIC ASSERTION: Duplicates should not change decode result
+        match (original_result, duplicate_result) {
+            (Ok(orig_decoded), Ok(dup_decoded)) => {
+                let orig_data = flatten_source_symbols(&orig_decoded.source, data.len());
+                let dup_data = flatten_source_symbols(&dup_decoded.source, data.len());
+                prop_assert_eq!(
+                    orig_data.clone(), dup_data,
+                    "MR8 VIOLATION: duplicate symbols changed decode result"
+                );
+                prop_assert_eq!(
+                    orig_data, data,
+                    "MR8 VIOLATION: original decode failed identity check"
+                );
+            }
+            (Ok(_), Err(e)) => {
+                prop_assert!(
+                    false,
+                    "MR8 VIOLATION: adding duplicate symbols caused decode failure: {:?}",
+                    e
+                );
+            }
+            (Err(_), Ok(_)) => {
+                prop_assert!(
+                    false,
+                    "MR8 VIOLATION: duplicates enabled decode where original failed"
+                );
+            }
+            (Err(_), Err(_)) => {
+                // Both failed - no constraint violated
+            }
+        }
+    });
+}
+
 // ============================================================================
 // Composite Metamorphic Relations
 // ============================================================================

@@ -3,20 +3,18 @@
 //! This module contains conformance test suites that validate our implementations
 //! against formal specifications (RFCs) and reference implementations.
 
-pub mod hpack_rfc7541;
-pub mod hpack_metamorphic;
 pub mod codec_framing;
 pub mod h2_rfc7540;
-pub mod websocket_rfc6455;
+pub mod h3_rfc9114;
+pub mod hpack_metamorphic;
+pub mod hpack_rfc7541;
 pub mod obligation_invariants;
+pub mod websocket_rfc6455;
 
 // Re-export main conformance test functionality
-pub use hpack_rfc7541::{
-    HpackConformanceHarness,
-    RequirementLevel,
-    TestVerdict,
-};
 pub use h2_rfc7540::{H2ConformanceHarness, H2ConformanceResult};
+pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
+pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
 pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -73,7 +71,8 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
 
     // HPACK RFC 7541 conformance
     let hpack_harness = HpackConformanceHarness::new();
-    let hpack_results: Vec<ConformanceTestResult> = hpack_harness.run_all_tests()
+    let hpack_results: Vec<ConformanceTestResult> = hpack_harness
+        .run_all_tests()
         .into_iter()
         .map(|r| ConformanceTestResult {
             test_id: r.test_id,
@@ -97,7 +96,8 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
 
     // HTTP/2 RFC 7540 conformance
     let h2_harness = H2ConformanceHarness::new();
-    let h2_results: Vec<ConformanceTestResult> = h2_harness.run_all_tests()
+    let h2_results: Vec<ConformanceTestResult> = h2_harness
+        .run_all_tests()
         .into_iter()
         .map(|r| ConformanceTestResult {
             test_id: r.test_id,
@@ -131,7 +131,8 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
 
     // WebSocket RFC 6455 conformance
     let ws_harness = WsConformanceHarness::new();
-    let ws_results: Vec<ConformanceTestResult> = ws_harness.run_all_tests()
+    let ws_results: Vec<ConformanceTestResult> = ws_harness
+        .run_all_tests()
         .into_iter()
         .map(|r| ConformanceTestResult {
             test_id: r.test_id,
@@ -167,7 +168,8 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
 
     // Codec framing conformance
     let codec_harness = codec_framing::CodecConformanceHarness::new();
-    let codec_results: Vec<ConformanceTestResult> = codec_harness.run_all_tests()
+    let codec_results: Vec<ConformanceTestResult> = codec_harness
+        .run_all_tests()
         .into_iter()
         .map(|r| ConformanceTestResult {
             test_id: r.test_id,
@@ -200,16 +202,30 @@ pub fn generate_compliance_report() -> serde_json::Value {
     let results = run_all_conformance_tests();
 
     let total = results.len();
-    let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
-    let failed = results.iter().filter(|r| r.verdict == TestVerdict::Fail).count();
-    let skipped = results.iter().filter(|r| r.verdict == TestVerdict::Skipped).count();
-    let expected_failures = results.iter().filter(|r| r.verdict == TestVerdict::ExpectedFailure).count();
+    let passed = results
+        .iter()
+        .filter(|r| r.verdict == TestVerdict::Pass)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.verdict == TestVerdict::Fail)
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| r.verdict == TestVerdict::Skipped)
+        .count();
+    let expected_failures = results
+        .iter()
+        .filter(|r| r.verdict == TestVerdict::ExpectedFailure)
+        .count();
 
     // MUST clause coverage calculation
-    let must_tests: Vec<_> = results.iter()
+    let must_tests: Vec<_> = results
+        .iter()
         .filter(|r| r.requirement_level == RequirementLevel::Must)
         .collect();
-    let must_passed = must_tests.iter()
+    let must_passed = must_tests
+        .iter()
         .filter(|r| r.verdict == TestVerdict::Pass)
         .count();
     let must_total = must_tests.len();
@@ -241,7 +257,8 @@ pub fn generate_compliance_report() -> serde_json::Value {
                 category_stats["failed"] = (category_stats["failed"].as_u64().unwrap() + 1).into();
             }
             TestVerdict::ExpectedFailure => {
-                category_stats["expected_failures"] = (category_stats["expected_failures"].as_u64().unwrap() + 1).into();
+                category_stats["expected_failures"] =
+                    (category_stats["expected_failures"].as_u64().unwrap() + 1).into();
             }
             _ => {}
         }
@@ -304,14 +321,26 @@ mod tests {
         // Verify all tests have required fields
         for result in &results {
             assert!(!result.test_id.is_empty(), "Test ID must not be empty");
-            assert!(!result.description.is_empty(), "Description must not be empty");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
         }
 
         // Generate and validate report structure
         let report = generate_compliance_report();
-        assert!(report["conformance_report"].is_object(), "Report should have conformance_report section");
-        assert!(report["conformance_report"]["summary"].is_object(), "Report should have summary");
-        assert!(report["conformance_report"]["must_clause_coverage"].is_object(), "Report should have MUST coverage");
+        assert!(
+            report["conformance_report"].is_object(),
+            "Report should have conformance_report section"
+        );
+        assert!(
+            report["conformance_report"]["summary"].is_object(),
+            "Report should have summary"
+        );
+        assert!(
+            report["conformance_report"]["must_clause_coverage"].is_object(),
+            "Report should have MUST coverage"
+        );
     }
 
     #[test]
@@ -322,13 +351,17 @@ mod tests {
         assert!(!results.is_empty(), "HPACK conformance should have tests");
 
         // Check for expected test categories
-        let categories: std::collections::HashSet<_> = results
-            .iter()
-            .map(|r| &r.category)
-            .collect();
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
 
-        assert!(categories.contains(&TestCategory::StaticTable), "Should test static table");
-        assert!(categories.contains(&TestCategory::RoundTrip), "Should test round-trip");
+        assert!(
+            categories.contains(&TestCategory::StaticTable),
+            "Should test static table"
+        );
+        assert!(
+            categories.contains(&TestCategory::RoundTrip),
+            "Should test round-trip"
+        );
     }
 
     #[test]
@@ -336,10 +369,19 @@ mod tests {
         let report = generate_compliance_report();
         let summary = &report["conformance_report"]["summary"];
 
-        assert!(summary["total_tests"].as_u64().unwrap() > 0, "Should have tests");
-        assert!(summary["success_rate"].as_f64().is_some(), "Should calculate success rate");
+        assert!(
+            summary["total_tests"].as_u64().unwrap() > 0,
+            "Should have tests"
+        );
+        assert!(
+            summary["success_rate"].as_f64().is_some(),
+            "Should calculate success rate"
+        );
 
         let must_coverage = &report["conformance_report"]["must_clause_coverage"];
-        assert!(must_coverage["coverage_percent"].as_f64().is_some(), "Should calculate MUST coverage");
+        assert!(
+            must_coverage["coverage_percent"].as_f64().is_some(),
+            "Should calculate MUST coverage"
+        );
     }
 }

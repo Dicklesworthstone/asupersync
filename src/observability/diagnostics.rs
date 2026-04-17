@@ -388,12 +388,12 @@ impl Diagnostics {
             }
             TaskState::CancelRequested { reason, .. } => {
                 details.push(format!("cancel kind: {}", reason.kind));
-                if let Some(msg) = &reason.message {
+                if let Some(msg) = &reason.message.as_deref() {
                     details.push(format!("message: {msg}"));
                 }
                 recommendations.push("Task is cancelling; wait for drain/finalizers.".to_string());
                 BlockReason::CancelRequested {
-                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message),
+                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message.as_deref()),
                 }
             }
             TaskState::Cancelling {
@@ -406,7 +406,7 @@ impl Diagnostics {
                     cleanup_budget.poll_quota
                 ));
                 BlockReason::RunningCleanup {
-                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message),
+                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message.as_deref()),
                     polls_remaining: cleanup_budget.poll_quota,
                 }
             }
@@ -420,7 +420,7 @@ impl Diagnostics {
                     cleanup_budget.poll_quota
                 ));
                 BlockReason::Finalizing {
-                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message),
+                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message.as_deref()),
                     polls_remaining: cleanup_budget.poll_quota,
                 }
             }

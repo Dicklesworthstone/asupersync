@@ -3389,7 +3389,7 @@ impl From<&CancelReason> for CancelReasonSnapshot {
             origin_region: reason.origin_region.into(),
             origin_task: reason.origin_task.map(IdSnapshot::from),
             timestamp: reason.timestamp.as_nanos(),
-            message: reason.message.map(str::to_string),
+            message: reason.message.clone(),
             cause: reason
                 .cause
                 .as_deref()
