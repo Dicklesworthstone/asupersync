@@ -132,6 +132,7 @@ pub mod io_op;
 /// Proof-carrying decision-plane kernel for runtime controllers.
 pub mod kernel;
 pub mod obligation_table;
+pub mod panic_isolation;
 pub mod reactor;
 pub mod region_heap;
 pub mod region_table;
@@ -179,6 +180,10 @@ pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use io_op::IoOp;
 pub use obligation_table::{
     ObligationAbortInfo, ObligationCommitInfo, ObligationLeakInfo, ObligationTable,
+};
+pub use panic_isolation::{
+    CleanupPhase, FinalizerType, MetricsProviderPanicExt, PanicContext, PanicIsolationConfig,
+    PanicIsolationResult, PanicIsolator, PanicLocation,
 };
 pub use reactor::{
     BrowserReactor, BrowserReactorConfig, Event, Events, Interest, LabReactor, Reactor,

@@ -3,6 +3,7 @@
 use crate::observability::metrics::MetricsProvider;
 use crate::runtime::RuntimeState;
 use crate::runtime::io_driver::IoDriverHandle;
+use crate::runtime::panic_isolation::{PanicIsolationConfig, PanicIsolationResult, PanicIsolator};
 use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
@@ -50,6 +51,8 @@ pub struct Worker {
     seen_io_tokens: HashSet<u64>,
     /// Cached metrics provider — avoids Arc clone per task execution.
     metrics: Arc<dyn MetricsProvider>,
+    /// Panic isolation framework for safe task execution.
+    panic_isolator: PanicIsolator,
     /// Pre-allocated scratch vec for local waiters (reused across polls).
     scratch_local: Cell<Vec<TaskId>>,
     /// Pre-allocated scratch vec for global waiters (reused across polls).
@@ -87,6 +90,9 @@ impl Worker {
             )
         };
 
+        let panic_isolator =
+            PanicIsolator::new(PanicIsolationConfig::default(), Arc::clone(&metrics));
+
         Self {
             id,
             local: LocalQueue::new(Arc::clone(&state)),
@@ -101,6 +107,7 @@ impl Worker {
             timer_driver,
             seen_io_tokens: HashSet::with_capacity(32),
             metrics,
+            panic_isolator,
             scratch_local: Cell::new(Vec::with_capacity(16)),
             scratch_global: Cell::new(Vec::with_capacity(16)),
             scratch_foreign_wakers: Cell::new(Vec::with_capacity(4)),
@@ -373,8 +380,32 @@ impl Worker {
         };
 
         let poll_start = Instant::now();
-        match stored.poll(&mut cx) {
-            Poll::Ready(outcome) => {
+
+        // Get region ID for panic isolation context
+        let region_id = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.task(task_id).map_or_else(
+                || {
+                    // Fallback region ID - this shouldn't happen in normal operation
+                    crate::types::RegionId::from_arena(crate::util::ArenaIndex::new(0, 0))
+                },
+                |record| record.owner,
+            )
+        };
+
+        // Isolate the potentially panicking task poll operation
+        let poll_result = self.panic_isolator.isolate_task_execution(
+            task_id,
+            region_id,
+            1, // TODO: Track actual poll attempt count
+            || stored.poll(&mut cx),
+        );
+
+        match poll_result {
+            PanicIsolationResult::Success(Poll::Ready(outcome)) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
@@ -483,7 +514,7 @@ impl Worker {
                 guard.completed = true;
                 wake_state.clear();
             }
-            Poll::Pending => {
+            PanicIsolationResult::Success(Poll::Pending) => {
                 let is_local = is_local_task;
 
                 match stored {
@@ -529,6 +560,76 @@ impl Worker {
                     self.parker.unpark();
                 }
                 guard.completed = true;
+            }
+            PanicIsolationResult::Panicked(panic_context)
+            | PanicIsolationResult::Skipped {
+                context: panic_context,
+                ..
+            } => {
+                // Task panicked during poll - convert to structured outcome
+                let panic_outcome = self.panic_isolator.panic_to_outcome(&panic_context);
+
+                // Complete the task with panic outcome (similar to Ready case but with panic outcome)
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
+                if let Some(record) = state.task_mut(task_id) {
+                    if !record.state.is_terminal() {
+                        record.complete(panic_outcome);
+                    }
+                }
+
+                let waiters = state.task_completed(task_id);
+                let finalizers = state.drain_ready_async_finalizers();
+                let mut local_waiters = self.scratch_local.take();
+                let mut global_waiters = self.scratch_global.take();
+                let mut foreign_wakers = self.scratch_foreign_wakers.take();
+                local_waiters.clear();
+                global_waiters.clear();
+                foreign_wakers.clear();
+
+                for waiter in waiters {
+                    if let Some(record) = state.task(waiter) {
+                        if record.wake_state.notify() {
+                            if record.is_local() {
+                                match record.pinned_worker() {
+                                    Some(worker_id) if worker_id == self.id => {
+                                        local_waiters.push(waiter);
+                                    }
+                                    Some(_worker_id) => {
+                                        record.wake_state.clear();
+                                        if let Some((waker, _)) = &record.cached_waker {
+                                            foreign_wakers.push(waker.clone());
+                                        }
+                                    }
+                                    None => local_waiters.push(waiter),
+                                }
+                            } else {
+                                global_waiters.push(waiter);
+                            }
+                        }
+                    }
+                }
+                drop(state);
+
+                while let Some(waker) = foreign_wakers.pop() {
+                    waker.wake();
+                }
+
+                for waiter in &global_waiters {
+                    self.global.push(*waiter);
+                }
+                self.local.push_many(&local_waiters);
+                self.scratch_local.set(local_waiters);
+                self.scratch_global.set(global_waiters);
+                self.scratch_foreign_wakers.set(foreign_wakers);
+                for (finalizer_task, _) in finalizers {
+                    self.global.push(finalizer_task);
+                }
+                guard.completed = true;
+                wake_state.clear();
             }
         }
         let _ = guard.completed;
