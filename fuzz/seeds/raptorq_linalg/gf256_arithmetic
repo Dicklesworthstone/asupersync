@@ -1,0 +1,77 @@
+{
+  "row_ops": [
+    {
+      "ScaleAdd": {
+        "dst_data": [29, 116, 205, 88],
+        "src_data": [173, 94, 51, 207],
+        "coefficient": 29
+      }
+    },
+    {
+      "Scale": {
+        "row_data": [1, 2, 4, 8, 16, 32, 64, 128],
+        "coefficient": 29
+      }
+    },
+    {
+      "Xor": {
+        "dst_data": [255, 170, 85, 51],
+        "src_data": [85, 170, 255, 204]
+      }
+    }
+  ],
+  "dense_row_ops": [
+    {
+      "Creation": {
+        "data": [29, 116, 205, 173, 94, 51, 207, 88]
+      }
+    },
+    {
+      "Manipulation": {
+        "row1_data": [1, 2, 4, 8, 29],
+        "row2_data": [16, 32, 64, 128, 116]
+      }
+    }
+  ],
+  "sparse_row_ops": [
+    {
+      "Creation": {
+        "entries": [[0, 29], [2, 116], [4, 205], [7, 173]],
+        "logical_len": 16
+      }
+    },
+    {
+      "Analysis": {
+        "entries": [[1, 255], [3, 1], [5, 2], [9, 0]],
+        "logical_len": 32
+      }
+    }
+  ],
+  "pivot_tests": [
+    {
+      "Basic": {
+        "matrix_data": [
+          [0, 29, 116],
+          [173, 0, 205],
+          [94, 51, 0]
+        ],
+        "start": 0,
+        "end": 3,
+        "col": 1
+      }
+    }
+  ],
+  "conversion_tests": [
+    {
+      "SparseToDense": {
+        "entries": [[0, 29], [3, 116], [7, 205], [15, 173]],
+        "logical_len": 16
+      }
+    },
+    {
+      "Roundtrip": {
+        "dense_data": [29, 0, 116, 0, 205, 0, 173, 0]
+      }
+    }
+  ]
+}

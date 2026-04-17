@@ -1,0 +1,65 @@
+{
+  "row_ops": [
+    {
+      "Xor": {
+        "dst_data": [1, 2, 3, 4, 5],
+        "src_data": [5, 4, 3, 2, 1]
+      }
+    },
+    {
+      "ScaleAdd": {
+        "dst_data": [0, 1, 2, 3],
+        "src_data": [4, 5, 6, 7],
+        "coefficient": 7
+      }
+    },
+    {
+      "Scale": {
+        "row_data": [1, 2, 3, 4],
+        "coefficient": 2
+      }
+    }
+  ],
+  "dense_row_ops": [
+    {
+      "Creation": {
+        "data": [1, 0, 2, 0, 3]
+      }
+    },
+    {
+      "NonzeroAnalysis": {
+        "data": [0, 1, 0, 2, 0, 3],
+        "search_starts": [0, 1, 2, 3]
+      }
+    }
+  ],
+  "sparse_row_ops": [
+    {
+      "Creation": {
+        "entries": [[1, 5], [3, 7], [5, 2]],
+        "logical_len": 8
+      }
+    }
+  ],
+  "pivot_tests": [
+    {
+      "Basic": {
+        "matrix_data": [
+          [0, 1, 2],
+          [1, 0, 3],
+          [2, 3, 0]
+        ],
+        "start": 0,
+        "end": 3,
+        "col": 0
+      }
+    }
+  ],
+  "conversion_tests": [
+    {
+      "Roundtrip": {
+        "dense_data": [1, 0, 2, 0, 3, 0]
+      }
+    }
+  ]
+}

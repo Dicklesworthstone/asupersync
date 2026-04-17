@@ -390,3 +390,10 @@ path = "fuzz_targets/io_uring_reactor.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_raptorq_linalg"
+path = "fuzz_targets/raptorq_linalg.rs"
+test = false
+doc = false
+bench = false
