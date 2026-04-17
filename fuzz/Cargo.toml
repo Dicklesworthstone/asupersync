@@ -338,3 +338,10 @@ path = "fuzz_targets/qpack_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_raptorq_systematic"
+path = "fuzz_targets/raptorq_systematic.rs"
+test = false
+doc = false
+bench = false
