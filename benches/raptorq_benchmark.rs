@@ -11,6 +11,9 @@
 #![recursion_limit = "512"]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use serde_json;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
@@ -31,6 +34,141 @@ const TRACK_E_CRITERION_SAMPLE_SIZE: usize = 10;
 const TRACK_E_CRITERION_WARM_UP_SECONDS: f64 = 0.05;
 const TRACK_E_CRITERION_MEASUREMENT_SECONDS: f64 = 0.05;
 const TRACK_E_TAIL_CONFIDENCE_PROXY: &str = "criterion_interval_high_endpoint_proxy_p95p99";
+
+// Track-G Performance Governance Integration
+const PERFORMANCE_BUDGETS_PATH: &str = "artifacts/raptorq_performance_budgets_v1.json";
+
+#[derive(serde::Deserialize, Debug, Clone)]
+struct WorkloadBudget {
+    description: String,
+    primary_metric: String,
+    hard_budget_ns: Option<u64>,
+    operational_budget_ns: Option<u64>,
+    hard_budget_mbps: Option<f64>,
+    operational_budget_mbps: Option<f64>,
+    hard_budget_rate: Option<f64>,
+    operational_budget_rate: Option<f64>,
+    regression_threshold_percent: f64,
+    target_p95_ns: Option<u64>,
+    target_p99_ns: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct PerformanceBudgets {
+    workload_budgets: HashMap<String, WorkloadBudget>,
+    budget_enforcement: serde_json::Value,
+    reproducibility_requirements: serde_json::Value,
+}
+
+static PERFORMANCE_BUDGETS: OnceLock<PerformanceBudgets> = OnceLock::new();
+
+fn load_performance_budgets() -> &'static PerformanceBudgets {
+    PERFORMANCE_BUDGETS.get_or_init(|| {
+        let content = std::fs::read_to_string(PERFORMANCE_BUDGETS_PATH).unwrap_or_else(|_| {
+            panic!(
+                "Failed to load performance budgets from {}",
+                PERFORMANCE_BUDGETS_PATH
+            )
+        });
+        serde_json::from_str(&content)
+            .unwrap_or_else(|e| panic!("Failed to parse performance budgets: {}", e))
+    })
+}
+
+fn check_latency_budget(workload_id: &str, measurement_ns: u64) -> BudgetCheckResult {
+    let budgets = load_performance_budgets();
+
+    if let Some(budget) = budgets.workload_budgets.get(workload_id) {
+        let hard_budget = budget.hard_budget_ns.unwrap_or(u64::MAX);
+        let operational_budget = budget.operational_budget_ns.unwrap_or(u64::MAX);
+
+        if measurement_ns > hard_budget {
+            BudgetCheckResult::HardViolation {
+                measurement_ns,
+                budget_ns: hard_budget,
+                violation_percent: ((measurement_ns as f64 / hard_budget as f64) - 1.0) * 100.0,
+            }
+        } else if measurement_ns > operational_budget {
+            BudgetCheckResult::OperationalViolation {
+                measurement_ns,
+                budget_ns: operational_budget,
+                violation_percent: ((measurement_ns as f64 / operational_budget as f64) - 1.0)
+                    * 100.0,
+            }
+        } else {
+            BudgetCheckResult::Pass {
+                measurement_ns,
+                operational_budget_ns: operational_budget,
+                hard_budget_ns: hard_budget,
+            }
+        }
+    } else {
+        BudgetCheckResult::NoBudget
+    }
+}
+
+fn emit_budget_check_event(workload_id: &str, result: &BudgetCheckResult) {
+    let event = serde_json::json!({
+        "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        "event": "budget_check",
+        "workload_id": workload_id,
+        "schema_version": "raptorq-perf-event-v1",
+        "result": match result {
+            BudgetCheckResult::Pass { measurement_ns, operational_budget_ns, hard_budget_ns } => {
+                serde_json::json!({
+                    "status": "pass",
+                    "measurement_ns": measurement_ns,
+                    "operational_budget_ns": operational_budget_ns,
+                    "hard_budget_ns": hard_budget_ns
+                })
+            },
+            BudgetCheckResult::OperationalViolation { measurement_ns, budget_ns, violation_percent } => {
+                serde_json::json!({
+                    "status": "operational_violation",
+                    "measurement_ns": measurement_ns,
+                    "budget_ns": budget_ns,
+                    "violation_percent": violation_percent
+                })
+            },
+            BudgetCheckResult::HardViolation { measurement_ns, budget_ns, violation_percent } => {
+                serde_json::json!({
+                    "status": "hard_violation",
+                    "measurement_ns": measurement_ns,
+                    "budget_ns": budget_ns,
+                    "violation_percent": violation_percent
+                })
+            },
+            BudgetCheckResult::NoBudget => {
+                serde_json::json!({
+                    "status": "no_budget",
+                    "note": "workload not in budget configuration"
+                })
+            }
+        }
+    });
+
+    eprintln!("{}", event);
+}
+
+#[derive(Debug)]
+enum BudgetCheckResult {
+    Pass {
+        measurement_ns: u64,
+        operational_budget_ns: u64,
+        hard_budget_ns: u64,
+    },
+    OperationalViolation {
+        measurement_ns: u64,
+        budget_ns: u64,
+        violation_percent: f64,
+    },
+    HardViolation {
+        measurement_ns: u64,
+        budget_ns: u64,
+        violation_percent: f64,
+    },
+    NoBudget,
+}
 
 #[derive(Clone, Copy)]
 struct Gf256BenchScenario {
@@ -658,7 +796,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
             });
         });
 
-        // Benchmark gf256_addmul_slice (THE critical hot path)
+        // Benchmark gf256_addmul_slice (THE critical hot path) with Track-G budget validation
         group.throughput(Throughput::Bytes(single_lane_bytes));
         group.bench_with_input(
             BenchmarkId::new("addmul_slice", &label),
@@ -674,6 +812,45 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                 });
             },
         );
+
+        // Track-G budget validation for RQ-G1-GF256-ADDMUL workload
+        {
+            let mut dst = deterministic_bytes(scenario.len, scenario.seed ^ 0x55AA_55AA);
+            let start = std::time::Instant::now();
+
+            // Single execution for budget measurement
+            gf256_addmul_slice(&mut dst, &src, c_val);
+
+            let duration_ns = start.elapsed().as_nanos() as u64;
+            let budget_result = check_latency_budget("RQ-G1-GF256-ADDMUL", duration_ns);
+            emit_budget_check_event("RQ-G1-GF256-ADDMUL", &budget_result);
+
+            // Emit structured performance event for governance tracking
+            let perf_event = serde_json::json!({
+                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+                "event": "workload_measurement",
+                "schema_version": "raptorq-perf-event-v1",
+                "workload_id": "RQ-G1-GF256-ADDMUL",
+                "scenario": {
+                    "seed": scenario.seed,
+                    "len": scenario.len,
+                    "k": scenario.k,
+                    "symbol_size": scenario.symbol_size,
+                    "mul_const": scenario.mul_const
+                },
+                "measurement": {
+                    "duration_ns": duration_ns,
+                    "primary_metric": "median_ns",
+                    "workload_family": "kernel_hotspot"
+                },
+                "reproducibility": {
+                    "command": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives/addmul_slice",
+                    "seed": scenario.seed,
+                    "deterministic": true
+                }
+            });
+            eprintln!("{}", perf_event);
+        }
 
         // Benchmark fused dual mul against sequential mul+mul.
         group.throughput(Throughput::Bytes(dual_lane_bytes));

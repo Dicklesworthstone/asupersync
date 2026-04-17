@@ -322,6 +322,7 @@ pub mod error {
                 RegionCreateError::ParentNotFound(_) | RegionCreateError::ParentClosed(_) => {
                     SporkSeverity::Permanent
                 }
+                RegionCreateError::ResourcePressure { .. } => SporkSeverity::Transient,
             }
         }
 

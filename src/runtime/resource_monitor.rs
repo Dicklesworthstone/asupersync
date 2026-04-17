@@ -67,6 +67,8 @@ pub enum ResourceType {
     CpuLoad,
     /// Network connections and sockets.
     NetworkConnections,
+    /// Runtime tasks and their associated resources.
+    Task,
     /// Custom application-defined resource.
     Custom(String),
 }
@@ -78,6 +80,7 @@ impl std::fmt::Display for ResourceType {
             Self::FileDescriptors => write!(f, "file_descriptors"),
             Self::CpuLoad => write!(f, "cpu_load"),
             Self::NetworkConnections => write!(f, "network_connections"),
+            Self::Task => write!(f, "task"),
             Self::Custom(name) => write!(f, "custom:{name}"),
         }
     }
@@ -238,6 +241,13 @@ impl TriggerConfig {
                 hysteresis: 0.05,
                 cooldown: Duration::from_secs(5),
                 enabled: false, // Must be explicitly enabled
+            },
+            ResourceType::Task => Self {
+                soft_threshold: 0.80, // 80% of task limit
+                hard_threshold: 0.95, // 95% of task limit
+                hysteresis: 0.05,
+                cooldown: Duration::from_secs(1),
+                enabled: true,
             },
         }
     }

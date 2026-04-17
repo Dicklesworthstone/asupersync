@@ -7,6 +7,7 @@
 
 use crate::record::region::AdmissionError;
 use crate::record::{RegionLimits, RegionRecord};
+use crate::runtime::resource_monitor::RegionPriority;
 use crate::types::{Budget, RegionId, Time};
 use crate::util::{Arena, ArenaIndex};
 
@@ -26,6 +27,13 @@ pub enum RegionCreateError {
         /// The number of live children at the time of rejection.
         live: usize,
     },
+    /// Resource pressure prevents creating new regions.
+    ResourcePressure {
+        /// The priority requested for the new region.
+        requested_priority: RegionPriority,
+        /// The reason for rejection due to resource pressure.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for RegionCreateError {
@@ -40,6 +48,14 @@ impl std::fmt::Display for RegionCreateError {
             } => write!(
                 f,
                 "parent region admission limit reached: region={region:?} limit={limit} live={live}"
+            ),
+            Self::ResourcePressure {
+                requested_priority,
+                reason,
+            } => write!(
+                f,
+                "resource pressure prevents region creation: priority={:?} reason={}",
+                requested_priority, reason
             ),
         }
     }

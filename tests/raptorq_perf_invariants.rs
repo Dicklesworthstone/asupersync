@@ -6693,7 +6693,8 @@ fn f6_benchmark_covers_regime_observability() {
 // Track-G Performance Governance Tests
 // ============================================================================
 
-const RAPTORQ_PERFORMANCE_BUDGETS_V1: &str = include_str!("../artifacts/raptorq_performance_budgets_v1.json");
+const RAPTORQ_PERFORMANCE_BUDGETS_V1: &str =
+    include_str!("../artifacts/raptorq_performance_budgets_v1.json");
 const RAPTORQ_PERF_GATES_SCRIPT: &str = include_str!("../scripts/run_raptorq_perf_gates.sh");
 
 /// G1 performance budgets schema and workload coverage validation.
@@ -6740,12 +6741,20 @@ fn g1_performance_budgets_schema_and_coverage() {
         );
 
         let budget = &workload_budgets[*workload];
-        assert!(budget["primary_metric"].is_string(),
-                "workload {workload} missing primary_metric");
-        assert!(budget["hard_budget_ns"].is_number() || budget["hard_budget_mbps"].is_number() || budget["hard_budget_rate"].is_number(),
-                "workload {workload} missing hard budget threshold");
-        assert!(budget["regression_threshold_percent"].is_number(),
-                "workload {workload} missing regression_threshold_percent");
+        assert!(
+            budget["primary_metric"].is_string(),
+            "workload {workload} missing primary_metric"
+        );
+        assert!(
+            budget["hard_budget_ns"].is_number()
+                || budget["hard_budget_mbps"].is_number()
+                || budget["hard_budget_rate"].is_number(),
+            "workload {workload} missing hard budget threshold"
+        );
+        assert!(
+            budget["regression_threshold_percent"].is_number(),
+            "workload {workload} missing regression_threshold_percent"
+        );
     }
 
     // SLO definitions validation
@@ -6768,9 +6777,14 @@ fn g1_performance_budgets_schema_and_coverage() {
 
         let slo_def = &slo_definitions[*slo];
         assert!(slo_def["metric"].is_string(), "SLO {slo} missing metric");
-        assert!(slo_def["threshold"].is_number(), "SLO {slo} missing threshold");
-        assert!(slo_def["measurement_window_samples"].is_number(),
-                "SLO {slo} missing measurement_window_samples");
+        assert!(
+            slo_def["threshold"].is_number(),
+            "SLO {slo} missing threshold"
+        );
+        assert!(
+            slo_def["measurement_window_samples"].is_number(),
+            "SLO {slo} missing measurement_window_samples"
+        );
     }
 
     // CI gate configuration validation
@@ -6783,10 +6797,14 @@ fn g1_performance_budgets_schema_and_coverage() {
         Some("scripts/run_raptorq_perf_gates.sh"),
         "CI gate must reference the correct runner script"
     );
-    assert!(ci_gate_config["measurement_samples"].as_u64().unwrap_or(0) >= 10,
-            "CI gate must have sufficient measurement samples");
-    assert!(ci_gate_config["timeout_seconds"].as_u64().unwrap_or(0) >= 300,
-            "CI gate must have reasonable timeout");
+    assert!(
+        ci_gate_config["measurement_samples"].as_u64().unwrap_or(0) >= 10,
+        "CI gate must have sufficient measurement samples"
+    );
+    assert!(
+        ci_gate_config["timeout_seconds"].as_u64().unwrap_or(0) >= 300,
+        "CI gate must have reasonable timeout"
+    );
 
     // Reproducibility requirements validation
     let repro_reqs = artifact["reproducibility_requirements"]
@@ -6890,7 +6908,8 @@ fn g1_governance_integration_validation() {
         governance["evidence_artifacts_required"]
             .as_array()
             .expect("evidence_artifacts_required must be an array")
-            .len() >= 3,
+            .len()
+            >= 3,
         "governance must require sufficient evidence artifacts"
     );
 
@@ -6903,7 +6922,8 @@ fn g1_governance_integration_validation() {
         rollback_policy["automatic_rollback_triggers"]
             .as_array()
             .expect("automatic_rollback_triggers must be an array")
-            .len() >= 2,
+            .len()
+            >= 2,
         "rollback policy must define automatic triggers"
     );
 

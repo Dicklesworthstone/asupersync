@@ -271,6 +271,43 @@ jobs:
             artifacts/security_release_gate_events.ndjson
           retention-days: 30
 
+      # Track-G Performance Governance: RaptorQ regression gates
+      - name: RaptorQ performance gates self-test
+        run: |
+          bash scripts/run_raptorq_perf_gates.sh --self-test
+
+      - name: RaptorQ performance budget smoke test
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts baselines
+          # Run smoke benchmark and performance gates
+          bash scripts/run_raptorq_perf_gates.sh smoke
+
+      - name: RaptorQ performance budget validation
+        run: |
+          set -euo pipefail
+          # Validate performance budget schema and governance integration
+          if command -v rch >/dev/null 2>&1; then
+            echo "Running RaptorQ performance validation with rch..."
+            rch exec -- cargo test --test raptorq_perf_invariants g1_performance_budgets_schema_and_coverage -- --nocapture
+            rch exec -- cargo test --test raptorq_perf_invariants g1_performance_gates_script_validation -- --nocapture
+          else
+            echo "rch unavailable; running local cargo test"
+            cargo test --test raptorq_perf_invariants g1_performance_budgets_schema_and_coverage -- --nocapture
+            cargo test --test raptorq_perf_invariants g1_performance_gates_script_validation -- --nocapture
+          fi
+
+      - name: Upload RaptorQ performance gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raptorq-performance-gate-report
+          path: |
+            artifacts/raptorq_perf_gate_report.json
+            artifacts/raptorq_perf_gate_events.ndjson
+            artifacts/raptorq_current_bench_results.json
+          retention-days: 30
+
       - name: Browser Edition onboarding command bundle smoke
         run: |
           set -euo pipefail

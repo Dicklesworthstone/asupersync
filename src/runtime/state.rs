@@ -21,6 +21,9 @@ use crate::record::{
 use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
+use crate::runtime::resource_monitor::{
+    DegradationLevel, DegradationStatsSnapshot, MonitorConfig, RegionPriority, ResourceMonitor,
+};
 use crate::runtime::stored_task::StoredTask;
 use crate::runtime::task_handle::JoinError;
 use crate::runtime::{BlockingPoolHandle, ObligationTable, RegionTable, TaskTable};
@@ -392,6 +395,11 @@ pub struct RuntimeState {
     state_verifier: Arc<super::state_verifier::StateTransitionVerifier>,
     /// Cancellation debt accumulation monitor.
     debt_monitor: Arc<crate::observability::CancellationDebtMonitor>,
+    /// Resource monitor for graceful degradation.
+    ///
+    /// Tracks memory, file descriptors, CPU load, and network connections,
+    /// and triggers degradation policies when thresholds are exceeded.
+    resource_monitor: Arc<ResourceMonitor>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -485,6 +493,7 @@ impl RuntimeState {
                 super::state_verifier::StateVerifierConfig::default(),
             )),
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
+            resource_monitor: Arc::new(ResourceMonitor::new(MonitorConfig::default())),
         }
     }
 
@@ -935,11 +944,18 @@ impl RuntimeState {
     ///
     /// The child's effective budget is the meet (tightest constraints) of the
     /// parent budget and the provided budget.
+    ///
+    /// This method includes graceful degradation checks - if resource pressure
+    /// is high, the region creation may be rejected to preserve system stability.
     pub fn create_child_region(
         &mut self,
         parent: RegionId,
         budget: Budget,
     ) -> Result<RegionId, RegionCreateError> {
+        // Check resource pressure before creating the region
+        // Use Normal priority as the default for backward compatibility
+        self.check_resource_pressure_for_region(RegionPriority::Normal)?;
+
         let id = self.regions.create_child(parent, budget, self.now)?;
 
         self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, Some(parent)));
@@ -1062,6 +1078,7 @@ impl RuntimeState {
         }
 
         self.record_task_spawn(task_id, region);
+
 
         // Trace task creation
         debug!(
@@ -2640,6 +2657,7 @@ impl RuntimeState {
                                 self.finalizing_regions.swap_remove(pos);
                             }
                             self.record_finalizer_close(region_id);
+
                             // Emit RegionCloseComplete trace event (pairs
                             // with RegionCloseBegin emitted in cancel_request).
                             self.record_trace_event(|seq| {
@@ -2704,6 +2722,108 @@ impl RuntimeState {
     #[cfg(test)]
     pub(crate) fn record_finalizer_close_for_test(&mut self, region: RegionId) {
         self.record_finalizer_close(region);
+    }
+
+    /// Returns a reference to the resource monitor for graceful degradation.
+    ///
+    /// The resource monitor tracks memory, file descriptors, CPU load, and network
+    /// connections, and triggers degradation policies when thresholds are exceeded.
+    pub fn resource_monitor(&self) -> Arc<ResourceMonitor> {
+        Arc::clone(&self.resource_monitor)
+    }
+
+    /// Sets the priority for a region in the graceful degradation system.
+    ///
+    /// Higher priority regions (Critical, High) are preserved during resource
+    /// pressure, while lower priority regions (Low, BestEffort) are shed first.
+    ///
+    /// # Arguments
+    /// * `region_id` - The region to set the priority for
+    /// * `priority` - The new priority level for the region
+    ///
+    /// # Returns
+    /// * `true` if the region exists and priority was set
+    /// * `false` if the region does not exist
+    pub fn set_region_priority(&mut self, region_id: RegionId, priority: RegionPriority) -> bool {
+        if self.regions.get(region_id.arena_index()).is_none() {
+            return false;
+        }
+        self.resource_monitor
+            .engine()
+            .set_region_priority(region_id, priority);
+        true
+    }
+
+    /// Checks if the runtime should accept new work based on resource pressure.
+    ///
+    /// Returns `true` if resource pressure is acceptable for new regions/tasks,
+    /// or `false` if the runtime should apply backpressure.
+    pub fn should_accept_new_work(&self) -> bool {
+        let composite_level = self
+            .resource_monitor
+            .pressure()
+            .composite_degradation_level();
+        matches!(
+            composite_level,
+            DegradationLevel::None | DegradationLevel::Light
+        )
+    }
+
+    /// Gets the current degradation level and statistics.
+    ///
+    /// This provides visibility into the current resource pressure state
+    /// for monitoring and debugging purposes.
+    pub fn degradation_stats(&self) -> DegradationStatsSnapshot {
+        self.resource_monitor.engine().stats()
+    }
+
+    /// Applies resource-based work shedding decisions during region creation.
+    ///
+    /// This integrates the graceful degradation system with region creation
+    /// by rejecting new regions when resource pressure is high and the
+    /// requested region priority is below the shedding threshold.
+    ///
+    /// # Arguments
+    /// * `priority` - Priority of the region being created
+    ///
+    /// # Returns
+    /// * `Ok(())` if the region should be allowed
+    /// * `Err(RegionCreateError)` if the region should be rejected due to resource pressure
+    pub fn check_resource_pressure_for_region(
+        &self,
+        priority: RegionPriority,
+    ) -> Result<(), RegionCreateError> {
+        let composite_level = self
+            .resource_monitor
+            .pressure()
+            .composite_degradation_level();
+
+        // Apply shedding based on degradation level and region priority
+        let should_shed = match (composite_level, priority) {
+            // Critical/High regions are never shed
+            (_, RegionPriority::Critical | RegionPriority::High) => false,
+            // Normal regions are shed under Heavy or Emergency pressure
+            (DegradationLevel::Heavy | DegradationLevel::Emergency, RegionPriority::Normal) => true,
+            // Low/BestEffort regions are shed under Moderate+ pressure
+            (
+                DegradationLevel::Moderate | DegradationLevel::Heavy | DegradationLevel::Emergency,
+                RegionPriority::Low | RegionPriority::BestEffort,
+            ) => true,
+            // Allow in all other cases
+            _ => false,
+        };
+
+        if should_shed {
+            Err(RegionCreateError::ResourcePressure {
+                requested_priority: priority,
+                reason: format!(
+                    "Resource pressure level {:?} prevents region creation at priority {:?}",
+                    composite_level, priority
+                ),
+            })
+        } else {
+            Ok(())
+        }
     }
 }
 

@@ -25,8 +25,8 @@ use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::runtime::RuntimeBuilder;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Test message type with sequence numbers for ordering validation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,8 +49,13 @@ impl TestMessage {
 /// Channel operation types for behavioral testing.
 #[derive(Debug, Clone)]
 pub enum ChannelOp {
-    Send { msg: TestMessage, timeout_ms: Option<u64> },
-    Recv { timeout_ms: Option<u64> },
+    Send {
+        msg: TestMessage,
+        timeout_ms: Option<u64>,
+    },
+    Recv {
+        timeout_ms: Option<u64>,
+    },
     TryRecv,
     CheckClosed,
     Clone,
@@ -125,11 +130,14 @@ impl ChannelMetamorphicHarness {
             match tx.reserve(&cx).await {
                 Ok(permit) => {
                     permit.send(msg.clone());
-                },
+                }
                 Err(e) => {
                     results.push(MRResult {
                         relation_name: "FIFO_Preservation".to_string(),
-                        input_description: format!("Sequential send of {} messages", test_messages.len()),
+                        input_description: format!(
+                            "Sequential send of {} messages",
+                            test_messages.len()
+                        ),
                         expected_property: "FIFO order preservation".to_string(),
                         actual_outcome: format!("Send failed: {:?}", e),
                         passed: false,
@@ -138,7 +146,7 @@ impl ChannelMetamorphicHarness {
                         test_duration_ms: start_time.elapsed().as_millis() as u64,
                     });
                     return results;
-                },
+                }
             }
         }
 
@@ -172,7 +180,11 @@ impl ChannelMetamorphicHarness {
             relation_name: "FIFO_Preservation".to_string(),
             input_description: format!("Sequential send/recv of {} messages", test_messages.len()),
             expected_property: "Messages received in same order as sent".to_string(),
-            actual_outcome: format!("Received {} messages in order: {}", received.len(), fifo_preserved),
+            actual_outcome: format!(
+                "Received {} messages in order: {}",
+                received.len(),
+                fifo_preserved
+            ),
             passed: fifo_preserved,
             violation_details,
             messages_processed: received.len() as u64,
@@ -202,7 +214,7 @@ impl ChannelMetamorphicHarness {
                 Ok(permit) => {
                     permit.send(msg);
                     sent_count += 1;
-                },
+                }
                 Err(_) => break, // Stop on any error
             }
         }
@@ -218,7 +230,10 @@ impl ChannelMetamorphicHarness {
         // Verify conservation law
         let conservation_holds = sent_count == recv_count;
         let violation_details = if !conservation_holds {
-            Some(format!("Conservation violation: sent {}, received {}", sent_count, recv_count))
+            Some(format!(
+                "Conservation violation: sent {}, received {}",
+                sent_count, recv_count
+            ))
         } else {
             None
         };
@@ -297,8 +312,10 @@ impl ChannelMetamorphicHarness {
             relation_name: "Clone_Behavior_Identity".to_string(),
             input_description: "Send via original and cloned sender".to_string(),
             expected_property: "Both senders should behave identically".to_string(),
-            actual_outcome: format!("original_sent: {}, clone_sent: {}, total_received: {}",
-                                  sent_via_original, sent_via_clone, received_count),
+            actual_outcome: format!(
+                "original_sent: {}, clone_sent: {}, total_received: {}",
+                sent_via_original, sent_via_clone, received_count
+            ),
             passed: clone_identity_holds,
             violation_details,
             messages_processed: received_count as u64,
@@ -326,7 +343,7 @@ impl ChannelMetamorphicHarness {
                 Ok(permit) => {
                     permit.send(msg);
                     successful_sends += 1;
-                },
+                }
                 Err(_) => break,
             }
         }
@@ -337,8 +354,8 @@ impl ChannelMetamorphicHarness {
             Ok(permit) => {
                 permit.send(extra_msg);
                 false // Should not succeed
-            },
-            Err(_) => true // Expected to fail
+            }
+            Err(_) => true, // Expected to fail
         };
 
         // Verify capacity bounds
@@ -360,9 +377,12 @@ impl ChannelMetamorphicHarness {
         results.push(MRResult {
             relation_name: "Channel_Capacity_Bounds".to_string(),
             input_description: format!("Fill channel to capacity {} then try extra send", capacity),
-            expected_property: "Channel accepts exactly capacity messages, blocks extra".to_string(),
-            actual_outcome: format!("accepted: {}/{}, extra_blocked: {}",
-                                  successful_sends, capacity, extra_send_blocked),
+            expected_property: "Channel accepts exactly capacity messages, blocks extra"
+                .to_string(),
+            actual_outcome: format!(
+                "accepted: {}/{}, extra_blocked: {}",
+                successful_sends, capacity, extra_send_blocked
+            ),
             passed: capacity_bounds_correct,
             violation_details,
             messages_processed: successful_sends as u64,
@@ -389,14 +409,19 @@ impl ChannelMetamorphicHarness {
         report.push_str(&format!("Total Tests: {}\n", total_tests));
         report.push_str(&format!("Passed: {}\n", passed_tests));
         report.push_str(&format!("Failed: {}\n", failed_tests));
-        report.push_str(&format!("Success Rate: {:.2}%\n",
-                                (passed_tests as f64 / total_tests as f64) * 100.0));
+        report.push_str(&format!(
+            "Success Rate: {:.2}%\n",
+            (passed_tests as f64 / total_tests as f64) * 100.0
+        ));
         report.push_str(&format!("Messages Processed: {}\n\n", total_messages));
 
         report.push_str("=== DETAILED RESULTS ===\n");
         for result in results {
-            report.push_str(&format!("• {} [{}]\n", result.relation_name,
-                                   if result.passed { "PASS" } else { "FAIL" }));
+            report.push_str(&format!(
+                "• {} [{}]\n",
+                result.relation_name,
+                if result.passed { "PASS" } else { "FAIL" }
+            ));
             report.push_str(&format!("  Input: {}\n", result.input_description));
             report.push_str(&format!("  Property: {}\n", result.expected_property));
             report.push_str(&format!("  Outcome: {}\n", result.actual_outcome));
@@ -405,8 +430,10 @@ impl ChannelMetamorphicHarness {
                 report.push_str(&format!("  Violation: {}\n", violation));
             }
 
-            report.push_str(&format!("  Duration: {}ms, Messages: {}\n\n",
-                                   result.test_duration_ms, result.messages_processed));
+            report.push_str(&format!(
+                "  Duration: {}ms, Messages: {}\n\n",
+                result.test_duration_ms, result.messages_processed
+            ));
         }
 
         report
@@ -437,13 +464,20 @@ mod tests {
             // Check for violations
             let violation_count = harness.violation_count();
             if violation_count > 0 {
-                panic!("Metamorphic relations violated: {} failures detected", violation_count);
+                panic!(
+                    "Metamorphic relations violated: {} failures detected",
+                    violation_count
+                );
             }
 
             // All tests should pass
             for result in &results {
-                assert!(result.passed, "Metamorphic relation {} failed: {}",
-                       result.relation_name, result.violation_details.as_deref().unwrap_or("Unknown"));
+                assert!(
+                    result.passed,
+                    "Metamorphic relation {} failed: {}",
+                    result.relation_name,
+                    result.violation_details.as_deref().unwrap_or("Unknown")
+                );
             }
         });
     }
@@ -459,7 +493,11 @@ mod tests {
             let results = harness.test_mpsc_fifo_preservation().await;
 
             assert!(!results.is_empty(), "FIFO preservation test did not run");
-            assert!(results[0].passed, "FIFO preservation violated: {:?}", results[0].violation_details);
+            assert!(
+                results[0].passed,
+                "FIFO preservation violated: {:?}",
+                results[0].violation_details
+            );
         });
     }
 
@@ -474,7 +512,11 @@ mod tests {
             let results = harness.test_mpsc_conservation().await;
 
             assert!(!results.is_empty(), "Conservation test did not run");
-            assert!(results[0].passed, "Conservation law violated: {:?}", results[0].violation_details);
+            assert!(
+                results[0].passed,
+                "Conservation law violated: {:?}",
+                results[0].violation_details
+            );
         });
     }
 }

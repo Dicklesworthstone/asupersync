@@ -35,13 +35,11 @@
 //!    - Reproducible command bundles
 //!    - Evidence linkage for audit trail
 
-use crate::raptorq::gf256::{
-    Gf256ArchitectureClass, Gf256Kernel, Gf256ProfilePackId, active_kernel,
-};
+use crate::raptorq::gf256::{Gf256ArchitectureClass, Gf256ProfilePackId};
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 
 /// Represents a candidate kernel configuration for offline tuning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -144,8 +142,11 @@ pub struct TuningWorkload {
 /// GF256 operation types for benchmarking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GF256Operation {
+    /// Multiplication operation in GF(256)
     Mul,
+    /// Addition followed by multiplication in GF(256)
     AddMul,
+    /// Addition operation in GF(256)
     Add,
 }
 
@@ -225,10 +226,7 @@ pub struct OfflineTuner {
 
 impl OfflineTuner {
     /// Creates a new offline tuner for the specified architecture.
-    pub fn new(
-        architecture_class: Gf256ArchitectureClass,
-        criteria: OptimizationCriteria,
-    ) -> Self {
+    pub fn new(architecture_class: Gf256ArchitectureClass, criteria: OptimizationCriteria) -> Self {
         let tuning_space = Self::default_tuning_space_for_arch(architecture_class);
         let workloads = Self::default_workloads_for_arch(architecture_class);
 
@@ -251,13 +249,21 @@ impl OfflineTuner {
                     for &fusion_shape in &self.tuning_space.fusion_shapes {
                         let candidate_id = format!(
                             "{:?}-t{}-u{}-pf{}-{:?}-v1",
-                            self.architecture_class, tile_bytes, unroll,
-                            prefetch_distance, fusion_shape
-                        ).to_lowercase().replace(' ', "_");
+                            self.architecture_class,
+                            tile_bytes,
+                            unroll,
+                            prefetch_distance,
+                            fusion_shape
+                        )
+                        .to_lowercase()
+                        .replace(' ', "_");
 
                         let optimization_flags = Self::derive_optimization_flags(
-                            self.architecture_class, tile_bytes, unroll,
-                            prefetch_distance, fusion_shape
+                            self.architecture_class,
+                            tile_bytes,
+                            unroll,
+                            prefetch_distance,
+                            fusion_shape,
                         );
 
                         candidates.push(KernelCandidate {
@@ -281,12 +287,19 @@ impl OfflineTuner {
     pub fn run_systematic_benchmarks(&mut self) -> Result<(), TuningError> {
         let candidates = self.generate_candidates();
 
-        println!("Starting systematic benchmarking of {} candidates across {} workloads",
-                 candidates.len(), self.workloads.len());
+        println!(
+            "Starting systematic benchmarking of {} candidates across {} workloads",
+            candidates.len(),
+            self.workloads.len()
+        );
 
         for (i, candidate) in candidates.iter().enumerate() {
-            println!("Benchmarking candidate {}/{}: {}",
-                     i + 1, candidates.len(), candidate.candidate_id);
+            println!(
+                "Benchmarking candidate {}/{}: {}",
+                i + 1,
+                candidates.len(),
+                candidate.candidate_id
+            );
 
             for workload in &self.workloads {
                 let result = self.benchmark_candidate(candidate, workload)?;
@@ -302,7 +315,7 @@ impl OfflineTuner {
     fn benchmark_candidate(
         &self,
         candidate: &KernelCandidate,
-        workload: &TuningWorkload
+        workload: &TuningWorkload,
     ) -> Result<BenchmarkResult, TuningError> {
         // Generate deterministic test data for this workload
         let test_data = self.generate_test_data(workload);
@@ -343,10 +356,9 @@ impl OfflineTuner {
             let throughput_score = result.throughput_ops_per_sec;
             let bandwidth_score = result.bandwidth_gbps;
 
-            let weighted_score =
-                self.criteria.latency_weight * latency_score +
-                self.criteria.throughput_weight * throughput_score +
-                self.criteria.bandwidth_weight * bandwidth_score;
+            let weighted_score = self.criteria.latency_weight * latency_score
+                + self.criteria.throughput_weight * throughput_score
+                + self.criteria.bandwidth_weight * bandwidth_score;
 
             *candidate_scores.entry(candidate_id.clone()).or_insert(0.0) +=
                 weighted_score * self.workload_weight(&result.workload_id);
@@ -368,7 +380,10 @@ impl OfflineTuner {
     }
 
     /// Emits optimized profile pack based on tuning results.
-    pub fn emit_profile_pack(&self, selected: &KernelCandidate) -> Result<ProfilePackSpec, TuningError> {
+    pub fn emit_profile_pack(
+        &self,
+        selected: &KernelCandidate,
+    ) -> Result<ProfilePackSpec, TuningError> {
         let profile_pack_id = match self.architecture_class {
             Gf256ArchitectureClass::GenericScalar => Gf256ProfilePackId::ScalarConservativeV1,
             Gf256ArchitectureClass::X86Avx2 => Gf256ProfilePackId::X86Avx2BalancedV1,
@@ -393,12 +408,16 @@ impl OfflineTuner {
             addmul_min_lane,
             max_lane_ratio: 4, // TODO: Derive from candidate
             replay_pointer: "replay:offline-kernel-superopt-v1".to_string(),
-            command_bundle: format!("offline_tuner --arch {:?} --candidate {}",
-                                   self.architecture_class, selected.candidate_id),
+            command_bundle: format!(
+                "offline_tuner --arch {:?} --candidate {}",
+                self.architecture_class, selected.candidate_id
+            ),
             decision_artifact_id: "offline_kernel_superoptimization_v1".to_string(),
             decision_role: "automated_offline_kernel_optimization".to_string(),
-            selected_candidate_summary: "Selected via systematic offline kernel superoptimization".to_string(),
-            rejected_candidate_set_summary: "Rejected candidates had lower multi-objective scores".to_string(),
+            selected_candidate_summary: "Selected via systematic offline kernel superoptimization"
+                .to_string(),
+            rejected_candidate_set_summary: "Rejected candidates had lower multi-objective scores"
+                .to_string(),
             selected_mul_delta_vs_baseline_pct: "pending_measurement".to_string(), // TODO: Calculate
             selected_addmul_delta_vs_baseline_pct: "pending_measurement".to_string(), // TODO: Calculate
             selected_targeted_addmul_average_delta_pct: "pending_measurement".to_string(), // TODO: Calculate
@@ -420,14 +439,22 @@ impl OfflineTuner {
                 tile_sizes: vec![16, 32, 64],
                 unroll_factors: vec![2, 4, 8],
                 prefetch_distances: vec![0, 32, 64, 128],
-                fusion_shapes: vec![FusionShape::Split, FusionShape::Fused, FusionShape::Balanced],
+                fusion_shapes: vec![
+                    FusionShape::Split,
+                    FusionShape::Fused,
+                    FusionShape::Balanced,
+                ],
             },
             Gf256ArchitectureClass::Aarch64Neon => TuningSpace {
                 architecture_class: arch,
                 tile_sizes: vec![16, 32, 64],
                 unroll_factors: vec![1, 2, 4],
                 prefetch_distances: vec![0, 16, 32, 64],
-                fusion_shapes: vec![FusionShape::Split, FusionShape::Fused, FusionShape::Balanced],
+                fusion_shapes: vec![
+                    FusionShape::Split,
+                    FusionShape::Fused,
+                    FusionShape::Balanced,
+                ],
             },
         }
     }
@@ -496,13 +523,13 @@ impl OfflineTuner {
                 if unroll >= 4 {
                     flags.push("aggressive_unroll".to_string());
                 }
-            },
+            }
             Gf256ArchitectureClass::Aarch64Neon => {
                 flags.push("neon".to_string());
-            },
+            }
             Gf256ArchitectureClass::GenericScalar => {
                 flags.push("scalar".to_string());
-            },
+            }
         }
 
         if prefetch_distance > 0 {
@@ -519,23 +546,39 @@ impl OfflineTuner {
     }
 
     /// Derives threshold parameters from a selected candidate.
-    fn derive_thresholds_from_candidate(candidate: &KernelCandidate) -> (usize, usize, usize, usize, usize) {
+    fn derive_thresholds_from_candidate(
+        candidate: &KernelCandidate,
+    ) -> (usize, usize, usize, usize, usize) {
         match candidate.fusion_shape {
             FusionShape::Fused => {
                 // Fused kernels benefit from larger working sets
-                (candidate.tile_bytes * 4, candidate.tile_bytes * 16,
-                 candidate.tile_bytes * 2, candidate.tile_bytes * 8,
-                 candidate.tile_bytes)
-            },
+                (
+                    candidate.tile_bytes * 4,
+                    candidate.tile_bytes * 16,
+                    candidate.tile_bytes * 2,
+                    candidate.tile_bytes * 8,
+                    candidate.tile_bytes,
+                )
+            }
             FusionShape::Split => {
                 // Split kernels prefer smaller, more predictable working sets
-                (usize::MAX, 0, candidate.tile_bytes, candidate.tile_bytes * 4, candidate.tile_bytes / 2)
-            },
+                (
+                    usize::MAX,
+                    0,
+                    candidate.tile_bytes,
+                    candidate.tile_bytes * 4,
+                    candidate.tile_bytes / 2,
+                )
+            }
             FusionShape::Balanced => {
                 // Balanced approach based on tile size
-                (candidate.tile_bytes * 2, candidate.tile_bytes * 8,
-                 candidate.tile_bytes, candidate.tile_bytes * 6,
-                 candidate.tile_bytes / 2)
+                (
+                    candidate.tile_bytes * 2,
+                    candidate.tile_bytes * 8,
+                    candidate.tile_bytes,
+                    candidate.tile_bytes * 6,
+                    candidate.tile_bytes / 2,
+                )
             }
         }
     }
@@ -560,7 +603,7 @@ impl OfflineTuner {
         &self,
         candidate: &KernelCandidate,
         workload: &TuningWorkload,
-        test_data: &[u8]
+        test_data: &[u8],
     ) -> Result<(LatencyStats, f64, f64), TuningError> {
         // This is a simplified measurement - in practice would dispatch to
         // actual optimized kernel implementations
@@ -574,13 +617,13 @@ impl OfflineTuner {
             match workload.operation {
                 GF256Operation::Mul => {
                     self.simulate_mul_kernel(candidate, test_data)?;
-                },
+                }
                 GF256Operation::AddMul => {
                     self.simulate_addmul_kernel(candidate, test_data)?;
-                },
+                }
                 GF256Operation::Add => {
                     self.simulate_add_kernel(candidate, test_data)?;
-                },
+                }
             }
 
             latencies.push(start.elapsed().as_nanos() as f64);
@@ -595,7 +638,8 @@ impl OfflineTuner {
         let max_ns = latencies[latencies.len() - 1];
 
         let mean = latencies.iter().sum::<f64>() / latencies.len() as f64;
-        let variance = latencies.iter().map(|l| (l - mean).powi(2)).sum::<f64>() / latencies.len() as f64;
+        let variance =
+            latencies.iter().map(|l| (l - mean).powi(2)).sum::<f64>() / latencies.len() as f64;
         let stddev_ns = variance.sqrt();
 
         let latency_stats = LatencyStats {
@@ -610,7 +654,8 @@ impl OfflineTuner {
         // Estimate throughput and bandwidth
         let ops_per_sec = 1_000_000_000.0 / median_ns; // operations per second
         let throughput_ops_per_sec = ops_per_sec * test_data.len() as f64;
-        let bandwidth_gbps = (throughput_ops_per_sec * test_data.len() as f64) / (1024.0 * 1024.0 * 1024.0);
+        let bandwidth_gbps =
+            (throughput_ops_per_sec * test_data.len() as f64) / (1024.0 * 1024.0 * 1024.0);
 
         Ok((latency_stats, throughput_ops_per_sec, bandwidth_gbps))
     }
@@ -620,7 +665,7 @@ impl OfflineTuner {
         &self,
         _candidate: &KernelCandidate,
         _workload: &TuningWorkload,
-        _test_data: &[u8]
+        _test_data: &[u8],
     ) -> Result<bool, TuningError> {
         // In practice, this would compare optimized kernel output against
         // a reference scalar implementation to ensure bit-exact results
@@ -633,28 +678,45 @@ impl OfflineTuner {
         self.workloads
             .iter()
             .find(|w| w.workload_id == workload_id)
-            .map(|w| w.weight)
-            .unwrap_or(1.0)
+            .map_or(1.0, |w| w.weight)
     }
 
     /// Simulate mul kernel execution (placeholder).
-    fn simulate_mul_kernel(&self, candidate: &KernelCandidate, data: &[u8]) -> Result<(), TuningError> {
+    fn simulate_mul_kernel(
+        &self,
+        candidate: &KernelCandidate,
+        data: &[u8],
+    ) -> Result<(), TuningError> {
         // Placeholder - would dispatch to actual optimized kernel
-        std::thread::sleep(Duration::from_nanos(data.len() as u64 / candidate.unroll as u64));
+        std::thread::sleep(Duration::from_nanos(
+            data.len() as u64 / candidate.unroll as u64,
+        ));
         Ok(())
     }
 
     /// Simulate addmul kernel execution (placeholder).
-    fn simulate_addmul_kernel(&self, candidate: &KernelCandidate, data: &[u8]) -> Result<(), TuningError> {
+    fn simulate_addmul_kernel(
+        &self,
+        candidate: &KernelCandidate,
+        data: &[u8],
+    ) -> Result<(), TuningError> {
         // Placeholder - would dispatch to actual optimized kernel
-        std::thread::sleep(Duration::from_nanos(data.len() as u64 * 3 / candidate.unroll as u64));
+        std::thread::sleep(Duration::from_nanos(
+            data.len() as u64 * 3 / candidate.unroll as u64,
+        ));
         Ok(())
     }
 
     /// Simulate add kernel execution (placeholder).
-    fn simulate_add_kernel(&self, candidate: &KernelCandidate, data: &[u8]) -> Result<(), TuningError> {
+    fn simulate_add_kernel(
+        &self,
+        candidate: &KernelCandidate,
+        data: &[u8],
+    ) -> Result<(), TuningError> {
         // Placeholder - would dispatch to actual optimized kernel
-        std::thread::sleep(Duration::from_nanos(data.len() as u64 / (candidate.unroll * 2) as u64));
+        std::thread::sleep(Duration::from_nanos(
+            data.len() as u64 / (candidate.unroll * 2) as u64,
+        ));
         Ok(())
     }
 }
@@ -662,18 +724,23 @@ impl OfflineTuner {
 /// Errors that can occur during offline tuning.
 #[derive(Debug, thiserror::Error)]
 pub enum TuningError {
+    /// No benchmark results available for optimization
     #[error("No benchmark results available for optimization")]
     NoBenchmarkResults,
 
+    /// No valid candidates found after filtering
     #[error("No valid candidates found after filtering")]
     NoValidCandidates,
 
+    /// Kernel execution failed during benchmarking
     #[error("Kernel execution failed: {0}")]
     KernelExecutionFailed(String),
 
+    /// Bit-exactness verification failed between kernels
     #[error("Bit-exactness verification failed")]
     BitExactnessVerificationFailed,
 
+    /// I/O error occurred during tuning operations
     #[error("I/O error during tuning: {0}")]
     IoError(#[from] std::io::Error),
 }
@@ -691,7 +758,7 @@ mod tests {
                 throughput_weight: 0.3,
                 bandwidth_weight: 0.2,
                 min_improvement_threshold: 5.0,
-            }
+            },
         );
 
         let candidates = tuner.generate_candidates();
@@ -721,6 +788,10 @@ mod tests {
 
         assert!(!workloads.is_empty());
         assert!(workloads.iter().any(|w| w.operation == GF256Operation::Mul));
-        assert!(workloads.iter().any(|w| w.operation == GF256Operation::AddMul));
+        assert!(
+            workloads
+                .iter()
+                .any(|w| w.operation == GF256Operation::AddMul)
+        );
     }
 }

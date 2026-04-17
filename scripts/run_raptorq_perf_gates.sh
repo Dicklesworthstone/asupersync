@@ -103,7 +103,7 @@ EOF
     # Run critical workloads only
     if rch exec -- cargo bench --bench raptorq_benchmark \
         -- --warm-up-time 1 --measurement-time 5 \
-        'encode/k=32' 'decode_source/k=32' 'gf256_addmul' \
+        'gf256_primitives' 'raptorq_e2e/encode' \
         --output-format json > "$CURRENT_RESULTS" 2>&1; then
 
         cat >> "$NDJSON_LOG" <<EOF

@@ -28,9 +28,7 @@ use clap::{Parser, Subcommand};
 use serde_json;
 
 use asupersync::raptorq::gf256::{Gf256ArchitectureClass, active_kernel};
-use asupersync::raptorq::offline_tuner::{
-    OfflineTuner, OptimizationCriteria,
-};
+use asupersync::raptorq::offline_tuner::{OfflineTuner, OptimizationCriteria};
 
 #[derive(Parser)]
 #[command(name = "offline_tuner")]
@@ -133,11 +131,9 @@ fn main() {
 
     // Initialize logging based on verbosity
     if cli.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
-            .init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-            .init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
     // Create output directory
@@ -167,13 +163,18 @@ fn main() {
             },
         ),
 
-        Commands::Candidates { arch } => generate_candidates(arch.into(), &cli.output_dir, cli.verbose),
+        Commands::Candidates { arch } => {
+            generate_candidates(arch.into(), &cli.output_dir, cli.verbose)
+        }
 
-        Commands::EmitProfile { results_file, output_file } =>
-            emit_profile_pack(results_file, output_file, cli.verbose),
+        Commands::EmitProfile {
+            results_file,
+            output_file,
+        } => emit_profile_pack(results_file, output_file, cli.verbose),
 
-        Commands::Validate { arch, profile_file } =>
-            validate_kernels(arch.into(), profile_file, cli.verbose),
+        Commands::Validate { arch, profile_file } => {
+            validate_kernels(arch.into(), profile_file, cli.verbose)
+        }
     };
 
     if let Err(e) = result {
@@ -192,19 +193,31 @@ fn run_optimization(
     let target_arch = if auto_detect {
         let kernel = active_kernel();
         match kernel {
-            asupersync::raptorq::gf256::Gf256Kernel::Scalar => Gf256ArchitectureClass::GenericScalar,
-            #[cfg(all(feature = "simd-intrinsics", any(target_arch = "x86", target_arch = "x86_64")))]
+            asupersync::raptorq::gf256::Gf256Kernel::Scalar => {
+                Gf256ArchitectureClass::GenericScalar
+            }
+            #[cfg(all(
+                feature = "simd-intrinsics",
+                any(target_arch = "x86", target_arch = "x86_64")
+            ))]
             asupersync::raptorq::gf256::Gf256Kernel::X86Avx2 => Gf256ArchitectureClass::X86Avx2,
             #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
-            asupersync::raptorq::gf256::Gf256Kernel::Aarch64Neon => Gf256ArchitectureClass::Aarch64Neon,
+            asupersync::raptorq::gf256::Gf256Kernel::Aarch64Neon => {
+                Gf256ArchitectureClass::Aarch64Neon
+            }
         }
     } else {
         arch.ok_or("Must specify --arch or --auto-detect")?.into()
     };
 
-    println!("Starting offline kernel superoptimization for {:?}", target_arch);
-    println!("Optimization criteria: latency={:.2}, throughput={:.2}, bandwidth={:.2}",
-             criteria.latency_weight, criteria.throughput_weight, criteria.bandwidth_weight);
+    println!(
+        "Starting offline kernel superoptimization for {:?}",
+        target_arch
+    );
+    println!(
+        "Optimization criteria: latency={:.2}, throughput={:.2}, bandwidth={:.2}",
+        criteria.latency_weight, criteria.throughput_weight, criteria.bandwidth_weight
+    );
 
     let mut tuner = OfflineTuner::new(target_arch, criteria.clone());
 
@@ -215,9 +228,15 @@ fn run_optimization(
     if verbose {
         println!("Candidates:");
         for (i, candidate) in candidates.iter().enumerate() {
-            println!("  {}: {} (tile={}, unroll={}, prefetch={}, fusion={:?})",
-                     i + 1, candidate.candidate_id, candidate.tile_bytes,
-                     candidate.unroll, candidate.prefetch_distance, candidate.fusion_shape);
+            println!(
+                "  {}: {} (tile={}, unroll={}, prefetch={}, fusion={:?})",
+                i + 1,
+                candidate.candidate_id,
+                candidate.tile_bytes,
+                candidate.unroll,
+                candidate.prefetch_distance,
+                candidate.fusion_shape
+            );
         }
     }
 
@@ -254,7 +273,10 @@ fn run_optimization(
         "total_candidates": candidates.len(),
     });
 
-    fs::write(&results_file, serde_json::to_string_pretty(&tuning_results)?)?;
+    fs::write(
+        &results_file,
+        serde_json::to_string_pretty(&tuning_results)?,
+    )?;
     fs::write(&profile_file, serde_json::to_string_pretty(&profile_pack)?)?;
 
     println!("Optimization complete!");
@@ -279,13 +301,23 @@ fn generate_candidates(
     let tuner = OfflineTuner::new(arch, criteria);
     let candidates = tuner.generate_candidates();
 
-    println!("Generated {} kernel candidates for {:?}", candidates.len(), arch);
+    println!(
+        "Generated {} kernel candidates for {:?}",
+        candidates.len(),
+        arch
+    );
 
     if verbose {
         for (i, candidate) in candidates.iter().enumerate() {
-            println!("{}. {} (tile={}, unroll={}, prefetch={}, fusion={:?})",
-                     i + 1, candidate.candidate_id, candidate.tile_bytes,
-                     candidate.unroll, candidate.prefetch_distance, candidate.fusion_shape);
+            println!(
+                "{}. {} (tile={}, unroll={}, prefetch={}, fusion={:?})",
+                i + 1,
+                candidate.candidate_id,
+                candidate.tile_bytes,
+                candidate.unroll,
+                candidate.prefetch_distance,
+                candidate.fusion_shape
+            );
         }
     }
 
@@ -297,7 +329,10 @@ fn generate_candidates(
         "generated_at": format!("{:?}", std::time::SystemTime::now()),
     });
 
-    fs::write(&output_file, serde_json::to_string_pretty(&candidates_json)?)?;
+    fs::write(
+        &output_file,
+        serde_json::to_string_pretty(&candidates_json)?,
+    )?;
     println!("Candidates saved to: {}", output_file.display());
 
     Ok(())
@@ -317,11 +352,18 @@ fn emit_profile_pack(
     let selected_candidate = results["selected_candidate"].clone();
 
     if verbose {
-        println!("Selected candidate: {}",
-                 selected_candidate["candidate_id"].as_str().unwrap_or("unknown"));
+        println!(
+            "Selected candidate: {}",
+            selected_candidate["candidate_id"]
+                .as_str()
+                .unwrap_or("unknown")
+        );
     }
 
-    println!("Profile pack generated and saved to: {}", output_file.display());
+    println!(
+        "Profile pack generated and saved to: {}",
+        output_file.display()
+    );
 
     Ok(())
 }
@@ -350,4 +392,3 @@ fn validate_kernels(
 
     Ok(())
 }
-
