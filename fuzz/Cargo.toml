@@ -485,3 +485,17 @@ path = "fuzz_targets/bytes_chain.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_broadcast_lag"
+path = "fuzz_targets/broadcast_lag.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tls_handshake_sequence"
+path = "fuzz_targets/tls_handshake_sequence.rs"
+test = false
+doc = false
+bench = false
