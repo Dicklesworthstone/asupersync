@@ -1769,8 +1769,11 @@ impl StarvationAnalysisWindow {
     fn events_in_window(&self, window_duration_ns: u64, current_time_ns: u64) -> u32 {
         let threshold_time = current_time_ns.saturating_sub(window_duration_ns);
         let mut count = 0;
+        let recorded_events = usize::try_from(self.total_events)
+            .unwrap_or(usize::MAX)
+            .min(self.size);
 
-        for &event_time in &self.events {
+        for &event_time in self.events.iter().take(recorded_events) {
             if event_time >= threshold_time && event_time <= current_time_ns {
                 count += 1;
             }
@@ -6599,6 +6602,29 @@ mod tests {
         assert_eq!(oldest.skip_count, 1);
         assert_eq!(oldest.wait_time_ns, 250);
         assert_eq!(oldest.total_wait_time_ns, 250);
+    }
+
+    #[test]
+    fn starvation_analysis_window_ignores_uninitialized_slots() {
+        let mut window = StarvationAnalysisWindow::new(16);
+        let current_time_ns = 500_000_000;
+        let window_duration_ns = 1_000_000_000;
+
+        assert_eq!(
+            window.events_in_window(window_duration_ns, current_time_ns),
+            0
+        );
+        assert!(!window.is_pattern_detected(10, window_duration_ns, current_time_ns));
+
+        for timestamp_ns in (410_000_000..=500_000_000).step_by(10_000_000) {
+            window.record_event(timestamp_ns);
+        }
+
+        assert_eq!(
+            window.events_in_window(window_duration_ns, current_time_ns),
+            10
+        );
+        assert!(window.is_pattern_detected(10, window_duration_ns, current_time_ns));
     }
 
     #[test]
