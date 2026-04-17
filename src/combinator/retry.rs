@@ -406,7 +406,7 @@ impl RetryTokenBucket {
 
     /// Refills the bucket based on time elapsed.
     fn refill(&mut self, now: Time) {
-        let elapsed_nanos = now.saturating_sub(self.last_refill);
+        let elapsed_nanos = now.duration_since(self.last_refill);
         let elapsed_secs = elapsed_nanos as f64 / 1_000_000_000.0;
 
         let tokens_to_add = elapsed_secs * self.refill_rate;
