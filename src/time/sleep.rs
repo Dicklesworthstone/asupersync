@@ -1930,10 +1930,9 @@ mod tests {
 
         let shared_deadline = Time::from_secs(10);
         let mut sleeps = Vec::new();
-        let mut wakers = Vec::new();
         let mut woke_flags = Vec::new();
 
-        // Create multiple sleeps with same deadline
+        // Create multiple sleeps with same deadline and register them
         for i in 0..5 {
             let mut sleep = Sleep::new(shared_deadline);
             let woke = Arc::new(AtomicBool::new(false));
@@ -1950,7 +1949,6 @@ mod tests {
             );
 
             sleeps.push(sleep);
-            wakers.push(task_cx);
             woke_flags.push(woke);
         }
 
@@ -1981,9 +1979,11 @@ mod tests {
             );
         }
 
-        // All sleeps should be ready when polled
-        for (i, (sleep, waker)) in sleeps.iter_mut().zip(wakers.iter_mut()).enumerate() {
-            let ready = Pin::new(sleep).poll(waker);
+        // All sleeps should be ready when polled with fresh context
+        for (i, sleep) in sleeps.iter_mut().enumerate() {
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let ready = Pin::new(sleep).poll(&mut task_cx);
             crate::assert_with_log!(
                 ready.is_ready(),
                 &format!("sleep {} ready after timer fire", i),
