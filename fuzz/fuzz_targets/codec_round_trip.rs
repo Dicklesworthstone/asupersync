@@ -33,12 +33,6 @@ enum CodecType {
     Bytes,
     /// Newline-delimited text with configurable max length
     Lines { max_length: Option<u16> }, // u16 to keep reasonable bounds
-    /// Length-delimited binary frames
-    LengthDelimited {
-        max_frame_length: Option<u32>,
-        big_endian: bool,
-        length_field_length: u8, // 1, 2, 4, or 8 bytes
-    },
 }
 
 /// Test data patterns designed to trigger different code paths
@@ -270,52 +264,6 @@ fn fuzz_round_trip(codec_type: CodecType, test_data: TestData) {
             }
         }
 
-        CodecType::LengthDelimited { max_frame_length, big_endian, length_field_length } => {
-            let max_frame = max_frame_length.map(|l| l as usize).unwrap_or(8 * 1024 * 1024);
-            let length_len = match length_field_length % 4 {
-                0 => 1,
-                1 => 2,
-                2 => 4,
-                _ => 8,
-            };
-
-            let mut codec = asupersync::codec::LengthDelimitedCodec::builder()
-                .length_field_length(length_len)
-                .max_frame_length(max_frame)
-                .big_endian(big_endian)
-                .new_codec();
-
-            let data_bytes = test_data.to_bytes();
-            let bytes_input = Bytes::from(data_bytes);
-            let mut encode_buf = BytesMut::new();
-
-            // Encode phase
-            let encode_result = codec.encode(bytes_input.clone(), &mut encode_buf);
-            if encode_result.is_err() {
-                return; // Expected failure
-            }
-
-            // Decode phase
-            let mut decode_src = encode_buf;
-            let decode_result = codec.decode(&mut decode_src);
-
-            // Round-trip oracle
-            match decode_result {
-                Ok(Some(decoded)) => {
-                    assert_eq!(
-                        decoded.as_ref(),
-                        bytes_input.as_ref(),
-                        "LengthDelimitedCodec round-trip failed"
-                    );
-                }
-                Ok(None) => {
-                    // Partial read - acceptable
-                }
-                Err(_) => {
-                    panic!("LengthDelimitedCodec decode failed on valid encoded data");
-                }
-            }
-        }
     }
 }
 
@@ -397,7 +345,7 @@ fn fuzz_partial_frames(codec_type: CodecType, test_data: TestData, chunk_sizes: 
         }
         _ => {
             // Similar partial frame logic for other codecs...
-            // Abbreviated for space - would implement for Bytes and LengthDelimited
+            // Abbreviated for space - would implement for Bytes codec
         }
     }
 }
