@@ -13,6 +13,7 @@ pub mod h2_rst_stream_ping_rfc9113;
 // pub mod hpack_rfc7541;
 pub mod kafka_record_batch_v2;
 pub mod quic_retry_rfc9000;
+pub mod tls_0rtt_replay_rfc8446;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod postgres_logical_replication;
@@ -32,6 +33,7 @@ pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult, 
 pub use mysql_stmt_prepare_execute::{MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory};
 pub use postgres_logical_replication::{PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory};
 pub use quic_retry_rfc9000::{QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory};
+pub use tls_0rtt_replay_rfc8446::{Tls0RttConformanceHarness, Tls0RttConformanceResult, TestCategory as Tls0RttTestCategory};
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
@@ -107,6 +109,14 @@ pub enum TestCategory {
     IntegrityValidation,
     ClientProcessing,
     ServerProcessing,
+    // TLS 1.3 0-RTT categories
+    PreSharedKeyExtension,
+    TicketAgeObfuscation,
+    ServerReplayRejection,
+    AntiReplayCache,
+    EarlyDataLimits,
+    FreshnessWindow,
+    HelloRetryRequest,
 }
 
 // Unified conformance test result
@@ -227,6 +237,43 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         })
         .collect();
     results.extend(quic_results);
+
+    // TLS 1.3 0-RTT Replay Protection RFC 8446 conformance
+    #[cfg(feature = "tls")]
+    {
+        let tls_0rtt_harness = Tls0RttConformanceHarness::new();
+        let tls_0rtt_results: Vec<ConformanceTestResult> = tls_0rtt_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    tls_0rtt_replay_rfc8446::TestCategory::PreSharedKeyExtension => TestCategory::PreSharedKeyExtension,
+                    tls_0rtt_replay_rfc8446::TestCategory::TicketAgeObfuscation => TestCategory::TicketAgeObfuscation,
+                    tls_0rtt_replay_rfc8446::TestCategory::ServerReplayRejection => TestCategory::ServerReplayRejection,
+                    tls_0rtt_replay_rfc8446::TestCategory::AntiReplayCache => TestCategory::AntiReplayCache,
+                    tls_0rtt_replay_rfc8446::TestCategory::EarlyDataLimits => TestCategory::EarlyDataLimits,
+                    tls_0rtt_replay_rfc8446::TestCategory::FreshnessWindow => TestCategory::FreshnessWindow,
+                    tls_0rtt_replay_rfc8446::TestCategory::HelloRetryRequest => TestCategory::HelloRetryRequest,
+                },
+                requirement_level: match r.requirement_level {
+                    tls_0rtt_replay_rfc8446::RequirementLevel::Must => RequirementLevel::Must,
+                    tls_0rtt_replay_rfc8446::RequirementLevel::Should => RequirementLevel::Should,
+                    tls_0rtt_replay_rfc8446::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    tls_0rtt_replay_rfc8446::TestVerdict::Pass => TestVerdict::Pass,
+                    tls_0rtt_replay_rfc8446::TestVerdict::Fail => TestVerdict::Fail,
+                    tls_0rtt_replay_rfc8446::TestVerdict::Skipped => TestVerdict::Skipped,
+                    tls_0rtt_replay_rfc8446::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(tls_0rtt_results);
+    }
 
     // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
     /*
@@ -414,6 +461,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "coverage": "systematic",
                     "reference": "RFC 9000 Section 17.2.5 QUIC Retry packet conformance"
                 },
+                "tls_0rtt_replay_rfc8446": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 8446 Section 8 TLS 1.3 0-RTT replay protection conformance"
+                },
                 "websocket_rfc6455": {
                     "status": "implemented",
                     "coverage": "systematic",
@@ -559,6 +611,47 @@ mod tests {
         if !failures.is_empty() {
             panic!("QUIC conformance tests failed: {:#?}", failures);
         }
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_tls_0rtt_conformance_integration() {
+        let tls_0rtt_harness = Tls0RttConformanceHarness::new();
+        let results = tls_0rtt_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "TLS 0-RTT conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&tls_0rtt_replay_rfc8446::TestCategory::PreSharedKeyExtension),
+            "Should test PreSharedKey extension with early_data"
+        );
+        assert!(
+            categories.contains(&tls_0rtt_replay_rfc8446::TestCategory::TicketAgeObfuscation),
+            "Should test ticket age obfuscation"
+        );
+        assert!(
+            categories.contains(&tls_0rtt_replay_rfc8446::TestCategory::AntiReplayCache),
+            "Should test anti-replay cache TTL enforcement"
+        );
+        assert!(
+            categories.contains(&tls_0rtt_replay_rfc8446::TestCategory::EarlyDataLimits),
+            "Should test max_early_data_size limits"
+        );
+
+        // Verify we have both pass and expected failure verdicts (for negative tests)
+        let passes = results.iter()
+            .filter(|r| r.verdict == tls_0rtt_replay_rfc8446::TestVerdict::Pass)
+            .count();
+        let expected_failures = results.iter()
+            .filter(|r| r.verdict == tls_0rtt_replay_rfc8446::TestVerdict::ExpectedFailure)
+            .count();
+
+        assert!(passes > 0, "Should have passing tests for positive cases");
+        assert!(expected_failures > 0, "Should have expected failures for negative tests");
     }
 
     #[test]
