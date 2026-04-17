@@ -63,7 +63,9 @@ fuzz_target!(|data: &[u8]| {
 
             // Test the load_all convenience method if we have a small number of events
             // This exercises pre-allocation logic and batch parsing
-            if let Ok(mut reader2) = asupersync::trace::file::TraceReader::from_reader(Cursor::new(data)) {
+            if let Ok(mut reader2) =
+                asupersync::trace::file::TraceReader::from_reader(Cursor::new(data))
+            {
                 if reader2.event_count() <= 1000 {
                     let _ = reader2.load_all();
                 }

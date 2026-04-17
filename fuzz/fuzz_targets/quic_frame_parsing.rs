@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// QUIC frame fuzz input for comprehensive RFC 9000 frame testing
@@ -48,11 +48,7 @@ enum QuicFrameType {
     /// NEW_TOKEN frame (0x07)
     NewToken,
     /// STREAM frames (0x08-0x0f with different flags)
-    Stream {
-        fin: bool,
-        len: bool,
-        off: bool,
-    },
+    Stream { fin: bool, len: bool, off: bool },
     /// MAX_DATA frame (0x10)
     MaxData,
     /// MAX_STREAM_DATA frame (0x11)
@@ -205,27 +201,51 @@ fn build_quic_frame(frame_data: &QuicFrameFuzzData) -> Vec<u8> {
     let frame_type_byte = match &frame_data.frame_type {
         QuicFrameType::Padding => 0x00,
         QuicFrameType::Ping => 0x01,
-        QuicFrameType::Ack { ecn_counts } => if *ecn_counts { 0x03 } else { 0x02 },
+        QuicFrameType::Ack { ecn_counts } => {
+            if *ecn_counts {
+                0x03
+            } else {
+                0x02
+            }
+        }
         QuicFrameType::ResetStream => 0x04,
         QuicFrameType::StopSending => 0x05,
         QuicFrameType::Crypto => 0x06,
         QuicFrameType::NewToken => 0x07,
         QuicFrameType::Stream { fin, len, off } => {
             0x08 | (if *fin { 0x01 } else { 0x00 })
-                 | (if *len { 0x02 } else { 0x00 })
-                 | (if *off { 0x04 } else { 0x00 })
-        },
+                | (if *len { 0x02 } else { 0x00 })
+                | (if *off { 0x04 } else { 0x00 })
+        }
         QuicFrameType::MaxData => 0x10,
         QuicFrameType::MaxStreamData => 0x11,
-        QuicFrameType::MaxStreams { bidirectional } => if *bidirectional { 0x12 } else { 0x13 },
+        QuicFrameType::MaxStreams { bidirectional } => {
+            if *bidirectional {
+                0x12
+            } else {
+                0x13
+            }
+        }
         QuicFrameType::DataBlocked => 0x14,
         QuicFrameType::StreamDataBlocked => 0x15,
-        QuicFrameType::StreamsBlocked { bidirectional } => if *bidirectional { 0x16 } else { 0x17 },
+        QuicFrameType::StreamsBlocked { bidirectional } => {
+            if *bidirectional {
+                0x16
+            } else {
+                0x17
+            }
+        }
         QuicFrameType::NewConnectionId => 0x18,
         QuicFrameType::RetireConnectionId => 0x19,
         QuicFrameType::PathChallenge => 0x1a,
         QuicFrameType::PathResponse => 0x1b,
-        QuicFrameType::ConnectionClose { quic_error } => if *quic_error { 0x1c } else { 0x1d },
+        QuicFrameType::ConnectionClose { quic_error } => {
+            if *quic_error {
+                0x1c
+            } else {
+                0x1d
+            }
+        }
         QuicFrameType::HandshakeDone => 0x1e,
     };
 
@@ -249,19 +269,19 @@ fn encode_vlq_test(value: u64, force_length: Option<u8>) -> Vec<u8> {
     match force_length {
         Some(1) if value < 64 => {
             result.push(value as u8);
-        },
+        }
         Some(2) if value < 16384 => {
             let val = value | 0x4000;
             result.extend_from_slice(&val.to_be_bytes()[6..]);
-        },
+        }
         Some(4) if value < 1073741824 => {
             let val = value | 0x80000000;
             result.extend_from_slice(&val.to_be_bytes()[4..]);
-        },
+        }
         Some(8) if value < 4611686018427387904 => {
             let val = value | 0xc000000000000000;
             result.extend_from_slice(&val.to_be_bytes());
-        },
+        }
         _ => {
             // Use standard encoding
             if value < 64 {
@@ -296,27 +316,27 @@ fn test_quic_frame_parsing(data: &[u8]) {
 
     // Validate frame type ranges per RFC 9000
     let _is_valid_frame_type = match frame_type {
-        0x00 => true, // PADDING
-        0x01 => true, // PING
+        0x00 => true,        // PADDING
+        0x01 => true,        // PING
         0x02 | 0x03 => true, // ACK
-        0x04 => true, // RESET_STREAM
-        0x05 => true, // STOP_SENDING
-        0x06 => true, // CRYPTO
-        0x07 => true, // NEW_TOKEN
+        0x04 => true,        // RESET_STREAM
+        0x05 => true,        // STOP_SENDING
+        0x06 => true,        // CRYPTO
+        0x07 => true,        // NEW_TOKEN
         0x08..=0x0f => true, // STREAM
-        0x10 => true, // MAX_DATA
-        0x11 => true, // MAX_STREAM_DATA
+        0x10 => true,        // MAX_DATA
+        0x11 => true,        // MAX_STREAM_DATA
         0x12 | 0x13 => true, // MAX_STREAMS
-        0x14 => true, // DATA_BLOCKED
-        0x15 => true, // STREAM_DATA_BLOCKED
+        0x14 => true,        // DATA_BLOCKED
+        0x15 => true,        // STREAM_DATA_BLOCKED
         0x16 | 0x17 => true, // STREAMS_BLOCKED
-        0x18 => true, // NEW_CONNECTION_ID
-        0x19 => true, // RETIRE_CONNECTION_ID
-        0x1a => true, // PATH_CHALLENGE
-        0x1b => true, // PATH_RESPONSE
+        0x18 => true,        // NEW_CONNECTION_ID
+        0x19 => true,        // RETIRE_CONNECTION_ID
+        0x1a => true,        // PATH_CHALLENGE
+        0x1b => true,        // PATH_RESPONSE
         0x1c | 0x1d => true, // CONNECTION_CLOSE
-        0x1e => true, // HANDSHAKE_DONE
-        _ => false, // Reserved or invalid
+        0x1e => true,        // HANDSHAKE_DONE
+        _ => false,          // Reserved or invalid
     };
 
     // Test payload parsing based on frame type
@@ -332,22 +352,22 @@ fn test_quic_frame_parsing(data: &[u8]) {
                         return;
                     }
                 }
-            },
+            }
             0x01 => {
                 // PING frames have no payload
                 if !payload.is_empty() {
                     // Invalid PING frame
                     return;
                 }
-            },
+            }
             0x02 | 0x03 => {
                 // ACK frames - test VLQ parsing
                 test_ack_frame_parsing(payload, frame_type == 0x03);
-            },
+            }
             0x08..=0x0f => {
                 // STREAM frames - test stream ID and payload
                 test_stream_frame_parsing(payload, frame_type);
-            },
+            }
             _ => {
                 // Other frame types - basic payload validation
                 test_generic_frame_parsing(payload);
@@ -514,18 +534,15 @@ fn parse_vlq(data: &[u8], offset: usize) -> Option<(u64, usize)> {
         0 => {
             // 1 byte
             Some((first_byte as u64 & 0x3f, 1))
-        },
+        }
         1 => {
             // 2 bytes
             if offset + 1 >= data.len() {
                 return None;
             }
-            let value = u16::from_be_bytes([
-                first_byte & 0x3f,
-                data[offset + 1],
-            ]) as u64;
+            let value = u16::from_be_bytes([first_byte & 0x3f, data[offset + 1]]) as u64;
             Some((value, 2))
-        },
+        }
         2 => {
             // 4 bytes
             if offset + 3 >= data.len() {
@@ -538,7 +555,7 @@ fn parse_vlq(data: &[u8], offset: usize) -> Option<(u64, usize)> {
                 data[offset + 3],
             ]) as u64;
             Some((value, 4))
-        },
+        }
         3 => {
             // 8 bytes
             if offset + 7 >= data.len() {
@@ -555,7 +572,7 @@ fn parse_vlq(data: &[u8], offset: usize) -> Option<(u64, usize)> {
                 data[offset + 7],
             ]);
             Some((value, 8))
-        },
+        }
         _ => unreachable!(),
     }
 }
@@ -573,28 +590,31 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
             VlqEdgeCase::OneByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value as u64, Some(1));
                 test_quic_frame_parsing(&encoded);
-            },
+            }
             VlqEdgeCase::TwoByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value as u64, Some(2));
                 test_quic_frame_parsing(&encoded);
-            },
+            }
             VlqEdgeCase::FourByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value as u64, Some(4));
                 test_quic_frame_parsing(&encoded);
-            },
+            }
             VlqEdgeCase::EightByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value, Some(8));
                 test_quic_frame_parsing(&encoded);
-            },
+            }
             VlqEdgeCase::Invalid { raw_bytes } => {
                 test_quic_frame_parsing(raw_bytes);
-            },
-            VlqEdgeCase::NonMinimal { value, excess_bytes } => {
+            }
+            VlqEdgeCase::NonMinimal {
+                value,
+                excess_bytes,
+            } => {
                 let mut encoded = encode_vlq_test(*value, Some(*excess_bytes + 1));
                 // Prepend frame type for testing
                 encoded.insert(0, 0x10); // MAX_DATA frame type
                 test_quic_frame_parsing(&encoded);
-            },
+            }
         }
     }
 
@@ -634,11 +654,11 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
 
     // Test 6: Edge case combinations
     let edge_cases = [
-        vec![0x00], // Single PADDING
-        vec![0x01], // PING
-        vec![0xFF, 0x00, 0x01], // Invalid frame type
+        vec![0x00],                         // Single PADDING
+        vec![0x01],                         // PING
+        vec![0xFF, 0x00, 0x01],             // Invalid frame type
         vec![0x08, 0xFF, 0xFF, 0xFF, 0xFF], // STREAM with malformed stream ID
-        vec![0x02, 0x00, 0x00, 0xFF], // ACK with invalid fields
+        vec![0x02, 0x00, 0x00, 0xFF],       // ACK with invalid fields
     ];
 
     for edge_case in &edge_cases {

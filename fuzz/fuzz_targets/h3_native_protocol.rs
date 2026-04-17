@@ -1,14 +1,12 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::http::h3_native::{
-    H3Frame, H3Settings, H3NativeError, H3QpackMode, QpackFieldPlan,
-    H3RequestHead, H3ResponseHead,
-    H3_SETTING_QPACK_MAX_TABLE_CAPACITY, H3_SETTING_MAX_FIELD_SECTION_SIZE,
-    H3_SETTING_QPACK_BLOCKED_STREAMS, H3_SETTING_ENABLE_CONNECT_PROTOCOL,
-    H3_SETTING_H3_DATAGRAM,
+    H3_SETTING_ENABLE_CONNECT_PROTOCOL, H3_SETTING_H3_DATAGRAM, H3_SETTING_MAX_FIELD_SECTION_SIZE,
+    H3_SETTING_QPACK_BLOCKED_STREAMS, H3_SETTING_QPACK_MAX_TABLE_CAPACITY, H3Frame, H3NativeError,
+    H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, QpackFieldPlan,
     qpack_decode_field_section, qpack_decode_request_field_section,
     qpack_decode_response_field_section,
 };
@@ -32,13 +30,9 @@ struct H3ProtocolFuzz {
 #[derive(Arbitrary, Debug)]
 enum FrameOperation {
     /// Parse single frame from raw bytes
-    ParseFrame {
-        data: Vec<u8>,
-    },
+    ParseFrame { data: Vec<u8> },
     /// Parse multiple consecutive frames
-    ParseMultipleFrames {
-        frame_data: Vec<Vec<u8>>,
-    },
+    ParseMultipleFrames { frame_data: Vec<Vec<u8>> },
     /// Parse frame with specific type
     ParseTypedFrame {
         frame_type: FrameType,
@@ -68,22 +62,13 @@ enum FrameType {
 #[derive(Arbitrary, Debug)]
 enum SettingsOperation {
     /// Parse settings payload
-    ParseSettings {
-        payload: Vec<u8>,
-    },
+    ParseSettings { payload: Vec<u8> },
     /// Parse settings with known identifiers
-    ParseKnownSettings {
-        settings: Vec<SettingPair>,
-    },
+    ParseKnownSettings { settings: Vec<SettingPair> },
     /// Parse settings with duplicates
-    ParseDuplicateSettings {
-        setting_id: u64,
-        values: Vec<u64>,
-    },
+    ParseDuplicateSettings { setting_id: u64, values: Vec<u64> },
     /// Parse malformed settings
-    ParseMalformedSettings {
-        malformed_data: Vec<u8>,
-    },
+    ParseMalformedSettings { malformed_data: Vec<u8> },
 }
 
 /// Setting key-value pair
@@ -108,34 +93,20 @@ enum SettingId {
 #[derive(Arbitrary, Debug)]
 enum StreamOperation {
     /// Parse stream type
-    ParseStreamType {
-        stream_data: Vec<u8>,
-    },
+    ParseStreamType { stream_data: Vec<u8> },
     /// Test stream protocol validation
-    ValidateStreamProtocol {
-        stream_type: u64,
-        data: Vec<u8>,
-    },
+    ValidateStreamProtocol { stream_type: u64, data: Vec<u8> },
 }
 
 /// QPACK field section operations
 #[derive(Arbitrary, Debug)]
 enum QpackOperation {
     /// Parse generic field section
-    ParseFieldSection {
-        payload: Vec<u8>,
-        mode: QpackMode,
-    },
+    ParseFieldSection { payload: Vec<u8>, mode: QpackMode },
     /// Parse request field section
-    ParseRequestFieldSection {
-        payload: Vec<u8>,
-        mode: QpackMode,
-    },
+    ParseRequestFieldSection { payload: Vec<u8>, mode: QpackMode },
     /// Parse response field section
-    ParseResponseFieldSection {
-        payload: Vec<u8>,
-        mode: QpackMode,
-    },
+    ParseResponseFieldSection { payload: Vec<u8>, mode: QpackMode },
     /// Parse field section with specific patterns
     ParseStructuredFieldSection {
         field_patterns: Vec<FieldPattern>,
@@ -159,23 +130,13 @@ enum QpackMode {
 #[derive(Arbitrary, Debug)]
 enum FieldPattern {
     /// Static index reference
-    StaticIndex {
-        index: u8,
-    },
+    StaticIndex { index: u8 },
     /// Literal with name reference
-    LiteralNameRef {
-        name_index: u8,
-        value: Vec<u8>,
-    },
+    LiteralNameRef { name_index: u8, value: Vec<u8> },
     /// Literal with literal name
-    LiteralName {
-        name: Vec<u8>,
-        value: Vec<u8>,
-    },
+    LiteralName { name: Vec<u8>, value: Vec<u8> },
     /// Malformed pattern
-    Malformed {
-        data: Vec<u8>,
-    },
+    Malformed { data: Vec<u8> },
 }
 
 /// Edge case testing
@@ -184,13 +145,9 @@ enum EdgeCaseOperation {
     /// Empty input
     EmptyInput,
     /// Single byte input
-    SingleByte {
-        byte: u8,
-    },
+    SingleByte { byte: u8 },
     /// Large varint
-    LargeVarint {
-        value: u64,
-    },
+    LargeVarint { value: u64 },
     /// Overlapping frames
     OverlappingFrames {
         frame1: Vec<u8>,
@@ -198,9 +155,7 @@ enum EdgeCaseOperation {
         overlap_bytes: u8,
     },
     /// Invalid UTF-8 in frame payload
-    InvalidUtf8Payload {
-        payload: Vec<u8>,
-    },
+    InvalidUtf8Payload { payload: Vec<u8> },
     /// Maximum size frames
     MaxSizeFrame {
         frame_type: FrameType,
@@ -215,9 +170,13 @@ const MAX_OPERATIONS: usize = 100;
 
 fuzz_target!(|input: H3ProtocolFuzz| {
     // Limit operations to prevent timeout
-    if input.frame_operations.len() + input.settings_operations.len() +
-       input.stream_operations.len() + input.qpack_operations.len() +
-       input.edge_cases.len() > MAX_OPERATIONS {
+    if input.frame_operations.len()
+        + input.settings_operations.len()
+        + input.stream_operations.len()
+        + input.qpack_operations.len()
+        + input.edge_cases.len()
+        > MAX_OPERATIONS
+    {
         return;
     }
 
@@ -287,7 +246,10 @@ fn test_frame_operation(operation: FrameOperation) {
             }
         }
 
-        FrameOperation::ParseTypedFrame { frame_type, mut payload } => {
+        FrameOperation::ParseTypedFrame {
+            frame_type,
+            mut payload,
+        } => {
             if payload.len() > MAX_PAYLOAD_SIZE {
                 payload.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -297,7 +259,10 @@ fn test_frame_operation(operation: FrameOperation) {
             let _ = H3Frame::decode(&frame_bytes);
         }
 
-        FrameOperation::ParseTruncatedFrame { mut complete_data, truncate_at } => {
+        FrameOperation::ParseTruncatedFrame {
+            mut complete_data,
+            truncate_at,
+        } => {
             if complete_data.len() > MAX_FRAME_SIZE {
                 complete_data.truncate(MAX_FRAME_SIZE);
             }
@@ -356,7 +321,8 @@ fn test_settings_operation(operation: SettingsOperation) {
         SettingsOperation::ParseDuplicateSettings { setting_id, values } => {
             // Test duplicate setting detection
             let mut payload = Vec::new();
-            for value in values.into_iter().take(10) { // Limit to 10 duplicates
+            for value in values.into_iter().take(10) {
+                // Limit to 10 duplicates
                 encode_varint(setting_id, &mut payload);
                 encode_varint(value, &mut payload);
             }
@@ -397,7 +363,10 @@ fn test_stream_operation(operation: StreamOperation) {
             }
         }
 
-        StreamOperation::ValidateStreamProtocol { stream_type, mut data } => {
+        StreamOperation::ValidateStreamProtocol {
+            stream_type,
+            mut data,
+        } => {
             if data.len() > MAX_PAYLOAD_SIZE {
                 data.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -478,7 +447,10 @@ fn test_qpack_operation(operation: QpackOperation) {
             }
         }
 
-        QpackOperation::ParseStructuredFieldSection { field_patterns, mode } => {
+        QpackOperation::ParseStructuredFieldSection {
+            field_patterns,
+            mode,
+        } => {
             let h3_mode = convert_qpack_mode(mode);
 
             // Construct QPACK payload from structured patterns
@@ -488,7 +460,10 @@ fn test_qpack_operation(operation: QpackOperation) {
             }
         }
 
-        QpackOperation::ParseMalformedQpack { mut malformed_data, mode } => {
+        QpackOperation::ParseMalformedQpack {
+            mut malformed_data,
+            mode,
+        } => {
             if malformed_data.len() > MAX_PAYLOAD_SIZE {
                 malformed_data.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -530,7 +505,11 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             let _ = decode_varint_safe(&data);
         }
 
-        EdgeCaseOperation::OverlappingFrames { frame1, frame2, overlap_bytes } => {
+        EdgeCaseOperation::OverlappingFrames {
+            frame1,
+            frame2,
+            overlap_bytes,
+        } => {
             // Test frames that might overlap in memory
             let overlap = (overlap_bytes as usize).min(frame1.len()).min(frame2.len());
             if overlap > 0 {
@@ -550,7 +529,10 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             let _ = H3Frame::decode(&frame_bytes);
         }
 
-        EdgeCaseOperation::MaxSizeFrame { frame_type, fill_byte } => {
+        EdgeCaseOperation::MaxSizeFrame {
+            frame_type,
+            fill_byte,
+        } => {
             // Test maximum size frames
             let payload = vec![fill_byte; MAX_PAYLOAD_SIZE];
             let frame_bytes = construct_frame_bytes(frame_type, &payload);
@@ -574,7 +556,10 @@ fn verify_frame_consistency(frame: &H3Frame) {
         H3Frame::Settings(_) => {
             // Settings should be internally consistent
         }
-        H3Frame::PushPromise { push_id, field_block: _ } => {
+        H3Frame::PushPromise {
+            push_id,
+            field_block: _,
+        } => {
             assert!(*push_id < (1u64 << 62), "Push ID too large: {}", push_id);
             // Field block can be any bytes
         }
@@ -584,7 +569,10 @@ fn verify_frame_consistency(frame: &H3Frame) {
         H3Frame::MaxPushId(id) => {
             assert!(*id < (1u64 << 62), "Push ID too large: {}", id);
         }
-        H3Frame::Unknown { frame_type: _, payload: _ } => {
+        H3Frame::Unknown {
+            frame_type: _,
+            payload: _,
+        } => {
             // Unknown frames are preserved as-is
         }
     }
@@ -606,7 +594,10 @@ fn verify_error_consistency(err: &H3NativeError, _data: &[u8]) {
             // Should specify which setting has invalid value
         }
         H3NativeError::ControlProtocol(msg) => {
-            assert!(!msg.is_empty(), "Control protocol error should have message");
+            assert!(
+                !msg.is_empty(),
+                "Control protocol error should have message"
+            );
         }
         H3NativeError::StreamProtocol(msg) => {
             assert!(!msg.is_empty(), "Stream protocol error should have message");
@@ -615,10 +606,16 @@ fn verify_error_consistency(err: &H3NativeError, _data: &[u8]) {
             assert!(!msg.is_empty(), "QPACK policy error should have message");
         }
         H3NativeError::InvalidRequestPseudoHeader(msg) => {
-            assert!(!msg.is_empty(), "Invalid request pseudo header error should have message");
+            assert!(
+                !msg.is_empty(),
+                "Invalid request pseudo header error should have message"
+            );
         }
         H3NativeError::InvalidResponsePseudoHeader(msg) => {
-            assert!(!msg.is_empty(), "Invalid response pseudo header error should have message");
+            assert!(
+                !msg.is_empty(),
+                "Invalid response pseudo header error should have message"
+            );
         }
     }
 }
@@ -678,7 +675,8 @@ fn construct_frame_bytes(frame_type: FrameType, payload: &[u8]) -> Vec<u8> {
 fn construct_settings_payload(settings: &[SettingPair]) -> Vec<u8> {
     let mut payload = Vec::new();
 
-    for setting in settings.iter().take(20) { // Limit to 20 settings
+    for setting in settings.iter().take(20) {
+        // Limit to 20 settings
         let id_value = match setting.id {
             SettingId::QpackMaxTableCapacity => H3_SETTING_QPACK_MAX_TABLE_CAPACITY,
             SettingId::MaxFieldSectionSize => H3_SETTING_MAX_FIELD_SECTION_SIZE,
@@ -758,7 +756,8 @@ fn construct_qpack_payload(field_patterns: &[FieldPattern]) -> Vec<u8> {
     payload.push(0x00); // S=0, Delta Base = 0, encoded as single byte
 
     // Encode field patterns
-    for pattern in field_patterns.iter().take(20) { // Limit to 20 patterns
+    for pattern in field_patterns.iter().take(20) {
+        // Limit to 20 patterns
         match pattern {
             FieldPattern::StaticIndex { index } => {
                 // Indexed field line: 1 T Index(6+)

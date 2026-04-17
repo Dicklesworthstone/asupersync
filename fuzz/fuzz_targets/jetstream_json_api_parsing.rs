@@ -15,8 +15,7 @@ use libfuzzer_sys::fuzz_target;
 /// The fuzzer generates malformed, edge case, and malicious JSON payloads
 /// to verify parsers are robust against untrusted server responses.
 use asupersync::messaging::jetstream::{
-    JetStreamContext, Consumer,
-    extract_json_string_simple, extract_json_u64
+    Consumer, JetStreamContext, extract_json_string_simple, extract_json_u64,
 };
 use asupersync::messaging::nats::{Message, NatsClient};
 use std::str;
@@ -32,22 +31,38 @@ fn test_jetstream_api_robustness(json_data: &str) {
     // we focus on the helper functions that are directly accessible
 
     // Test extract_json_string_simple
-    let test_fields = ["name", "stream", "subject", "error", "description",
-                       "consumer", "durable_name", "deliver_subject", "config"];
+    let test_fields = [
+        "name",
+        "stream",
+        "subject",
+        "error",
+        "description",
+        "consumer",
+        "durable_name",
+        "deliver_subject",
+        "config",
+    ];
 
     for field in &test_fields {
         let _result = extract_json_string_simple(json_data, field);
     }
 
     // Test extract_json_u64
-    let numeric_fields = ["seq", "stream_seq", "consumer_seq", "delivered",
-                         "ack_floor", "num_pending", "num_redelivered", "code"];
+    let numeric_fields = [
+        "seq",
+        "stream_seq",
+        "consumer_seq",
+        "delivered",
+        "ack_floor",
+        "num_pending",
+        "num_redelivered",
+        "code",
+    ];
 
     for field in &numeric_fields {
         let _result = extract_json_u64(json_data, field);
     }
 }
-
 
 /// Test parse_js_message via Consumer with various Message patterns.
 ///
@@ -60,19 +75,16 @@ fn test_js_message_parsing(subject_data: &str) {
         format!("$JS.ACK.stream.consumer.1.100.50.1234567890.5"),
         format!("$JS.ACK.{}.consumer.1.100.50.1234567890.5", subject_data),
         format!("$JS.ACK.stream.{}.1.100.50.1234567890.5", subject_data),
-
         // Dotted stream/consumer names (regression case)
         format!("$JS.ACK.stream.with.dots.consumer.with.dots.1.42.21.9999999.0"),
-
         // Malformed patterns
         format!("$JS.ACK.{}", subject_data),
         format!("$JS.ACK"),
         format!("$JS.{}", subject_data),
         format!("{}", subject_data),
-
         // Edge cases
-        format!("$JS.ACK...1.2.3.4.5"),  // empty stream/consumer
-        format!("$JS.ACK.s.c.{}.2.3.4.5", subject_data),  // subject_data as numeric field
+        format!("$JS.ACK...1.2.3.4.5"), // empty stream/consumer
+        format!("$JS.ACK.s.c.{}.2.3.4.5", subject_data), // subject_data as numeric field
     ];
 
     for reply_subject in &test_patterns {
@@ -99,57 +111,45 @@ fn test_malformed_json(base_data: &[u8]) {
             format!("{{{}}}", base_str),
             format!("[\"{}\"]", base_str),
             format!("\"{}\"", base_str),
-
             // Incomplete JSON
-            format!("{{\"field\":\"{}", base_str),      // Missing closing quote/brace
-            format!("{{\"{}\":", base_str),             // Missing value
+            format!("{{\"field\":\"{}", base_str), // Missing closing quote/brace
+            format!("{{\"{}\":", base_str),        // Missing value
             format!("{{\"{}\":{}}}", base_str, base_str), // Non-quoted value
-
             // Nested structures
             format!("{{\"config\":{{\"name\":\"{}\"}}}}", base_str),
             format!("{{\"stream_info\":{{\"{}\":{}}}}}", base_str, "null"),
-
             // Array structures
             format!("{{\"subjects\":[\"{}\",\"{}\"]}}", base_str, base_str),
             format!("{{\"messages\":[{{\"data\":\"{}\"}}]}}", base_str),
-
             // Large numbers
             format!("{{\"seq\":{}}}", base_str),
             format!("{{\"size\":{}}}", u64::MAX),
             format!("{{\"count\":{}}}", i64::MIN),
-
             // Special float values
             format!("{{\"rate\":{}}}", "NaN"),
             format!("{{\"timeout\":{}}}", "Infinity"),
             format!("{{\"delay\":{}}}", "-Infinity"),
-
             // Unicode and escapes
             format!("{{\"subject\":\"{}\\u0000\"}}", base_str),
             format!("{{\"data\":\"{}\\uFFFF\"}}", base_str),
-            format!("{{\"name\":\"{}\u{1F4A9}\"}}", base_str),   // emoji
-
+            format!("{{\"name\":\"{}\u{1F4A9}\"}}", base_str), // emoji
             // Control characters
-            format!("{{\"{}\x00\":\"value\"}}", base_str),      // null in key
-            format!("{{\"key\":\"{}\x1F\"}}", base_str),        // control char
-            format!("{{\"bom\":\"{}\u{FEFF}\"}}", base_str),     // BOM
-
+            format!("{{\"{}\x00\":\"value\"}}", base_str), // null in key
+            format!("{{\"key\":\"{}\x1F\"}}", base_str),   // control char
+            format!("{{\"bom\":\"{}\u{FEFF}\"}}", base_str), // BOM
             // Malformed escapes
-            format!("{{\"field\":\"{}\\x\"}}", base_str),       // bad escape
-            format!("{{\"field\":\"{}\\u123\"}}", base_str),    // incomplete unicode
-            format!("{{\"field\":\"{}\\uZZZZ\"}}", base_str),   // invalid unicode
-
+            format!("{{\"field\":\"{}\\x\"}}", base_str), // bad escape
+            format!("{{\"field\":\"{}\\u123\"}}", base_str), // incomplete unicode
+            format!("{{\"field\":\"{}\\uZZZZ\"}}", base_str), // invalid unicode
             // Duplicate keys
             format!("{{\"key\":\"{}\",\"key\":\"{}\"}}", base_str, base_str),
-
             // Type confusion
-            format!("{{\"seq\":\"{}\"}}",  base_str),           // string for number
-            format!("{{\"messages\":\"{}\"}}",  base_str),     // string for array
-            format!("{{\"config\":\"{}\"}}",  base_str),       // string for object
-
+            format!("{{\"seq\":\"{}\"}}", base_str), // string for number
+            format!("{{\"messages\":\"{}\"}}", base_str), // string for array
+            format!("{{\"config\":\"{}\"}}", base_str), // string for object
             // Very long values
             base_str.repeat(1000),
             format!("{{\"data\":\"{}\"}}", base_str.repeat(500)),
-
             // Deep nesting
             (0..100).fold(format!("{{\"data\":\"{}\"}}", base_str), |acc, _| {
                 format!("{{\"nested\":{}}}", acc)
@@ -172,43 +172,35 @@ fn test_json_edge_cases() {
         "null",
         "   ",
         "\t\n\r",
-
         // Minimal valid stream info
         r#"{"config":{"name":"test"}}"#,
         r#"{"state":{"messages":0}}"#,
-
         // Minimal valid pub ack
         r#"{"stream":"test","seq":1}"#,
         r#"{"error":{"code":400,"description":"bad request"}}"#,
-
         // API errors
         r#"{"error_code":404,"description":"not found"}"#,
         r#"{"type":"error","code":500}"#,
-
         // Boundary numbers
         r#"{"seq":0}"#,
-        r#"{"seq":18446744073709551615}"#,    // u64::MAX
-        r#"{"delivered":-1}"#,               // negative
+        r#"{"seq":18446744073709551615}"#,     // u64::MAX
+        r#"{"delivered":-1}"#,                 // negative
         r#"{"size":1.7976931348623157e+308}"#, // f64 max
         r#"{"rate":4.9406564584124654e-324}"#, // f64 min positive
-
         // Complex nested structures
         r#"{"config":{"name":"stream","subjects":["a","b","c"],"retention":"limits","max_msgs":1000}}"#,
         r#"{"state":{"messages":100,"bytes":1024,"first_seq":1,"last_seq":100,"consumer_count":2}}"#,
         r#"{"cluster":{"name":"cluster","leader":"node1","replicas":[{"name":"node2","current":true}]}}"#,
-
         // Real-world-ish payloads
         r#"{"type":"io.nats.jetstream.api.v1.stream_info_response","config":{"name":"EVENTS","subjects":["events.*"],"retention":"limits","max_consumers":-1,"max_msgs":-1,"max_bytes":-1,"max_age":0,"max_msgs_per_subject":-1,"max_msg_size":-1,"storage":"file","num_replicas":1,"discard":"old"},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}"#,
         r#"{"type":"io.nats.jetstream.api.v1.pub_ack","stream":"ORDERS","seq":1234567}"#,
         r#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#,
-
         // Malicious attempts
-        "x".repeat(100000),                  // very long
-        "{}".repeat(50000),                  // many objects
-        "[".repeat(10000) + &"]".repeat(10000), // deep arrays
-        format!("{{\"overflow\":{}}}", "9".repeat(1000)),  // huge number
+        "x".repeat(100000),                                  // very long
+        "{}".repeat(50000),                                  // many objects
+        "[".repeat(10000) + &"]".repeat(10000),              // deep arrays
+        format!("{{\"overflow\":{}}}", "9".repeat(1000)),    // huge number
         "{\"a\":".repeat(1000) + "null" + &"}".repeat(1000), // deep nesting
-
         // Encoding edge cases
         r#"{"utf8":"Hello 世界"}"#,
         r#"{"emoji":"🚀📡🌟"}"#,
@@ -237,7 +229,7 @@ fn test_json_edge_cases() {
         "mixed.Case.Subject.With.123.Numbers",
         "special!@#$%^&*()chars",
         "unicode.测试.🌟",
-        "\x00\x1F\x7F",      // control chars
+        "\x00\x1F\x7F", // control chars
         " leading.space",
         "trailing.space ",
         "  multiple   spaces  ",
@@ -254,20 +246,30 @@ fn test_protocol_patterns() {
     // Test various JetStream API patterns
     let api_patterns = vec![
         // Stream operations
-        ("$JS.API.STREAM.CREATE.EVENTS", r#"{"name":"EVENTS","subjects":["events.*"]}"#),
+        (
+            "$JS.API.STREAM.CREATE.EVENTS",
+            r#"{"name":"EVENTS","subjects":["events.*"]}"#,
+        ),
         ("$JS.API.STREAM.DELETE.EVENTS", r#"{"}"#),
         ("$JS.API.STREAM.INFO.EVENTS", r#"{}"#),
         ("$JS.API.STREAM.LIST", r#"{"offset":0,"limit":256}"#),
-        ("$JS.API.STREAM.PURGE.EVENTS", r#"{"filter":"events.old.*"}"#),
-
+        (
+            "$JS.API.STREAM.PURGE.EVENTS",
+            r#"{"filter":"events.old.*"}"#,
+        ),
         // Consumer operations
-        ("$JS.API.CONSUMER.CREATE.EVENTS.PROCESSOR", r#"{"durable_name":"processor","deliver_subject":"process.>"}"#),
+        (
+            "$JS.API.CONSUMER.CREATE.EVENTS.PROCESSOR",
+            r#"{"durable_name":"processor","deliver_subject":"process.>"}"#,
+        ),
         ("$JS.API.CONSUMER.DELETE.EVENTS.PROCESSOR", r#"{}"#),
         ("$JS.API.CONSUMER.INFO.EVENTS.PROCESSOR", r#"{}"#),
-
         // Message operations
         ("$JS.API.DIRECT.GET.EVENTS", r#"{"seq":123}"#),
-        ("$JS.API.STREAM.MSG.DELETE.EVENTS", r#"{"seq":456,"no_erase":false}"#),
+        (
+            "$JS.API.STREAM.MSG.DELETE.EVENTS",
+            r#"{"seq":456,"no_erase":false}"#,
+        ),
     ];
 
     for (subject, payload) in &api_patterns {
@@ -354,7 +356,10 @@ fuzz_target!(|data: &[u8]| {
             format!("{{\"delivered\":{}}}", first_byte as u64),
             format!("{{\"size\":{}}}", (first_byte as u64) * 1_000_000),
             format!("{{\"rate\":{}.{}}}", first_byte / 10, first_byte % 10),
-            format!("{{\"timeout\":{}}}", if first_byte == 0 { 1 } else { first_byte }),
+            format!(
+                "{{\"timeout\":{}}}",
+                if first_byte == 0 { 1 } else { first_byte }
+            ),
         ];
 
         for test_json in &numeric_tests {
@@ -366,7 +371,10 @@ fuzz_target!(|data: &[u8]| {
             format!("{{\"name\":\"{}\"}}", first_byte as char),
             format!("{{\"subject\":\"test.{}.events\"}}", first_byte),
             format!("{{\"error\":\"code {}\"}}", first_byte),
-            format!("{{\"description\":\"{}\"}}", (0..first_byte).map(|_| 'x').collect::<String>()),
+            format!(
+                "{{\"description\":\"{}\"}}",
+                (0..first_byte).map(|_| 'x').collect::<String>()
+            ),
         ];
 
         for test_json in &string_tests {
@@ -377,14 +385,19 @@ fuzz_target!(|data: &[u8]| {
     // Test 10: Mixed encoding interpretation
     if data.len() >= 2 {
         // Test as potential JSON with BOM
-        let with_bom = [0xEF, 0xBB, 0xBF].iter().chain(data.iter()).copied().collect::<Vec<_>>();
+        let with_bom = [0xEF, 0xBB, 0xBF]
+            .iter()
+            .chain(data.iter())
+            .copied()
+            .collect::<Vec<_>>();
         if let Ok(bom_string) = String::from_utf8(with_bom) {
             test_jetstream_api_robustness(&bom_string);
         }
 
         // Test as potential UTF-16
         if data.len() % 2 == 0 {
-            let utf16_units: Vec<u16> = data.chunks_exact(2)
+            let utf16_units: Vec<u16> = data
+                .chunks_exact(2)
                 .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
                 .collect();
             if let Ok(utf16_string) = String::from_utf16(&utf16_units) {

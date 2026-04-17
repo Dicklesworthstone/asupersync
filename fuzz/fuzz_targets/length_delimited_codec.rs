@@ -16,18 +16,18 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use asupersync::codec::{Decoder, LengthDelimitedCodec};
 use asupersync::bytes::BytesMut;
+use asupersync::codec::{Decoder, LengthDelimitedCodec};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzConfig {
-    length_field_offset: u8,        // 0..=255
-    length_field_length: u8,        // Will be clamped to 1..=8
-    length_adjustment: i16,         // -32768..32767
-    num_skip: u8,                   // 0..=255
-    max_frame_length: u16,          // 1..=65535
+    length_field_offset: u8, // 0..=255
+    length_field_length: u8, // Will be clamped to 1..=8
+    length_adjustment: i16,  // -32768..32767
+    num_skip: u8,            // 0..=255
+    max_frame_length: u16,   // 1..=65535
     big_endian: bool,
 }
 
@@ -82,12 +82,16 @@ fuzz_target!(|input: FuzzInput| {
                 // Successfully decoded a frame
 
                 // Basic sanity checks that should never fail
-                assert!(frame.len() <= max_frame_length,
-                       "Decoded frame exceeds max_frame_length");
+                assert!(
+                    frame.len() <= max_frame_length,
+                    "Decoded frame exceeds max_frame_length"
+                );
 
                 // Ensure frame is not unreasonably large
-                assert!(frame.len() <= 10_000_000,
-                       "Decoded frame is suspiciously large");
+                assert!(
+                    frame.len() <= 10_000_000,
+                    "Decoded frame is suspiciously large"
+                );
 
                 // If buffer is empty, we should be done
                 if buf.is_empty() {

@@ -31,24 +31,23 @@ use libfuzzer_sys::fuzz_target;
 /// - Embedded null bytes and control characters
 /// - Very long compression streams testing memory usage
 use asupersync::http::compress::{
-    ContentEncoding, negotiate_encoding, parse_accept_encoding,
-    IdentityDecompressor, GzipDecompressor, DeflateDecompressor, BrotliDecompressor,
-    Decompressor,
+    BrotliDecompressor, ContentEncoding, Decompressor, DeflateDecompressor, GzipDecompressor,
+    IdentityDecompressor, negotiate_encoding, parse_accept_encoding,
 };
 use std::io;
 
 // Constants for decompression bomb protection
 const MAX_DECOMPRESSED_SIZE: usize = 1024 * 1024; // 1MB safety limit for fuzzing
-const SMALL_DECOMPRESSED_SIZE: usize = 1024;      // 1KB for testing exact limits
+const SMALL_DECOMPRESSED_SIZE: usize = 1024; // 1KB for testing exact limits
 
 /// Test identity decompression with size limits and edge cases.
 fn test_identity_decompression(data: &[u8]) {
     // Test various size limits
     let size_limits = [
-        None,                           // No limit
-        Some(SMALL_DECOMPRESSED_SIZE), // Small limit
-        Some(MAX_DECOMPRESSED_SIZE),   // Large limit
-        Some(data.len()),              // Exact size
+        None,                               // No limit
+        Some(SMALL_DECOMPRESSED_SIZE),      // Small limit
+        Some(MAX_DECOMPRESSED_SIZE),        // Large limit
+        Some(data.len()),                   // Exact size
         Some(data.len().saturating_sub(1)), // Just under
     ];
 
@@ -58,7 +57,9 @@ fn test_identity_decompression(data: &[u8]) {
 
         // Test chunk-by-chunk decompression
         for chunk_size in [1, 4, 16, 64, data.len()] {
-            if chunk_size > data.len() { continue; }
+            if chunk_size > data.len() {
+                continue;
+            }
 
             let mut local_output = Vec::new();
             let mut local_decompressor = IdentityDecompressor::new(max_size);
@@ -68,16 +69,22 @@ fn test_identity_decompression(data: &[u8]) {
                     Ok(_) => {
                         // Verify size limits are respected
                         if let Some(limit) = max_size {
-                            assert!(local_output.len() <= limit,
+                            assert!(
+                                local_output.len() <= limit,
                                 "Identity decompressor exceeded size limit: {} > {}",
-                                local_output.len(), limit);
+                                local_output.len(),
+                                limit
+                            );
                         }
                     }
                     Err(e) => {
                         // Error is acceptable, especially for size limit violations
-                        assert!(e.kind() == io::ErrorKind::Other ||
-                               e.kind() == io::ErrorKind::InvalidData,
-                               "Unexpected error kind: {:?}", e.kind());
+                        assert!(
+                            e.kind() == io::ErrorKind::Other
+                                || e.kind() == io::ErrorKind::InvalidData,
+                            "Unexpected error kind: {:?}",
+                            e.kind()
+                        );
                     }
                 }
             }
@@ -106,9 +113,12 @@ fn test_gzip_decompression(data: &[u8]) {
             Ok(_) => {
                 // Verify size limits
                 if let Some(limit) = max_size {
-                    assert!(output.len() <= limit,
+                    assert!(
+                        output.len() <= limit,
                         "Gzip decompressor exceeded size limit: {} > {}",
-                        output.len(), limit);
+                        output.len(),
+                        limit
+                    );
                 }
 
                 // Test finish after successful decompress
@@ -123,7 +133,9 @@ fn test_gzip_decompression(data: &[u8]) {
 
         // Test streaming decompression with various chunk sizes
         for chunk_size in [1, 8, 32] {
-            if data.len() < chunk_size { continue; }
+            if data.len() < chunk_size {
+                continue;
+            }
 
             let mut stream_decompressor = GzipDecompressor::new(max_size);
             let mut stream_output = Vec::new();
@@ -132,9 +144,12 @@ fn test_gzip_decompression(data: &[u8]) {
                 match stream_decompressor.decompress(chunk, &mut stream_output) {
                     Ok(_) => {
                         if let Some(limit) = max_size {
-                            assert!(stream_output.len() <= limit,
+                            assert!(
+                                stream_output.len() <= limit,
                                 "Streaming gzip exceeded size limit: {} > {}",
-                                stream_output.len(), limit);
+                                stream_output.len(),
+                                limit
+                            );
                         }
                     }
                     Err(_) => break, // Expected for malformed data
@@ -162,9 +177,12 @@ fn test_deflate_decompression(data: &[u8]) {
         match decompressor.decompress(data, &mut output) {
             Ok(_) => {
                 if let Some(limit) = max_size {
-                    assert!(output.len() <= limit,
+                    assert!(
+                        output.len() <= limit,
                         "Deflate decompressor exceeded size limit: {} > {}",
-                        output.len(), limit);
+                        output.len(),
+                        limit
+                    );
                 }
             }
             Err(_) => {
@@ -179,13 +197,17 @@ fn test_deflate_decompression(data: &[u8]) {
         let mut incremental_output = Vec::new();
 
         // Feed data byte by byte to stress boundary handling
-        for &byte in data.iter().take(100) { // Limit to avoid timeout
+        for &byte in data.iter().take(100) {
+            // Limit to avoid timeout
             match incremental_decompressor.decompress(&[byte], &mut incremental_output) {
                 Ok(_) => {
                     if let Some(limit) = max_size {
                         if incremental_output.len() > limit {
-                            panic!("Incremental deflate exceeded size limit: {} > {}",
-                                   incremental_output.len(), limit);
+                            panic!(
+                                "Incremental deflate exceeded size limit: {} > {}",
+                                incremental_output.len(),
+                                limit
+                            );
                         }
                     }
                 }
@@ -212,9 +234,12 @@ fn test_brotli_decompression(data: &[u8]) {
         match decompressor.decompress(data, &mut output) {
             Ok(_) => {
                 if let Some(limit) = max_size {
-                    assert!(output.len() <= limit,
+                    assert!(
+                        output.len() <= limit,
                         "Brotli decompressor exceeded size limit: {} > {}",
-                        output.len(), limit);
+                        output.len(),
+                        limit
+                    );
                 }
             }
             Err(_) => {
@@ -228,16 +253,22 @@ fn test_brotli_decompression(data: &[u8]) {
         let mut chunk_decompressor = BrotliDecompressor::new(max_size);
         let mut chunk_output = Vec::new();
 
-        for chunk_size in [2, 7, 23] { // Prime numbers to hit weird boundaries
-            if data.len() < chunk_size { continue; }
+        for chunk_size in [2, 7, 23] {
+            // Prime numbers to hit weird boundaries
+            if data.len() < chunk_size {
+                continue;
+            }
 
             for chunk in data.chunks(chunk_size) {
                 match chunk_decompressor.decompress(chunk, &mut chunk_output) {
                     Ok(_) => {
                         if let Some(limit) = max_size {
                             if chunk_output.len() > limit {
-                                panic!("Chunked brotli exceeded size limit: {} > {}",
-                                       chunk_output.len(), limit);
+                                panic!(
+                                    "Chunked brotli exceeded size limit: {} > {}",
+                                    chunk_output.len(),
+                                    limit
+                                );
                             }
                         }
                     }
@@ -284,14 +315,15 @@ fn test_accept_encoding_parsing(data: &[u8]) {
 
 /// Generate malformed compressed data patterns for edge case testing.
 fn test_compression_edge_cases(base_data: &[u8]) {
-    if base_data.is_empty() { return; }
+    if base_data.is_empty() {
+        return;
+    }
 
     // Create various malformed compression patterns
     let malformed_patterns = vec![
         // Truncated headers
         base_data[..std::cmp::min(1, base_data.len())].to_vec(),
         base_data[..std::cmp::min(2, base_data.len())].to_vec(),
-
         // Invalid magic numbers (common compression headers)
         {
             let mut invalid_gzip = vec![0x1f, 0x8b, 0x08]; // Valid gzip header start
@@ -299,19 +331,17 @@ fn test_compression_edge_cases(base_data: &[u8]) {
             invalid_gzip[2] = 0xFF; // Invalid compression method
             invalid_gzip
         },
-
         // Potential decompression bombs - small input that might expand
         {
             let mut bomb_attempt = vec![
                 0x1f, 0x8b, 0x08, 0x00, // gzip header
                 0x00, 0x00, 0x00, 0x00, // mtime
-                0x00, 0x03,             // extra flags + OS
+                0x00, 0x03, // extra flags + OS
             ];
             // Add deflate stream that might attempt to create large output
             bomb_attempt.extend_from_slice(base_data);
             bomb_attempt
         },
-
         // Embedded nulls and control characters
         {
             let mut with_nulls = base_data.to_vec();
@@ -320,7 +350,6 @@ fn test_compression_edge_cases(base_data: &[u8]) {
             }
             with_nulls
         },
-
         // Repeated byte patterns (common in compression bombs)
         vec![base_data.get(0).copied().unwrap_or(0); std::cmp::min(base_data.len() * 10, 1000)],
     ];
@@ -339,27 +368,21 @@ fn test_known_edge_cases() {
     let edge_cases = vec![
         // Empty input
         vec![],
-
         // Single bytes
         vec![0x00],
         vec![0xFF],
-
         // Valid gzip header with no data
         vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03],
-
         // Invalid gzip magic
         vec![0x1f, 0x8c, 0x08, 0x00],
-
         // Deflate with zlib header
         vec![0x78, 0x9c], // zlib header (CM=8, CINFO=7, FCHECK=28)
-
         // Brotli stream header
         vec![0x1b], // Brotli stream start
-
         // Large header claiming huge uncompressed size
-        vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
-             0xFF, 0xFF, 0xFF, 0xFF], // Try to claim huge size
-
+        vec![
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xFF, 0xFF, 0xFF, 0xFF,
+        ], // Try to claim huge size
         // Accept-Encoding edge cases
         b"gzip;q=1.7976931348623157e+308".to_vec(), // Huge quality value
         b"*;q=0.".to_vec(),                         // Incomplete quality
@@ -379,10 +402,18 @@ fn test_known_edge_cases() {
 
 /// Test size limit enforcement at exact boundaries.
 fn test_size_limit_boundaries(data: &[u8]) {
-    if data.is_empty() { return; }
+    if data.is_empty() {
+        return;
+    }
 
     // Test exact boundary conditions for size limits
-    let test_sizes = [0, 1, data.len().saturating_sub(1), data.len(), data.len() + 1];
+    let test_sizes = [
+        0,
+        1,
+        data.len().saturating_sub(1),
+        data.len(),
+        data.len() + 1,
+    ];
 
     for &limit in &test_sizes {
         // Test identity decompression at exact boundaries
@@ -391,8 +422,12 @@ fn test_size_limit_boundaries(data: &[u8]) {
 
         match identity.decompress(data, &mut output) {
             Ok(_) => {
-                assert!(output.len() <= limit,
-                    "Identity boundary test failed: {} > {}", output.len(), limit);
+                assert!(
+                    output.len() <= limit,
+                    "Identity boundary test failed: {} > {}",
+                    output.len(),
+                    limit
+                );
             }
             Err(_) => {
                 // Expected when data exceeds limit
@@ -411,8 +446,12 @@ fn test_size_limit_boundaries(data: &[u8]) {
         for &byte in data.iter().take(limit.saturating_add(5)) {
             match streaming_identity.decompress(&[byte], &mut streaming_output) {
                 Ok(_) => {
-                    assert!(streaming_output.len() <= limit,
-                        "Streaming boundary test failed: {} > {}", streaming_output.len(), limit);
+                    assert!(
+                        streaming_output.len() <= limit,
+                        "Streaming boundary test failed: {} > {}",
+                        streaming_output.len(),
+                        limit
+                    );
                 }
                 Err(_) => {
                     // Expected when hitting size limit
@@ -453,7 +492,10 @@ fuzz_target!(|data: &[u8]| {
         let mut identity_output = Vec::new();
         let mut identity_decompressor = IdentityDecompressor::new(Some(MAX_DECOMPRESSED_SIZE));
 
-        if identity_decompressor.decompress(data, &mut identity_output).is_ok() {
+        if identity_decompressor
+            .decompress(data, &mut identity_output)
+            .is_ok()
+        {
             // If identity succeeds, the data should be treated as literal bytes
             // Verify that compressed formats properly reject or handle it
 
@@ -476,9 +518,13 @@ fuzz_target!(|data: &[u8]| {
                 ("brotli", &brotli_result, &brotli_output),
             ] {
                 if result.is_ok() {
-                    assert!(output.len() <= MAX_DECOMPRESSED_SIZE,
+                    assert!(
+                        output.len() <= MAX_DECOMPRESSED_SIZE,
                         "{} decompressor exceeded size limit: {} > {}",
-                        name, output.len(), MAX_DECOMPRESSED_SIZE);
+                        name,
+                        output.len(),
+                        MAX_DECOMPRESSED_SIZE
+                    );
                 }
             }
         }
@@ -486,7 +532,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 7: Encoding negotiation with fuzzer-generated headers
     if let Ok(header_str) = std::str::from_utf8(data) {
-        if header_str.len() < 1000 { // Prevent excessively long headers
+        if header_str.len() < 1000 {
+            // Prevent excessively long headers
             // Test realistic encoding combinations
             let encoding_combinations = [
                 &[ContentEncoding::Identity][..],
@@ -495,8 +542,17 @@ fuzz_target!(|data: &[u8]| {
                 &[ContentEncoding::Brotli],
                 &[ContentEncoding::Gzip, ContentEncoding::Deflate],
                 &[ContentEncoding::Gzip, ContentEncoding::Brotli],
-                &[ContentEncoding::Gzip, ContentEncoding::Deflate, ContentEncoding::Brotli],
-                &[ContentEncoding::Identity, ContentEncoding::Gzip, ContentEncoding::Deflate, ContentEncoding::Brotli],
+                &[
+                    ContentEncoding::Gzip,
+                    ContentEncoding::Deflate,
+                    ContentEncoding::Brotli,
+                ],
+                &[
+                    ContentEncoding::Identity,
+                    ContentEncoding::Gzip,
+                    ContentEncoding::Deflate,
+                    ContentEncoding::Brotli,
+                ],
             ];
 
             for supported in &encoding_combinations {
@@ -519,7 +575,8 @@ fuzz_target!(|data: &[u8]| {
             ];
 
             for variant in &header_variants {
-                if variant.len() < 2000 { // Prevent excessive lengths
+                if variant.len() < 2000 {
+                    // Prevent excessive lengths
                     let _result = negotiate_encoding(Some(variant), &[ContentEncoding::Gzip]);
                 }
             }

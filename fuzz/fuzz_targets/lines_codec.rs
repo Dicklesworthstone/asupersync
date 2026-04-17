@@ -16,23 +16,23 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use asupersync::codec::{Decoder, LinesCodec};
 use asupersync::bytes::BytesMut;
+use asupersync::codec::{Decoder, LinesCodec};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzConfig {
-    max_length: Option<u16>,  // None = unlimited, Some(n) = limited
+    max_length: Option<u16>, // None = unlimited, Some(n) = limited
     use_decode_eof: bool,
-    split_operations: bool,   // Whether to split buffer operations
+    split_operations: bool, // Whether to split buffer operations
 }
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     config: FuzzConfig,
     data: Vec<u8>,
-    split_points: Vec<u8>,   // For splitting operations
+    split_points: Vec<u8>, // For splitting operations
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -75,17 +75,30 @@ fuzz_target!(|input: FuzzInput| {
                     // Successfully decoded a line
 
                     // Basic UTF-8 validation - should never fail if codec returned Ok
-                    assert!(line.chars().all(|_| true), "Codec returned invalid UTF-8 string");
+                    assert!(
+                        line.chars().all(|_| true),
+                        "Codec returned invalid UTF-8 string"
+                    );
 
                     // If max_length is set, line should not exceed it
                     if max_length != usize::MAX {
-                        assert!(line.len() <= max_length,
-                               "Line length {} exceeds max_length {}", line.len(), max_length);
+                        assert!(
+                            line.len() <= max_length,
+                            "Line length {} exceeds max_length {}",
+                            line.len(),
+                            max_length
+                        );
                     }
 
                     // Ensure line doesn't contain newline characters (they should be stripped)
-                    assert!(!line.contains('\n'), "Decoded line contains newline character");
-                    assert!(!line.contains('\r'), "Decoded line contains carriage return");
+                    assert!(
+                        !line.contains('\n'),
+                        "Decoded line contains newline character"
+                    );
+                    assert!(
+                        !line.contains('\r'),
+                        "Decoded line contains carriage return"
+                    );
 
                     // If buffer is empty, break
                     if buf.is_empty() {

@@ -35,7 +35,12 @@ impl<'a> TlsReader<'a> {
         if self.pos + 3 > self.data.len() {
             return Err("Not enough data for u24".to_string());
         }
-        let val = u32::from_be_bytes([0, self.data[self.pos], self.data[self.pos + 1], self.data[self.pos + 2]]);
+        let val = u32::from_be_bytes([
+            0,
+            self.data[self.pos],
+            self.data[self.pos + 1],
+            self.data[self.pos + 2],
+        ]);
         self.pos += 3;
         Ok(val)
     }
@@ -253,7 +258,6 @@ fn test_certificate_parsing(data: &[u8]) {
     let pin_set = CertificatePinSet::new();
     let _ = pin_set.validate(&cert);
 }
-
 
 /// Test private key parsing
 fn test_private_key_parsing(data: &[u8]) {

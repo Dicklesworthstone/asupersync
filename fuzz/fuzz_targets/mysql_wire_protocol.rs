@@ -8,8 +8,8 @@ use libfuzzer_sys::fuzz_target;
 /// MySQL packet header structure (4 bytes)
 #[derive(Debug)]
 struct PacketHeader {
-    length: u32,    // 3 bytes, little endian
-    sequence: u8,   // 1 byte
+    length: u32,  // 3 bytes, little endian
+    sequence: u8, // 1 byte
 }
 
 /// MySQL OK packet structure
@@ -37,7 +37,10 @@ fn parse_packet_header(data: &[u8], expected_seq: u8) -> Result<PacketHeader, St
     }
 
     if sequence != expected_seq {
-        return Err(format!("Sequence mismatch: expected {}, got {}", expected_seq, sequence));
+        return Err(format!(
+            "Sequence mismatch: expected {}, got {}",
+            expected_seq, sequence
+        ));
     }
 
     Ok(PacketHeader { length, sequence })
@@ -62,7 +65,7 @@ fn read_lenenc_int(data: &[u8], offset: &mut usize) -> Result<u64, String> {
             let val = u16::from_le_bytes([data[*offset], data[*offset + 1]]);
             *offset += 2;
             Ok(u64::from(val))
-        },
+        }
         253 => {
             if *offset + 2 >= data.len() {
                 return Err("Insufficient data for 3-byte length".to_string());
@@ -70,18 +73,24 @@ fn read_lenenc_int(data: &[u8], offset: &mut usize) -> Result<u64, String> {
             let val = u32::from_le_bytes([data[*offset], data[*offset + 1], data[*offset + 2], 0]);
             *offset += 3;
             Ok(u64::from(val))
-        },
+        }
         254 => {
             if *offset + 7 >= data.len() {
                 return Err("Insufficient data for 8-byte length".to_string());
             }
             let val = u64::from_le_bytes([
-                data[*offset], data[*offset + 1], data[*offset + 2], data[*offset + 3],
-                data[*offset + 4], data[*offset + 5], data[*offset + 6], data[*offset + 7],
+                data[*offset],
+                data[*offset + 1],
+                data[*offset + 2],
+                data[*offset + 3],
+                data[*offset + 4],
+                data[*offset + 5],
+                data[*offset + 6],
+                data[*offset + 7],
             ]);
             *offset += 8;
             Ok(val)
-        },
+        }
         _ => Err("Invalid length encoding".to_string()),
     }
 }

@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// RaptorQ Galois Field GF(256) operations for fuzzing
 mod gf256 {
@@ -26,7 +26,7 @@ mod gf256 {
                 result ^= a;
             }
             a = if a & 0x80 != 0 {
-                (a << 1) ^ 0x1B  // Primitive polynomial x^8 + x^4 + x^3 + x + 1
+                (a << 1) ^ 0x1B // Primitive polynomial x^8 + x^4 + x^3 + x + 1
             } else {
                 a << 1
             };
@@ -45,7 +45,7 @@ struct FuzzReceivedSymbol {
     /// Whether this is a source symbol (ESI < K)
     pub is_source: bool,
     /// Column indices this symbol depends on
-    pub columns: Vec<u16>,  // Use u16 to limit size
+    pub columns: Vec<u16>, // Use u16 to limit size
     /// GF(256) coefficients
     pub coefficients: Vec<u8>,
     /// Symbol data
@@ -92,12 +92,16 @@ fn validate_systematic_params(params: &mut FuzzSystematicParams) -> Result<(), F
 }
 
 /// Validate received symbols structure
-fn validate_received_symbols(symbols: &[FuzzReceivedSymbol], params: &FuzzSystematicParams) -> Result<(), FuzzDecodeError> {
+fn validate_received_symbols(
+    symbols: &[FuzzReceivedSymbol],
+    params: &FuzzSystematicParams,
+) -> Result<(), FuzzDecodeError> {
     let l = params.k + params.s + params.h;
 
     for symbol in symbols {
         // ESI bounds checking
-        if symbol.esi >= 2u32.pow(24) {  // 24-bit ESI limit
+        if symbol.esi >= 2u32.pow(24) {
+            // 24-bit ESI limit
             return Err(FuzzDecodeError::InvalidParameters);
         }
 
@@ -227,7 +231,10 @@ fn simulate_peeling_phase(symbols: &[FuzzReceivedSymbol]) -> Result<usize, FuzzD
 }
 
 /// Main fuzzing function that exercises RaptorQ decoding logic
-fn fuzz_raptorq_decode(mut params: FuzzSystematicParams, symbols: Vec<FuzzReceivedSymbol>) -> Result<(), FuzzDecodeError> {
+fn fuzz_raptorq_decode(
+    mut params: FuzzSystematicParams,
+    symbols: Vec<FuzzReceivedSymbol>,
+) -> Result<(), FuzzDecodeError> {
     // Validate and normalize parameters
     validate_systematic_params(&mut params)?;
 
@@ -291,11 +298,12 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Try to generate received symbols
-    let symbols: Vec<FuzzReceivedSymbol> = if let Ok(s) = Vec::<FuzzReceivedSymbol>::arbitrary(&mut unstructured) {
-        s
-    } else {
-        return;
-    };
+    let symbols: Vec<FuzzReceivedSymbol> =
+        if let Ok(s) = Vec::<FuzzReceivedSymbol>::arbitrary(&mut unstructured) {
+            s
+        } else {
+            return;
+        };
 
     // Limit the number of symbols for performance
     let limited_symbols: Vec<_> = symbols.into_iter().take(100).collect();
@@ -306,12 +314,25 @@ fuzz_target!(|data: &[u8]| {
     // Test some additional edge cases if we have remaining data
     if unstructured.len() > 0 {
         // Test empty symbol list
-        let _ = fuzz_raptorq_decode(FuzzSystematicParams { k: 1, symbol_size: 64, s: 0, h: 0 }, vec![]);
+        let _ = fuzz_raptorq_decode(
+            FuzzSystematicParams {
+                k: 1,
+                symbol_size: 64,
+                s: 0,
+                h: 0,
+            },
+            vec![],
+        );
 
         // Test single symbol
         if let Ok(single_symbol) = FuzzReceivedSymbol::arbitrary(&mut unstructured) {
             let _ = fuzz_raptorq_decode(
-                FuzzSystematicParams { k: 1, symbol_size: single_symbol.data.len() as u16, s: 0, h: 0 },
+                FuzzSystematicParams {
+                    k: 1,
+                    symbol_size: single_symbol.data.len() as u16,
+                    s: 0,
+                    h: 0,
+                },
                 vec![single_symbol],
             );
         }

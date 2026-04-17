@@ -2,6 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
+use asupersync::decoding::DecodingConfig;
 /// Symbol and ID deserialization fuzz testing for robustness and security.
 ///
 /// This fuzz target extensively tests the typed symbol and ID deserialization
@@ -22,15 +23,15 @@ use libfuzzer_sys::fuzz_target;
 /// - Serialization format exploits: malformed MessagePack/Bincode/JSON
 /// - ID boundary violations: arena index overflow, invalid ID constructions
 /// - Memory exhaustion: oversized payloads, deeply nested structures
-
 // Import the symbol and ID modules to test
 use asupersync::types::typed_symbol::{
-    TypedSymbol, TypedHeader, TypedDecoder, SerdeCodec, SerializationFormat,
-    Serializer, Deserializer, TYPED_SYMBOL_MAGIC, TYPED_SYMBOL_HEADER_LEN
+    Deserializer, SerdeCodec, SerializationFormat, Serializer, TYPED_SYMBOL_HEADER_LEN,
+    TYPED_SYMBOL_MAGIC, TypedDecoder, TypedHeader, TypedSymbol,
 };
-use asupersync::types::{RegionId, TaskId, ObligationId, Symbol, SymbolKind, ObjectId, ObjectParams};
-use asupersync::decoding::DecodingConfig;
-use serde::{Serialize, Deserialize};
+use asupersync::types::{
+    ObjectId, ObjectParams, ObligationId, RegionId, Symbol, SymbolKind, TaskId,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Test data structure for symbol serialization/deserialization testing
@@ -75,7 +76,9 @@ fn generate_valid_headers(data: &[u8]) -> Vec<Vec<u8>> {
         header.extend_from_slice(&data[0..8]); // Type ID from data
         header.push(SerializationFormat::MessagePack.to_byte());
         header.extend_from_slice(&data[0..8]); // Schema hash from data
-        header.extend_from_slice(&u32::from_be_bytes([data[4], data[5], data[6], data[7]]).to_le_bytes()); // Payload len
+        header.extend_from_slice(
+            &u32::from_be_bytes([data[4], data[5], data[6], data[7]]).to_le_bytes(),
+        ); // Payload len
         headers.push(header);
     }
 
@@ -92,8 +95,13 @@ fn generate_malformed_headers(data: &[u8]) -> Vec<Vec<u8>> {
     }
 
     // Invalid magic bytes
-    malformed.push(vec![b'F', b'A', b'K', b'E', 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0]);
-    malformed.push(vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0]);
+    malformed.push(vec![
+        b'F', b'A', b'K', b'E', 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0,
+        0,
+    ]);
+    malformed.push(vec![
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0,
+    ]);
 
     // Invalid format bytes
     let mut invalid_format = Vec::from(TYPED_SYMBOL_MAGIC);
@@ -179,7 +187,10 @@ fn generate_serialized_payloads(data: &[u8]) -> Vec<(SerializationFormat, Vec<u8
     if let Ok(serialized) = codec.serialize(&test_data, SerializationFormat::MessagePack) {
         for truncate_len in [1, serialized.len() / 2, serialized.len().saturating_sub(1)] {
             if truncate_len < serialized.len() {
-                payloads.push((SerializationFormat::MessagePack, serialized[..truncate_len].to_vec()));
+                payloads.push((
+                    SerializationFormat::MessagePack,
+                    serialized[..truncate_len].to_vec(),
+                ));
             }
         }
     }
@@ -203,7 +214,11 @@ fn test_id_deserialization(data: &[u8]) {
     let test_region_id = RegionId::ephemeral(); // Create valid ID
 
     let codec = SerdeCodec;
-    for format in [SerializationFormat::MessagePack, SerializationFormat::Json, SerializationFormat::Bincode] {
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Json,
+        SerializationFormat::Bincode,
+    ] {
         // Try to deserialize valid ID
         if let Ok(serialized) = codec.serialize(&test_region_id, format) {
             let _ = codec.deserialize::<RegionId>(&serialized, format);
@@ -291,7 +306,7 @@ fn test_serialization_formats(data: &[u8]) {
     if data.len() >= 4 {
         for i in 0..4.min(data.len() / 4) {
             let key = format!("key_{}", i);
-            let value = format!("value_{:?}", &data[i*4..(i+1)*4]);
+            let value = format!("value_{:?}", &data[i * 4..(i + 1) * 4]);
             complex_data.insert(key, value);
         }
 
@@ -329,7 +344,10 @@ fn test_serialization_formats(data: &[u8]) {
         };
     }
 
-    for format in [SerializationFormat::MessagePack, SerializationFormat::Bincode] {
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Bincode,
+    ] {
         if let Ok(serialized) = codec.serialize(&nested, format) {
             let _ = codec.deserialize::<Nested>(&serialized, format);
         }
@@ -432,7 +450,7 @@ fuzz_target!(|data: &[u8]| {
     if data.len() >= 4 {
         // Test various 4-byte combinations as potential magic numbers
         for i in 0..data.len().saturating_sub(3) {
-            let potential_magic = &data[i..i+4];
+            let potential_magic = &data[i..i + 4];
 
             // Create a minimal header with this magic
             let mut test_header = potential_magic.to_vec();
@@ -445,7 +463,7 @@ fuzz_target!(|data: &[u8]| {
     if data.len() >= 8 {
         // Test various integer interpretations of the input data
         for offset in 0..data.len().saturating_sub(8) {
-            let bytes = &data[offset..offset+8];
+            let bytes = &data[offset..offset + 8];
 
             // Test as version (u16)
             if bytes.len() >= 2 {
@@ -454,8 +472,7 @@ fuzz_target!(|data: &[u8]| {
 
             // Test as type_id (u64)
             let _type_id = u64::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7]
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]);
 
             // Test as payload_len (u32)

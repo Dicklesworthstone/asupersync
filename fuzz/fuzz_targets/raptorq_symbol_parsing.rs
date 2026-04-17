@@ -30,10 +30,10 @@ use libfuzzer_sys::fuzz_target;
 /// - Symbol scheduling and dependency resolution
 /// - RFC 6330 protocol compliance validation
 use asupersync::raptorq::{
-    decoder::{InactivationDecoder, ReceivedSymbol, DecodeError, DecodeResult},
+    decoder::{DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol},
     gf256::{Gf256, gf256_addmul_slice},
-    systematic::{SystematicParams, ConstraintMatrix},
     proof::{DecodeConfig, DecodeProof},
+    systematic::{ConstraintMatrix, SystematicParams},
 };
 use asupersync::types::ObjectId;
 
@@ -46,7 +46,9 @@ const MAX_ESI: u32 = 0xFFFFFF; // 24-bit Encoding Symbol ID limit
 
 /// Test ReceivedSymbol creation and validation with malformed inputs.
 fn test_received_symbol_parsing(data: &[u8]) {
-    if data.len() < 16 { return; }
+    if data.len() < 16 {
+        return;
+    }
 
     // Extract parameters from fuzz input
     let esi = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
@@ -58,16 +60,17 @@ fn test_received_symbol_parsing(data: &[u8]) {
     // Test various ESI values including edge cases
     let test_esis = [
         esi,
-        0,                    // Minimum ESI
-        MAX_ESI,             // Maximum ESI
-        MAX_ESI + 1,         // Beyond protocol limit
-        u32::MAX,            // Maximum u32
+        0,           // Minimum ESI
+        MAX_ESI,     // Maximum ESI
+        MAX_ESI + 1, // Beyond protocol limit
+        u32::MAX,    // Maximum u32
     ];
 
     for &test_esi in &test_esis {
         // Test column indices with potential overflow
         let mut columns = Vec::new();
-        for i in 0..num_columns.min(32) { // Limit to prevent timeout
+        for i in 0..num_columns.min(32) {
+            // Limit to prevent timeout
             let col_idx = if data.len() > data_start + i * 4 {
                 usize::from_le_bytes([
                     data.get(data_start + i * 4).copied().unwrap_or(0),
@@ -93,11 +96,11 @@ fn test_received_symbol_parsing(data: &[u8]) {
 
         // Test symbol data with various lengths
         let symbol_sizes = [
-            0,                           // Empty symbol
-            1,                           // Minimal symbol
-            data.len().saturating_sub(data_start),  // Use remaining fuzz data
+            0,                                     // Empty symbol
+            1,                                     // Minimal symbol
+            data.len().saturating_sub(data_start), // Use remaining fuzz data
             MIN_SYMBOL_SIZE,
-            MAX_SYMBOL_SIZE.min(1024),   // Limit for fuzzing performance
+            MAX_SYMBOL_SIZE.min(1024), // Limit for fuzzing performance
         ];
 
         for &symbol_size in &symbol_sizes {
@@ -122,13 +125,15 @@ fn test_received_symbol_parsing(data: &[u8]) {
             let _ = &symbol;
 
             // Test symbol validation by attempting to use in decoder
-            if test_esi <= MAX_ESI && !columns.is_empty() &&
-               columns.len() == coefficients.len() &&
-               symbol.data.len() <= MAX_SYMBOL_SIZE.min(1024) {
-
+            if test_esi <= MAX_ESI
+                && !columns.is_empty()
+                && columns.len() == coefficients.len()
+                && symbol.data.len() <= MAX_SYMBOL_SIZE.min(1024)
+            {
                 // Test with minimal valid parameters
                 let k = (columns.iter().max().copied().unwrap_or(0) + 1).min(100); // Limit K for performance
-                if k >= MIN_K && k <= 1000 { // Reasonable bounds for fuzzing
+                if k >= MIN_K && k <= 1000 {
+                    // Reasonable bounds for fuzzing
                     test_decoder_with_symbol(&symbol, k);
                 }
             }
@@ -139,7 +144,9 @@ fn test_received_symbol_parsing(data: &[u8]) {
 /// Test InactivationDecoder with malformed symbols.
 fn test_decoder_with_symbol(symbol: &ReceivedSymbol, k: usize) {
     // Create decoder with validated parameters
-    if k < MIN_K || k > 1000 { return; } // Reasonable bounds for fuzzing
+    if k < MIN_K || k > 1000 {
+        return;
+    } // Reasonable bounds for fuzzing
 
     let symbol_size = symbol.data.len().min(1024);
     let object_id = ObjectId::new();
@@ -161,7 +168,9 @@ fn test_decoder_with_symbol(symbol: &ReceivedSymbol, k: usize) {
 
 /// Test GF(256) operations with malformed inputs.
 fn test_gf256_operations(data: &[u8]) {
-    if data.len() < 4 { return; }
+    if data.len() < 4 {
+        return;
+    }
 
     // Test basic GF(256) operations
     let a = Gf256::from(data[0]);
@@ -194,7 +203,8 @@ fn test_gf256_operations(data: &[u8]) {
     }
 
     // Test GF(256) field properties with fuzz data
-    for &byte in data.iter().take(16) { // Limit for performance
+    for &byte in data.iter().take(16) {
+        // Limit for performance
         let element = Gf256::from(byte);
 
         // Test field operations
@@ -210,12 +220,13 @@ fn test_gf256_operations(data: &[u8]) {
 
 /// Test SystematicParams validation with edge case parameters.
 fn test_systematic_params_validation(data: &[u8]) {
-    if data.len() < 12 { return; }
+    if data.len() < 12 {
+        return;
+    }
 
     // Extract parameters from fuzz data
     let k = usize::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]);
 
     // Extract floating point parameters (c and delta)
@@ -248,7 +259,9 @@ fn test_systematic_params_validation(data: &[u8]) {
 
 /// Test constraint matrix operations with degenerate inputs.
 fn test_constraint_matrix_operations(data: &[u8]) {
-    if data.len() < 8 { return; }
+    if data.len() < 8 {
+        return;
+    }
 
     let k = ((data[0] as usize % 100) + 1).min(50); // Small K for performance
     let symbol_size = ((data[1] as usize % 64) + 1).min(32); // Small symbols
@@ -278,31 +291,37 @@ fn test_constraint_matrix_operations(data: &[u8]) {
 fn create_malformed_symbols(data: &[u8], k: usize) -> Vec<ReceivedSymbol> {
     let mut symbols = Vec::new();
 
-    if data.len() < 8 { return symbols; }
+    if data.len() < 8 {
+        return symbols;
+    }
 
     // Create symbols with various malformed properties
-    for i in 0..(data.len() / 8).min(10) { // Limit number for performance
+    for i in 0..(data.len() / 8).min(10) {
+        // Limit number for performance
         let offset = i * 8;
 
         let esi = u32::from_le_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
         ]);
 
         let malformed_types = [
             // Empty columns
             (vec![], vec![], vec![0u8]),
-
             // Oversized column indices
             (vec![usize::MAX], vec![Gf256::from(1)], vec![0u8]),
-
             // Mismatched columns and coefficients
             (vec![0, 1], vec![Gf256::from(1)], vec![0u8, 1u8]),
-
             // Very large column indices
             (vec![k + 1000], vec![Gf256::from(1)], vec![0u8]),
-
             // Duplicate column indices
-            (vec![0, 0, 0], vec![Gf256::from(1), Gf256::from(2), Gf256::from(3)], vec![0u8]),
+            (
+                vec![0, 0, 0],
+                vec![Gf256::from(1), Gf256::from(2), Gf256::from(3)],
+                vec![0u8],
+            ),
         ];
 
         for (columns, coefficients, symbol_data) in &malformed_types {
@@ -321,7 +340,9 @@ fn create_malformed_symbols(data: &[u8], k: usize) -> Vec<ReceivedSymbol> {
 
 /// Test decode operations with invalid symbol combinations.
 fn test_decode_edge_cases(data: &[u8]) {
-    if data.len() < 4 { return; }
+    if data.len() < 4 {
+        return;
+    }
 
     let k = ((data[0] as usize % 50) + 1).min(20); // Small K for performance
     let symbol_size = ((data[1] as usize % 32) + 1).min(16);
@@ -332,13 +353,15 @@ fn test_decode_edge_cases(data: &[u8]) {
         // Test decode with various problematic symbol sets
 
         // 1. All source symbols with same ESI
-        let same_esi_symbols: Vec<_> = (0..5).map(|_| ReceivedSymbol {
-            esi: 0,
-            is_source: true,
-            columns: vec![0],
-            coefficients: vec![Gf256::from(1)],
-            data: vec![0u8; symbol_size],
-        }).collect();
+        let same_esi_symbols: Vec<_> = (0..5)
+            .map(|_| ReceivedSymbol {
+                esi: 0,
+                is_source: true,
+                columns: vec![0],
+                coefficients: vec![Gf256::from(1)],
+                data: vec![0u8; symbol_size],
+            })
+            .collect();
 
         let _result = decoder.decode(&same_esi_symbols);
 
@@ -379,8 +402,11 @@ fn test_decode_edge_cases(data: &[u8]) {
                 is_source: true,
                 columns: vec![0],
                 coefficients: vec![Gf256::from(1)],
-                data: data.get(0..symbol_size).unwrap_or(&vec![0u8; symbol_size]).to_vec(),
-            }
+                data: data
+                    .get(0..symbol_size)
+                    .unwrap_or(&vec![0u8; symbol_size])
+                    .to_vec(),
+            },
         ];
 
         // Add malformed symbols
@@ -392,7 +418,9 @@ fn test_decode_edge_cases(data: &[u8]) {
 
 /// Test RFC 6330 protocol compliance edge cases.
 fn test_rfc6330_compliance(data: &[u8]) {
-    if data.len() < 8 { return; }
+    if data.len() < 8 {
+        return;
+    }
 
     // Test ESI ranges according to RFC 6330
     let esi = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
@@ -406,11 +434,9 @@ fn test_rfc6330_compliance(data: &[u8]) {
         // Valid source symbol
         (0, true),
         (k.saturating_sub(1) as u32, true),
-
         // Valid repair symbol
         (k as u32, false),
         (MAX_ESI, false),
-
         // Invalid ESI values
         (MAX_ESI + 1, false), // Beyond 24-bit limit
         (u32::MAX, false),    // Maximum u32
@@ -471,17 +497,18 @@ fuzz_target!(|data: &[u8]| {
         let object_id = ObjectId::new();
         if let Ok(decoder) = InactivationDecoder::new(object_id, k, symbol_size) {
             // Create many symbols to test performance bounds
-            let symbols: Vec<_> = (0..k * 2).map(|i| {
-                ReceivedSymbol {
+            let symbols: Vec<_> = (0..k * 2)
+                .map(|i| ReceivedSymbol {
                     esi: i as u32,
                     is_source: i < k,
                     columns: if i < k { vec![i] } else { vec![i % k] },
                     coefficients: vec![Gf256::from(((i + 1) % 256) as u8)],
-                    data: data.get(i * 16..(i + 1) * 16)
+                    data: data
+                        .get(i * 16..(i + 1) * 16)
                         .unwrap_or(&[0u8; 16])
                         .to_vec(),
-                }
-            }).collect();
+                })
+                .collect();
 
             // This should complete in reasonable time
             let _result = decoder.decode(&symbols);
@@ -516,13 +543,17 @@ fuzz_target!(|data: &[u8]| {
 
 /// Test critical boundary conditions in RaptorQ parameters.
 fn test_boundary_conditions(data: &[u8]) {
-    if data.is_empty() { return; }
+    if data.is_empty() {
+        return;
+    }
 
     // Test K parameter boundaries
     let k_boundaries = [0, 1, MIN_K, MAX_K.min(100), MAX_K + 1];
 
     for &k in &k_boundaries {
-        if k == 0 { continue; } // Skip invalid K
+        if k == 0 {
+            continue;
+        } // Skip invalid K
 
         let symbol_size = 16;
         let object_id = ObjectId::new();
@@ -535,7 +566,9 @@ fn test_boundary_conditions(data: &[u8]) {
     let symbol_size_boundaries = [0, 1, MIN_SYMBOL_SIZE, MAX_SYMBOL_SIZE.min(1024)];
 
     for &size in &symbol_size_boundaries {
-        if size == 0 { continue; } // Skip invalid size
+        if size == 0 {
+            continue;
+        } // Skip invalid size
 
         let object_id = ObjectId::new();
         let _result = InactivationDecoder::new(object_id, 10, size.min(1024));

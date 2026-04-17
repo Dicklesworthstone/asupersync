@@ -1,17 +1,11 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use asupersync::raptorq::gf256::{
-    Gf256,
-    gf256_add_slice,
-    gf256_add_slices2,
-    gf256_mul_slice,
-    gf256_addmul_slice,
-    active_kernel,
-    dual_mul_kernel_decision,
-    dual_addmul_kernel_decision,
+    Gf256, active_kernel, dual_addmul_kernel_decision, dual_mul_kernel_decision, gf256_add_slice,
+    gf256_add_slices2, gf256_addmul_slice, gf256_mul_slice,
 };
+use libfuzzer_sys::fuzz_target;
 
 /// Fuzzing input structure for GF256 operations
 #[derive(Arbitrary, Debug)]
@@ -59,10 +53,7 @@ enum SliceOperation {
         src_b_data: Vec<u8>,
     },
     /// Test gf256_mul_slice with scalar
-    MulSlice {
-        dst_data: Vec<u8>,
-        scalar: u8,
-    },
+    MulSlice { dst_data: Vec<u8>, scalar: u8 },
     /// Test gf256_addmul_slice operation
     AddMulSlice {
         dst_data: Vec<u8>,
@@ -116,7 +107,11 @@ fn test_field_operation(op: FieldOperation) {
 
             // Verify commutativity: a * b == b * a
             let reverse = Gf256(b).mul_field(Gf256(a));
-            assert_eq!(result.0, reverse.0, "Multiplication not commutative: {} * {} != {} * {}", a, b, b, a);
+            assert_eq!(
+                result.0, reverse.0,
+                "Multiplication not commutative: {} * {} != {} * {}",
+                a, b, b, a
+            );
 
             // Verify identity: a * 1 == a
             if b == 1 {
@@ -127,14 +122,18 @@ fn test_field_operation(op: FieldOperation) {
             if b == 0 {
                 assert_eq!(result.0, 0, "Zero multiplication failed: {} * 0 != 0", a);
             }
-        },
+        }
 
         FieldOperation::Add { a, b } => {
             let result = Gf256(a).0 ^ Gf256(b).0; // Addition is XOR in GF(256)
 
             // Verify commutativity: a + b == b + a
             let reverse = Gf256(b).0 ^ Gf256(a).0;
-            assert_eq!(result, reverse, "Addition not commutative: {} + {} != {} + {}", a, b, b, a);
+            assert_eq!(
+                result, reverse,
+                "Addition not commutative: {} + {} != {} + {}",
+                a, b, b, a
+            );
 
             // Verify identity: a + 0 == a
             if b == 0 {
@@ -145,7 +144,7 @@ fn test_field_operation(op: FieldOperation) {
             if a == b {
                 assert_eq!(result, 0, "Self-inverse failed: {} + {} != 0", a, a);
             }
-        },
+        }
 
         FieldOperation::Divide { a, b } => {
             if b != 0 {
@@ -153,9 +152,13 @@ fn test_field_operation(op: FieldOperation) {
 
                 // Verify: (a / b) * b == a
                 let check = result.mul_field(Gf256(b));
-                assert_eq!(check.0, a, "Division verification failed: ({} / {}) * {} != {}", a, b, b, a);
+                assert_eq!(
+                    check.0, a,
+                    "Division verification failed: ({} / {}) * {} != {}",
+                    a, b, b, a
+                );
             }
-        },
+        }
 
         FieldOperation::Invert { a } => {
             if a != 0 {
@@ -165,7 +168,7 @@ fn test_field_operation(op: FieldOperation) {
                 let check = Gf256(a).mul_field(inv);
                 assert_eq!(check.0, 1, "Inversion failed: {} * {}^-1 != 1", a, a);
             }
-        },
+        }
 
         FieldOperation::Power { a, exp } => {
             let result = Gf256(a).pow(exp);
@@ -179,27 +182,38 @@ fn test_field_operation(op: FieldOperation) {
             if exp == 1 {
                 assert_eq!(result.0, a, "Power of one failed: {}^1 != {}", a, a);
             }
-        },
+        }
 
         FieldOperation::AssociativityTest { a, b, c } => {
             let left = Gf256(a).mul_field(Gf256(b)).mul_field(Gf256(c));
             let right = Gf256(a).mul_field(Gf256(b).mul_field(Gf256(c)));
-            assert_eq!(left.0, right.0, "Associativity failed: ({} * {}) * {} != {} * ({} * {})", a, b, c, a, b, c);
-        },
+            assert_eq!(
+                left.0, right.0,
+                "Associativity failed: ({} * {}) * {} != {} * ({} * {})",
+                a, b, c, a, b, c
+            );
+        }
 
         FieldOperation::DistributivityTest { a, b, c } => {
             let left = Gf256(a).mul_field(Gf256(b ^ c)); // Addition is XOR
             let right_b = Gf256(a).mul_field(Gf256(b));
             let right_c = Gf256(a).mul_field(Gf256(c));
             let right = right_b.0 ^ right_c.0;
-            assert_eq!(left.0, right, "Distributivity failed: {} * ({} + {}) != ({} * {}) + ({} * {})", a, b, c, a, b, a, c);
-        },
+            assert_eq!(
+                left.0, right,
+                "Distributivity failed: {} * ({} + {}) != ({} * {}) + ({} * {})",
+                a, b, c, a, b, a, c
+            );
+        }
     }
 }
 
 fn test_slice_operation(op: SliceOperation) {
     match op {
-        SliceOperation::AddSlice { mut dst_data, src_data } => {
+        SliceOperation::AddSlice {
+            mut dst_data,
+            src_data,
+        } => {
             // Ensure slices are reasonable size
             if dst_data.len() > MAX_SLICE_LEN {
                 dst_data.truncate(MAX_SLICE_LEN);
@@ -215,17 +229,34 @@ fn test_slice_operation(op: SliceOperation) {
                 // Verify XOR operation
                 for i in 0..min_len {
                     let expected = original_dst[i] ^ src_slice[i];
-                    assert_eq!(dst_slice[i], expected, "Add slice failed at index {}: {} ^ {} != {}", i, original_dst[i], src_slice[i], expected);
+                    assert_eq!(
+                        dst_slice[i], expected,
+                        "Add slice failed at index {}: {} ^ {} != {}",
+                        i, original_dst[i], src_slice[i], expected
+                    );
                 }
             }
-        },
+        }
 
-        SliceOperation::AddSlices2 { mut dst_a_data, src_a_data, mut dst_b_data, src_b_data } => {
+        SliceOperation::AddSlices2 {
+            mut dst_a_data,
+            src_a_data,
+            mut dst_b_data,
+            src_b_data,
+        } => {
             // Ensure reasonable sizes
-            if dst_a_data.len() > MAX_SLICE_LEN { dst_a_data.truncate(MAX_SLICE_LEN); }
-            if dst_b_data.len() > MAX_SLICE_LEN { dst_b_data.truncate(MAX_SLICE_LEN); }
+            if dst_a_data.len() > MAX_SLICE_LEN {
+                dst_a_data.truncate(MAX_SLICE_LEN);
+            }
+            if dst_b_data.len() > MAX_SLICE_LEN {
+                dst_b_data.truncate(MAX_SLICE_LEN);
+            }
 
-            let min_len = dst_a_data.len().min(src_a_data.len()).min(dst_b_data.len()).min(src_b_data.len());
+            let min_len = dst_a_data
+                .len()
+                .min(src_a_data.len())
+                .min(dst_b_data.len())
+                .min(src_b_data.len());
             if min_len > 0 {
                 let dst_a_slice = &mut dst_a_data[..min_len];
                 let src_a_slice = &src_a_data[..min_len];
@@ -241,13 +272,24 @@ fn test_slice_operation(op: SliceOperation) {
                 for i in 0..min_len {
                     let expected_a = orig_a[i] ^ src_a_slice[i];
                     let expected_b = orig_b[i] ^ src_b_slice[i];
-                    assert_eq!(dst_a_slice[i], expected_a, "Add slices2 A failed at index {}", i);
-                    assert_eq!(dst_b_slice[i], expected_b, "Add slices2 B failed at index {}", i);
+                    assert_eq!(
+                        dst_a_slice[i], expected_a,
+                        "Add slices2 A failed at index {}",
+                        i
+                    );
+                    assert_eq!(
+                        dst_b_slice[i], expected_b,
+                        "Add slices2 B failed at index {}",
+                        i
+                    );
                 }
             }
-        },
+        }
 
-        SliceOperation::MulSlice { mut dst_data, scalar } => {
+        SliceOperation::MulSlice {
+            mut dst_data,
+            scalar,
+        } => {
             if dst_data.len() > MAX_SLICE_LEN {
                 dst_data.truncate(MAX_SLICE_LEN);
             }
@@ -258,12 +300,24 @@ fn test_slice_operation(op: SliceOperation) {
                 // Verify Gf256(scalar) multiplication
                 for i in 0..dst_data.len() {
                     let expected = Gf256(original[i]).mul_field(Gf256(scalar)).0;
-                    assert_eq!(dst_data[i], expected, "Mul slice failed at index {}: {} * {} != {}", i, original[i], Gf256(scalar), expected);
+                    assert_eq!(
+                        dst_data[i],
+                        expected,
+                        "Mul slice failed at index {}: {} * {} != {}",
+                        i,
+                        original[i],
+                        Gf256(scalar),
+                        expected
+                    );
                 }
             }
-        },
+        }
 
-        SliceOperation::AddMulSlice { mut dst_data, src_data, scalar } => {
+        SliceOperation::AddMulSlice {
+            mut dst_data,
+            src_data,
+            scalar,
+        } => {
             if dst_data.len() > MAX_SLICE_LEN {
                 dst_data.truncate(MAX_SLICE_LEN);
             }
@@ -279,12 +333,26 @@ fn test_slice_operation(op: SliceOperation) {
                 for i in 0..min_len {
                     let mul_result = Gf256(src_slice[i]).mul_field(Gf256(scalar)).0;
                     let expected = original_dst[i] ^ mul_result; // Addition is XOR
-                    assert_eq!(dst_slice[i], expected, "AddMul slice failed at index {}: {} + ({} * {}) != {}", i, original_dst[i], src_slice[i], Gf256(scalar), expected);
+                    assert_eq!(
+                        dst_slice[i],
+                        expected,
+                        "AddMul slice failed at index {}: {} + ({} * {}) != {}",
+                        i,
+                        original_dst[i],
+                        src_slice[i],
+                        Gf256(scalar),
+                        expected
+                    );
                 }
             }
-        },
+        }
 
-        SliceOperation::MisalignedAccess { mut data, offset, len, scalar } => {
+        SliceOperation::MisalignedAccess {
+            mut data,
+            offset,
+            len,
+            scalar,
+        } => {
             if data.len() > MAX_SLICE_LEN {
                 data.truncate(MAX_SLICE_LEN);
             }
@@ -300,11 +368,15 @@ fn test_slice_operation(op: SliceOperation) {
                     // Verify the operation still works correctly
                     for i in 0..slice.len() {
                         let expected = Gf256(original[i]).mul_field(Gf256(scalar)).0;
-                        assert_eq!(slice[i], expected, "Misaligned mul slice failed at index {}", i);
+                        assert_eq!(
+                            slice[i], expected,
+                            "Misaligned mul slice failed at index {}",
+                            i
+                        );
                     }
                 }
             }
-        },
+        }
 
         SliceOperation::EmptySlices => {
             // Test that empty slice operations don't panic
@@ -317,7 +389,7 @@ fn test_slice_operation(op: SliceOperation) {
 
             let mut empty_dst2: Vec<u8> = vec![];
             gf256_add_slices2(&mut empty_dst, &empty_src, &mut empty_dst2, &empty_src);
-        },
+        }
 
         SliceOperation::SingleElement { element, scalar } => {
             // Test single-element operations
@@ -336,7 +408,7 @@ fn test_slice_operation(op: SliceOperation) {
             let mul_part = Gf256(element).mul_field(Gf256(scalar)).0;
             let expected_addmul = original_element ^ mul_part;
             assert_eq!(dst[0], expected_addmul, "Single element addmul failed");
-        },
+        }
     }
 }
 

@@ -1,17 +1,14 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::net::quic_core::{
-    ConnectionId, PacketHeader, TransportParameters, QuicCoreError,
-    decode_varint, encode_varint,
-    QUIC_VARINT_MAX,
-    TP_MAX_IDLE_TIMEOUT, TP_MAX_UDP_PAYLOAD_SIZE, TP_INITIAL_MAX_DATA,
-    TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL, TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
-    TP_INITIAL_MAX_STREAM_DATA_UNI, TP_INITIAL_MAX_STREAMS_BIDI,
-    TP_INITIAL_MAX_STREAMS_UNI, TP_ACK_DELAY_EXPONENT, TP_MAX_ACK_DELAY,
-    TP_DISABLE_ACTIVE_MIGRATION,
+    ConnectionId, PacketHeader, QUIC_VARINT_MAX, QuicCoreError, TP_ACK_DELAY_EXPONENT,
+    TP_DISABLE_ACTIVE_MIGRATION, TP_INITIAL_MAX_DATA, TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+    TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE, TP_INITIAL_MAX_STREAM_DATA_UNI,
+    TP_INITIAL_MAX_STREAMS_BIDI, TP_INITIAL_MAX_STREAMS_UNI, TP_MAX_ACK_DELAY, TP_MAX_IDLE_TIMEOUT,
+    TP_MAX_UDP_PAYLOAD_SIZE, TransportParameters, decode_varint, encode_varint,
 };
 
 /// Fuzz input for QUIC core protocol parsing
@@ -33,21 +30,13 @@ struct QuicCoreFuzzInput {
 #[derive(Arbitrary, Debug)]
 enum VarIntOperation {
     /// Decode varint from raw bytes
-    DecodeVarint {
-        data: Vec<u8>,
-    },
+    DecodeVarint { data: Vec<u8> },
     /// Roundtrip test: encode then decode
-    RoundtripVarint {
-        value: u64,
-    },
+    RoundtripVarint { value: u64 },
     /// Test varint boundary values
-    BoundaryVarint {
-        boundary_type: VarIntBoundary,
-    },
+    BoundaryVarint { boundary_type: VarIntBoundary },
     /// Test malformed varint encoding
-    MalformedVarint {
-        malformed_data: Vec<u8>,
-    },
+    MalformedVarint { malformed_data: Vec<u8> },
 }
 
 /// Varint boundary test cases
@@ -77,17 +66,13 @@ enum VarIntBoundary {
 #[derive(Arbitrary, Debug)]
 enum ConnectionIdOperation {
     /// Create ConnectionId from bytes
-    CreateFromBytes {
-        bytes: Vec<u8>,
-    },
+    CreateFromBytes { bytes: Vec<u8> },
     /// Create empty ConnectionId
     CreateEmpty,
     /// Create maximum length ConnectionId
     CreateMaxLength,
     /// Create oversized ConnectionId (should fail)
-    CreateOversized {
-        extra_bytes: u8,
-    },
+    CreateOversized { extra_bytes: u8 },
 }
 
 /// Packet header operation variants
@@ -136,26 +121,15 @@ enum LongPacketTypeFuzz {
 #[derive(Arbitrary, Debug)]
 enum TransportParamOperation {
     /// Parse transport parameters from bytes
-    ParseTransportParams {
-        tlv_data: Vec<u8>,
-    },
+    ParseTransportParams { tlv_data: Vec<u8> },
     /// Parse known transport parameters
-    ParseKnownParams {
-        params: Vec<KnownTransportParam>,
-    },
+    ParseKnownParams { params: Vec<KnownTransportParam> },
     /// Parse with duplicate parameters (should fail)
-    ParseDuplicateParams {
-        param_id: u64,
-        values: Vec<u64>,
-    },
+    ParseDuplicateParams { param_id: u64, values: Vec<u64> },
     /// Parse malformed transport parameters
-    ParseMalformedParams {
-        malformed_data: Vec<u8>,
-    },
+    ParseMalformedParams { malformed_data: Vec<u8> },
     /// Roundtrip test: encode then decode
-    RoundtripParams {
-        params: Vec<KnownTransportParam>,
-    },
+    RoundtripParams { params: Vec<KnownTransportParam> },
 }
 
 /// Known transport parameter for testing
@@ -188,22 +162,13 @@ enum EdgeCaseOperation {
     /// Empty input
     EmptyInput,
     /// Single byte input
-    SingleByte {
-        byte: u8,
-    },
+    SingleByte { byte: u8 },
     /// Very large inputs
-    LargeInput {
-        size: u16,
-        fill_pattern: u8,
-    },
+    LargeInput { size: u16, fill_pattern: u8 },
     /// Random garbage input
-    GarbageInput {
-        garbage: Vec<u8>,
-    },
+    GarbageInput { garbage: Vec<u8> },
     /// Input with high entropy
-    HighEntropyInput {
-        entropy_data: Vec<u8>,
-    },
+    HighEntropyInput { entropy_data: Vec<u8> },
 }
 
 /// Maximum input sizes to prevent timeout/memory exhaustion
@@ -213,11 +178,11 @@ const MAX_OPERATIONS: usize = 100;
 
 fuzz_target!(|input: QuicCoreFuzzInput| {
     // Limit operations to prevent timeout
-    let total_ops = input.varint_operations.len() +
-                   input.connection_id_operations.len() +
-                   input.packet_operations.len() +
-                   input.transport_param_operations.len() +
-                   input.edge_cases.len();
+    let total_ops = input.varint_operations.len()
+        + input.connection_id_operations.len()
+        + input.packet_operations.len()
+        + input.transport_param_operations.len()
+        + input.edge_cases.len();
 
     if total_ops > MAX_OPERATIONS {
         return;
@@ -262,8 +227,16 @@ fn test_varint_operation(operation: VarIntOperation) {
                 Ok((value, consumed)) => {
                     // Verify consumed bytes are reasonable
                     assert!(consumed <= data.len(), "Consumed more bytes than available");
-                    assert!(consumed >= 1 && consumed <= 8, "Invalid varint length: {}", consumed);
-                    assert!(value <= QUIC_VARINT_MAX, "Decoded value exceeds QUIC varint max: {}", value);
+                    assert!(
+                        consumed >= 1 && consumed <= 8,
+                        "Invalid varint length: {}",
+                        consumed
+                    );
+                    assert!(
+                        value <= QUIC_VARINT_MAX,
+                        "Decoded value exceeds QUIC varint max: {}",
+                        value
+                    );
 
                     // Test roundtrip if value is valid
                     test_varint_roundtrip(value);
@@ -299,20 +272,41 @@ fn test_varint_operation(operation: VarIntOperation) {
             match boundary_type {
                 VarIntBoundary::BeyondMax => {
                     // Should fail for values beyond max
-                    assert!(encode_result.is_err(), "Expected encoding to fail for value beyond max: {}", test_value);
+                    assert!(
+                        encode_result.is_err(),
+                        "Expected encoding to fail for value beyond max: {}",
+                        test_value
+                    );
                 }
                 _ => {
                     // Should succeed for valid values
-                    assert!(encode_result.is_ok(), "Expected encoding to succeed for boundary value: {}", test_value);
+                    assert!(
+                        encode_result.is_ok(),
+                        "Expected encoding to succeed for boundary value: {}",
+                        test_value
+                    );
 
                     // Test decoding
                     if encode_result.is_ok() {
                         let decode_result = decode_varint(&encoded);
-                        assert!(decode_result.is_ok(), "Expected decoding to succeed for boundary value: {}", test_value);
+                        assert!(
+                            decode_result.is_ok(),
+                            "Expected decoding to succeed for boundary value: {}",
+                            test_value
+                        );
 
                         if let Ok((decoded_value, consumed)) = decode_result {
-                            assert_eq!(decoded_value, test_value, "Roundtrip failed for boundary value: {}", test_value);
-                            assert_eq!(consumed, encoded.len(), "Consumed bytes mismatch for boundary value: {}", test_value);
+                            assert_eq!(
+                                decoded_value, test_value,
+                                "Roundtrip failed for boundary value: {}",
+                                test_value
+                            );
+                            assert_eq!(
+                                consumed,
+                                encoded.len(),
+                                "Consumed bytes mismatch for boundary value: {}",
+                                test_value
+                            );
                         }
                     }
                 }
@@ -341,16 +335,28 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
 
             if bytes.len() <= ConnectionId::MAX_LEN {
                 // Should succeed for valid lengths
-                assert!(result.is_ok(), "Expected ConnectionId creation to succeed for {} bytes", bytes.len());
+                assert!(
+                    result.is_ok(),
+                    "Expected ConnectionId creation to succeed for {} bytes",
+                    bytes.len()
+                );
 
                 if let Ok(cid) = result {
                     assert_eq!(cid.len(), bytes.len(), "ConnectionId length mismatch");
                     assert_eq!(cid.as_bytes(), &bytes[..], "ConnectionId bytes mismatch");
-                    assert_eq!(cid.is_empty(), bytes.is_empty(), "ConnectionId empty check mismatch");
+                    assert_eq!(
+                        cid.is_empty(),
+                        bytes.is_empty(),
+                        "ConnectionId empty check mismatch"
+                    );
                 }
             } else {
                 // Should fail for oversized inputs
-                assert!(result.is_err(), "Expected ConnectionId creation to fail for {} bytes", bytes.len());
+                assert!(
+                    result.is_err(),
+                    "Expected ConnectionId creation to fail for {} bytes",
+                    bytes.len()
+                );
 
                 if let Err(QuicCoreError::InvalidConnectionIdLength(len)) = result {
                     assert_eq!(len, bytes.len(), "Error should report correct length");
@@ -365,7 +371,11 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
             if let Ok(cid) = result {
                 assert_eq!(cid.len(), 0, "Empty ConnectionId should have zero length");
                 assert!(cid.is_empty(), "Empty ConnectionId should report as empty");
-                assert_eq!(cid.as_bytes(), &[] as &[u8], "Empty ConnectionId should return empty slice");
+                assert_eq!(
+                    cid.as_bytes(),
+                    &[] as &[u8],
+                    "Empty ConnectionId should return empty slice"
+                );
             }
         }
 
@@ -375,9 +385,20 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
             assert!(result.is_ok(), "Max length ConnectionId should be valid");
 
             if let Ok(cid) = result {
-                assert_eq!(cid.len(), ConnectionId::MAX_LEN, "Max length ConnectionId should report correct length");
-                assert!(!cid.is_empty(), "Max length ConnectionId should not be empty");
-                assert_eq!(cid.as_bytes().len(), ConnectionId::MAX_LEN, "Max length ConnectionId should return correct bytes");
+                assert_eq!(
+                    cid.len(),
+                    ConnectionId::MAX_LEN,
+                    "Max length ConnectionId should report correct length"
+                );
+                assert!(
+                    !cid.is_empty(),
+                    "Max length ConnectionId should not be empty"
+                );
+                assert_eq!(
+                    cid.as_bytes().len(),
+                    ConnectionId::MAX_LEN,
+                    "Max length ConnectionId should return correct bytes"
+                );
             }
         }
 
@@ -392,7 +413,10 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
 
 fn test_packet_operation(operation: PacketOperation) {
     match operation {
-        PacketOperation::ParseHeader { mut packet_data, short_dcid_len } => {
+        PacketOperation::ParseHeader {
+            mut packet_data,
+            short_dcid_len,
+        } => {
             if packet_data.len() > MAX_INPUT_SIZE {
                 packet_data.truncate(MAX_INPUT_SIZE);
             }
@@ -403,7 +427,10 @@ fn test_packet_operation(operation: PacketOperation) {
             match result {
                 Ok((header, consumed)) => {
                     // Verify consumed bytes are reasonable
-                    assert!(consumed <= packet_data.len(), "Consumed more bytes than available");
+                    assert!(
+                        consumed <= packet_data.len(),
+                        "Consumed more bytes than available"
+                    );
                     assert!(consumed > 0, "Must consume at least one byte");
 
                     // Verify header consistency
@@ -438,7 +465,13 @@ fn test_packet_operation(operation: PacketOperation) {
 
             // Construct a long header packet
             let packet_bytes = construct_long_header_bytes(
-                version, &dst_cid, &src_cid, packet_type, &token, payload_length, packet_number
+                version,
+                &dst_cid,
+                &src_cid,
+                packet_type,
+                &token,
+                payload_length,
+                packet_number,
             );
 
             let _ = PacketHeader::decode(&packet_bytes, dst_cid.len());
@@ -457,13 +490,20 @@ fn test_packet_operation(operation: PacketOperation) {
 
             // Construct a short header packet
             let packet_bytes = construct_short_header_bytes(
-                spin, key_phase, &dst_cid, packet_number, packet_number_len
+                spin,
+                key_phase,
+                &dst_cid,
+                packet_number,
+                packet_number_len,
             );
 
             let _ = PacketHeader::decode(&packet_bytes, dst_cid.len());
         }
 
-        PacketOperation::ParseTruncatedHeader { mut complete_header, truncate_at } => {
+        PacketOperation::ParseTruncatedHeader {
+            mut complete_header,
+            truncate_at,
+        } => {
             if complete_header.len() > MAX_INPUT_SIZE {
                 complete_header.truncate(MAX_INPUT_SIZE);
             }
@@ -521,7 +561,8 @@ fn test_transport_param_operation(operation: TransportParamOperation) {
         TransportParamOperation::ParseDuplicateParams { param_id, values } => {
             // Test duplicate parameter detection
             let mut tlv_data = Vec::new();
-            for value in values.into_iter().take(10) { // Limit to 10 duplicates
+            for value in values.into_iter().take(10) {
+                // Limit to 10 duplicates
                 let _ = encode_varint(param_id, &mut tlv_data);
                 let _ = encode_varint(8, &mut tlv_data); // 8-byte value length
                 tlv_data.extend_from_slice(&value.to_be_bytes());
@@ -571,7 +612,10 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             matches!(result_header, Err(QuicCoreError::UnexpectedEof));
 
             let result_params = TransportParameters::decode(&[]);
-            assert!(result_params.is_ok(), "Empty transport params should be valid");
+            assert!(
+                result_params.is_ok(),
+                "Empty transport params should be valid"
+            );
 
             let result_cid = ConnectionId::new(&[]);
             assert!(result_cid.is_ok(), "Empty connection ID should be valid");
@@ -619,7 +663,8 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
 
             // Test high-entropy input for potential parser state confusion
             let _ = decode_varint(&entropy_data);
-            let _ = PacketHeader::decode(&entropy_data, entropy_data.len().min(ConnectionId::MAX_LEN));
+            let _ =
+                PacketHeader::decode(&entropy_data, entropy_data.len().min(ConnectionId::MAX_LEN));
             let _ = TransportParameters::decode(&entropy_data);
             if entropy_data.len() <= ConnectionId::MAX_LEN {
                 let _ = ConnectionId::new(&entropy_data);
@@ -633,17 +678,37 @@ fn test_varint_roundtrip(value: u64) {
     let encode_result = encode_varint(value, &mut encoded);
 
     if value <= QUIC_VARINT_MAX {
-        assert!(encode_result.is_ok(), "Encoding should succeed for valid value: {}", value);
+        assert!(
+            encode_result.is_ok(),
+            "Encoding should succeed for valid value: {}",
+            value
+        );
 
         let decode_result = decode_varint(&encoded);
-        assert!(decode_result.is_ok(), "Decoding should succeed for encoded value: {}", value);
+        assert!(
+            decode_result.is_ok(),
+            "Decoding should succeed for encoded value: {}",
+            value
+        );
 
         if let Ok((decoded_value, consumed)) = decode_result {
-            assert_eq!(decoded_value, value, "Roundtrip value mismatch: {} != {}", value, decoded_value);
-            assert_eq!(consumed, encoded.len(), "Consumed bytes should match encoded length");
+            assert_eq!(
+                decoded_value, value,
+                "Roundtrip value mismatch: {} != {}",
+                value, decoded_value
+            );
+            assert_eq!(
+                consumed,
+                encoded.len(),
+                "Consumed bytes should match encoded length"
+            );
         }
     } else {
-        assert!(encode_result.is_err(), "Encoding should fail for invalid value: {}", value);
+        assert!(
+            encode_result.is_err(),
+            "Encoding should fail for invalid value: {}",
+            value
+        );
     }
 }
 
@@ -654,7 +719,11 @@ fn verify_varint_error(err: &QuicCoreError, data: &[u8]) {
         }
         QuicCoreError::VarIntOutOfRange(value) => {
             // Should specify the invalid value
-            assert!(*value > QUIC_VARINT_MAX, "VarIntOutOfRange error with valid value: {}", value);
+            assert!(
+                *value > QUIC_VARINT_MAX,
+                "VarIntOutOfRange error with valid value: {}",
+                value
+            );
         }
         _ => {
             // Other errors are unexpected for varint decoding
@@ -667,25 +736,46 @@ fn verify_packet_header_consistency(header: &PacketHeader) {
     match header {
         PacketHeader::Long(long_header) => {
             // Verify connection ID lengths
-            assert!(long_header.dst_cid.len() <= ConnectionId::MAX_LEN, "Destination CID too long");
-            assert!(long_header.src_cid.len() <= ConnectionId::MAX_LEN, "Source CID too long");
+            assert!(
+                long_header.dst_cid.len() <= ConnectionId::MAX_LEN,
+                "Destination CID too long"
+            );
+            assert!(
+                long_header.src_cid.len() <= ConnectionId::MAX_LEN,
+                "Source CID too long"
+            );
 
             // Verify packet number length
-            assert!(long_header.packet_number_len >= 1 && long_header.packet_number_len <= 4,
-                   "Invalid packet number length: {}", long_header.packet_number_len);
+            assert!(
+                long_header.packet_number_len >= 1 && long_header.packet_number_len <= 4,
+                "Invalid packet number length: {}",
+                long_header.packet_number_len
+            );
         }
         PacketHeader::Short(short_header) => {
             // Verify destination connection ID length
-            assert!(short_header.dst_cid.len() <= ConnectionId::MAX_LEN, "Destination CID too long");
+            assert!(
+                short_header.dst_cid.len() <= ConnectionId::MAX_LEN,
+                "Destination CID too long"
+            );
 
             // Verify packet number length
-            assert!(short_header.packet_number_len >= 1 && short_header.packet_number_len <= 4,
-                   "Invalid packet number length: {}", short_header.packet_number_len);
+            assert!(
+                short_header.packet_number_len >= 1 && short_header.packet_number_len <= 4,
+                "Invalid packet number length: {}",
+                short_header.packet_number_len
+            );
         }
         PacketHeader::Retry(retry_header) => {
             // Verify connection ID lengths
-            assert!(retry_header.dst_cid.len() <= ConnectionId::MAX_LEN, "Destination CID too long");
-            assert!(retry_header.src_cid.len() <= ConnectionId::MAX_LEN, "Source CID too long");
+            assert!(
+                retry_header.dst_cid.len() <= ConnectionId::MAX_LEN,
+                "Destination CID too long"
+            );
+            assert!(
+                retry_header.src_cid.len() <= ConnectionId::MAX_LEN,
+                "Source CID too long"
+            );
         }
     }
 }
@@ -701,7 +791,10 @@ fn verify_packet_error(err: &QuicCoreError, _data: &[u8]) {
         }
         QuicCoreError::InvalidConnectionIdLength(len) => {
             // Should specify the invalid length
-            assert!(*len > ConnectionId::MAX_LEN, "Invalid connection ID length should be > MAX_LEN");
+            assert!(
+                *len > ConnectionId::MAX_LEN,
+                "Invalid connection ID length should be > MAX_LEN"
+            );
         }
         _ => {
             // Other errors are acceptable
@@ -712,7 +805,10 @@ fn verify_packet_error(err: &QuicCoreError, _data: &[u8]) {
 fn verify_transport_params_consistency(params: &TransportParameters) {
     // Verify transport parameter constraints
     if let Some(max_udp_payload_size) = params.max_udp_payload_size {
-        assert!(max_udp_payload_size >= 1200, "max_udp_payload_size must be >= 1200");
+        assert!(
+            max_udp_payload_size >= 1200,
+            "max_udp_payload_size must be >= 1200"
+        );
     }
 
     if let Some(ack_delay_exponent) = params.ack_delay_exponent {
@@ -754,9 +850,15 @@ fn test_transport_params_roundtrip(params: &TransportParameters) {
         if let Ok(decoded_params) = decode_result {
             // Verify key fields match
             assert_eq!(params.max_idle_timeout, decoded_params.max_idle_timeout);
-            assert_eq!(params.max_udp_payload_size, decoded_params.max_udp_payload_size);
+            assert_eq!(
+                params.max_udp_payload_size,
+                decoded_params.max_udp_payload_size
+            );
             assert_eq!(params.initial_max_data, decoded_params.initial_max_data);
-            assert_eq!(params.disable_active_migration, decoded_params.disable_active_migration);
+            assert_eq!(
+                params.disable_active_migration,
+                decoded_params.disable_active_migration
+            );
         }
     }
 }
@@ -819,10 +921,10 @@ fn construct_short_header_bytes(
     let pn_len = packet_number_len.clamp(1, 4);
 
     // First byte: Form (0) + fixed bit (1) + spin + reserved (2) + key phase + packet number length - 1 (2 bits)
-    let first_byte = 0b0100_0000 |
-                    (if spin { 0b0010_0000 } else { 0 }) |
-                    (if key_phase { 0b0000_0100 } else { 0 }) |
-                    (pn_len - 1);
+    let first_byte = 0b0100_0000
+        | (if spin { 0b0010_0000 } else { 0 })
+        | (if key_phase { 0b0000_0100 } else { 0 })
+        | (pn_len - 1);
     data.push(first_byte);
 
     // Destination connection ID
@@ -837,13 +939,18 @@ fn construct_short_header_bytes(
 fn construct_transport_params_tlv(params: &[KnownTransportParam]) -> Vec<u8> {
     let mut tlv_data = Vec::new();
 
-    for param in params.iter().take(20) { // Limit to 20 parameters
+    for param in params.iter().take(20) {
+        // Limit to 20 parameters
         let param_id = match param.param_type {
             TransportParamType::MaxIdleTimeout => TP_MAX_IDLE_TIMEOUT,
             TransportParamType::MaxUdpPayloadSize => TP_MAX_UDP_PAYLOAD_SIZE,
             TransportParamType::InitialMaxData => TP_INITIAL_MAX_DATA,
-            TransportParamType::InitialMaxStreamDataBidiLocal => TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
-            TransportParamType::InitialMaxStreamDataBidiRemote => TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+            TransportParamType::InitialMaxStreamDataBidiLocal => {
+                TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL
+            }
+            TransportParamType::InitialMaxStreamDataBidiRemote => {
+                TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE
+            }
             TransportParamType::InitialMaxStreamDataUni => TP_INITIAL_MAX_STREAM_DATA_UNI,
             TransportParamType::InitialMaxStreamsBidi => TP_INITIAL_MAX_STREAMS_BIDI,
             TransportParamType::InitialMaxStreamsUni => TP_INITIAL_MAX_STREAMS_UNI,

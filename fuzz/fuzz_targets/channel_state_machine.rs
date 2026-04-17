@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Stateful fuzz input for channel state machine testing
@@ -17,25 +17,17 @@ struct ChannelStateMachineFuzz {
 #[derive(Arbitrary, Debug)]
 enum ChannelOperation {
     /// Test reserve/commit pattern
-    ReserveCommit {
-        should_commit: bool,
-        value: u32,
-    },
+    ReserveCommit { should_commit: bool, value: u32 },
     /// Test reserve/abort pattern
     ReserveAbort,
     /// Test try_reserve
-    TryReserve {
-        value: u32,
-    },
+    TryReserve { value: u32 },
     /// Test sender drop
     SenderDrop,
     /// Test receiver operations
     TryReceive,
     /// Test concurrent operations
-    ConcurrentOp {
-        op_count: u8,
-        value: u32,
-    },
+    ConcurrentOp { op_count: u8, value: u32 },
 }
 
 /// Shadow model for state verification
@@ -73,9 +65,15 @@ fuzz_target!(|input: ChannelStateMachineFuzz| {
         env.operation_count.store(i, Ordering::SeqCst);
 
         match operation {
-            ChannelOperation::ReserveCommit { should_commit, value } => {
+            ChannelOperation::ReserveCommit {
+                should_commit,
+                value,
+            } => {
                 // Simulate reserve/commit with sync channel
-                let msg = TestMessage { value, operation_id: i };
+                let msg = TestMessage {
+                    value,
+                    operation_id: i,
+                };
 
                 if should_commit {
                     match tx.try_send(msg) {
@@ -98,7 +96,10 @@ fuzz_target!(|input: ChannelStateMachineFuzz| {
             }
 
             ChannelOperation::TryReserve { value } => {
-                let msg = TestMessage { value, operation_id: i };
+                let msg = TestMessage {
+                    value,
+                    operation_id: i,
+                };
                 match tx.try_send(msg) {
                     Ok(()) => {
                         env.shadow.committed_messages.fetch_add(1, Ordering::SeqCst);
@@ -134,7 +135,7 @@ fuzz_target!(|input: ChannelStateMachineFuzz| {
                 for j in 0..count {
                     let msg = TestMessage {
                         value: value.wrapping_add(j as u32),
-                        operation_id: i * 1000 + j
+                        operation_id: i * 1000 + j,
                     };
                     let _ = tx.try_send(msg);
                 }

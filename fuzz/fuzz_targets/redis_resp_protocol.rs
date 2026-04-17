@@ -21,9 +21,8 @@ use libfuzzer_sys::fuzz_target;
 /// - Malformed/truncated inputs, protocol violations
 /// - Integer overflow edge cases, invalid UTF-8
 /// - Memory exhaustion protection verification
-
 // Import the Redis module to test
-use asupersync::messaging::redis::{RespValue, RedisProtocolLimits};
+use asupersync::messaging::redis::{RedisProtocolLimits, RespValue};
 
 /// Generate valid RESP test cases for baseline testing
 fn generate_valid_resp_samples(data: &[u8]) -> Vec<Vec<u8>> {
@@ -39,7 +38,8 @@ fn generate_valid_resp_samples(data: &[u8]) -> Vec<Vec<u8>> {
 
     // Generate error: -ERR unknown command\r\n
     samples.push(b"-ERR unknown command\r\n".to_vec());
-    samples.push(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec());
+    samples
+        .push(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec());
 
     // Generate integers: :1000\r\n
     samples.push(b":0\r\n".to_vec());
@@ -150,7 +150,8 @@ fn generate_large_array_data(count: usize) -> Vec<u8> {
     let mut data = Vec::new();
 
     data.extend_from_slice(format!("*{count}\r\n").as_bytes());
-    for i in 0..count.min(1000) { // Cap iteration to prevent OOM during test generation
+    for i in 0..count.min(1000) {
+        // Cap iteration to prevent OOM during test generation
         data.extend_from_slice(format!(":{i}\r\n").as_bytes());
     }
 
@@ -167,7 +168,11 @@ fn test_helper_functions(data: &[u8]) {
 
     // Test parse_i64_ascii by creating integer RESP values
     if let Ok(s) = std::str::from_utf8(data) {
-        let clean_str = s.chars().filter(|c| c.is_ascii_digit() || *c == '-' || *c == '+').take(20).collect::<String>();
+        let clean_str = s
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == '-' || *c == '+')
+            .take(20)
+            .collect::<String>();
         if !clean_str.is_empty() {
             let resp_data = format!(":{clean_str}\r\n");
             let _ = RespValue::try_decode(resp_data.as_bytes());
@@ -217,7 +222,10 @@ fn test_round_trip_properties(data: &[u8]) {
         // The re-encoded value should parse successfully
         if let Ok(Some((value2, _))) = RespValue::try_decode(&encoded) {
             // Check basic structural equality
-            assert_eq!(std::mem::discriminant(&value), std::mem::discriminant(&value2));
+            assert_eq!(
+                std::mem::discriminant(&value),
+                std::mem::discriminant(&value2)
+            );
 
             // For non-recursive types, check exact equality
             match (&value, &value2) {
@@ -269,14 +277,22 @@ fuzz_target!(|data: &[u8]| {
     test_helper_functions(data);
 
     // Test 6: Test deep nesting scenarios (up to reasonable depth)
-    let max_test_depth = if data.is_empty() { 0 } else { (data[0] as usize % 100) + 1 };
+    let max_test_depth = if data.is_empty() {
+        0
+    } else {
+        (data[0] as usize % 100) + 1
+    };
     for depth in [1, 5, 10, max_test_depth.min(200)].iter().copied() {
         let deep_data = generate_deep_nesting_data(depth);
         let _ = RespValue::try_decode(&deep_data);
     }
 
     // Test 7: Test large array scenarios
-    let max_test_count = if data.is_empty() { 0 } else { (data[0] as usize % 1000) + 1 };
+    let max_test_count = if data.is_empty() {
+        0
+    } else {
+        (data[0] as usize % 1000) + 1
+    };
     for count in [0, 1, 10, max_test_count.min(5000)].iter().copied() {
         let large_array_data = generate_large_array_data(count);
         let _ = RespValue::try_decode(&large_array_data);
@@ -287,7 +303,10 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 9: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
-        for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1].iter().copied() {
+        for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
+            .iter()
+            .copied()
+        {
             if split_point < data.len() {
                 let first_part = &data[..split_point];
                 let second_part = &data[split_point..];

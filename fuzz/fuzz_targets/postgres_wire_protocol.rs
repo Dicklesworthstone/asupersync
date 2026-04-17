@@ -1,10 +1,10 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 // We need to import the parsing functions and types from the actual postgres module
-use asupersync::database::postgres::{PgError};
+use asupersync::database::postgres::PgError;
 
 /// PostgreSQL wire protocol message for fuzzing
 #[derive(Debug, Arbitrary)]
@@ -91,43 +91,25 @@ enum PgWireMessage {
     /// Authentication messages (type 'R')
     Authentication(AuthenticationMessage),
     /// Row description (type 'T')
-    RowDescription {
-        fields: Vec<RowDescField>,
-    },
+    RowDescription { fields: Vec<RowDescField> },
     /// Data row (type 'D')
-    DataRow {
-        values: Vec<DataRowValue>,
-    },
+    DataRow { values: Vec<DataRowValue> },
     /// Error response (type 'E')
-    ErrorResponse {
-        fields: Vec<ErrorField>,
-    },
+    ErrorResponse { fields: Vec<ErrorField> },
     /// Notice response (type 'N')
-    NoticeResponse {
-        fields: Vec<ErrorField>,
-    },
+    NoticeResponse { fields: Vec<ErrorField> },
     /// Parameter status (type 'S')
-    ParameterStatus {
-        name: String,
-        value: String,
-    },
+    ParameterStatus { name: String, value: String },
     /// Ready for query (type 'Z')
     ReadyForQuery {
         status: u8, // 'I'=idle, 'T'=transaction, 'E'=error
     },
     /// Parameter description (type 't')
-    ParameterDescription {
-        params: Vec<ParameterDesc>,
-    },
+    ParameterDescription { params: Vec<ParameterDesc> },
     /// Command complete (type 'C')
-    CommandComplete {
-        tag: String,
-    },
+    CommandComplete { tag: String },
     /// Backend key data (type 'K')
-    BackendKeyData {
-        process_id: i32,
-        secret_key: i32,
-    },
+    BackendKeyData { process_id: i32, secret_key: i32 },
     /// Parse complete (type '1')
     ParseComplete,
     /// Bind complete (type '2')
@@ -275,16 +257,20 @@ fn test_scram_parsing(scram: &ScramFuzzData) {
 
     // Test various SCRAM formats with edge cases
     let malformed_formats = [
-        format!("r={}", scram.server_first),  // Missing salt and iterations
+        format!("r={}", scram.server_first), // Missing salt and iterations
         format!("s={}", base64_encode(b"salt")), // Missing nonce and iterations
-        format!("i={}", 4096), // Missing nonce and salt
+        format!("i={}", 4096),               // Missing nonce and salt
         format!("r={},s={},i=-1", scram.server_first, base64_encode(b"salt")), // Negative iterations
-        format!("r={},s={},i=1000000", scram.server_first, base64_encode(b"salt")), // Huge iterations
-        format!("r={},s=,i=4096", scram.server_first), // Empty salt
-        format!("r=,s={},i=4096", base64_encode(b"salt")), // Empty nonce
-        "".to_string(), // Empty message
-        "invalid".to_string(), // No equals signs
-        "r=".to_string(), // Empty value
+        format!(
+            "r={},s={},i=1000000",
+            scram.server_first,
+            base64_encode(b"salt")
+        ), // Huge iterations
+        format!("r={},s=,i=4096", scram.server_first),                         // Empty salt
+        format!("r=,s={},i=4096", base64_encode(b"salt")),                     // Empty nonce
+        "".to_string(),                                                        // Empty message
+        "invalid".to_string(),                                                 // No equals signs
+        "r=".to_string(),                                                      // Empty value
         "r=nonce,s=salt,i=invalid".to_string(), // Non-numeric iterations
     ];
 
@@ -339,8 +325,10 @@ impl MockConn {
         let msg_type = message_data[0];
         let length_bytes = &message_data[1..5];
         let length = i32::from_be_bytes([
-            length_bytes[0], length_bytes[1],
-            length_bytes[2], length_bytes[3]
+            length_bytes[0],
+            length_bytes[1],
+            length_bytes[2],
+            length_bytes[3],
         ]);
 
         // Validate message structure
@@ -417,9 +405,8 @@ impl MockConn {
                 return;
             }
 
-            let length = i32::from_be_bytes([
-                data[pos], data[pos + 1], data[pos + 2], data[pos + 3]
-            ]);
+            let length =
+                i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
             pos += 4;
 
             if length == -1 {
@@ -469,14 +456,14 @@ impl MockConn {
 
         // Test various auth types
         match auth_type {
-            0 => {}, // AuthenticationOk
-            3 => {}, // AuthenticationCleartextPassword
+            0 => {} // AuthenticationOk
+            3 => {} // AuthenticationCleartextPassword
             5 => {
                 // AuthenticationMD5Password - should have 4-byte salt
                 if data.len() >= 8 {
                     let _salt = &data[4..8];
                 }
-            },
+            }
             10 => {
                 // AuthenticationSASL - mechanism list
                 let mut pos = 4;
@@ -495,10 +482,10 @@ impl MockConn {
                         break; // End of list
                     }
                 }
-            },
-            11 => {}, // AuthenticationSASLContinue
-            12 => {}, // AuthenticationSASLFinal
-            _ => {}, // Other auth types
+            }
+            11 => {} // AuthenticationSASLContinue
+            12 => {} // AuthenticationSASLFinal
+            _ => {}  // Other auth types
         }
     }
 
@@ -549,9 +536,8 @@ impl MockConn {
 
         for i in 0..param_count {
             let pos = 2 + (i as usize * 4);
-            let _type_oid = i32::from_be_bytes([
-                data[pos], data[pos + 1], data[pos + 2], data[pos + 3]
-            ]);
+            let _type_oid =
+                i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         }
     }
 
@@ -579,41 +565,28 @@ fuzz_target!(|message: PgWireMessage| {
 
     // Build and test the appropriate wire protocol message
     let wire_data = match message {
-        PgWireMessage::Authentication(auth) => {
-            build_auth_message(&auth)
-        },
-        PgWireMessage::RowDescription { fields } => {
-            build_row_description(&fields)
-        },
-        PgWireMessage::DataRow { values } => {
-            build_data_row(&values)
-        },
-        PgWireMessage::ErrorResponse { fields } => {
-            build_error_response(&fields, b'E')
-        },
-        PgWireMessage::NoticeResponse { fields } => {
-            build_error_response(&fields, b'N')
-        },
-        PgWireMessage::ParameterStatus { name, value } => {
-            build_parameter_status(&name, &value)
-        },
-        PgWireMessage::ReadyForQuery { status } => {
-            build_message(b'Z', &[status])
-        },
-        PgWireMessage::ParameterDescription { params } => {
-            build_parameter_description(&params)
-        },
+        PgWireMessage::Authentication(auth) => build_auth_message(&auth),
+        PgWireMessage::RowDescription { fields } => build_row_description(&fields),
+        PgWireMessage::DataRow { values } => build_data_row(&values),
+        PgWireMessage::ErrorResponse { fields } => build_error_response(&fields, b'E'),
+        PgWireMessage::NoticeResponse { fields } => build_error_response(&fields, b'N'),
+        PgWireMessage::ParameterStatus { name, value } => build_parameter_status(&name, &value),
+        PgWireMessage::ReadyForQuery { status } => build_message(b'Z', &[status]),
+        PgWireMessage::ParameterDescription { params } => build_parameter_description(&params),
         PgWireMessage::CommandComplete { tag } => {
             let mut payload = tag.as_bytes().to_vec();
             payload.push(0); // Null terminator
             build_message(b'C', &payload)
-        },
-        PgWireMessage::BackendKeyData { process_id, secret_key } => {
+        }
+        PgWireMessage::BackendKeyData {
+            process_id,
+            secret_key,
+        } => {
             let mut payload = Vec::new();
             payload.extend_from_slice(&process_id.to_be_bytes());
             payload.extend_from_slice(&secret_key.to_be_bytes());
             build_message(b'K', &payload)
-        },
+        }
         PgWireMessage::ParseComplete => build_message(b'1', &[]),
         PgWireMessage::BindComplete => build_message(b'2', &[]),
         PgWireMessage::CloseComplete => build_message(b'3', &[]),
@@ -622,10 +595,8 @@ fuzz_target!(|message: PgWireMessage| {
         PgWireMessage::ScramAuth(scram) => {
             test_scram_parsing(&scram);
             return; // Don't test as wire message
-        },
-        PgWireMessage::Raw(raw) => {
-            build_message(raw.message_type, &raw.payload)
-        },
+        }
+        PgWireMessage::Raw(raw) => build_message(raw.message_type, &raw.payload),
     };
 
     // Test the wire protocol parsing

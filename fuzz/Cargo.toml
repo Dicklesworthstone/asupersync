@@ -305,6 +305,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_codec_framing_comprehensive"
+path = "fuzz_targets/codec_framing_comprehensive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_raptorq_aead_envelope"
 path = "fuzz_targets/raptorq_aead_envelope.rs"
 test = false

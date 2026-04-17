@@ -35,7 +35,9 @@ fuzz_target!(|data: &[u8]| {
             match rmp_serde::to_vec(&event) {
                 Ok(serialized) => {
                     // Verify round-trip consistency by deserializing again
-                    let _ = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(&serialized);
+                    let _ = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(
+                        &serialized,
+                    );
                 }
                 Err(_) => {
                     // Serialization error - could indicate malformed internal state
@@ -55,7 +57,8 @@ fuzz_target!(|data: &[u8]| {
         Ok(metadata) => {
             // Test round-trip serialization for metadata
             if let Ok(serialized) = rmp_serde::to_vec(&metadata) {
-                let _ = rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(&serialized);
+                let _ =
+                    rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(&serialized);
             }
 
             // Test Debug formatting

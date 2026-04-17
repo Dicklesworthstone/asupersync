@@ -93,8 +93,10 @@ fn parse_frame_header(data: &[u8]) -> FrameHeader {
     let flags = data[4];
 
     // Stream ID is 31-bit (MSB reserved)
-    let stream_id =
-        ((data[5] as u32 & 0x7F) << 24) | ((data[6] as u32) << 16) | ((data[7] as u32) << 8) | (data[8] as u32);
+    let stream_id = ((data[5] as u32 & 0x7F) << 24)
+        | ((data[6] as u32) << 16)
+        | ((data[7] as u32) << 8)
+        | (data[8] as u32);
 
     FrameHeader {
         length,

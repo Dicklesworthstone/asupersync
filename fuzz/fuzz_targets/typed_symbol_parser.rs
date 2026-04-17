@@ -1,8 +1,8 @@
 #![no_main]
 
+use asupersync::types::typed_symbol::{TypeMismatchError, TypedSymbol};
+use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
-use asupersync::types::{Symbol, SymbolId, SymbolKind, ObjectId};
-use asupersync::types::typed_symbol::{TypedSymbol, TypeMismatchError};
 
 // Simple test type for fuzzing
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -24,7 +24,8 @@ fuzz_target!(|data: &[u8]| {
     let symbol = Symbol::from_slice(symbol_id, data, SymbolKind::Source);
 
     // Attempt to parse as a typed symbol - this exercises the parser
-    let result: Result<TypedSymbol<TestData>, TypeMismatchError> = TypedSymbol::try_from_symbol(symbol);
+    let result: Result<TypedSymbol<TestData>, TypeMismatchError> =
+        TypedSymbol::try_from_symbol(symbol);
 
     // We don't care if it succeeds or fails, just that it doesn't crash
     let _ = result;

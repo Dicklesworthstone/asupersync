@@ -61,7 +61,11 @@ fn parse_server_first(data: &[u8]) -> Result<(String, Vec<u8>, u32), String> {
             }
             salt_b64 = Some(value);
         } else if let Some(value) = part.strip_prefix("i=") {
-            iterations = Some(value.parse::<u32>().map_err(|_| "Invalid iteration count")?);
+            iterations = Some(
+                value
+                    .parse::<u32>()
+                    .map_err(|_| "Invalid iteration count")?,
+            );
         }
     }
 
@@ -126,8 +130,8 @@ fn parse_sasl_mechanisms(data: &[u8]) -> Result<Vec<String>, String> {
 
     while parser.remaining() > 0 {
         let mechanism_bytes = parser.read_until(0)?;
-        let mechanism = std::str::from_utf8(mechanism_bytes)
-            .map_err(|_| "Invalid UTF-8 in mechanism name")?;
+        let mechanism =
+            std::str::from_utf8(mechanism_bytes).map_err(|_| "Invalid UTF-8 in mechanism name")?;
 
         if mechanism.is_empty() {
             continue;
@@ -158,7 +162,10 @@ fn generate_client_first(username: &str, client_nonce: &str) -> Result<Vec<u8>, 
     }
 
     // Validate username contains only safe characters
-    if !username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if !username
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
         return Err("Invalid username characters".to_string());
     }
 
@@ -268,7 +275,7 @@ fn test_scram_edge_cases(data: &[u8]) {
             data[0],
             data.get(1).copied().unwrap_or(0),
             data.get(2).copied().unwrap_or(0),
-            data.get(3).copied().unwrap_or(0)
+            data.get(3).copied().unwrap_or(0),
         ])
     } else {
         4096

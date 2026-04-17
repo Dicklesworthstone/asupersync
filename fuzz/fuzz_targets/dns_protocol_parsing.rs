@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use std::net::{UdpSocket, Ipv4Addr, Ipv6Addr};
+use libfuzzer_sys::fuzz_target;
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::thread;
 use std::time::Duration;
 
@@ -81,15 +81,9 @@ enum DnsName {
     /// Compression pointer (offset)
     Pointer(u16),
     /// Mixed labels + pointer
-    Mixed {
-        labels: Vec<String>,
-        pointer: u16,
-    },
+    Mixed { labels: Vec<String>, pointer: u16 },
     /// Malformed label lengths (for testing 0x40-0xBF reserved range)
-    Malformed {
-        bad_length: u8,
-        data: Vec<u8>,
-    },
+    Malformed { bad_length: u8, data: Vec<u8> },
     /// Oversized name (>255 bytes total)
     Oversized(Vec<u8>),
 }
@@ -104,10 +98,7 @@ enum RDataType {
     /// CNAME record
     Cname(DnsName),
     /// MX record
-    Mx {
-        preference: u16,
-        exchange: DnsName,
-    },
+    Mx { preference: u16, exchange: DnsName },
     /// TXT record
     Txt(Vec<String>),
     /// SRV record
@@ -164,10 +155,7 @@ enum RawMutation {
         additional: u16,
     },
     /// Insert malformed label length
-    MalformedLabel {
-        offset: usize,
-        bad_length: u8,
-    },
+    MalformedLabel { offset: usize, bad_length: u8 },
     /// Corrupt RDATA length
     CorruptRDataLen {
         record_index: usize,
@@ -249,12 +237,22 @@ fn build_dns_packet(fuzz_data: &DnsFuzzData) -> Vec<u8> {
 fn build_flags_word(flags: &DnsFlags) -> u16 {
     let mut word = 0u16;
 
-    if flags.qr { word |= 0x8000; }
+    if flags.qr {
+        word |= 0x8000;
+    }
     word |= ((flags.opcode & 0x0F) as u16) << 11;
-    if flags.aa { word |= 0x0400; }
-    if flags.tc { word |= 0x0200; }
-    if flags.rd { word |= 0x0100; }
-    if flags.ra { word |= 0x0080; }
+    if flags.aa {
+        word |= 0x0400;
+    }
+    if flags.tc {
+        word |= 0x0200;
+    }
+    if flags.rd {
+        word |= 0x0100;
+    }
+    if flags.ra {
+        word |= 0x0080;
+    }
     word |= ((flags.z & 0x07) as u16) << 4;
     word |= (flags.rcode & 0x0F) as u16;
 
@@ -279,13 +277,13 @@ fn encode_dns_name(name: &DnsName, packet: &mut Vec<u8>) {
                 }
             }
             packet.push(0); // Null terminator
-        },
+        }
         DnsName::Pointer(offset) => {
             // Compression pointer (0xC0 | high bits, low byte)
             let offset = *offset & 0x3FFF; // Mask to 14 bits
             packet.push(0xC0 | ((offset >> 8) as u8));
             packet.push(offset as u8);
-        },
+        }
         DnsName::Mixed { labels, pointer } => {
             // Encode labels first
             for label in labels {
@@ -301,13 +299,13 @@ fn encode_dns_name(name: &DnsName, packet: &mut Vec<u8>) {
             let offset = *pointer & 0x3FFF;
             packet.push(0xC0 | ((offset >> 8) as u8));
             packet.push(offset as u8);
-        },
+        }
         DnsName::Malformed { bad_length, data } => {
             // Test reserved label length range (0x40-0xBF)
             packet.push(*bad_length);
             packet.extend_from_slice(&data[..data.len().min(255)]);
             packet.push(0); // Null terminator
-        },
+        }
         DnsName::Oversized(data) => {
             // Create name longer than 255 bytes total
             let mut remaining = data.len().min(300); // Cap at 300 to avoid OOM
@@ -315,14 +313,18 @@ fn encode_dns_name(name: &DnsName, packet: &mut Vec<u8>) {
 
             while remaining > 0 && pos < data.len() {
                 let chunk_size = remaining.min(63).min(data.len() - pos);
-                if chunk_size == 0 { break; }
+                if chunk_size == 0 {
+                    break;
+                }
 
                 packet.push(chunk_size as u8);
                 packet.extend_from_slice(&data[pos..pos + chunk_size]);
                 pos += chunk_size;
                 remaining = remaining.saturating_sub(chunk_size);
 
-                if remaining == 0 { break; }
+                if remaining == 0 {
+                    break;
+                }
             }
             packet.push(0);
         }
@@ -331,7 +333,9 @@ fn encode_dns_name(name: &DnsName, packet: &mut Vec<u8>) {
 
 /// Apply compression pointer attacks to test cycle detection
 fn apply_compression_attack(packet: &mut Vec<u8>, attack: &CompressionAttack) {
-    if packet.len() < 20 { return; }
+    if packet.len() < 20 {
+        return;
+    }
 
     match attack {
         CompressionAttack::SelfLoop => {
@@ -341,7 +345,7 @@ fn apply_compression_attack(packet: &mut Vec<u8>, attack: &CompressionAttack) {
                 packet[pos] = 0xC0;
                 packet[pos + 1] = pos as u8;
             }
-        },
+        }
         CompressionAttack::DeepChain(depth) => {
             // Create chain of pointers exceeding depth limit
             let start_pos = 12;
@@ -356,7 +360,7 @@ fn apply_compression_attack(packet: &mut Vec<u8>, attack: &CompressionAttack) {
                     };
                 }
             }
-        },
+        }
         CompressionAttack::InvalidOffset(offset) => {
             // Pointer to invalid/out-of-bounds offset
             if packet.len() > 14 {
@@ -365,7 +369,7 @@ fn apply_compression_attack(packet: &mut Vec<u8>, attack: &CompressionAttack) {
                 packet[pos] = 0xC0 | ((clamped_offset >> 8) as u8);
                 packet[pos + 1] = clamped_offset as u8;
             }
-        },
+        }
         CompressionAttack::OverlapChain(offsets) => {
             // Multiple overlapping compression pointers
             for (i, offset) in offsets.iter().enumerate() {
@@ -376,7 +380,7 @@ fn apply_compression_attack(packet: &mut Vec<u8>, attack: &CompressionAttack) {
                     packet[pos + 1] = clamped_offset as u8;
                 }
             }
-        },
+        }
         CompressionAttack::None => {
             // No attack, leave packet as-is
         }
@@ -389,14 +393,19 @@ fn apply_raw_mutation(packet: &mut Vec<u8>, mutation: &RawMutation) {
         RawMutation::Truncate(offset) => {
             let truncate_at = (*offset).min(packet.len());
             packet.truncate(truncate_at);
-        },
+        }
         RawMutation::CorruptFlags(new_flags) => {
             if packet.len() >= 4 {
                 packet[2] = (*new_flags >> 8) as u8;
                 packet[3] = (*new_flags & 0xFF) as u8;
             }
-        },
-        RawMutation::InvalidCounts { questions, answers, authority, additional } => {
+        }
+        RawMutation::InvalidCounts {
+            questions,
+            answers,
+            authority,
+            additional,
+        } => {
             if packet.len() >= 12 {
                 packet[4] = (*questions >> 8) as u8;
                 packet[5] = (*questions & 0xFF) as u8;
@@ -407,14 +416,17 @@ fn apply_raw_mutation(packet: &mut Vec<u8>, mutation: &RawMutation) {
                 packet[10] = (*additional >> 8) as u8;
                 packet[11] = (*additional & 0xFF) as u8;
             }
-        },
+        }
         RawMutation::MalformedLabel { offset, bad_length } => {
             if *offset < packet.len() {
                 // Insert malformed label length in reserved range 0x40-0xBF
                 packet[*offset] = *bad_length;
             }
-        },
-        RawMutation::CorruptRDataLen { record_index: _, new_length } => {
+        }
+        RawMutation::CorruptRDataLen {
+            record_index: _,
+            new_length,
+        } => {
             // Find RDATA length field and corrupt it
             if packet.len() > 12 {
                 // Simple heuristic: look for RDATA length fields
@@ -483,7 +495,9 @@ fn test_dns_with_fake_server(fuzz_packet: &[u8]) {
 
 /// Test specific RFC 1035 compliance edge cases
 fn test_rfc1035_edge_cases(data: &[u8]) {
-    if data.len() < 12 { return; }
+    if data.len() < 12 {
+        return;
+    }
 
     // Test header flag combinations
     for i in 0..16 {
@@ -525,7 +539,9 @@ fn test_rfc1035_edge_cases(data: &[u8]) {
 /// Test packet parsing through DNS resolver
 fn test_packet_parsing(packet: &[u8]) {
     // Limit packet size to prevent OOM
-    if packet.len() > 2000 { return; }
+    if packet.len() > 2000 {
+        return;
+    }
 
     // Create minimal fake server to serve this packet
     let _ = std::panic::catch_unwind(|| {
@@ -535,13 +551,17 @@ fn test_packet_parsing(packet: &[u8]) {
 
 /// Test DNS name encoding edge cases specifically
 fn test_dns_name_edge_cases(data: &[u8]) {
-    if data.is_empty() { return; }
+    if data.is_empty() {
+        return;
+    }
 
     // Test label length edge cases
     let label_lengths = [0, 1, 62, 63, 64, 100, 255];
 
     for &len in &label_lengths {
-        if len > data.len() { continue; }
+        if len > data.len() {
+            continue;
+        }
 
         let mut packet = vec![
             0x12, 0x34, 0x01, 0x00, // Header
@@ -563,8 +583,7 @@ fn test_dns_name_edge_cases(data: &[u8]) {
     // Test reserved label length range (0x40-0xBF)
     for reserved in 0x40..=0xBF {
         let mut packet = vec![
-            0x12, 0x34, 0x01, 0x00,
-            0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         packet.push(reserved);
         packet.extend_from_slice(&data[..data.len().min(10)]);
@@ -575,14 +594,13 @@ fn test_dns_name_edge_cases(data: &[u8]) {
     }
 }
 
-
-
 fuzz_target!(|fuzz_data: DnsFuzzData| {
     // Limit input size to prevent excessive resource usage
-    if fuzz_data.message.questions.len() > 100 ||
-       fuzz_data.message.answers.len() > 100 ||
-       fuzz_data.message.authority.len() > 50 ||
-       fuzz_data.message.additional.len() > 50 {
+    if fuzz_data.message.questions.len() > 100
+        || fuzz_data.message.answers.len() > 100
+        || fuzz_data.message.authority.len() > 50
+        || fuzz_data.message.additional.len() > 50
+    {
         return;
     }
 
@@ -613,7 +631,10 @@ fuzz_target!(|fuzz_data: DnsFuzzData| {
     }
 
     // Test 6: Compression pointer cycle detection
-    if matches!(fuzz_data.compression_attack, CompressionAttack::SelfLoop | CompressionAttack::DeepChain(_)) {
+    if matches!(
+        fuzz_data.compression_attack,
+        CompressionAttack::SelfLoop | CompressionAttack::DeepChain(_)
+    ) {
         // These packets specifically test cycle detection in decode_dns_name_inner
         test_packet_parsing(&packet);
     }

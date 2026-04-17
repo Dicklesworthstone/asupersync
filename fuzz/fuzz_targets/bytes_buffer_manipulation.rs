@@ -7,8 +7,8 @@
 //! The goal is to catch buffer boundary violations, integer overflow/underflow,
 //! and panic conditions in buffer operations.
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct BufferOpSequence {

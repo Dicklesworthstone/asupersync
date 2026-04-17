@@ -11,7 +11,7 @@ use libfuzzer_sys::fuzz_target;
 ///
 /// The fuzzer generates malformed, edge case, and malicious Accept-Encoding headers
 /// to verify the parser is robust against untrusted input and doesn't crash.
-use asupersync::http::compress::{negotiate_encoding, ContentEncoding};
+use asupersync::http::compress::{ContentEncoding, negotiate_encoding};
 use std::str;
 
 /// Test parse individual encoding tokens for robustness.
@@ -39,18 +39,15 @@ fn test_encoding_negotiation(accept_encoding_header: &str) {
     let test_cases = [
         // Empty supported encodings
         vec![],
-
         // Single encoding support
         vec![ContentEncoding::Identity],
         vec![ContentEncoding::Gzip],
         vec![ContentEncoding::Deflate],
         vec![ContentEncoding::Brotli],
-
         // Multiple encoding support
         vec![ContentEncoding::Gzip, ContentEncoding::Deflate],
         vec![ContentEncoding::Gzip, ContentEncoding::Brotli],
         vec![ContentEncoding::Identity, ContentEncoding::Gzip],
-
         // All encodings supported
         vec![
             ContentEncoding::Identity,
@@ -81,17 +78,14 @@ fn test_malformed_headers(base_data: &[u8]) {
         let test_headers = vec![
             // Basic variations
             base_str.to_string(),
-
             // Add quality values
             format!("{};q=0.5", base_str),
             format!("{};q=1.0", base_str),
             format!("{};q=0.0", base_str),
-
             // Multiple encodings
             format!("{}, gzip", base_str),
             format!("gzip, {}", base_str),
             format!("{}, deflate, br", base_str),
-
             // With problematic quality values
             format!("{};q=1.5", base_str),      // > 1.0
             format!("{};q=-0.5", base_str),     // negative
@@ -100,48 +94,39 @@ fn test_malformed_headers(base_data: &[u8]) {
             format!("{};q=infinity", base_str), // infinity
             format!("{};q=", base_str),         // empty q value
             format!("{};q", base_str),          // no q value
-
             // Whitespace variations
             format!("  {}  ", base_str),
             format!("{}  ;  q=0.5", base_str),
             format!("{} ; q = 0.8 ", base_str),
-
             // Case variations
             base_str.to_uppercase(),
             base_str.to_lowercase(),
-
             // Special characters
             format!("{}*", base_str),
             format!("{}+", base_str),
             format!("{}@", base_str),
             format!("{}#", base_str),
-
             // Very long headers
             base_str.repeat(100),
             format!("{}={}", base_str.repeat(50), "x".repeat(1000)),
-
             // Unicode and control characters
-            format!("{}\u{1F4A9}", base_str),   // emoji
-            format!("{}\x00", base_str),        // null byte
-            format!("{}\x1F", base_str),        // control char
-            format!("{}\u{FEFF}", base_str),    // BOM
-
+            format!("{}\u{1F4A9}", base_str), // emoji
+            format!("{}\x00", base_str),      // null byte
+            format!("{}\x1F", base_str),      // control char
+            format!("{}\u{FEFF}", base_str),  // BOM
             // Malformed separators
-            format!("{};", base_str),           // trailing semicolon
-            format!("{},", base_str),           // trailing comma
-            format!(";{}", base_str),           // leading semicolon
-            format!(",{}", base_str),           // leading comma
-            format!("{};;q=0.5", base_str),     // double semicolon
-            format!("{},,gzip", base_str),      // double comma
-
+            format!("{};", base_str),       // trailing semicolon
+            format!("{},", base_str),       // trailing comma
+            format!(";{}", base_str),       // leading semicolon
+            format!(",{}", base_str),       // leading comma
+            format!("{};;q=0.5", base_str), // double semicolon
+            format!("{},,gzip", base_str),  // double comma
             // Duplicate parameters
             format!("{};q=0.5;q=0.8", base_str),
             format!("{};q=0.5;q=0.5", base_str),
-
             // Empty parts
-            format!("{}, ,gzip", base_str),     // empty part
+            format!("{}, ,gzip", base_str), // empty part
             format!("gzip, , {}", base_str),
-
             // Boundary values
             format!("{};q=0.000", base_str),
             format!("{};q=1.000", base_str),
@@ -165,20 +150,17 @@ fn test_edge_cases() {
         "\n",
         "\r\n",
         "   \t\n\r   ",
-
         // Just quality without encoding
         "q=0.5",
         ";q=0.5",
         "q=",
         "q",
-
         // Just separators
         ",",
         ";",
         ",,",
         ";;",
         ",;,",
-
         // Wildcard variations
         "*",
         "*;q=0",
@@ -187,32 +169,28 @@ fn test_edge_cases() {
         "*, gzip",
         "gzip, *",
         "gzip;q=0.8, *;q=0.1",
-
         // Real-world headers
         "gzip, deflate, br",
         "gzip;q=1.0, deflate;q=0.5, *;q=0",
         "br;q=1.0, gzip;q=0.8, deflate;q=0.6, *;q=0.1",
         "identity",
         "gzip, identity; q=0.5, *;q=0",
-
         // Browser-style headers
         "gzip, deflate, br, zstd",
         "gzip, compress, deflate",
         "deflate, gzip;q=1.0, *;q=0.5",
-
         // Malicious attempts
-        "x".repeat(10000),                    // very long
-        "gzip;q=".to_string() + &"9".repeat(1000),  // huge quality value
-        "a,".repeat(10000),                   // many parts
-        ("\x00".repeat(100)) + "gzip",        // null bytes
-        "\u{FFFF}gzip\u{FFFE}",              // unicode edge chars
-        "gzip\r\ngzip",                       // line breaks
-
+        "x".repeat(10000),                         // very long
+        "gzip;q=".to_string() + &"9".repeat(1000), // huge quality value
+        "a,".repeat(10000),                        // many parts
+        ("\x00".repeat(100)) + "gzip",             // null bytes
+        "\u{FFFF}gzip\u{FFFE}",                    // unicode edge chars
+        "gzip\r\ngzip",                            // line breaks
         // Float edge cases
-        "gzip;q=1.7976931348623157e+308",     // max f64
-        "gzip;q=4.9406564584124654e-324",     // min f64
-        "gzip;q=1.0000000000000002",          // precision test
-        "gzip;q=0.9999999999999999",          // precision test
+        "gzip;q=1.7976931348623157e+308", // max f64
+        "gzip;q=4.9406564584124654e-324", // min f64
+        "gzip;q=1.0000000000000002",      // precision test
+        "gzip;q=0.9999999999999999",      // precision test
     ];
 
     for header in &edge_case_headers {
@@ -290,9 +268,8 @@ fuzz_target!(|data: &[u8]| {
 
     let first_byte = data[0];
     let quality_values = [
-        "0.0", "0.1", "0.5", "0.9", "1.0",
-        "0.000", "1.000", "0.999", "0.001",
-        "00.5", "01.0", "1.00000",  // Leading zeros, extra precision
+        "0.0", "0.1", "0.5", "0.9", "1.0", "0.000", "1.000", "0.999", "0.001", "00.5", "01.0",
+        "1.00000", // Leading zeros, extra precision
     ];
 
     for &q in &quality_values {
@@ -306,11 +283,10 @@ fuzz_target!(|data: &[u8]| {
         "compress, gzip",
         "compress;q=0.5, gzip;q=1.0",
         "gzip;q=1.0, identity; q=0.5, *;q=0",
-
         // Edge cases from specification
-        "br;level=4",  // with parameters (not quality)
-        "gzip; q=0.001",  // minimum quality
-        "deflate; q=0.999",  // near maximum quality
+        "br;level=4",       // with parameters (not quality)
+        "gzip; q=0.001",    // minimum quality
+        "deflate; q=0.999", // near maximum quality
     ];
 
     for header in &protocol_tests {

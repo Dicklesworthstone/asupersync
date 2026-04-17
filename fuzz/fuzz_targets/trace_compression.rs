@@ -52,7 +52,8 @@ fuzz_target!(|data: &[u8]| {
     if data.len() >= 8 {
         // Extract potential size from first 4 bytes
         let size_bytes = &data[0..4];
-        let size = u32::from_le_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]]) as usize;
+        let size = u32::from_le_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]])
+            as usize;
 
         // Only attempt decompression if size is reasonable (prevent memory exhaustion)
         if size <= 16 * 1024 * 1024 {
@@ -67,12 +68,15 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test compression of the input data to exercise the compression path
-    if data.len() <= 1024 * 1024 {  // Reasonable size for compression testing
+    if data.len() <= 1024 * 1024 {
+        // Reasonable size for compression testing
         match lz4_flex::compress(data) {
             Ok(compressed) => {
                 // Test decompression of freshly compressed data
                 let _ = lz4_flex::decompress(&compressed, data.len());
-                let _ = lz4_flex::decompress_size_prepended(&lz4_flex::compress_prepend_size(data).unwrap_or_default());
+                let _ = lz4_flex::decompress_size_prepended(
+                    &lz4_flex::compress_prepend_size(data).unwrap_or_default(),
+                );
             }
             Err(_) => {
                 // Compression error
