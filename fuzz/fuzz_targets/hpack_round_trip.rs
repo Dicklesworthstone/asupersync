@@ -39,6 +39,9 @@ const MAX_HEADERS: usize = 32;
 /// Maximum header name/value length to prevent memory exhaustion.
 const MAX_STRING_LENGTH: usize = 1024;
 
+/// Maximum large header value length for testing 4096+ byte values.
+const MAX_LARGE_STRING_LENGTH: usize = 8192;
+
 /// Maximum encoded output size to prevent compression bombs.
 const MAX_ENCODED_SIZE: usize = 16384;
 
@@ -87,6 +90,15 @@ fuzz_target!(|data: &[u8]| {
 
     // Test with sensitive headers (should not be indexed)
     sensitive_headers_test(&mut encoder, &mut decoder);
+
+    // Test large header values (4096+ bytes)
+    large_header_values_test(&mut encoder, &mut decoder, header_data);
+
+    // Test Huffman encoding boundary conditions
+    huffman_boundary_test(&mut encoder, &mut decoder, header_data);
+
+    // Test header fragmentation scenarios
+    header_fragmentation_test(&mut encoder, &mut decoder, &original_headers);
 });
 
 /// Generate headers from fuzz input data.
@@ -507,6 +519,383 @@ fn dynamic_table_size_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecode
                 "Table size {} header count mismatch",
                 size
             );
+        }
+    }
+}
+
+/// Test encoding/decoding of large header values (4096+ bytes).
+fn large_header_values_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder, data: &[u8]) {
+    if data.len() < 16 {
+        return;
+    }
+
+    // Generate large header values using different patterns
+    let large_headers = vec![
+        Header {
+            name: "x-large-data".to_string(),
+            value: generate_large_header_value(data, 4096),
+        },
+        Header {
+            name: "x-large-base64".to_string(),
+            value: generate_large_base64_value(data, 5000),
+        },
+        Header {
+            name: "x-large-repeated".to_string(),
+            value: generate_repeated_pattern_value(data, 6000),
+        },
+    ];
+
+    for header in &large_headers {
+        let test_headers = vec![header.clone()];
+
+        // Test with Huffman encoding enabled
+        encoder.set_use_huffman(true);
+        test_large_header_round_trip(encoder, decoder, &test_headers);
+
+        // Test with Huffman encoding disabled
+        encoder.set_use_huffman(false);
+        test_large_header_round_trip(encoder, decoder, &test_headers);
+    }
+}
+
+/// Generate a large header value from input bytes.
+fn generate_large_header_value(data: &[u8], target_size: usize) -> String {
+    let mut value = String::with_capacity(target_size);
+
+    while value.len() < target_size {
+        for &byte in data {
+            if value.len() >= target_size {
+                break;
+            }
+            // Use printable ASCII range
+            let ch = match byte % 94 {
+                0..=25 => (b'A' + (byte % 26)) as char,
+                26..=51 => (b'a' + (byte % 26)) as char,
+                52..=61 => (b'0' + (byte % 10)) as char,
+                62 => ' ',
+                63 => '-',
+                64 => '_',
+                65 => '.',
+                66 => ',',
+                67 => ';',
+                68 => ':',
+                69 => '/',
+                70 => '?',
+                71 => '#',
+                72 => '[',
+                73 => ']',
+                74 => '@',
+                75 => '!',
+                76 => '$',
+                77 => '&',
+                78 => '\'',
+                79 => '(',
+                80 => ')',
+                81 => '*',
+                82 => '+',
+                83 => '=',
+                _ => (b'0' + (byte % 10)) as char,
+            };
+            value.push(ch);
+        }
+    }
+
+    value.truncate(target_size.min(MAX_LARGE_STRING_LENGTH));
+    value
+}
+
+/// Generate a large Base64-style header value.
+fn generate_large_base64_value(data: &[u8], target_size: usize) -> String {
+    let b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+    let mut value = String::with_capacity(target_size);
+
+    for i in 0..target_size.min(MAX_LARGE_STRING_LENGTH) {
+        let byte_idx = i % data.len().max(1);
+        let char_idx = data[byte_idx] as usize % b64_chars.len();
+        value.push(b64_chars.chars().nth(char_idx).unwrap());
+    }
+
+    value
+}
+
+/// Generate a large header value with repeated patterns.
+fn generate_repeated_pattern_value(data: &[u8], target_size: usize) -> String {
+    if data.is_empty() {
+        return "a".repeat(target_size.min(MAX_LARGE_STRING_LENGTH));
+    }
+
+    let pattern_size = (data[0] % 16 + 1) as usize;
+    let pattern = &data[1..pattern_size.min(data.len())];
+
+    let pattern_str: String = pattern
+        .iter()
+        .map(|&b| {
+            let c = b % 26 + b'a';
+            c as char
+        })
+        .collect();
+
+    if pattern_str.is_empty() {
+        return "x".repeat(target_size.min(MAX_LARGE_STRING_LENGTH));
+    }
+
+    let repeats = target_size / pattern_str.len() + 1;
+    let repeated = pattern_str.repeat(repeats);
+
+    repeated[..target_size.min(MAX_LARGE_STRING_LENGTH)].to_string()
+}
+
+/// Test round-trip for large headers with specific size limits.
+fn test_large_header_round_trip(
+    encoder: &mut HpackEncoder,
+    decoder: &mut HpackDecoder,
+    headers: &[Header],
+) {
+    // Encode headers
+    let mut encoded = BytesMut::new();
+    encoder.encode(headers, &mut encoded);
+
+    // Allow larger encoded size for large header testing
+    let max_size = MAX_ENCODED_SIZE * 4; // 64KB limit for large headers
+    if encoded.len() > max_size {
+        return; // Skip excessively large encodings
+    }
+
+    // Decode headers
+    let mut encoded_bytes = encoded.freeze();
+    if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
+        // Verify round-trip consistency
+        assert_eq!(
+            headers.len(),
+            decoded_headers.len(),
+            "Large header count mismatch"
+        );
+
+        for (orig, decoded) in headers.iter().zip(decoded_headers.iter()) {
+            assert_eq!(
+                orig.name.to_lowercase(),
+                decoded.name.to_lowercase(),
+                "Large header name mismatch: '{}' vs '{}'",
+                orig.name,
+                decoded.name
+            );
+            assert_eq!(
+                orig.value, decoded.value,
+                "Large header value mismatch for '{}': lengths {} vs {}",
+                orig.name, orig.value.len(), decoded.value.len()
+            );
+        }
+    }
+}
+
+/// Test Huffman encoding boundary conditions.
+fn huffman_boundary_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder, data: &[u8]) {
+    if data.len() < 8 {
+        return;
+    }
+
+    // Generate test strings that are at Huffman encoding boundaries
+    let repeated_a = "a".repeat(100);
+    let repeated_e = "e".repeat(50);
+    let repeated_space = " ".repeat(80);
+    let random_value = generate_low_compression_value(data, 100);
+    let mixed_value = format!("{}{}", "a".repeat(50), generate_low_compression_value(data, 50));
+    let ascii_value = generate_ascii_boundary_value(data);
+
+    let test_cases = vec![
+        // Very short strings (Huffman overhead not worth it)
+        ("x", "a"),
+        ("xy", "ab"),
+        ("xyz", "abc"),
+
+        // Strings with high compression ratio (lots of repeated chars)
+        ("aaa", repeated_a.as_str()),
+        ("eee", repeated_e.as_str()),
+        ("   ", repeated_space.as_str()), // spaces compress well
+
+        // Strings with low compression ratio (random-ish content)
+        ("x-random", random_value.as_str()),
+
+        // Mixed content (some compressible, some not)
+        ("x-mixed", mixed_value.as_str()),
+
+        // ASCII vs Latin-1 boundary content
+        ("x-ascii", ascii_value.as_str()),
+    ];
+
+    for (name, value) in test_cases {
+        let test_headers = vec![Header {
+            name: name.to_string(),
+            value: value.to_string(),
+        }];
+
+        // Test with Huffman enabled (should compress if beneficial)
+        encoder.set_use_huffman(true);
+        let mut encoded_huffman = BytesMut::new();
+        encoder.encode(&test_headers, &mut encoded_huffman);
+
+        // Test with Huffman disabled (raw encoding)
+        encoder.set_use_huffman(false);
+        let mut encoded_raw = BytesMut::new();
+        encoder.encode(&test_headers, &mut encoded_raw);
+
+        // Both should decode to the same result
+        if encoded_huffman.len() <= MAX_ENCODED_SIZE && encoded_raw.len() <= MAX_ENCODED_SIZE {
+            let mut huffman_bytes = encoded_huffman.freeze();
+            let mut raw_bytes = encoded_raw.freeze();
+
+            if let (Ok(huffman_result), Ok(raw_result)) = (
+                decoder.decode(&mut huffman_bytes),
+                decoder.decode(&mut raw_bytes),
+            ) {
+                assert_eq!(
+                    huffman_result.len(),
+                    raw_result.len(),
+                    "Huffman vs raw result count mismatch for '{}'",
+                    name
+                );
+
+                for (huff, raw) in huffman_result.iter().zip(raw_result.iter()) {
+                    assert_eq!(
+                        huff.name, raw.name,
+                        "Huffman vs raw name mismatch for '{}'",
+                        name
+                    );
+                    assert_eq!(
+                        huff.value, raw.value,
+                        "Huffman vs raw value mismatch for '{}'",
+                        name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Generate a header value with low Huffman compression ratio.
+fn generate_low_compression_value(data: &[u8], target_len: usize) -> String {
+    let mut value = String::with_capacity(target_len);
+
+    // Use bytes that don't compress well under Huffman
+    let low_compression_chars = "~!@#$%^&*()_+{}|:<>?[];',./\"\\`";
+
+    for i in 0..target_len {
+        let byte_idx = i % data.len().max(1);
+        let char_idx = data[byte_idx] as usize % low_compression_chars.len();
+        value.push(low_compression_chars.chars().nth(char_idx).unwrap());
+    }
+
+    value
+}
+
+/// Generate content at ASCII/Latin-1 boundaries that might trigger encoding edge cases.
+fn generate_ascii_boundary_value(data: &[u8]) -> String {
+    if data.is_empty() {
+        return "test\x7f".to_string();
+    }
+
+    let mut value = String::new();
+
+    // Mix ASCII and near-boundary characters
+    for (i, &byte) in data.iter().enumerate().take(50) {
+        let ch = match i % 4 {
+            0 => (byte % 95 + 32) as char,      // ASCII printable
+            1 => '\x7f',                        // DEL character
+            2 => char::from(byte % 32 + 128),   // High bit set (using char::from for safety)
+            3 => char::from(byte % 127 + 129),  // Latin-1 range (using char::from for safety)
+            _ => unreachable!(),
+        };
+        value.push(ch);
+    }
+
+    value
+}
+
+/// Test header fragmentation scenarios (simulating CONTINUATION frames).
+fn header_fragmentation_test(
+    encoder: &mut HpackEncoder,
+    decoder: &mut HpackDecoder,
+    original_headers: &[Header],
+) {
+    if original_headers.is_empty() {
+        return;
+    }
+
+    // Test encoding a large set of headers that might require fragmentation
+    let mut large_header_set = original_headers.to_vec();
+
+    // Add some additional headers to increase the total size
+    for i in 0..8 {
+        large_header_set.push(Header {
+            name: format!("x-fragment-test-{}", i),
+            value: format!("value_that_might_trigger_fragmentation_{}_with_longer_content", i),
+        });
+    }
+
+    // Encode the full header set
+    let mut encoded = BytesMut::new();
+    encoder.encode(&large_header_set, &mut encoded);
+
+    if encoded.len() > MAX_ENCODED_SIZE * 2 {
+        return; // Skip if too large
+    }
+
+    // Test fragmented decoding by splitting the encoded data
+    let encoded_bytes = encoded.freeze();
+
+    // Try different fragmentation points
+    let fragment_points = [
+        encoded_bytes.len() / 4,
+        encoded_bytes.len() / 3,
+        encoded_bytes.len() / 2,
+        encoded_bytes.len() * 2 / 3,
+        encoded_bytes.len() * 3 / 4,
+    ];
+
+    for &split_point in &fragment_points {
+        if split_point > 0 && split_point < encoded_bytes.len() {
+            // Split the encoded data into two fragments
+            let first_fragment = encoded_bytes.slice(0..split_point);
+            let second_fragment = encoded_bytes.slice(split_point..);
+
+            // Try to decode the fragments separately (this should fail gracefully)
+            let mut first_copy = first_fragment.clone();
+            let _first_result = decoder.decode(&mut first_copy);
+
+            // The first fragment alone should either:
+            // 1. Fail to decode (incomplete header block)
+            // 2. Decode partial headers (if it happens to be at a header boundary)
+            // Either is acceptable - the key is no panics or crashes
+
+            // Recombine fragments and decode the complete header block
+            let mut combined = BytesMut::new();
+            combined.extend_from_slice(&first_fragment);
+            combined.extend_from_slice(&second_fragment);
+            let mut combined_bytes = combined.freeze();
+
+            if let Ok(decoded_headers) = decoder.decode(&mut combined_bytes) {
+                // Verify that recombined fragments decode correctly
+                assert_eq!(
+                    large_header_set.len(),
+                    decoded_headers.len(),
+                    "Fragmentation test header count mismatch at split point {}",
+                    split_point
+                );
+
+                for (orig, decoded) in large_header_set.iter().zip(decoded_headers.iter()) {
+                    assert_eq!(
+                        orig.name.to_lowercase(),
+                        decoded.name.to_lowercase(),
+                        "Fragmentation test name mismatch at split point {}",
+                        split_point
+                    );
+                    assert_eq!(
+                        orig.value, decoded.value,
+                        "Fragmentation test value mismatch for '{}' at split point {}",
+                        orig.name, split_point
+                    );
+                }
+            }
         }
     }
 }
