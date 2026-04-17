@@ -6672,6 +6672,56 @@ mod tests {
     }
 
     #[test]
+    fn starvation_analysis_window_comprehensive_uninitialized_edge_cases() {
+        // Test comprehensive edge cases for uninitialized slot handling
+
+        // Case 1: Empty window with various time ranges
+        let mut window = StarvationAnalysisWindow::new(8);
+        assert_eq!(window.events_in_window(1_000_000, 500_000), 0);
+        assert_eq!(window.events_in_window(u64::MAX, 1_000_000), 0);
+        assert_eq!(window.events_in_window(0, 0), 0);
+
+        // Case 2: Single event with boundary conditions
+        window.record_event(1000);
+        assert_eq!(window.events_in_window(1, 1000), 1); // Exact match
+        assert_eq!(window.events_in_window(1, 999), 0);  // Event outside window
+        assert_eq!(window.events_in_window(1, 1001), 1); // Event inside window
+
+        // Case 3: Fill exactly to buffer size (8 events)
+        let mut full_window = StarvationAnalysisWindow::new(8);
+        for i in 0..8 {
+            full_window.record_event(1000 + i * 100);
+        }
+        assert_eq!(full_window.events_in_window(10_000, 2000), 8);
+
+        // Case 4: Overfill buffer (9+ events, should wrap and ignore zeros)
+        let mut overfull_window = StarvationAnalysisWindow::new(4);
+        for i in 0..6 {  // 6 events in 4-slot buffer
+            overfull_window.record_event(1000 + i * 100);
+        }
+        // Should only count the 4 most recent events, not uninitialized zeros
+        assert_eq!(overfull_window.events_in_window(10_000, 2000), 4);
+
+        // Case 5: Zero timestamp edge case
+        let mut zero_window = StarvationAnalysisWindow::new(3);
+        zero_window.record_event(0);
+        zero_window.record_event(100);
+        // Should count zero as a valid event, not as uninitialized
+        assert_eq!(zero_window.events_in_window(200, 150), 2);
+
+        // Case 6: Pattern detection thresholds
+        let mut pattern_window = StarvationAnalysisWindow::new(16);
+        assert!(!pattern_window.is_pattern_detected(10, 1_000_000, 500_000));
+
+        // Add exactly threshold number of events
+        for i in 0..10 {
+            pattern_window.record_event(400_000 + i * 10_000);
+        }
+        assert!(pattern_window.is_pattern_detected(10, 1_000_000, 500_000));
+        assert!(!pattern_window.is_pattern_detected(11, 1_000_000, 500_000));
+    }
+
+    #[test]
     fn fairness_monitor_reports_oldest_tracked_task_details() {
         let mut monitor = FairnessMonitor::with_defaults();
         let oldest = TaskId::new_for_test(32, 0);
