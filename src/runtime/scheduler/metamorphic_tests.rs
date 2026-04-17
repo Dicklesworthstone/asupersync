@@ -4,10 +4,10 @@
 //! scheduling decisions made. Unlike unit tests that check exact outcomes, metamorphic
 //! tests verify relationships between different execution scenarios.
 
+use crate::obligation::lyapunov::SchedulingSuggestion;
 use crate::runtime::RuntimeState;
 use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::sync::ContendedMutex;
-use crate::obligation::lyapunov::SchedulingSuggestion;
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::DetRng;
 use std::sync::Arc;
@@ -635,6 +635,38 @@ fn mr_composite_cancel_drain_consistency() {
     });
 }
 
+/// MR: Priority Lane Ordering Invariance
+///
+/// If tasks are scheduled in different priority lanes (cancel > timed > ready),
+/// then dispatch order must respect lane priority regardless of arrival order.
+#[test]
+fn mr_priority_lane_ordering() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
+
+    // Create tasks for each lane
+    let ready_task = TaskId::new_for_test(1, 0);
+    let timed_task = TaskId::new_for_test(2, 0);
+    let cancel_task = TaskId::new_for_test(3, 0);
+
+    // Schedule in reverse priority order (worst case for ordering)
+    scheduler.inject_ready(ready_task, 100);  // Ready lane (lowest)
+    scheduler.inject_timed(timed_task, Time::from_nanos(1000)); // Timed lane (middle)
+    scheduler.inject_cancel(cancel_task, 200); // Cancel lane (highest)
+
+    // Dispatch order must be: cancel -> timed -> ready
+    let first = worker.next_task();
+    assert_eq!(first, Some(cancel_task), "Cancel lane must dispatch first");
+
+    let second = worker.next_task();
+    assert_eq!(second, Some(timed_task), "Timed lane must dispatch second");
+
+    let third = worker.next_task();
+    assert_eq!(third, Some(ready_task), "Ready lane must dispatch last");
+}
+
 #[cfg(test)]
 mod validation_tests {
     use super::*;
@@ -714,10 +746,11 @@ mod validation_tests {
 
         let state = Arc::new(ContendedMutex::new(
             "test.runtime_state",
-            RuntimeState::new()
+            RuntimeState::new(),
         ));
         let cancel_streak_limit = 4;
-        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_streak_limit);
+        let mut scheduler =
+            ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_streak_limit);
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
 
@@ -734,7 +767,8 @@ mod validation_tests {
         let mut cancel_streak = 0;
         let mut max_streak = 0;
 
-        for _ in 0..7 { // Process more than cancel_streak_limit
+        for _ in 0..7 {
+            // Process more than cancel_streak_limit
             if let Some(task_id) = worker.next_task() {
                 if cancel_tasks.contains(&task_id) {
                     cancel_streak += 1;
@@ -747,8 +781,10 @@ mod validation_tests {
             }
         }
 
-        assert!(max_streak <= cancel_streak_limit,
-                "Infrastructure test: cancel streak should respect limit");
+        assert!(
+            max_streak <= cancel_streak_limit,
+            "Infrastructure test: cancel streak should respect limit"
+        );
     }
 
     /// Validate EDF timed lane ordering test infrastructure
@@ -758,7 +794,7 @@ mod validation_tests {
 
         let _state = Arc::new(ContendedMutex::new(
             "test.runtime_state",
-            RuntimeState::new()
+            RuntimeState::new(),
         ));
         let mut scheduler = create_test_scheduler(1);
         let mut workers = scheduler.take_workers();
@@ -778,12 +814,24 @@ mod validation_tests {
 
         // Should dispatch in EDF order: task1 (earliest), task2 (middle), task0 (latest)
         let first = worker.next_task();
-        assert_eq!(first, Some(task_ids[1]), "Should dispatch earliest deadline first");
+        assert_eq!(
+            first,
+            Some(task_ids[1]),
+            "Should dispatch earliest deadline first"
+        );
 
         let second = worker.next_task();
-        assert_eq!(second, Some(task_ids[2]), "Should dispatch middle deadline second");
+        assert_eq!(
+            second,
+            Some(task_ids[2]),
+            "Should dispatch middle deadline second"
+        );
 
         let third = worker.next_task();
-        assert_eq!(third, Some(task_ids[0]), "Should dispatch latest deadline third");
+        assert_eq!(
+            third,
+            Some(task_ids[0]),
+            "Should dispatch latest deadline third"
+        );
     }
 }
