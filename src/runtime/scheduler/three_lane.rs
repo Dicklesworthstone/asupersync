@@ -2245,7 +2245,6 @@ impl ThreeLaneWorker {
         self.fairness_monitor.lock().starvation_stats(current_time)
     }
 
-
     /// Returns invariant statistics from the monitor.
     #[must_use]
     pub fn invariant_stats(&self) -> super::invariant_monitor::InvariantStats {
@@ -2293,7 +2292,9 @@ impl ThreeLaneWorker {
             drop(local_ready_guard);
             drop(local_guard);
 
-            self.invariant_monitor.lock().verify_queue_consistency(&ready_snapshot, current_time);
+            self.invariant_monitor
+                .lock()
+                .verify_queue_consistency(&ready_snapshot, current_time);
         }
 
         // Verify fast queue consistency
@@ -2305,7 +2306,9 @@ impl ThreeLaneWorker {
             priority_range: None,
             time_range: Some((current_time, current_time)),
         };
-        self.invariant_monitor.lock().verify_queue_consistency(&fast_snapshot, current_time);
+        self.invariant_monitor
+            .lock()
+            .verify_queue_consistency(&fast_snapshot, current_time);
     }
 
     /// Records task completion for invariant monitoring.
@@ -2319,11 +2322,9 @@ impl ThreeLaneWorker {
         }
 
         let current_time = Time::from_nanos(self.current_time_ns());
-        self.invariant_monitor.lock().record_task_complete(
-            task,
-            self.id,
-            current_time
-        );
+        self.invariant_monitor
+            .lock()
+            .record_task_complete(task, self.id, current_time);
     }
 
     /// Records task cancellation for invariant monitoring.
@@ -2336,7 +2337,9 @@ impl ThreeLaneWorker {
         }
 
         let current_time = Time::from_nanos(self.current_time_ns());
-        self.invariant_monitor.lock().record_task_cancel(task, current_time);
+        self.invariant_monitor
+            .lock()
+            .record_task_cancel(task, current_time);
     }
 
     /// Runs a closure against the task table, using the sharded task table
@@ -3043,8 +3046,11 @@ impl ThreeLaneWorker {
             .record_task_dispatch(task, current_time);
 
         // Record task dequeue for invariant verification
-        self.invariant_monitor.lock()
-            .record_task_dequeue(task, "scheduler_dispatch", Time::from_nanos(current_time));
+        self.invariant_monitor.lock().record_task_dequeue(
+            task,
+            "scheduler_dispatch",
+            Time::from_nanos(current_time),
+        );
 
         task
     }
@@ -3430,7 +3436,7 @@ impl ThreeLaneWorker {
                     self.invariant_monitor.lock().record_task_dequeue(
                         task,
                         "fast_steal",
-                        Time::from_nanos(self.current_time_ns())
+                        Time::from_nanos(self.current_time_ns()),
                     );
 
                     return Some(task);
@@ -3477,7 +3483,7 @@ impl ThreeLaneWorker {
                     self.invariant_monitor.lock().record_task_dequeue(
                         first_task,
                         "priority_steal",
-                        Time::from_nanos(self.current_time_ns())
+                        Time::from_nanos(self.current_time_ns()),
                     );
 
                     // Push remaining stolen tasks to our fast queue
@@ -3490,7 +3496,7 @@ impl ThreeLaneWorker {
                                 task,
                                 "fast_queue_stolen",
                                 _priority,
-                                Time::from_nanos(self.current_time_ns())
+                                Time::from_nanos(self.current_time_ns()),
                             );
                         }
                     }
@@ -6937,7 +6943,7 @@ mod tests {
         assert_eq!(worker.invariant_stats().operations_monitored, 0);
 
         // Test scheduling to different lanes with invariant monitoring
-        worker.schedule_local(task1, 50);    // Ready lane
+        worker.schedule_local(task1, 50); // Ready lane
         worker.schedule_local_cancel(task2, 100); // Cancel lane
         worker.schedule_local_timed(task3, Time::from_nanos(5000)); // Timed lane
 
@@ -6951,9 +6957,21 @@ mod tests {
         let task3_tracked = tracked.iter().find(|t| t.task_id == task3).unwrap();
 
         // Verify queue assignments
-        assert!(task1_tracked.queues.contains(&"local_ready_queue".to_string()));
-        assert!(task2_tracked.queues.contains(&"local_cancel_queue".to_string()));
-        assert!(task3_tracked.queues.contains(&"local_timed_queue".to_string()));
+        assert!(
+            task1_tracked
+                .queues
+                .contains(&"local_ready_queue".to_string())
+        );
+        assert!(
+            task2_tracked
+                .queues
+                .contains(&"local_cancel_queue".to_string())
+        );
+        assert!(
+            task3_tracked
+                .queues
+                .contains(&"local_timed_queue".to_string())
+        );
 
         // Test task dispatch tracking
         if let Some(dispatched_task) = worker.next_task() {
@@ -6996,7 +7014,7 @@ mod tests {
             10, // Low priority
             high_priority_task,
             50, // High priority - should be scheduled first
-            Time::from_nanos(1000)
+            Time::from_nanos(1000),
         );
 
         // Should have detected a priority violation
