@@ -249,6 +249,7 @@ const fn kind_index(kind: ObligationKind) -> u8 {
         ObligationKind::Ack => 1,
         ObligationKind::Lease => 2,
         ObligationKind::IoOp => 3,
+        ObligationKind::SemaphorePermit => 4,
     }
 }
 

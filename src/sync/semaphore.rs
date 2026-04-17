@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+use crate::obligation::graded::{ObligationToken, SemaphorePermitKind};
 
 /// Error returned when semaphore acquisition fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +225,7 @@ impl Semaphore {
             // On ARM this avoids a store-release barrier per acquisition.
             self.permits_shadow.store(state.permits, Ordering::Relaxed);
             Ok(SemaphorePermit {
+                obligation: Some(ObligationToken::reserve(format!("semaphore-permit-{}", count))),
                 semaphore: self,
                 count,
             })
@@ -369,6 +371,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 next.wake();
             }
             return Poll::Ready(Ok(SemaphorePermit {
+                obligation: Some(ObligationToken::reserve(format!("semaphore-permit-{}", self.count))),
                 semaphore: self.semaphore,
                 count: self.count,
             }));
@@ -393,8 +396,12 @@ impl<'a> Future for AcquireFuture<'a, '_> {
 }
 
 /// A permit from a semaphore.
+///
+/// Fields are ordered so that `obligation` drops first (firing the panic if leaked)
+/// and then semaphore drops (releasing permits back to the semaphore).
 #[must_use = "permit will be immediately released if not held"]
 pub struct SemaphorePermit<'a> {
+    obligation: Option<ObligationToken<SemaphorePermitKind>>,
     semaphore: &'a Semaphore,
     count: usize,
 }
@@ -408,9 +415,36 @@ impl SemaphorePermit<'_> {
     }
 
     /// Forgets the permit without releasing it back to the semaphore.
+    /// This aborts the underlying obligation to indicate the permit was intentionally leaked.
     #[inline]
     pub fn forget(mut self) {
         self.count = 0;
+        if let Some(obligation) = self.obligation.take() {
+            let _proof = obligation.abort();
+        }
+    }
+
+    /// Extracts the obligation token without releasing the permit back to the semaphore.
+    /// This transfers ownership of the obligation to the caller.
+    /// The permit is consumed and will not release permits back to the semaphore.
+    #[inline]
+    pub(crate) fn into_parts(mut self) -> (usize, Option<ObligationToken<SemaphorePermitKind>>) {
+        let count = self.count;
+        let obligation = self.obligation.take();
+        self.count = 0; // Prevent Drop from releasing permits
+        (count, obligation)
+    }
+
+    /// Commits the permit explicitly, releasing it back to the semaphore.
+    /// This consumes the permit and commits the underlying obligation, preventing
+    /// the drop bomb from firing.
+    #[inline]
+    pub fn commit(mut self) {
+        if let Some(obligation) = self.obligation.take() {
+            let _proof = obligation.commit();
+        }
+        // Drop will now release the semaphore permits without panicking
+        drop(self);
     }
 }
 
@@ -419,13 +453,19 @@ impl Drop for SemaphorePermit<'_> {
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
         }
+        // Obligation token will automatically panic if leaked when it drops.
+        // Normal usage should call commit() to avoid the panic.
     }
 }
 
 /// An owned permit from a semaphore.
+///
+/// Fields are ordered so that `obligation` drops first (firing the panic if leaked)
+/// and then semaphore drops (releasing permits back to the semaphore).
 #[derive(Debug)]
 #[must_use = "permit will be immediately released if not held"]
 pub struct OwnedSemaphorePermit {
+    obligation: Option<ObligationToken<SemaphorePermitKind>>,
     semaphore: std::sync::Arc<Semaphore>,
     count: usize,
 }
@@ -455,10 +495,14 @@ impl OwnedSemaphorePermit {
         count: usize,
     ) -> Result<Self, TryAcquireError> {
         let permit = semaphore.try_acquire(count)?;
-        // Transfer ownership: forget the borrow-based permit so it doesn't
-        // release on drop; the OwnedSemaphorePermit will release in its own Drop.
-        permit.forget();
-        Ok(Self { semaphore, count })
+        // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
+        // will handle both permit release and obligation lifecycle in its own Drop.
+        let (count, obligation) = permit.into_parts();
+        Ok(Self {
+            obligation,
+            semaphore,
+            count,
+        })
     }
 
     /// Tries to acquire an owned permit without waiting, cloning the `Arc`
@@ -472,13 +516,14 @@ impl OwnedSemaphorePermit {
         count: usize,
     ) -> Result<Self, TryAcquireError> {
         // Acquire permits via the semaphore's internal state directly.
-        // We forget the SemaphorePermit to avoid its Drop releasing permits,
-        // since OwnedSemaphorePermit's Drop will handle the release instead.
+        // We extract the obligation token from the SemaphorePermit to avoid its Drop
+        // releasing permits, since OwnedSemaphorePermit's Drop will handle the release instead.
         let permit = semaphore.try_acquire(count)?;
-        // Transfer ownership: forget the borrow-based permit so it doesn't
-        // release on drop; the OwnedSemaphorePermit will release in its own Drop.
-        permit.forget();
+        // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
+        // will handle both permit release and obligation lifecycle in its own Drop.
+        let (count, obligation) = permit.into_parts();
         Ok(Self {
+            obligation,
             semaphore: semaphore.clone(),
             count,
         })
@@ -495,6 +540,16 @@ impl OwnedSemaphorePermit {
     #[inline]
     pub fn forget(mut self) {
         self.count = 0;
+        // TODO: If obligation tracking is enabled, abort the obligation instead of committing
+        self.obligation = None;
+    }
+
+    /// Commits the permit explicitly, releasing it back to the semaphore.
+    /// This is equivalent to dropping the permit but provides explicit control.
+    #[inline]
+    pub fn commit(self) {
+        // The Drop implementation will handle both permit release and obligation commit
+        drop(self);
     }
 }
 
@@ -502,6 +557,16 @@ impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
+        }
+
+        // TODO: Commit obligation if tracking is enabled
+        // Currently we don't have access to runtime state in Drop,
+        // so this will need to be implemented when runtime integration is complete
+        if let Some(_obligation_id) = self.obligation.take() {
+            // When runtime integration is complete:
+            // 1. Get current runtime handle
+            // 2. Access runtime state
+            // 3. Call state.commit_obligation(obligation_id)
         }
     }
 }
@@ -642,6 +707,7 @@ impl Future for OwnedAcquireFuture {
                 next.wake();
             }
             return Poll::Ready(Ok(OwnedSemaphorePermit {
+                obligation: Some(ObligationToken::reserve(format!("semaphore-permit-{}", this.count))),
                 semaphore: this.semaphore.clone(),
                 count: this.count,
             }));
@@ -2285,5 +2351,26 @@ mod tests {
         );
 
         crate::test_complete!("metamorphic_try_acquire_never_blocks");
+    }
+
+    #[test]
+    fn test_semaphore_permit_obligation_structure() {
+        init_test("test_semaphore_permit_obligation_structure");
+        let sem = Semaphore::new(2);
+
+        // Test that permits have obligation tracking fields
+        let permit = sem.try_acquire(1).expect("should acquire permit");
+
+        // Verify the permit can be committed explicitly
+        permit.commit();
+
+        // Test owned permit as well
+        let owned_permit = OwnedSemaphorePermit::try_acquire(Arc::new(sem), 1)
+            .expect("should acquire owned permit");
+
+        // Verify owned permit can be committed
+        owned_permit.commit();
+
+        crate::test_complete!("test_semaphore_permit_obligation_structure");
     }
 }

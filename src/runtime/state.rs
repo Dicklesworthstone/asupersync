@@ -3517,6 +3517,8 @@ pub enum ObligationKindSnapshot {
     Lease,
     /// I/O operation.
     IoOp,
+    /// Semaphore permit.
+    SemaphorePermit,
 }
 
 impl From<ObligationKind> for ObligationKindSnapshot {
@@ -3526,6 +3528,7 @@ impl From<ObligationKind> for ObligationKindSnapshot {
             ObligationKind::Ack => Self::Ack,
             ObligationKind::Lease => Self::Lease,
             ObligationKind::IoOp => Self::IoOp,
+            ObligationKind::SemaphorePermit => Self::SemaphorePermit,
         }
     }
 }

@@ -59,6 +59,7 @@ const fn obligation_index(kind: ObligationKind) -> usize {
         ObligationKind::Ack => 1,
         ObligationKind::Lease => 2,
         ObligationKind::IoOp => 3,
+        ObligationKind::SemaphorePermit => 4,
     }
 }
 

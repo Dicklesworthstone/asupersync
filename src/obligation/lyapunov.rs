@@ -338,6 +338,10 @@ impl StateSnapshot {
                 ObligationKind::IoOp => {
                     pending_io_ops = pending_io_ops.saturating_add(1);
                 }
+                ObligationKind::SemaphorePermit => {
+                    // Count semaphore permits as part of synchronization obligations
+                    pending_leases = pending_leases.saturating_add(1);
+                }
             }
         }
         // -- Region scan: one pass for draining count. --

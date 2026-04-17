@@ -576,6 +576,16 @@ impl TokenKind for IoOpKind {
     }
 }
 
+/// Marker type for [`ObligationKind::SemaphorePermit`].
+#[derive(Debug)]
+pub enum SemaphorePermitKind {}
+impl sealed::Sealed for SemaphorePermitKind {}
+impl TokenKind for SemaphorePermitKind {
+    fn obligation_kind() -> ObligationKind {
+        ObligationKind::SemaphorePermit
+    }
+}
+
 // ============================================================================
 // ObligationToken<K> — typestate linear token
 // ============================================================================
