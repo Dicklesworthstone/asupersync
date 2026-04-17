@@ -6,6 +6,7 @@
 // pub mod codec_framing;
 pub mod h1_rfc9112;
 // pub mod h2_rfc7540;
+pub mod h2_rst_stream_ping_rfc9113;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
@@ -22,6 +23,7 @@ pub mod obligation_invariants;
 // Re-export main conformance test functionality
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
 // pub use h2_rfc7540::{H2ConformanceHarness, H2ConformanceResult};
+pub use h2_rst_stream_ping_rfc9113::{H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory};
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 // pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
 pub use kafka_record_batch_v2::{KafkaConformanceHarness, ConformanceTestResult, TestCategory as KafkaTestCategory};
@@ -57,6 +59,13 @@ pub enum TestCategory {
     FlowControl,
     Priority,
     Security,
+    RstStreamFormat,
+    RstStreamErrorCodes,
+    PingFormat,
+    PingAck,
+    ErrorClassification,
+    ProtocolOrdering,
+    ConnectionHandling,
     // Codec categories
     Framing,
     ResourceLimits,
@@ -141,6 +150,40 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         })
         .collect();
     results.extend(h1_results);
+
+    // HTTP/2 RST_STREAM/PING RFC 9113 conformance
+    let h2_harness = H2ConformanceHarness::new();
+    let h2_results: Vec<ConformanceTestResult> = h2_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                h2_rst_stream_ping_rfc9113::TestCategory::RstStreamFormat => TestCategory::RstStreamFormat,
+                h2_rst_stream_ping_rfc9113::TestCategory::RstStreamErrorCodes => TestCategory::RstStreamErrorCodes,
+                h2_rst_stream_ping_rfc9113::TestCategory::PingFormat => TestCategory::PingFormat,
+                h2_rst_stream_ping_rfc9113::TestCategory::PingAck => TestCategory::PingAck,
+                h2_rst_stream_ping_rfc9113::TestCategory::ErrorClassification => TestCategory::ErrorClassification,
+                h2_rst_stream_ping_rfc9113::TestCategory::ProtocolOrdering => TestCategory::ProtocolOrdering,
+                h2_rst_stream_ping_rfc9113::TestCategory::ConnectionHandling => TestCategory::ConnectionHandling,
+            },
+            requirement_level: match r.requirement_level {
+                h2_rst_stream_ping_rfc9113::RequirementLevel::Must => RequirementLevel::Must,
+                h2_rst_stream_ping_rfc9113::RequirementLevel::Should => RequirementLevel::Should,
+                h2_rst_stream_ping_rfc9113::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                h2_rst_stream_ping_rfc9113::TestVerdict::Pass => TestVerdict::Pass,
+                h2_rst_stream_ping_rfc9113::TestVerdict::Fail => TestVerdict::Fail,
+                h2_rst_stream_ping_rfc9113::TestVerdict::Skipped => TestVerdict::Skipped,
+                h2_rst_stream_ping_rfc9113::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(h2_results);
 
     // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
     /*
@@ -318,6 +361,11 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "coverage": "systematic",
                     "reference": "RFC 7540 HTTP/2 specification requirements"
                 },
+                "h2_rst_stream_ping_rfc9113": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "RFC 9113 HTTP/2 RST_STREAM and PING frame conformance"
+                },
                 "websocket_rfc6455": {
                     "status": "implemented",
                     "coverage": "systematic",
@@ -391,6 +439,40 @@ mod tests {
             categories.contains(&h1_rfc9112::H1TestCategory::ChunkExtensions),
             "Should test chunk extensions"
         );
+    }
+
+    #[test]
+    fn test_h2_conformance_integration() {
+        let h2_harness = H2ConformanceHarness::new();
+        let results = h2_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "H2 conformance should have tests");
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&h2_rst_stream_ping_rfc9113::TestCategory::RstStreamFormat),
+            "Should test RST_STREAM format"
+        );
+        assert!(
+            categories.contains(&h2_rst_stream_ping_rfc9113::TestCategory::PingFormat),
+            "Should test PING format"
+        );
+        assert!(
+            categories.contains(&h2_rst_stream_ping_rfc9113::TestCategory::PingAck),
+            "Should test PING ACK behavior"
+        );
+
+        // Verify all tests pass
+        let failures: Vec<_> = results.iter()
+            .filter(|r| r.verdict == h2_rst_stream_ping_rfc9113::TestVerdict::Fail)
+            .collect();
+
+        if !failures.is_empty() {
+            panic!("H2 conformance tests failed: {:#?}", failures);
+        }
     }
 
     #[test]
