@@ -511,7 +511,7 @@ pub struct Gf256ProfileEnvironmentMetadata {
 }
 
 /// Architecture class used to map profile-pack defaults.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Gf256ArchitectureClass {
     /// No ISA acceleration available; conservative scalar profile.
     GenericScalar,
@@ -535,7 +535,7 @@ impl Gf256ArchitectureClass {
 }
 
 /// Deterministic profile-pack identifier for dual-kernel policy windows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Gf256ProfilePackId {
     /// Conservative scalar profile (fused dual paths effectively disabled).
     ScalarConservativeV1,

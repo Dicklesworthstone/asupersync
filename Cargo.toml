@@ -85,7 +85,7 @@ tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
 tls-webpki-roots = ["tls", "dep:webpki-roots"]
 # Enable CLI tooling (trace inspection).
-cli = ["dep:clap", "dep:time", "trace-compression", "dep:conformance", "dep:serde_yaml"]
+cli = ["dep:clap", "dep:time", "trace-compression", "dep:conformance", "dep:serde_yaml", "dep:chrono", "dep:env_logger"]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite"]
 # Enable PostgreSQL async client with wire protocol.
@@ -118,6 +118,11 @@ path = "src/lib.rs"
 name = "asupersync"
 path = "src/bin/asupersync.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "offline_tuner"
+path = "src/bin/offline_tuner.rs"
+required-features = ["cli", "simd-intrinsics"]
 
 [dependencies]
 # Phase 0: prefer std/core; avoid bringing in executors/runtimes.
@@ -178,6 +183,8 @@ x509-parser = { version = "0.18", optional = true }
 toml = { version = "1.0", optional = true }
 clap = { version = "4.4", features = ["derive"], optional = true }
 time = { version = ">=0.3, <0.3.47", features = ["formatting"], optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
+env_logger = { version = "0.11", optional = true }
 # YAML parsing for FrankenLab scenario files (CLI feature)
 serde_yaml = { version = "0.9", optional = true }
 # SQLite async wrapper - bundled by default for portability

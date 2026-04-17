@@ -26,6 +26,7 @@ pub mod decision_contract;
 pub mod decoder;
 pub mod gf256;
 pub mod linalg;
+pub mod offline_tuner;
 pub mod pipeline;
 pub mod proof;
 pub mod regression;
