@@ -6,6 +6,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use asupersync::bytes::Bytes;
+use asupersync::http::h2::hpack::{Decoder, Header};
+
 /// Fixture metadata for provenance tracking.
 #[derive(Debug, Clone)]
 pub struct FixtureMetadata {
@@ -180,15 +183,52 @@ pub fn compare_against_fixture(
     our_encoded: &[u8],
 ) -> FixtureComparisonResult {
     if our_encoded == fixture.expected_encoded {
-        FixtureComparisonResult::ExactMatch
+        return FixtureComparisonResult::ExactMatch;
+    }
+
+    let expected_headers: Vec<Header> = fixture
+        .input_headers
+        .iter()
+        .map(|(name, value)| Header::new(name.clone(), value.clone()))
+        .collect();
+
+    let decode = |encoded: &[u8], label: &str| -> Result<Vec<Header>, String> {
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::copy_from_slice(encoded);
+        decoder
+            .decode(&mut src)
+            .map_err(|error| format!("failed to decode {label}: {error}"))
+    };
+
+    let reference_decoded = match decode(&fixture.expected_encoded, "reference fixture") {
+        Ok(decoded) => decoded,
+        Err(reason) => return FixtureComparisonResult::Mismatch { reason },
+    };
+
+    if reference_decoded != expected_headers {
+        return FixtureComparisonResult::Mismatch {
+            reason: format!(
+                "reference fixture decoded to {:?}, expected {:?}",
+                reference_decoded, expected_headers
+            ),
+        };
+    }
+
+    let our_decoded = match decode(our_encoded, "candidate encoding") {
+        Ok(decoded) => decoded,
+        Err(reason) => return FixtureComparisonResult::Mismatch { reason },
+    };
+
+    if our_decoded == expected_headers {
+        FixtureComparisonResult::FunctionalEquivalent
     } else {
-        // For HPACK, different encodings can be functionally equivalent
-        // This would require decoding both and comparing the results
         FixtureComparisonResult::Mismatch {
             reason: format!(
-                "Encoded output differs: expected {:02x?}, got {:02x?}",
+                "encoded output differs: expected {:02x?}, got {:02x?}; decoded headers {:?} != {:?}",
                 fixture.expected_encoded,
-                our_encoded
+                our_encoded,
+                our_decoded,
+                expected_headers
             ),
         }
     }
@@ -258,8 +298,14 @@ mod tests {
         let fixture = HpackFixture {
             name: "test".to_string(),
             description: "test fixture".to_string(),
-            input_headers: vec![("test".to_string(), "value".to_string())],
-            expected_encoded: vec![0x01, 0x02, 0x03],
+            input_headers: vec![("custom-key".to_string(), "custom-value".to_string())],
+            expected_encoded: generate_fixture_from_headers(
+                "test_fixture",
+                "Test fixture generation",
+                &[("custom-key".to_string(), "custom-value".to_string())],
+                false,
+            )
+            .expected_encoded,
             use_huffman: false,
             metadata: FixtureMetadata {
                 generator: "test".to_string(),
@@ -271,11 +317,21 @@ mod tests {
         };
 
         // Exact match
-        let result = compare_against_fixture(&fixture, &[0x01, 0x02, 0x03]);
+        let result = compare_against_fixture(&fixture, &fixture.expected_encoded);
         assert_eq!(result, FixtureComparisonResult::ExactMatch);
 
+        // Functional equivalent
+        let equivalent = generate_fixture_from_headers(
+            "test_fixture_huffman",
+            "Equivalent fixture using Huffman",
+            &[("custom-key".to_string(), "custom-value".to_string())],
+            true,
+        );
+        let result = compare_against_fixture(&fixture, &equivalent.expected_encoded);
+        assert_eq!(result, FixtureComparisonResult::FunctionalEquivalent);
+
         // Mismatch
-        let result = compare_against_fixture(&fixture, &[0x01, 0x02, 0x04]);
+        let result = compare_against_fixture(&fixture, &[0xFF]);
         assert!(matches!(result, FixtureComparisonResult::Mismatch { .. }));
     }
 

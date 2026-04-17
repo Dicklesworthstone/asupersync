@@ -336,6 +336,8 @@ impl CompressionEfficiencyTester {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::fixtures::{FixtureMetadata, HpackFixture};
+    use chrono::Utc;
 
     #[test]
     fn test_differential_tester_creation() {
@@ -366,5 +368,31 @@ mod tests {
             // All tests should complete without panicking
             assert!(!result.test_id.is_empty());
         }
+    }
+
+    #[test]
+    fn test_fixture_differential_accepts_functionally_equivalent_encoding() {
+        let tester = HpackDifferentialTester::new();
+        let fixture = HpackFixture {
+            name: "functional_equivalence".to_string(),
+            description: "Same headers, non-Huffman reference".to_string(),
+            input_headers: vec![(":path".to_string(), "/sample/path".to_string())],
+            expected_encoded: tester.encode_headers(
+                &[Header::new(":path", "/sample/path")],
+                false,
+            ),
+            use_huffman: true,
+            metadata: FixtureMetadata {
+                generator: "unit-test".to_string(),
+                version: "1".to_string(),
+                command: "manual".to_string(),
+                git_ref: None,
+                generated_at: Utc::now(),
+            },
+        };
+
+        let result = tester.test_against_fixture(&fixture);
+        assert_eq!(result.verdict, TestVerdict::Pass);
+        assert!(result.error_message.is_none());
     }
 }

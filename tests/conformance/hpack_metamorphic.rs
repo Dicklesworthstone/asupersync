@@ -195,52 +195,52 @@ mod metamorphic_properties {
     /// Property: Headers that hit static table should decode identically regardless of dynamic table state
     #[test]
     fn mr4_static_vs_dynamic_table_equivalence() {
-        proptest!(|()| {
-            // Use headers that are guaranteed to be in static table
-            let static_headers = vec![
-                Header { name: ":method".to_string(), value: "GET".to_string() },
-                Header { name: ":path".to_string(), value: "/".to_string() },
-                Header { name: ":scheme".to_string(), value: "https".to_string() },
-                Header { name: ":status".to_string(), value: "200".to_string() },
-                Header { name: "accept-encoding".to_string(), value: "gzip, deflate".to_string() },
-            ];
+        // Use headers that are guaranteed to be in static table.
+        let static_headers = vec![
+            Header { name: ":method".to_string(), value: "GET".to_string() },
+            Header { name: ":path".to_string(), value: "/".to_string() },
+            Header { name: ":scheme".to_string(), value: "https".to_string() },
+            Header { name: ":status".to_string(), value: "200".to_string() },
+            Header { name: "accept-encoding".to_string(), value: "gzip, deflate".to_string() },
+        ];
 
-            // Encoder/decoder with empty dynamic table
-            let mut encoder_clean = Encoder::new(4096);
-            let mut decoder_clean = Decoder::new(4096, 8192);
+        // Encoder/decoder with empty dynamic table.
+        let mut encoder_clean = Encoder::new(4096);
+        let mut decoder_clean = Decoder::new(4096, 8192);
 
-            // Encoder/decoder with populated dynamic table
-            let mut encoder_populated = Encoder::new(4096);
-            let mut decoder_populated = Decoder::new(4096, 8192);
+        // Encoder/decoder with populated dynamic table.
+        let mut encoder_populated = Encoder::new(4096);
+        let mut decoder_populated = Decoder::new(4096, 8192);
 
-            // Populate dynamic table with some other headers first
-            let populate_headers = vec![
-                Header { name: "x-custom-header".to_string(), value: "custom-value".to_string() },
-                Header { name: "x-another".to_string(), value: "another-value".to_string() },
-            ];
-            let mut populate_buf = BytesMut::new();
-            encoder_populated.encode(&populate_headers, &mut populate_buf);
-            let mut populate_bytes = populate_buf.freeze();
-            let _ = decoder_populated.decode(&mut populate_bytes).unwrap();
+        // Populate dynamic table with some other headers first.
+        let populate_headers = vec![
+            Header { name: "x-custom-header".to_string(), value: "custom-value".to_string() },
+            Header { name: "x-another".to_string(), value: "another-value".to_string() },
+        ];
+        let mut populate_buf = BytesMut::new();
+        encoder_populated.encode(&populate_headers, &mut populate_buf);
+        let mut populate_bytes = populate_buf.freeze();
+        let _ = decoder_populated.decode(&mut populate_bytes).unwrap();
 
-            // Now encode static headers with both encoders
-            let mut encoded_clean = BytesMut::new();
-            encoder_clean.encode(&static_headers, &mut encoded_clean);
+        // Now encode static headers with both encoders.
+        let mut encoded_clean = BytesMut::new();
+        encoder_clean.encode(&static_headers, &mut encoded_clean);
 
-            let mut encoded_populated = BytesMut::new();
-            encoder_populated.encode(&static_headers, &mut encoded_populated);
+        let mut encoded_populated = BytesMut::new();
+        encoder_populated.encode(&static_headers, &mut encoded_populated);
 
-            // Decode with corresponding decoders
-            let mut clean_bytes = encoded_clean.freeze();
-            let decoded_clean = decoder_clean.decode(&mut clean_bytes).unwrap();
+        // Decode with corresponding decoders.
+        let mut clean_bytes = encoded_clean.freeze();
+        let decoded_clean = decoder_clean.decode(&mut clean_bytes).unwrap();
 
-            let mut populated_bytes = encoded_populated.freeze();
-            let decoded_populated = decoder_populated.decode(&mut populated_bytes).unwrap();
+        let mut populated_bytes = encoded_populated.freeze();
+        let decoded_populated = decoder_populated.decode(&mut populated_bytes).unwrap();
 
-            // Results should be identical - static table lookups shouldn't depend on dynamic table state
-            prop_assert_eq!(decoded_clean, decoded_populated,
-                "Static table headers should decode identically regardless of dynamic table state");
-        });
+        assert_eq!(
+            decoded_clean,
+            decoded_populated,
+            "Static table headers should decode identically regardless of dynamic table state"
+        );
     }
 
     /// MR5: Table Size Invariance (Equivalence, Score: 6.5)
