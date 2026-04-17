@@ -6,4 +6,5 @@
 //! known input transformations."
 
 pub mod evidence_serialization;
+pub mod rwlock;
 pub mod scheduler_migration;
