@@ -2722,10 +2722,25 @@ impl RuntimeState {
 
                     // Check if we can complete close
                     if self.can_region_complete_close(region_id) {
+                        // Validate protocol transition to Closed
                         let closed = {
                             let Some(region) = self.regions.get(region_id.arena_index()) else {
                                 break;
                             };
+                            let context = RegionContext {
+                                active_tasks: region.task_count(),
+                                pending_finalizers: region.finalizer_count() as u32,
+                            };
+                            let validation_result = self.validate_region_protocol_transition(
+                                region_id,
+                                RegionEvent::CompleteClose,
+                                &context,
+                            );
+                            if matches!(validation_result, TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }) {
+                                eprintln!("Cancel protocol violation during region close completion: {validation_result:?}");
+                                // Continue with transition but log violation
+                            }
+
                             region.complete_close()
                         };
 
