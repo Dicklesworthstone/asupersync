@@ -1845,4 +1845,417 @@ mod tests {
         let cloned = e;
         assert_eq!(copied, cloned);
     }
+
+    // =========================================================================
+    // Metamorphic watch channel consistency tests (bead asupersync-8jjrl0)
+    // =========================================================================
+
+    /// MR1: borrow_and_update() consistency - returns the most recent send()'d
+    /// value regardless of timing. Property: borrow_and_update() always reflects
+    /// the latest successful send(), even under concurrent operations.
+    #[test]
+    fn metamorphic_borrow_and_update_consistency() {
+        init_test("metamorphic_borrow_and_update_consistency");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0u64);
+
+        // Initial state - should see the initial value
+        {
+            let initial = rx.borrow_and_update();
+            crate::assert_with_log!(*initial == 0, "initial value", 0u64, *initial);
+        }
+        crate::assert_with_log!(rx.seen_version == 0, "initial seen version", 0u64, rx.seen_version);
+
+        // Single send - borrow_and_update should see the new value
+        tx.send(42).expect("send failed");
+        {
+            let value1 = rx.borrow_and_update();
+            crate::assert_with_log!(*value1 == 42, "after send(42)", 42u64, *value1);
+        }
+        crate::assert_with_log!(rx.seen_version == 1, "version after first send", 1u64, rx.seen_version);
+
+        // Multiple sends in sequence - should always see the latest
+        for i in 1..10 {
+            let val = 100 + i;
+            tx.send(val).expect("send failed");
+            {
+                let observed = rx.borrow_and_update();
+                crate::assert_with_log!(
+                    *observed == val,
+                    &format!("sequence send {} value", i),
+                    val,
+                    *observed
+                );
+            }
+            crate::assert_with_log!(
+                rx.seen_version == i + 1,
+                &format!("sequence send {} version", i),
+                i + 1,
+                rx.seen_version
+            );
+        }
+
+        // Transform: Multiple receivers should independently see latest value
+        let mut rx2 = tx.subscribe();
+        let mut rx3 = tx.subscribe();
+
+        // All start at current version (won't see existing values until new send)
+        tx.send(999).expect("send failed");
+
+        {
+            let val1 = rx.borrow_and_update();
+            let val2 = rx2.borrow_and_update();
+            let val3 = rx3.borrow_and_update();
+
+            crate::assert_with_log!(*val1 == 999, "rx1 sees latest", 999u64, *val1);
+            crate::assert_with_log!(*val2 == 999, "rx2 sees latest", 999u64, *val2);
+            crate::assert_with_log!(*val3 == 999, "rx3 sees latest", 999u64, *val3);
+        }
+
+        // Transform: borrow vs borrow_and_update consistency
+        tx.send(1234).expect("send failed");
+
+        // borrow_and_update should update seen version
+        {
+            let val_update = rx.borrow_and_update();
+            crate::assert_with_log!(*val_update == 1234, "borrow_and_update value", 1234u64, *val_update);
+        }
+
+        // Subsequent borrow should see the same value without updating version
+        {
+            let val_borrow = rx.borrow();
+            crate::assert_with_log!(*val_borrow == 1234, "subsequent borrow value", 1234u64, *val_borrow);
+        }
+
+        // Version should not have changed from the borrow
+        let version_after_borrow = rx.seen_version;
+        crate::assert_with_log!(
+            version_after_borrow == 11, // 10 sends + initial
+            "version unchanged by borrow",
+            11u64,
+            version_after_borrow
+        );
+
+        crate::test_complete!("metamorphic_borrow_and_update_consistency");
+    }
+
+    /// MR2: Receiver isolation - multiple receivers observing concurrent sends
+    /// never see each other's intermediate states. Property: recv1.seen_version
+    /// and recv2.seen_version are independent and never interfere.
+    #[test]
+    fn metamorphic_receiver_isolation() {
+        init_test("metamorphic_receiver_isolation");
+        let _cx = test_cx();
+        let (tx, rx1_base) = channel(0u32);
+
+        // Create multiple independent receivers
+        let mut rx1 = rx1_base;
+        let mut rx2 = tx.subscribe();
+        let mut rx3 = tx.subscribe();
+
+        // Initial state - all receivers start independently
+        let init1 = rx1.seen_version();
+        let init2 = rx2.seen_version();
+        let init3 = rx3.seen_version();
+
+        crate::assert_with_log!(init1 == 0, "rx1 initial version", 0u64, init1);
+        // rx2 and rx3 start at current version since they subscribed later
+        crate::assert_with_log!(init2 == init3, "rx2 rx3 same start version", init2, init3);
+
+        // Send a value - all receivers should be able to observe it
+        tx.send(100).expect("send failed");
+
+        // Each receiver can independently choose when to observe
+        {
+            let val1 = rx1.borrow_and_update();
+            crate::assert_with_log!(*val1 == 100, "rx1 observes send", 100u32, *val1);
+        }
+        let _rx1_version = rx1.seen_version();
+
+        // rx2 should still have its old version (hasn't updated yet)
+        let rx2_version_before = rx2.seen_version();
+        crate::assert_with_log!(
+            rx2_version_before == init2,
+            "rx2 version independent of rx1",
+            init2,
+            rx2_version_before
+        );
+
+        // rx2 observes independently
+        {
+            let val2 = rx2.borrow_and_update();
+            crate::assert_with_log!(*val2 == 100, "rx2 observes same value", 100u32, *val2);
+        }
+        let _rx2_version_after = rx2.seen_version();
+
+        // rx3 hasn't observed yet, should still have old version
+        let rx3_version_before = rx3.seen_version();
+        crate::assert_with_log!(
+            rx3_version_before == init3,
+            "rx3 version independent of rx1/rx2",
+            init3,
+            rx3_version_before
+        );
+
+        // Transform: Staggered observations with multiple sends
+        tx.send(200).expect("send failed");
+        tx.send(300).expect("send failed");
+
+        // rx1 observes after multiple sends - should see latest
+        {
+            let val1_latest = rx1.borrow_and_update();
+            crate::assert_with_log!(*val1_latest == 300, "rx1 sees latest after multiple sends", 300u32, *val1_latest);
+        }
+
+        // rx3 observes for first time - should also see latest
+        {
+            let val3_first = rx3.borrow_and_update();
+            crate::assert_with_log!(*val3_first == 300, "rx3 sees latest on first observation", 300u32, *val3_first);
+        }
+
+        // Versions should be independent but current
+        let v1 = rx1.seen_version();
+        let v2 = rx2.seen_version();
+        let v3 = rx3.seen_version();
+
+        // rx1 and rx3 should have latest version (3 sends total)
+        crate::assert_with_log!(v1 == 3, "rx1 latest version", 3u64, v1);
+        crate::assert_with_log!(v3 == 3, "rx3 latest version", 3u64, v3);
+
+        // rx2 should still have version from earlier observation
+        crate::assert_with_log!(v2 == 1, "rx2 independent version", 1u64, v2);
+
+        // Transform: Independent has_changed() behavior
+        tx.send(400).expect("send failed");
+
+        let has_changed1 = rx1.has_changed();
+        let has_changed2 = rx2.has_changed();
+        let has_changed3 = rx3.has_changed();
+
+        crate::assert_with_log!(has_changed1, "rx1 has changes", true, has_changed1);
+        crate::assert_with_log!(has_changed2, "rx2 has changes", true, has_changed2);
+        crate::assert_with_log!(has_changed3, "rx3 has changes", true, has_changed3);
+
+        // After one receiver marks seen, others should still see changes
+        rx1.mark_seen();
+        let has_changed1_after = rx1.has_changed();
+        let has_changed2_after = rx2.has_changed();
+        let has_changed3_after = rx3.has_changed();
+
+        crate::assert_with_log!(!has_changed1_after, "rx1 no changes after mark", false, has_changed1_after);
+        crate::assert_with_log!(has_changed2_after, "rx2 still has changes", true, has_changed2_after);
+        crate::assert_with_log!(has_changed3_after, "rx3 still has changes", true, has_changed3_after);
+
+        crate::test_complete!("metamorphic_receiver_isolation");
+    }
+
+    /// MR3: changed() exactness - returns Ok(()) exactly once per distinct send,
+    /// never stutters. Property: count(changed() == Ok(())) == count(distinct sends)
+    #[test]
+    fn metamorphic_changed_exactness() {
+        init_test("metamorphic_changed_exactness");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0i32);
+
+        // Helper to poll a changed future to completion
+        let poll_changed = |rx: &mut Receiver<i32>| -> Result<(), RecvError> {
+            let mut future = rx.changed(&cx);
+            crate::test_util::poll_ready(&mut future)
+        };
+
+        // Initial state - no changes yet, should wait
+        let initial_version = rx.seen_version();
+        crate::assert_with_log!(initial_version == 0, "initial version", 0u64, initial_version);
+
+        // First send - changed() should return exactly once
+        tx.send(1).expect("send failed");
+
+        let change1 = poll_changed(&mut rx);
+        crate::assert_with_log!(change1.is_ok(), "first changed() succeeds", true, change1.is_ok());
+
+        // Calling changed() again without a new send should block (no stutter)
+        // We can't easily test blocking in a unit test, but we can verify the version is updated
+        let version_after_change = rx.seen_version();
+        crate::assert_with_log!(version_after_change == 1, "version updated after changed()", 1u64, version_after_change);
+        crate::assert_with_log!(!rx.has_changed(), "no changes after changed()", false, rx.has_changed());
+
+        // Multiple sends - each should trigger exactly one changed() notification
+        let mut change_count = 1; // Already counted the first change
+        for i in 2..=5 {
+            tx.send(i).expect("send failed");
+
+            let change = poll_changed(&mut rx);
+            crate::assert_with_log!(
+                change.is_ok(),
+                &format!("changed() {} succeeds", i),
+                true,
+                change.is_ok()
+            );
+            change_count += 1;
+
+            let version = rx.seen_version();
+            crate::assert_with_log!(
+                version == i as u64,
+                &format!("version {} after send {}", i, i),
+                i as u64,
+                version
+            );
+        }
+
+        crate::assert_with_log!(change_count == 5, "exactly 5 changes for 5 sends", 5, change_count);
+
+        // Transform: Rapid sends - each should still trigger exactly once
+        for i in 10..15 {
+            tx.send(i).expect("send failed");
+        }
+
+        // Should be able to observe all 5 rapid sends via changed()
+        for i in 10..15 {
+            let change = poll_changed(&mut rx);
+            crate::assert_with_log!(
+                change.is_ok(),
+                &format!("rapid send {} detected", i),
+                true,
+                change.is_ok()
+            );
+        }
+
+        let final_version = rx.seen_version();
+        crate::assert_with_log!(final_version == 9, "final version after all sends", 9u64, final_version);
+
+        // Transform: Send same value multiple times - each should still trigger changed()
+        tx.send(999).expect("send failed");
+        tx.send(999).expect("send failed");  // Same value
+        tx.send(999).expect("send failed");  // Same value again
+
+        let change_dup1 = poll_changed(&mut rx);
+        let change_dup2 = poll_changed(&mut rx);
+        let change_dup3 = poll_changed(&mut rx);
+
+        crate::assert_with_log!(change_dup1.is_ok(), "first duplicate change", true, change_dup1.is_ok());
+        crate::assert_with_log!(change_dup2.is_ok(), "second duplicate change", true, change_dup2.is_ok());
+        crate::assert_with_log!(change_dup3.is_ok(), "third duplicate change", true, change_dup3.is_ok());
+
+        let final_value = rx.borrow_and_update();
+        crate::assert_with_log!(*final_value == 999, "final value correct", 999i32, *final_value);
+
+        crate::test_complete!("metamorphic_changed_exactness");
+    }
+
+    /// MR4: Closed sender behavior - closed sender causes all waiting changed()
+    /// calls to return Err(Closed). Property: Drop(sender) → All waiting changed() → Err(Closed)
+    #[test]
+    fn metamorphic_closed_sender_behavior() {
+        init_test("metamorphic_closed_sender_behavior");
+        let cx = test_cx();
+        let (tx, mut rx1) = channel(0u8);
+
+        // Create multiple receivers
+        let mut rx2 = tx.subscribe();
+        let mut rx3 = tx.subscribe();
+
+        // Initial state - all receivers should see open channel
+        crate::assert_with_log!(!rx1.is_closed(), "rx1 initially open", false, rx1.is_closed());
+        crate::assert_with_log!(!rx2.is_closed(), "rx2 initially open", false, rx2.is_closed());
+        crate::assert_with_log!(!rx3.is_closed(), "rx3 initially open", false, rx3.is_closed());
+
+        // Send initial value so receivers have something to observe
+        tx.send(42).expect("send failed");
+
+        // All receivers should be able to observe the value
+        {
+            let val1 = rx1.borrow_and_update();
+            let val2 = rx2.borrow_and_update();
+            let val3 = rx3.borrow_and_update();
+
+            crate::assert_with_log!(*val1 == 42, "rx1 sees value", 42u8, *val1);
+            crate::assert_with_log!(*val2 == 42, "rx2 sees value", 42u8, *val2);
+            crate::assert_with_log!(*val3 == 42, "rx3 sees value", 42u8, *val3);
+        }
+
+        // Drop the sender
+        drop(tx);
+
+        // All receivers should now see the channel as closed
+        crate::assert_with_log!(rx1.is_closed(), "rx1 closed after drop", true, rx1.is_closed());
+        crate::assert_with_log!(rx2.is_closed(), "rx2 closed after drop", true, rx2.is_closed());
+        crate::assert_with_log!(rx3.is_closed(), "rx3 closed after drop", true, rx3.is_closed());
+
+        // Any attempt to wait for changes should return Closed error
+        let mut future1 = rx1.changed(&cx);
+        let result1 = crate::test_util::poll_ready(&mut future1);
+        crate::assert_with_log!(
+            matches!(result1, Err(RecvError::Closed)),
+            "rx1 changed() returns Closed",
+            true,
+            matches!(result1, Err(RecvError::Closed))
+        );
+
+        let mut future2 = rx2.changed(&cx);
+        let result2 = crate::test_util::poll_ready(&mut future2);
+        crate::assert_with_log!(
+            matches!(result2, Err(RecvError::Closed)),
+            "rx2 changed() returns Closed",
+            true,
+            matches!(result2, Err(RecvError::Closed))
+        );
+
+        let mut future3 = rx3.changed(&cx);
+        let result3 = crate::test_util::poll_ready(&mut future3);
+        crate::assert_with_log!(
+            matches!(result3, Err(RecvError::Closed)),
+            "rx3 changed() returns Closed",
+            true,
+            matches!(result3, Err(RecvError::Closed))
+        );
+
+        // Transform: Values should still be readable even after close
+        {
+            let final1 = rx1.borrow();
+            let final2 = rx2.borrow();
+            let final3 = rx3.borrow();
+
+            crate::assert_with_log!(*final1 == 42, "rx1 final value readable", 42u8, *final1);
+            crate::assert_with_log!(*final2 == 42, "rx2 final value readable", 42u8, *final2);
+            crate::assert_with_log!(*final3 == 42, "rx3 final value readable", 42u8, *final3);
+        }
+
+        // Transform: Test closed behavior during concurrent operations
+        // Create a new channel to test dropping sender while receivers are actively waiting
+        let (tx2, mut rx4) = channel(100i32);
+        let mut rx5 = tx2.subscribe();
+
+        // Send a value so receivers can observe it
+        tx2.send(200).expect("send failed");
+
+        // rx4 observes but rx5 doesn't
+        {
+            let val4 = rx4.borrow_and_update();
+            crate::assert_with_log!(*val4 == 200, "rx4 initial value", 200i32, *val4);
+        }
+
+        // rx5 should have changes pending
+        crate::assert_with_log!(rx5.has_changed(), "rx5 has pending changes", true, rx5.has_changed());
+
+        // Drop sender
+        drop(tx2);
+
+        // rx5's pending changes should now be reported as Closed
+        let mut future5 = rx5.changed(&cx);
+        let result5 = crate::test_util::poll_ready(&mut future5);
+        crate::assert_with_log!(
+            matches!(result5, Err(RecvError::Closed)),
+            "rx5 pending changed() returns Closed",
+            true,
+            matches!(result5, Err(RecvError::Closed))
+        );
+
+        // But rx5 should still be able to read the last value
+        {
+            let final5 = rx5.borrow();
+            crate::assert_with_log!(*final5 == 200, "rx5 can still read last value", 200i32, *final5);
+        }
+
+        crate::test_complete!("metamorphic_closed_sender_behavior");
+    }
 }
