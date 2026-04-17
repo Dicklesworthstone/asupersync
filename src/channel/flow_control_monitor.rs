@@ -15,7 +15,6 @@
 use crate::types::{TaskId, Time};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 /// Configuration for flow control monitoring.
 #[derive(Debug, Clone)]
