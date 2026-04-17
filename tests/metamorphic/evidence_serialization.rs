@@ -44,7 +44,7 @@ fn arb_verdict() -> impl Strategy<Value = Verdict> {
 /// Arbitrary instance for SupervisionDetail.
 fn arb_supervision_detail() -> impl Strategy<Value = SupervisionDetail> {
     prop_oneof![
-        ".*".prop_map(|s| SupervisionDetail::MonotoneSeverity { outcome_kind: s.leak() }),
+        ".*".prop_map(|s| SupervisionDetail::MonotoneSeverity { outcome_kind: s }),
         Just(SupervisionDetail::ExplicitStop),
         Just(SupervisionDetail::ExplicitEscalate),
         (1u32..100, prop::option::of(0u64..1000000)).prop_map(|(attempt, delay_ns)| {
@@ -78,22 +78,15 @@ fn arb_registry_detail() -> impl Strategy<Value = RegistryDetail> {
 /// Arbitrary instance for LinkDetail.
 fn arb_link_detail() -> impl Strategy<Value = LinkDetail> {
     prop_oneof![
-        (any::<u32>(), any::<u32>()).prop_map(|(task_id, region_id)| {
-            LinkDetail::ExitPropagated {
-                linked_task: TaskId::from_inner(task_id, region_id),
-                exit_reason: CancelReason::Cancelled,
-            }
+        Just(LinkDetail::TrapExitActive {
+            linked_task: TaskId::new_for_test(1, 0),
         }),
-        (any::<u32>(), any::<u32>()).prop_map(|(task_id, region_id)| {
-            LinkDetail::TrapExitActive {
-                linked_task: TaskId::from_inner(task_id, region_id),
-            }
+        Just(LinkDetail::TrapExitActive {
+            linked_task: TaskId::new_for_test(2, 0),
         }),
-        (any::<u32>(), any::<u32>()).prop_map(|(task_id, region_id)| {
-            LinkDetail::LinkBroken {
-                target_task: TaskId::from_inner(task_id, region_id),
-                reason: "test".to_string(),
-            }
+        Just(LinkDetail::LinkBroken {
+            target_task: TaskId::new_for_test(3, 0),
+            reason: "test".to_string(),
         }),
     ]
 }
@@ -101,22 +94,12 @@ fn arb_link_detail() -> impl Strategy<Value = LinkDetail> {
 /// Arbitrary instance for MonitorDetail.
 fn arb_monitor_detail() -> impl Strategy<Value = MonitorDetail> {
     prop_oneof![
-        (any::<u32>(), any::<u32>()).prop_map(|(task_id, region_id)| {
-            MonitorDetail::DownDelivered {
-                monitored_task: TaskId::from_inner(task_id, region_id),
-                exit_reason: CancelReason::Cancelled,
-            }
+        Just(MonitorDetail::WatcherTerminated {
+            watcher_task: TaskId::new_for_test(4, 0),
         }),
-        (any::<u32>(), any::<u32>()).prop_map(|(task_id, region_id)| {
-            MonitorDetail::WatcherTerminated {
-                watcher_task: TaskId::from_inner(task_id, region_id),
-            }
-        }),
-        (any::<u32>(), any::<u32>()).prop_map(|(task_id, region_id)| {
-            MonitorDetail::MonitorBroken {
-                monitored_task: TaskId::from_inner(task_id, region_id),
-                reason: "test".to_string(),
-            }
+        Just(MonitorDetail::MonitorBroken {
+            monitored_task: TaskId::new_for_test(5, 0),
+            reason: "test".to_string(),
         }),
     ]
 }
@@ -147,8 +130,8 @@ fn arb_evidence_record() -> impl Strategy<Value = EvidenceRecord> {
             |(timestamp, task_inner, task_region, region_inner, region_arena, subsystem, verdict, detail)| {
                 EvidenceRecord {
                     timestamp,
-                    task_id: TaskId::from_inner(task_inner, task_region),
-                    region_id: RegionId::from_inner(region_inner, region_arena),
+                    task_id: TaskId::new_for_test(task_inner, task_region),
+                    region_id: RegionId::new_for_test(region_inner, region_arena),
                     subsystem,
                     verdict,
                     detail,
