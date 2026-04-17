@@ -478,3 +478,10 @@ path = "fuzz_targets/intrusive_heap_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_bytes_chain"
+path = "fuzz_targets/bytes_chain.rs"
+test = false
+doc = false
+bench = false
