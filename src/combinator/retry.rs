@@ -339,6 +339,137 @@ impl<E: fmt::Display> fmt::Display for RetryError<E> {
 
 impl<E: fmt::Debug + fmt::Display> std::error::Error for RetryError<E> {}
 
+// ─── Token Bucket for Retry Rate Limiting ──────────────────────────────────
+
+/// Token bucket for rate-limiting retry attempts.
+///
+/// Prevents retry storms by limiting the rate at which retries can be attempted.
+/// Uses a classic token bucket algorithm where tokens refill at a steady rate
+/// and operations consume tokens.
+#[derive(Debug, Clone)]
+pub struct RetryTokenBucket {
+    /// Maximum number of tokens the bucket can hold.
+    capacity: u32,
+    /// Current number of available tokens.
+    tokens: f64,
+    /// Rate at which tokens are refilled (tokens per second).
+    refill_rate: f64,
+    /// Last time the bucket was refilled.
+    last_refill: Time,
+}
+
+impl RetryTokenBucket {
+    /// Creates a new token bucket with the specified capacity and refill rate.
+    ///
+    /// # Arguments
+    /// * `capacity` - Maximum tokens the bucket can hold
+    /// * `refill_rate` - Tokens added per second
+    /// * `now` - Current time
+    #[must_use]
+    pub fn new(capacity: u32, refill_rate: f64, now: Time) -> Self {
+        Self {
+            capacity,
+            tokens: capacity as f64, // Start with full bucket
+            refill_rate,
+            last_refill: now,
+        }
+    }
+
+    /// Attempts to consume tokens from the bucket.
+    ///
+    /// Returns `true` if the tokens were successfully consumed, `false` otherwise.
+    /// The bucket is automatically refilled based on time elapsed since last update.
+    pub fn try_consume(&mut self, cost: u32, now: Time) -> bool {
+        self.refill(now);
+
+        if self.tokens >= cost as f64 {
+            self.tokens -= cost as f64;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Calculates when the next token will be available.
+    ///
+    /// Returns the duration to wait before enough tokens are available.
+    #[must_use]
+    pub fn time_to_tokens(&self, cost: u32) -> Duration {
+        if self.tokens >= cost as f64 {
+            return Duration::ZERO;
+        }
+
+        let tokens_needed = cost as f64 - self.tokens;
+        let time_needed_secs = tokens_needed / self.refill_rate;
+        Duration::from_secs_f64(time_needed_secs)
+    }
+
+    /// Refills the bucket based on time elapsed.
+    fn refill(&mut self, now: Time) {
+        let elapsed_nanos = now.saturating_sub(self.last_refill);
+        let elapsed_secs = elapsed_nanos as f64 / 1_000_000_000.0;
+
+        let tokens_to_add = elapsed_secs * self.refill_rate;
+        self.tokens = (self.tokens + tokens_to_add).min(self.capacity as f64);
+        self.last_refill = now;
+    }
+
+    /// Returns the current number of available tokens.
+    #[must_use]
+    pub fn available_tokens(&self) -> u32 {
+        self.tokens.floor() as u32
+    }
+
+    /// Returns the bucket capacity.
+    #[must_use]
+    pub const fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// Returns the refill rate (tokens per second).
+    #[must_use]
+    pub const fn refill_rate(&self) -> f64 {
+        self.refill_rate
+    }
+}
+
+/// Policy that includes token bucket rate limiting for retries.
+#[derive(Debug, Clone)]
+pub struct RateLimitedRetryPolicy {
+    /// Base retry policy (backoff, attempts, etc.).
+    pub retry_policy: RetryPolicy,
+    /// Optional token bucket for rate limiting.
+    pub token_bucket: Option<(u32, f64)>, // (capacity, refill_rate)
+}
+
+impl RateLimitedRetryPolicy {
+    /// Creates a new rate-limited retry policy.
+    #[must_use]
+    pub fn new(retry_policy: RetryPolicy) -> Self {
+        Self {
+            retry_policy,
+            token_bucket: None,
+        }
+    }
+
+    /// Adds token bucket rate limiting.
+    ///
+    /// # Arguments
+    /// * `capacity` - Maximum tokens in bucket
+    /// * `refill_rate` - Tokens added per second
+    #[must_use]
+    pub fn with_token_bucket(mut self, capacity: u32, refill_rate: f64) -> Self {
+        self.token_bucket = Some((capacity, refill_rate));
+        self
+    }
+}
+
+impl Default for RateLimitedRetryPolicy {
+    fn default() -> Self {
+        Self::new(RetryPolicy::default())
+    }
+}
+
 /// Result type for retry operations, including cancellation.
 #[derive(Debug, Clone)]
 pub enum RetryResult<T, E> {
@@ -1260,6 +1391,356 @@ mod tests {
         if let RetryResult::Failed(err) = result {
             assert_eq!(err.attempts, 3);
             assert_eq!(err.final_error, "fail forever");
+        }
+    }
+
+    // ─── Token Bucket Golden Tests ──────────────────────────────────────────
+
+    mod token_bucket_golden_tests {
+        use super::*;
+
+        /// Helper to create a consistent test time baseline
+        fn test_time_baseline() -> Time {
+            Time::from_millis(1_000_000) // 1M ms = 1000 seconds
+        }
+
+        /// Golden test 1: Token refill rate respected
+        ///
+        /// Verifies that tokens are refilled at the exact rate specified.
+        /// Tests deterministic timing across different intervals.
+        #[test]
+        fn golden_token_refill_rate_respected() {
+            let capacity = 10;
+            let refill_rate = 5.0; // 5 tokens per second
+            let mut bucket = RetryTokenBucket::new(capacity, refill_rate, test_time_baseline());
+
+            // Start with empty bucket
+            let _ = bucket.try_consume(10, test_time_baseline());
+            assert_eq!(bucket.available_tokens(), 0);
+
+            // After 1 second, should have 5 tokens
+            let time_1s = test_time_baseline() + Duration::from_secs(1);
+            bucket.refill(time_1s);
+            assert_eq!(bucket.available_tokens(), 5);
+
+            // After 2 seconds total, should have 10 tokens (capped)
+            let time_2s = test_time_baseline() + Duration::from_secs(2);
+            bucket.refill(time_2s);
+            assert_eq!(bucket.available_tokens(), 10);
+
+            // After 0.5 seconds more, should still have 10 tokens (at capacity)
+            let time_2_5s = time_2s + Duration::from_millis(500);
+            bucket.refill(time_2_5s);
+            assert_eq!(bucket.available_tokens(), 10);
+
+            // Consume 8 tokens, leaving 2
+            assert!(bucket.try_consume(8, time_2_5s));
+            assert_eq!(bucket.available_tokens(), 2);
+
+            // After 0.4 seconds, should have 2 + (0.4 * 5) = 4 tokens
+            let time_2_9s = time_2_5s + Duration::from_millis(400);
+            bucket.refill(time_2_9s);
+            assert_eq!(bucket.available_tokens(), 4);
+
+            // Golden assertion: exact refill rate
+            assert_golden_token_refill_rate(refill_rate, &bucket, time_2_9s);
+        }
+
+        fn assert_golden_token_refill_rate(expected_rate: f64, bucket: &RetryTokenBucket, _now: Time) {
+            const EPSILON: f64 = 0.001;
+            let actual_rate = bucket.refill_rate();
+            assert!(
+                (actual_rate - expected_rate).abs() < EPSILON,
+                "Golden token refill rate mismatch: expected {}, got {}",
+                expected_rate,
+                actual_rate
+            );
+        }
+
+        /// Golden test 2: Burst absorbs exact bucket capacity
+        ///
+        /// Verifies that the bucket can handle burst traffic up to its exact capacity
+        /// and no more.
+        #[test]
+        fn golden_burst_absorbs_exact_capacity() {
+            let capacity = 5;
+            let refill_rate = 1.0; // 1 token per second
+            let mut bucket = RetryTokenBucket::new(capacity, refill_rate, test_time_baseline());
+
+            // Should be able to consume exactly the capacity in one burst
+            assert!(bucket.try_consume(capacity, test_time_baseline()));
+            assert_eq!(bucket.available_tokens(), 0);
+
+            // Should not be able to consume any more immediately
+            assert!(!bucket.try_consume(1, test_time_baseline()));
+            assert_eq!(bucket.available_tokens(), 0);
+
+            // Reset bucket to full
+            let mut bucket = RetryTokenBucket::new(capacity, refill_rate, test_time_baseline());
+
+            // Should not be able to consume more than capacity
+            assert!(!bucket.try_consume(capacity + 1, test_time_baseline()));
+            assert_eq!(bucket.available_tokens(), capacity); // Should remain unchanged
+
+            // Golden assertion: exact capacity handling
+            assert_golden_burst_capacity(capacity, bucket.capacity());
+        }
+
+        fn assert_golden_burst_capacity(expected_capacity: u32, actual_capacity: u32) {
+            assert_eq!(
+                actual_capacity, expected_capacity,
+                "Golden burst capacity mismatch: expected {}, got {}",
+                expected_capacity, actual_capacity
+            );
+        }
+
+        /// Golden test 3: Exhausted bucket blocks with Retry-After signal
+        ///
+        /// Verifies that when the bucket is exhausted, it provides accurate
+        /// timing information about when tokens will be available.
+        #[test]
+        fn golden_exhausted_bucket_blocks_with_retry_after() {
+            let capacity = 3;
+            let refill_rate = 2.0; // 2 tokens per second
+            let mut bucket = RetryTokenBucket::new(capacity, refill_rate, test_time_baseline());
+
+            // Exhaust the bucket
+            assert!(bucket.try_consume(capacity, test_time_baseline()));
+            assert_eq!(bucket.available_tokens(), 0);
+
+            // Try to consume 1 token - should fail
+            assert!(!bucket.try_consume(1, test_time_baseline()));
+
+            // Check retry-after signal
+            let retry_after = bucket.time_to_tokens(1);
+            let expected_retry_after = Duration::from_millis(500); // 1 token at 2 tokens/sec = 0.5s
+
+            assert_golden_retry_after_signal(expected_retry_after, retry_after);
+
+            // Try to consume 2 tokens - should need longer wait
+            let retry_after_2 = bucket.time_to_tokens(2);
+            let expected_retry_after_2 = Duration::from_secs(1); // 2 tokens at 2 tokens/sec = 1s
+
+            assert_golden_retry_after_signal(expected_retry_after_2, retry_after_2);
+
+            // Partially refill and check again
+            let time_quarter_sec = test_time_baseline() + Duration::from_millis(250);
+            bucket.refill(time_quarter_sec);
+            assert_eq!(bucket.available_tokens(), 0); // 0.25 * 2 = 0.5 tokens, floor = 0
+
+            let retry_after_partial = bucket.time_to_tokens(1);
+            let expected_partial = Duration::from_millis(250); // Need 0.5 more tokens = 0.25s
+
+            assert_golden_retry_after_signal(expected_partial, retry_after_partial);
+        }
+
+        fn assert_golden_retry_after_signal(expected: Duration, actual: Duration) {
+            let tolerance = Duration::from_millis(1); // 1ms tolerance for floating point
+            let diff = if actual > expected {
+                actual - expected
+            } else {
+                expected - actual
+            };
+            assert!(
+                diff <= tolerance,
+                "Golden retry-after signal mismatch: expected {:?}, got {:?}, diff {:?}",
+                expected, actual, diff
+            );
+        }
+
+        /// Golden test 4: Tokens consumed atomically per retry
+        ///
+        /// Verifies that token consumption is atomic - either the full cost
+        /// is consumed or nothing is consumed.
+        #[test]
+        fn golden_tokens_consumed_atomically() {
+            let capacity = 5;
+            let refill_rate = 1.0;
+            let mut bucket = RetryTokenBucket::new(capacity, refill_rate, test_time_baseline());
+
+            // Start with 3 tokens
+            assert!(bucket.try_consume(2, test_time_baseline()));
+            assert_eq!(bucket.available_tokens(), 3);
+
+            // Try to consume 4 tokens atomically - should fail and leave bucket unchanged
+            let tokens_before = bucket.available_tokens();
+            assert!(!bucket.try_consume(4, test_time_baseline()));
+            assert_eq!(bucket.available_tokens(), tokens_before);
+
+            // Try to consume 3 tokens atomically - should succeed
+            assert!(bucket.try_consume(3, test_time_baseline()));
+            assert_eq!(bucket.available_tokens(), 0);
+
+            // Multiple atomic operations in sequence
+            let mut bucket = RetryTokenBucket::new(10, 5.0, test_time_baseline());
+
+            let operations = vec![3, 2, 1, 4]; // Total: 10 tokens
+            for cost in operations {
+                assert!(
+                    bucket.try_consume(cost, test_time_baseline()),
+                    "Should be able to consume {} tokens atomically", cost
+                );
+            }
+            assert_eq!(bucket.available_tokens(), 0);
+
+            assert_golden_atomic_consumption(&bucket);
+        }
+
+        fn assert_golden_atomic_consumption(bucket: &RetryTokenBucket) {
+            // All tokens should be consumed (demonstrating atomic behavior)
+            assert_eq!(
+                bucket.available_tokens(), 0,
+                "Golden atomic consumption: all tokens should be consumed atomically"
+            );
+        }
+
+        /// Golden test 5: LabRuntime replay identical
+        ///
+        /// Verifies that token bucket behavior is deterministic and replay-identical
+        /// when using the same time sequence.
+        #[test]
+        fn golden_lab_runtime_replay_identical() {
+            let capacity = 4;
+            let refill_rate = 2.0;
+            let time_sequence = vec![
+                test_time_baseline(),
+                test_time_baseline() + Duration::from_millis(500),
+                test_time_baseline() + Duration::from_millis(1000),
+                test_time_baseline() + Duration::from_millis(1500),
+                test_time_baseline() + Duration::from_millis(2000),
+            ];
+
+            // First execution
+            let mut bucket1 = RetryTokenBucket::new(capacity, refill_rate, time_sequence[0]);
+            let mut trace1 = Vec::new();
+
+            for &time in &time_sequence[1..] {
+                let before_tokens = bucket1.available_tokens();
+                bucket1.refill(time);
+                let after_tokens = bucket1.available_tokens();
+                let consumed = bucket1.try_consume(1, time);
+                let final_tokens = bucket1.available_tokens();
+
+                trace1.push((before_tokens, after_tokens, consumed, final_tokens));
+            }
+
+            // Second execution (replay)
+            let mut bucket2 = RetryTokenBucket::new(capacity, refill_rate, time_sequence[0]);
+            let mut trace2 = Vec::new();
+
+            for &time in &time_sequence[1..] {
+                let before_tokens = bucket2.available_tokens();
+                bucket2.refill(time);
+                let after_tokens = bucket2.available_tokens();
+                let consumed = bucket2.try_consume(1, time);
+                let final_tokens = bucket2.available_tokens();
+
+                trace2.push((before_tokens, after_tokens, consumed, final_tokens));
+            }
+
+            // Golden assertion: traces must be identical
+            assert_golden_replay_identical(&trace1, &trace2);
+
+            // Additional determinism test with complex pattern
+            let complex_pattern = vec![
+                (test_time_baseline(), 2),
+                (test_time_baseline() + Duration::from_millis(333), 1),
+                (test_time_baseline() + Duration::from_millis(666), 3),
+                (test_time_baseline() + Duration::from_millis(1000), 1),
+            ];
+
+            let trace_a = execute_token_bucket_pattern(capacity, refill_rate, &complex_pattern);
+            let trace_b = execute_token_bucket_pattern(capacity, refill_rate, &complex_pattern);
+
+            assert_golden_replay_identical(&trace_a, &trace_b);
+        }
+
+        fn execute_token_bucket_pattern(
+            capacity: u32,
+            refill_rate: f64,
+            pattern: &[(Time, u32)],
+        ) -> Vec<(bool, u32)> {
+            if pattern.is_empty() {
+                return Vec::new();
+            }
+
+            let mut bucket = RetryTokenBucket::new(capacity, refill_rate, pattern[0].0);
+            let mut trace = Vec::new();
+
+            for &(time, cost) in &pattern[1..] {
+                bucket.refill(time);
+                let consumed = bucket.try_consume(cost, time);
+                let remaining = bucket.available_tokens();
+                trace.push((consumed, remaining));
+            }
+
+            trace
+        }
+
+        fn assert_golden_replay_identical<T: PartialEq + std::fmt::Debug>(
+            trace1: &[T],
+            trace2: &[T],
+        ) {
+            assert_eq!(
+                trace1.len(),
+                trace2.len(),
+                "Golden replay traces have different lengths"
+            );
+
+            for (i, (t1, t2)) in trace1.iter().zip(trace2).enumerate() {
+                assert_eq!(
+                    t1, t2,
+                    "Golden replay mismatch at step {}: {:?} != {:?}",
+                    i, t1, t2
+                );
+            }
+        }
+
+        /// Composite golden test: All token bucket properties together
+        ///
+        /// Tests multiple properties in combination to catch interaction bugs.
+        #[test]
+        fn golden_composite_token_bucket_properties() {
+            let capacity = 6;
+            let refill_rate = 3.0; // 3 tokens per second
+            let mut bucket = RetryTokenBucket::new(capacity, refill_rate, test_time_baseline());
+
+            // Property 1 + 2: Burst capacity + refill rate
+            assert!(bucket.try_consume(capacity, test_time_baseline())); // Use full burst
+            assert_eq!(bucket.available_tokens(), 0);
+
+            // Property 3: Retry-after when exhausted
+            let retry_after = bucket.time_to_tokens(3);
+            assert_eq!(retry_after, Duration::from_secs(1)); // 3 tokens at 3 tokens/sec
+
+            // Property 1: Refill rate over time
+            let time_1s = test_time_baseline() + Duration::from_secs(1);
+            bucket.refill(time_1s);
+            assert_eq!(bucket.available_tokens(), 3);
+
+            // Property 4: Atomic consumption
+            assert!(bucket.try_consume(3, time_1s)); // Should consume all 3 atomically
+            assert_eq!(bucket.available_tokens(), 0);
+
+            assert!(!bucket.try_consume(1, time_1s)); // Should fail atomically
+
+            // Property 5: Deterministic behavior
+            let time_2s = test_time_baseline() + Duration::from_secs(2);
+            bucket.refill(time_2s);
+            assert_eq!(bucket.available_tokens(), 3); // Predictable refill
+
+            // All properties maintained together
+            assert_golden_composite_properties(&bucket, capacity, refill_rate);
+        }
+
+        fn assert_golden_composite_properties(
+            bucket: &RetryTokenBucket,
+            expected_capacity: u32,
+            expected_refill_rate: f64,
+        ) {
+            assert_eq!(bucket.capacity(), expected_capacity);
+            assert!((bucket.refill_rate() - expected_refill_rate).abs() < 0.001);
+            assert!(bucket.available_tokens() <= expected_capacity);
         }
     }
 }
