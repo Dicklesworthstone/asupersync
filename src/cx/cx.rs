@@ -3466,7 +3466,8 @@ mod tests {
         assert_eq!(events.len(), 4);
 
         // Extract logical times for ordering verification
-        let times: Vec<_> = events.iter()
+        let times: Vec<_> = events
+            .iter()
             .map(|e| e.logical_time.as_ref().expect("logical time"))
             .collect();
 
@@ -3475,9 +3476,10 @@ mod tests {
         // For this test we verify causal ordering through logical time monotonicity
         for i in 1..times.len() {
             assert!(
-                times[i-1].tick <= times[i].tick,
+                times[i - 1].tick <= times[i].tick,
                 "Logical time should be monotonically increasing: {} > {}",
-                times[i-1].tick, times[i].tick
+                times[i - 1].tick,
+                times[i].tick
             );
         }
     }
@@ -3518,7 +3520,11 @@ mod tests {
         let events2 = trace2.snapshot();
 
         // Deterministic execution should produce identical trace sequences
-        assert_eq!(events1.len(), events2.len(), "Trace count should be deterministic");
+        assert_eq!(
+            events1.len(),
+            events2.len(),
+            "Trace count should be deterministic"
+        );
 
         for (i, (e1, e2)) in events1.iter().zip(events2.iter()).enumerate() {
             // Note: We compare message content rather than exact logical time
@@ -3536,7 +3542,7 @@ mod tests {
     /// Relation: Logical time monotonic through auth flow
     #[test]
     fn mr_trace_macaroon_causal_ordering() {
-        use super::macaroon::{MacaroonToken, CaveatPredicate};
+        use super::macaroon::{CaveatPredicate, MacaroonToken};
         use crate::security::key::AuthKey;
 
         let key = AuthKey::from_seed(42);
@@ -3568,16 +3574,18 @@ mod tests {
         assert_eq!(events.len(), 4);
 
         // Verify causal ordering preservation through logical time
-        let logical_times: Vec<_> = events.iter()
+        let logical_times: Vec<_> = events
+            .iter()
             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
             .collect();
 
         // Logical time should increase monotonically regardless of attenuation level
         for i in 1..logical_times.len() {
             assert!(
-                logical_times[i-1] <= logical_times[i],
+                logical_times[i - 1] <= logical_times[i],
                 "Macaroon attenuation should preserve causal ordering: tick {} > {}",
-                logical_times[i-1], logical_times[i]
+                logical_times[i - 1],
+                logical_times[i]
             );
         }
     }
@@ -3612,14 +3620,16 @@ mod tests {
         assert_eq!(events.len(), 4, "All traces should be recorded");
 
         // Verify no duplicate logical times (idempotence of time allocation)
-        let mut logical_times: Vec<_> = events.iter()
+        let mut logical_times: Vec<_> = events
+            .iter()
             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
             .collect();
         logical_times.sort_unstable();
         logical_times.dedup();
 
         assert_eq!(
-            logical_times.len(), 4,
+            logical_times.len(),
+            4,
             "Logical time allocation should be idempotent (no duplicate times)"
         );
     }
@@ -3646,15 +3656,17 @@ mod tests {
         assert_eq!(events.len(), 4, "Both contexts should write to same buffer");
 
         // Verify logical time ordering is preserved across clone usage
-        let logical_times: Vec<_> = events.iter()
+        let logical_times: Vec<_> = events
+            .iter()
             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
             .collect();
 
         for i in 1..logical_times.len() {
             assert!(
-                logical_times[i-1] <= logical_times[i],
+                logical_times[i - 1] <= logical_times[i],
                 "Clone should preserve logical time ordering: {} > {}",
-                logical_times[i-1], logical_times[i]
+                logical_times[i - 1],
+                logical_times[i]
             );
         }
 
@@ -3670,7 +3682,7 @@ mod tests {
     /// Combines parent-child + clone + macaroon relations
     #[test]
     fn mr_trace_composite_ordering() {
-        use super::macaroon::{MacaroonToken, CaveatPredicate};
+        use super::macaroon::{CaveatPredicate, MacaroonToken};
         use crate::security::key::AuthKey;
 
         let key = AuthKey::from_seed(789);
@@ -3705,20 +3717,25 @@ mod tests {
         }
 
         let events = trace.snapshot();
-        assert!(events.len() >= 5, "Composite test should produce multiple traces");
+        assert!(
+            events.len() >= 5,
+            "Composite test should produce multiple traces"
+        );
 
         // Verify all metamorphic properties hold in composition:
 
         // 1. Logical time monotonicity (covers MR1, MR3, MR5)
-        let logical_times: Vec<_> = events.iter()
+        let logical_times: Vec<_> = events
+            .iter()
             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
             .collect();
 
         for i in 1..logical_times.len() {
             assert!(
-                logical_times[i-1] <= logical_times[i],
+                logical_times[i - 1] <= logical_times[i],
                 "Composite trace ordering should preserve monotonicity: {} > {}",
-                logical_times[i-1], logical_times[i]
+                logical_times[i - 1],
+                logical_times[i]
             );
         }
 
@@ -3729,11 +3746,13 @@ mod tests {
         );
 
         // 3. Deterministic branching produces expected pattern (MR2)
-        let branch_traces: Vec<_> = events.iter()
+        let branch_traces: Vec<_> = events
+            .iter()
             .filter(|e| e.message.contains("_branch_"))
             .collect();
         assert_eq!(
-            branch_traces.len(), 3,
+            branch_traces.len(),
+            3,
             "Deterministic branching should produce exactly 3 branch traces"
         );
     }

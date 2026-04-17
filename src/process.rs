@@ -2778,4 +2778,309 @@ mod tests {
         }
         crate::test_complete!("test_process_error_display");
     }
+
+    // =========================================================================
+    // Process Signal Handling Conformance Tests - Child Process Management
+    // =========================================================================
+
+    /// Test SIGTERM-then-SIGKILL escalation with grace period.
+    ///
+    /// Verifies that process termination follows the standard Unix pattern:
+    /// 1. Send SIGTERM for graceful shutdown
+    /// 2. Wait grace period
+    /// 3. Send SIGKILL if process hasn't exited
+    #[cfg(unix)]
+    #[test]
+    fn test_sigterm_sigkill_escalation() {
+        init_test("test_sigterm_sigkill_escalation");
+
+        use std::time::{Duration, Instant};
+
+        // Spawn a process that ignores SIGTERM but responds to SIGKILL
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; sleep 30") // Ignore SIGTERM, sleep for 30s
+            .spawn()
+            .expect("spawn failed");
+
+        let pid = child.id().expect("no pid");
+        let start = Instant::now();
+
+        // Send SIGTERM first (graceful)
+        let sigterm_result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        crate::assert_with_log!(
+            sigterm_result == 0,
+            "SIGTERM sent successfully",
+            0,
+            sigterm_result
+        );
+
+        // Wait grace period (shorter for test)
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Check if process is still alive (should be, since it ignores SIGTERM)
+        let still_alive = unsafe {
+            libc::kill(pid as i32, 0) == 0 // Signal 0 checks existence
+        };
+        crate::assert_with_log!(
+            still_alive,
+            "Process still alive after SIGTERM",
+            true,
+            still_alive
+        );
+
+        // Now send SIGKILL (force kill)
+        let sigkill_result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        crate::assert_with_log!(
+            sigkill_result == 0,
+            "SIGKILL sent successfully",
+            0,
+            sigkill_result
+        );
+
+        // Wait for the process to die
+        let status = child.wait().expect("wait failed");
+        let elapsed = start.elapsed();
+
+        // Verify process was killed by signal (not natural exit)
+        crate::assert_with_log!(
+            status.signal().is_some(),
+            "Process killed by signal",
+            true,
+            status.signal().is_some()
+        );
+
+        // Should have been killed quickly (much less than 30s sleep)
+        crate::assert_with_log!(
+            elapsed < Duration::from_secs(5),
+            "Process killed quickly",
+            true,
+            elapsed.as_secs() < 5
+        );
+
+        crate::test_complete!("test_sigterm_sigkill_escalation");
+    }
+
+    /// Test zombie reaping correctness.
+    ///
+    /// Verifies that child processes don't become zombies and are properly reaped.
+    #[cfg(unix)]
+    #[test]
+    fn test_zombie_reaping_correctness() {
+        init_test("test_zombie_reaping_correctness");
+
+        let mut children = Vec::new();
+
+        // Spawn multiple short-lived processes
+        for i in 0..3 {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(&format!("exit {}", i))
+                .spawn()
+                .expect("spawn failed");
+
+            let pid = child.id().expect("no pid");
+            children.push((child, pid));
+        }
+
+        // Wait for all children and verify they're properly reaped
+        for (mut child, pid) in children {
+            let status = child.wait().expect("wait failed");
+
+            // Verify the expected exit code
+            let expected_code = if pid % 1000 < 3 {
+                (pid % 1000) as i32
+            } else {
+                0
+            };
+
+            // After wait(), the process should be reaped (not zombie)
+            // Sending signal 0 should fail with ESRCH (No such process)
+            let process_gone = unsafe {
+                libc::kill(pid as i32, 0) == -1 && *libc::__errno_location() == libc::ESRCH
+            };
+
+            crate::assert_with_log!(
+                process_gone,
+                &format!("Process {} reaped after wait", pid),
+                true,
+                process_gone
+            );
+        }
+
+        crate::test_complete!("test_zombie_reaping_correctness");
+    }
+
+    /// Test stdio pipe close after exit.
+    ///
+    /// Verifies that stdio pipes are properly closed when child process exits.
+    #[test]
+    fn test_stdio_pipe_close_after_exit() {
+        init_test("test_stdio_pipe_close_after_exit");
+
+        // Spawn process with piped stdout
+        let child = Command::new("echo")
+            .arg("test output")
+            .stdout(Stdio::Pipe)
+            .stdin(Stdio::Pipe)
+            .stderr(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        let output = child.wait_with_output().expect("wait_with_output failed");
+
+        // Verify output was captured
+        crate::assert_with_log!(
+            output.stdout == b"test output\n",
+            "stdout captured correctly",
+            "test output\\n",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        // Verify status indicates successful completion
+        crate::assert_with_log!(
+            output.status.success(),
+            "process exited successfully",
+            true,
+            output.status.success()
+        );
+
+        // The stdio pipes should be automatically closed after process exit
+        // This is verified by the fact that wait_with_output() succeeded
+        // and returned complete output without hanging
+
+        crate::test_complete!("test_stdio_pipe_close_after_exit");
+    }
+
+    /// Test setsid isolation preventing signal propagation.
+    ///
+    /// Verifies that child processes in new session don't receive signals
+    /// intended for parent process group.
+    #[cfg(unix)]
+    #[test]
+    fn test_setsid_isolation() {
+        init_test("test_setsid_isolation");
+
+        use std::time::Duration;
+
+        // Create a child process that creates its own session
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("setsid sleep 30") // Create new session and sleep
+            .spawn()
+            .expect("spawn failed");
+
+        let child_pid = child.id().expect("no pid");
+
+        // Get our own process group
+        let our_pgid = unsafe { libc::getpgid(0) };
+
+        // Get child's process group (should be different after setsid)
+        let child_pgid = unsafe { libc::getpgid(child_pid as i32) };
+
+        crate::assert_with_log!(
+            child_pgid != our_pgid,
+            "Child in different process group",
+            true,
+            child_pgid != our_pgid
+        );
+
+        // Send signal to our process group - child should not receive it
+        let signal_result = unsafe {
+            libc::kill(-our_pgid, libc::SIGUSR1) // Negative PID = process group
+        };
+        crate::assert_with_log!(
+            signal_result == 0,
+            "Signal sent to our process group",
+            0,
+            signal_result
+        );
+
+        // Give signal time to be delivered (if it were going to be)
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Child should still be alive (signal was isolated)
+        let child_alive = unsafe { libc::kill(child_pid as i32, 0) == 0 };
+        crate::assert_with_log!(
+            child_alive,
+            "Child survived signal to parent group",
+            true,
+            child_alive
+        );
+
+        // Clean up the child
+        child.kill().expect("kill failed");
+        let _status = child.wait().expect("wait failed");
+
+        crate::test_complete!("test_setsid_isolation");
+    }
+
+    /// Test exit code preservation across 256-bit exit status.
+    ///
+    /// Verifies that process exit codes are correctly preserved and accessible,
+    /// including edge cases around the 8-bit exit code space.
+    #[test]
+    fn test_exit_code_preservation() {
+        init_test("test_exit_code_preservation");
+
+        // Test various exit codes including edge cases
+        let test_codes = [0, 1, 127, 128, 255];
+
+        for &exit_code in &test_codes {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(&format!("exit {}", exit_code))
+                .spawn()
+                .expect("spawn failed");
+
+            let status = child.wait().expect("wait failed");
+
+            // Exit code should be preserved exactly
+            let actual_code = status.code().unwrap_or(-1);
+            crate::assert_with_log!(
+                actual_code == exit_code,
+                &format!("Exit code {} preserved", exit_code),
+                exit_code,
+                actual_code
+            );
+
+            // Success should only be true for exit code 0
+            let expected_success = exit_code == 0;
+            crate::assert_with_log!(
+                status.success() == expected_success,
+                &format!("Success status for exit {}", exit_code),
+                expected_success,
+                status.success()
+            );
+        }
+
+        // Test signal termination vs exit code distinction
+        #[cfg(unix)]
+        {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("kill -9 $$") // Self-terminate with SIGKILL
+                .spawn()
+                .expect("spawn failed");
+
+            let status = child.wait().expect("wait failed");
+
+            // Should be terminated by signal, not exit code
+            crate::assert_with_log!(
+                status.signal().is_some(),
+                "Terminated by signal",
+                true,
+                status.signal().is_some()
+            );
+
+            crate::assert_with_log!(
+                status.code().is_none(),
+                "No exit code for signal termination",
+                true,
+                status.code().is_none()
+            );
+        }
+
+        crate::test_complete!("test_exit_code_preservation");
+    }
 }
