@@ -17,6 +17,8 @@ const H3_FRAME_SETTINGS: u64 = 0x4;
 const H3_FRAME_PUSH_PROMISE: u64 = 0x5;
 const H3_FRAME_GOAWAY: u64 = 0x7;
 const H3_FRAME_MAX_PUSH_ID: u64 = 0xD;
+/// HTTP/3 DATAGRAM frame type (RFC 9297).
+const H3_FRAME_DATAGRAM: u64 = 0x30;
 const H3_STREAM_TYPE_CONTROL: u64 = 0x00;
 const H3_STREAM_TYPE_PUSH: u64 = 0x01;
 const H3_STREAM_TYPE_QPACK_ENCODER: u64 = 0x02;
@@ -264,6 +266,13 @@ pub enum H3Frame {
     Goaway(u64),
     /// MAX_PUSH_ID frame.
     MaxPushId(u64),
+    /// DATAGRAM frame (RFC 9297) with quarter-stream-id and payload.
+    Datagram {
+        /// Quarter-stream ID for context identification.
+        quarter_stream_id: u64,
+        /// Application payload data.
+        payload: Vec<u8>,
+    },
     /// Unknown frame preserved as raw payload.
     Unknown {
         /// Frame type identifier.
@@ -313,6 +322,15 @@ impl H3Frame {
                 encode_varint(*id, &mut payload)
                     .map_err(|_| H3NativeError::InvalidFrame("max_push_id out of range"))?;
                 H3_FRAME_MAX_PUSH_ID
+            }
+            Self::Datagram {
+                quarter_stream_id,
+                payload: data,
+            } => {
+                encode_varint(*quarter_stream_id, &mut payload)
+                    .map_err(|_| H3NativeError::InvalidFrame("quarter_stream_id out of range"))?;
+                payload.extend_from_slice(data);
+                H3_FRAME_DATAGRAM
             }
             Self::Unknown {
                 frame_type,
@@ -383,6 +401,14 @@ impl H3Frame {
                 }
                 Self::MaxPushId(id)
             }
+            H3_FRAME_DATAGRAM => {
+                let (quarter_stream_id, n) = decode_varint(payload)
+                    .map_err(|_| H3NativeError::InvalidFrame("datagram quarter_stream_id"))?;
+                Self::Datagram {
+                    quarter_stream_id,
+                    payload: payload[n..].to_vec(),
+                }
+            }
             _ => Self::Unknown {
                 frame_type,
                 payload: payload.to_vec(),
@@ -426,7 +452,7 @@ impl H3ControlState {
                         "duplicate SETTINGS on remote control stream",
                     ));
                 }
-                H3Frame::Data(_) | H3Frame::Headers(_) | H3Frame::PushPromise { .. } => {
+                H3Frame::Data(_) | H3Frame::Headers(_) | H3Frame::PushPromise { .. } | H3Frame::Datagram { .. } => {
                     return Err(H3NativeError::ControlProtocol(
                         "frame type not allowed on control stream",
                     ));
@@ -3109,6 +3135,276 @@ mod tests {
                 "must reject H2 reserved setting 0x{reserved_id:02x}"
             ));
             assert_eq!(err, H3NativeError::InvalidSettingValue(reserved_id));
+        }
+    }
+
+    // --- HTTP/3 DATAGRAM Frame Conformance Tests (RFC 9297) ---
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_roundtrip() {
+        // Basic DATAGRAM frame encode/decode roundtrip.
+        let frame = H3Frame::Datagram {
+            quarter_stream_id: 42,
+            payload: vec![0xCA, 0xFE, 0xBA, 0xBE],
+        };
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_roundtrip_empty_payload() {
+        // DATAGRAM frame with empty payload should work.
+        let frame = H3Frame::Datagram {
+            quarter_stream_id: 0,
+            payload: vec![],
+        };
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_roundtrip_large_quarter_stream_id() {
+        // Test maximum quarter-stream-id values (62-bit varint max).
+        let frame = H3Frame::Datagram {
+            quarter_stream_id: (1u64 << 62) - 1, // Maximum 62-bit value
+            payload: vec![0x01, 0x02],
+        };
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_golden_test_simple() {
+        // Golden test: Known DATAGRAM frame encoding.
+        // Frame type 0x30 (varint), length 6 (varint), quarter_stream_id 5 (varint), payload [0x01, 0x02, 0x03, 0x04].
+        let frame = H3Frame::Datagram {
+            quarter_stream_id: 5,
+            payload: vec![0x01, 0x02, 0x03, 0x04],
+        };
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+
+        // Expected wire format: [0x30, 0x05, 0x05, 0x01, 0x02, 0x03, 0x04]
+        // 0x30 = frame type (DATAGRAM)
+        // 0x05 = frame length (1 byte quarter_stream_id + 4 bytes payload)
+        // 0x05 = quarter_stream_id (5 as varint)
+        // [0x01, 0x02, 0x03, 0x04] = payload
+        let expected = vec![0x30u8, 0x05, 0x05, 0x01, 0x02, 0x03, 0x04];
+        assert_eq!(buf, expected, "DATAGRAM frame encoding mismatch");
+
+        // Verify decode produces the same frame
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_golden_test_zero_quarter_stream_id() {
+        // Golden test: DATAGRAM frame with zero quarter_stream_id.
+        let frame = H3Frame::Datagram {
+            quarter_stream_id: 0,
+            payload: vec![0xFF],
+        };
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+
+        // Expected: [0x30, 0x02, 0x00, 0xFF]
+        // 0x30 = frame type, 0x02 = length, 0x00 = quarter_stream_id, 0xFF = payload
+        let expected = vec![0x30u8, 0x02, 0x00, 0xFF];
+        assert_eq!(buf, expected);
+
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_large_payload() {
+        // Test DATAGRAM frame with large payload (up to practical limits).
+        let large_payload = vec![0x42u8; 1024];
+        let frame = H3Frame::Datagram {
+            quarter_stream_id: 1000,
+            payload: large_payload.clone(),
+        };
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn datagram_frame_forbidden_on_control_stream() {
+        // RFC 9297: DATAGRAM frames MUST NOT be sent on control streams.
+        let frame = H3Frame::Datagram {
+            quarter_stream_id: 10,
+            payload: vec![0xAA, 0xBB],
+        };
+
+        let mut state = H3ControlState::new();
+        state
+            .on_remote_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        let err = state.on_remote_control_frame(&frame).expect_err("must reject DATAGRAM on control stream");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("frame type not allowed on control stream")
+        );
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn settings_h3_datagram_enabled() {
+        // Test SETTINGS_H3_DATAGRAM=1 negotiation.
+        let settings = H3Settings {
+            qpack_max_table_capacity: Some(4096),
+            max_field_section_size: Some(8192),
+            qpack_blocked_streams: None,
+            enable_connect_protocol: Some(false),
+            h3_datagram: Some(true), // Enable DATAGRAM
+            unknown: vec![],
+        };
+
+        let mut buf = Vec::new();
+        settings.encode_payload(&mut buf).expect("encode settings");
+        let decoded = H3Settings::decode_payload(&buf).expect("decode settings");
+        assert_eq!(decoded.h3_datagram, Some(true));
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn settings_h3_datagram_disabled() {
+        // Test SETTINGS_H3_DATAGRAM=0 (explicitly disabled).
+        let settings = H3Settings {
+            qpack_max_table_capacity: None,
+            max_field_section_size: None,
+            qpack_blocked_streams: None,
+            enable_connect_protocol: None,
+            h3_datagram: Some(false), // Explicitly disabled
+            unknown: vec![],
+        };
+
+        let mut buf = Vec::new();
+        settings.encode_payload(&mut buf).expect("encode settings");
+        let decoded = H3Settings::decode_payload(&buf).expect("decode settings");
+        assert_eq!(decoded.h3_datagram, Some(false));
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn settings_h3_datagram_not_negotiated() {
+        // Test when SETTINGS_H3_DATAGRAM is not present (None).
+        let settings = H3Settings {
+            qpack_max_table_capacity: Some(1024),
+            max_field_section_size: None,
+            qpack_blocked_streams: None,
+            enable_connect_protocol: None,
+            h3_datagram: None, // Not negotiated
+            unknown: vec![],
+        };
+
+        let mut buf = Vec::new();
+        settings.encode_payload(&mut buf).expect("encode settings");
+        let decoded = H3Settings::decode_payload(&buf).expect("decode settings");
+        assert_eq!(decoded.h3_datagram, None);
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_context_id_boundary_values() {
+        // Test boundary values for quarter_stream_id (context identifier).
+        let test_cases = vec![
+            0u64,                    // Minimum value
+            1,                       // Minimum non-zero
+            63,                      // Single-byte varint maximum
+            64,                      // Two-byte varint minimum
+            16383,                   // Two-byte varint maximum
+            16384,                   // Three-byte varint minimum
+            1073741823,              // Four-byte varint maximum
+            (1u64 << 30),           // Five-byte varint minimum
+            (1u64 << 62) - 1,       // Maximum 62-bit value
+        ];
+
+        for quarter_stream_id in test_cases {
+            let frame = H3Frame::Datagram {
+                quarter_stream_id,
+                payload: vec![0x00, 0x01],
+            };
+            let mut buf = Vec::new();
+            frame.encode(&mut buf).expect(&format!("encode quarter_stream_id={}", quarter_stream_id));
+            let (decoded, consumed) = H3Frame::decode(&buf).expect(&format!("decode quarter_stream_id={}", quarter_stream_id));
+            assert_eq!(decoded, frame);
+            assert_eq!(consumed, buf.len());
+        }
+    }
+
+    #[test]
+    fn datagram_frame_decode_truncated_quarter_stream_id() {
+        // Test frame with truncated quarter_stream_id varint.
+        let mut buf = Vec::new();
+        encode_varint(H3_FRAME_DATAGRAM, &mut buf).expect("frame type");
+        encode_varint(2, &mut buf).expect("frame length");
+        buf.push(0x80); // Incomplete varint (continuation bit set but no following byte)
+
+        let err = H3Frame::decode(&buf).expect_err("must reject truncated quarter_stream_id");
+        assert_eq!(err, H3NativeError::InvalidFrame("quarter stream id varint"));
+    }
+
+    #[test]
+    fn datagram_frame_decode_truncated_payload() {
+        // Test frame where declared length exceeds available data.
+        let mut buf = Vec::new();
+        encode_varint(H3_FRAME_DATAGRAM, &mut buf).expect("frame type");
+        encode_varint(10, &mut buf).expect("frame length - claims 10 bytes");
+        encode_varint(5, &mut buf).expect("quarter_stream_id");
+        buf.extend_from_slice(&[0x01, 0x02]); // Only 2 bytes payload, but frame claims 10 total
+
+        let err = H3Frame::decode(&buf).expect_err("must reject truncated payload");
+        assert_eq!(err, H3NativeError::InvalidFrame("insufficient frame payload"));
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn datagram_frame_varint_quarter_stream_id_encoding() {
+        // Verify quarter_stream_id is properly encoded as varint in different ranges.
+        let test_cases = vec![
+            (0u64, vec![0x00]),                              // Zero
+            (42, vec![0x2A]),                               // Single byte
+            (300, vec![0x41, 0x2C]),                        // Two bytes
+            (100000, vec![0x80, 0x01, 0x86, 0xA0]),        // Four bytes
+        ];
+
+        for (quarter_stream_id, expected_varint) in test_cases {
+            let frame = H3Frame::Datagram {
+                quarter_stream_id,
+                payload: vec![0xFF],
+            };
+            let mut buf = Vec::new();
+            frame.encode(&mut buf).expect("encode");
+
+            // Skip frame type and length, check quarter_stream_id encoding
+            let (_, type_len) = decode_varint(&buf).expect("frame type");
+            let (declared_length, len_len) = decode_varint(&buf[type_len..]).expect("frame length");
+            let quarter_stream_id_start = type_len + len_len;
+            let (decoded_id, id_len) = decode_varint(&buf[quarter_stream_id_start..]).expect("quarter_stream_id");
+
+            assert_eq!(decoded_id, quarter_stream_id);
+            assert_eq!(&buf[quarter_stream_id_start..quarter_stream_id_start + id_len], &expected_varint);
         }
     }
 }
