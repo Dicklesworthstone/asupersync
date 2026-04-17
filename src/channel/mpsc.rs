@@ -2502,8 +2502,13 @@ pub mod backpressure_metamorphic {
     /// Composite metamorphic test: All relations together
     ///
     /// Tests multiple properties in combination to catch interaction bugs.
-    #[proptest]
-    fn composite_backpressure_properties(config: BackpressureTestConfig) {
+    #[test]
+    fn composite_backpressure_properties() {
+        use proptest::test_runner::TestRunner;
+        use proptest::strategy::Strategy;
+
+        let mut runner = TestRunner::default();
+        runner.run(&backpressure_config_strategy(), |config| {
         let lab = LabRuntime::new(LabConfig::new(config.seed));
         let result = lab.spawn_test_scope(Budget::with_millis(10000), move |cx, scope| async move {
             let (sender, mut receiver) = channel::<u32>(config.capacity);
@@ -2584,5 +2589,7 @@ pub mod backpressure_metamorphic {
         });
 
         result.expect("Composite backpressure properties test failed");
+            Ok(())
+        }).expect("Property test failed");
     }
 }
