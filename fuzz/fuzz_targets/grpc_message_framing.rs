@@ -54,6 +54,8 @@ enum WireType {
     Varint = 0,          // int32, int64, bool, enum
     Fixed64 = 1,         // double, fixed64, sfixed64
     LengthDelimited = 2, // string, bytes, embedded messages
+    StartGroup = 3,      // deprecated group start
+    EndGroup = 4,        // deprecated group end
     Fixed32 = 5,         // float, fixed32, sfixed32
 }
 
@@ -71,6 +73,8 @@ enum FieldData {
     Varint(u64),
     Fixed64([u8; 8]),
     LengthDelimited(Vec<u8>),
+    GroupStart(Vec<ProtobufField>), // Nested fields within a group
+    GroupEnd,                       // Group terminator
     Fixed32([u8; 4]),
 }
 
@@ -154,6 +158,32 @@ fn fuzz_structured_message(msg: StructuredGrpcMessage) {
                     fuzz_structured_message(nested_msg);
                 }
             }
+            (FieldData::GroupStart(group_fields), WireType::StartGroup) => {
+                // Encode nested fields within the group (test deprecated group syntax)
+                for group_field in group_fields {
+                    let group_tag_wire = (group_field.tag << 3) | (group_field.wire_type as u32);
+                    encode_varint(&mut protobuf_data, group_tag_wire as u64);
+
+                    match &group_field.data {
+                        FieldData::Varint(value) => encode_varint(&mut protobuf_data, *value),
+                        FieldData::Fixed64(bytes) => protobuf_data.extend_from_slice(bytes),
+                        FieldData::Fixed32(bytes) => protobuf_data.extend_from_slice(bytes),
+                        FieldData::LengthDelimited(data) => {
+                            let actual_len = data.len().min(MAX_FUZZ_MESSAGE_SIZE / 8);
+                            encode_varint(&mut protobuf_data, actual_len as u64);
+                            protobuf_data.extend_from_slice(&data[..actual_len]);
+                        }
+                        _ => {} // Avoid recursive groups
+                    }
+                }
+
+                // Add group end marker with same tag
+                let end_tag_wire = (field.tag << 3) | (WireType::EndGroup as u32);
+                encode_varint(&mut protobuf_data, end_tag_wire as u64);
+            }
+            (FieldData::GroupEnd, WireType::EndGroup) => {
+                // End group marker - already encoded in StartGroup case
+            }
             (FieldData::Fixed32(bytes), WireType::Fixed32) => {
                 protobuf_data.extend_from_slice(bytes);
             }
@@ -177,6 +207,10 @@ fn fuzz_structured_message(msg: StructuredGrpcMessage) {
     let data_ref = grpc_message.data.clone();
     test_grpc_codec_roundtrip(grpc_message);
     test_protobuf_parsing(&data_ref);
+
+    // Additional coverage for bead requirements
+    test_unknown_field_preservation(&msg.raw_suffix);
+    test_malformed_message_scenarios(&msg.raw_suffix);
 }
 
 /// Test raw byte sequences for edge case discovery.
@@ -191,6 +225,11 @@ fn fuzz_raw_data(data: &[u8]) {
     if data.len() >= 10 {
         test_varint_boundaries(&data[..10]);
     }
+
+    // Additional coverage for bead requirements
+    test_varint_field_number_overflow(data);
+    test_unknown_field_preservation(data);
+    test_malformed_message_scenarios(data);
 }
 
 /// Test gRPC framing edge cases with custom headers.
@@ -331,6 +370,189 @@ fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
         value >>= 7;
     }
     buf.push(value as u8);
+}
+
+/// Test unknown field preservation - requirement (4)
+fn test_unknown_field_preservation(data: &[u8]) {
+    if data.len() < 8 {
+        return;
+    }
+
+    // Create a message with unknown fields (high tag numbers)
+    let mut protobuf_data = Vec::new();
+
+    // Add known fields (tags 1-2)
+    encode_varint(&mut protobuf_data, (1 << 3) | (WireType::LengthDelimited as u64));
+    encode_varint(&mut protobuf_data, 4);
+    protobuf_data.extend_from_slice(b"test");
+
+    encode_varint(&mut protobuf_data, (2 << 3) | (WireType::Varint as u64));
+    encode_varint(&mut protobuf_data, 42);
+
+    // Add unknown fields with various tag numbers
+    let unknown_tags = [100, 1000, 10000, 536870911]; // Last one is max valid tag (2^29 - 1)
+    for (i, &tag) in unknown_tags.iter().enumerate() {
+        if i < data.len() {
+            let wire_type = match data[i] % 6 {
+                0 => WireType::Varint,
+                1 => WireType::Fixed64,
+                2 => WireType::LengthDelimited,
+                3 => WireType::StartGroup, // Test deprecated groups as unknown fields
+                4 => WireType::EndGroup,
+                _ => WireType::Fixed32,
+            };
+
+            encode_varint(&mut protobuf_data, (tag << 3) | (wire_type as u64));
+
+            match wire_type {
+                WireType::Varint => encode_varint(&mut protobuf_data, data[i] as u64),
+                WireType::Fixed64 => {
+                    let bytes = [data[i]; 8];
+                    protobuf_data.extend_from_slice(&bytes);
+                }
+                WireType::Fixed32 => {
+                    let bytes = [data[i]; 4];
+                    protobuf_data.extend_from_slice(&bytes);
+                }
+                WireType::LengthDelimited => {
+                    let len = (data[i] % 16) as usize;
+                    encode_varint(&mut protobuf_data, len as u64);
+                    protobuf_data.extend(vec![data[i]; len]);
+                }
+                WireType::StartGroup => {
+                    // Test deprecated group with unknown field
+                    encode_varint(&mut protobuf_data, ((tag + 1) << 3) | (WireType::Varint as u64));
+                    encode_varint(&mut protobuf_data, data[i] as u64);
+                    encode_varint(&mut protobuf_data, (tag << 3) | (WireType::EndGroup as u64));
+                }
+                WireType::EndGroup => {
+                    // Skip standalone EndGroup as it would be malformed
+                }
+            }
+        }
+    }
+
+    // Test that the message can still be parsed despite unknown fields
+    let bytes = Bytes::from(protobuf_data);
+    test_protobuf_parsing(&bytes);
+}
+
+/// Test varint field number overflow - requirement (1)
+fn test_varint_field_number_overflow(data: &[u8]) {
+    if data.len() < 4 {
+        return;
+    }
+
+    let mut protobuf_data = Vec::new();
+
+    // Test field numbers at boundaries and beyond limits
+    let overflow_tags = [
+        536870911u32,  // Maximum valid tag number (2^29 - 1)
+        536870912u32,  // Just above maximum (should be rejected)
+        u32::MAX,      // Maximum u32 value
+        0u32,          // Invalid tag number 0
+    ];
+
+    for (i, &tag) in overflow_tags.iter().enumerate() {
+        if i < data.len() {
+            // Craft varint that would cause tag overflow
+            let wire_type = WireType::Varint as u32;
+            let tag_wire = (tag << 3) | wire_type;
+
+            // Manually encode potentially invalid varint
+            if tag == u32::MAX {
+                // Craft a malformed varint that's too long
+                protobuf_data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+            } else {
+                encode_varint(&mut protobuf_data, tag_wire as u64);
+            }
+
+            // Add value
+            encode_varint(&mut protobuf_data, data[i] as u64);
+        }
+    }
+
+    // Test that parser handles tag overflow gracefully
+    let bytes = Bytes::from(protobuf_data);
+    test_protobuf_parsing(&bytes);
+}
+
+/// Test comprehensive malformed message scenarios - requirement (5)
+fn test_malformed_message_scenarios(data: &[u8]) {
+    let scenarios = [
+        // Scenario 1: Truncated varint
+        || {
+            vec![0xFF, 0xFF, 0xFF, 0xFF] // Varint without terminating byte
+        },
+        // Scenario 2: Invalid wire type
+        || {
+            let mut buf = Vec::new();
+            encode_varint(&mut buf, (1 << 3) | 6); // Wire type 6 doesn't exist
+            encode_varint(&mut buf, 42);
+            buf
+        },
+        // Scenario 3: Length-delimited field with wrong length
+        || {
+            let mut buf = Vec::new();
+            encode_varint(&mut buf, (1 << 3) | (WireType::LengthDelimited as u64));
+            encode_varint(&mut buf, 100); // Claims 100 bytes
+            buf.extend_from_slice(b"short"); // But only provides 5 bytes
+            buf
+        },
+        // Scenario 4: Nested messages with excessive depth
+        || {
+            let mut buf = Vec::new();
+            // Create deeply nested structure
+            for _ in 0..100 {
+                encode_varint(&mut buf, (1 << 3) | (WireType::LengthDelimited as u64));
+                encode_varint(&mut buf, 3); // Length of next tag+type+value
+            }
+            buf.extend_from_slice(&[0x08, 0x2A]); // Final value
+            buf
+        },
+        // Scenario 5: Unmatched group markers
+        || {
+            let mut buf = Vec::new();
+            encode_varint(&mut buf, (1 << 3) | (WireType::StartGroup as u64));
+            encode_varint(&mut buf, (1 << 3) | (WireType::Varint as u64));
+            encode_varint(&mut buf, 42);
+            // Missing EndGroup marker - should cause parsing error
+            buf
+        },
+        // Scenario 6: Mismatched group tags
+        || {
+            let mut buf = Vec::new();
+            encode_varint(&mut buf, (1 << 3) | (WireType::StartGroup as u64));
+            encode_varint(&mut buf, (2 << 3) | (WireType::Varint as u64));
+            encode_varint(&mut buf, 42);
+            encode_varint(&mut buf, (2 << 3) | (WireType::EndGroup as u64)); // Wrong tag
+            buf
+        },
+    ];
+
+    for (i, scenario) in scenarios.iter().enumerate() {
+        if i < data.len() && (data[i] % 6) == (i % 6) as u8 {
+            let malformed_data = scenario();
+            let bytes = Bytes::from(malformed_data);
+            test_protobuf_parsing(&bytes);
+        }
+    }
+
+    // Also test with user-provided data mixed in
+    if !data.is_empty() {
+        let mut mixed_data = Vec::new();
+
+        // Valid message start
+        encode_varint(&mut mixed_data, (1 << 3) | (WireType::LengthDelimited as u64));
+        encode_varint(&mut mixed_data, 4);
+        mixed_data.extend_from_slice(b"test");
+
+        // Add user data which might be malformed
+        mixed_data.extend_from_slice(data);
+
+        let bytes = Bytes::from(mixed_data);
+        test_protobuf_parsing(&bytes);
+    }
 }
 
 // Codec type aliases for testing different message types
