@@ -25,7 +25,7 @@ mod test_vectors;
 
 // Public re-exports for conformance testing
 pub use harness::{
-    ConformanceTestResult, HpackConformanceHarness, RequirementLevel, TestCategory, TestVerdict,
+    HpackConformanceHarness, RequirementLevel, TestCategory, TestVerdict,
 };
 
 #[cfg(test)]
@@ -37,11 +37,6 @@ mod tests {
     fn rfc7541_complete_conformance_suite() {
         let harness = HpackConformanceHarness::new();
         let results = harness.run_all_tests();
-
-        // Generate structured JSON-line output for CI integration
-        for result in &results {
-            println!("{}", serde_json::to_string(&result).unwrap());
-        }
 
         let passed = results
             .iter()

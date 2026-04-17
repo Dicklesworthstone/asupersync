@@ -3,7 +3,6 @@
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// Conformance test requirement level per RFC keywords.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
