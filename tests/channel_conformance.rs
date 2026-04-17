@@ -533,3 +533,41 @@ fn run_conformance_tests() {
     );
     test_complete!("run_channel_conformance_tests");
 }
+
+#[test]
+fn mpsc_backpressure_cancellation_recovers_channel_flow() {
+    init_test_logging();
+    test_phase!("mpsc_backpressure_cancellation_recovers_channel_flow");
+
+    let runtime = AsupersyncRuntime::new();
+    runtime.block_on(async {
+        let (tx, mut rx) = mpsc::channel::<u64>(1);
+        let cx = current_cx();
+
+        tx.send(&cx, 1).await.expect("prime bounded channel");
+
+        let cancelled = future::or(
+            async {
+                sleep_future(Duration::from_millis(20)).await;
+                Err::<(), &'static str>("timed out")
+            },
+            async {
+                tx.send(&cx, 2)
+                    .await
+                    .map_err(|_| "send failed while full")?;
+                Ok::<(), &'static str>(())
+            },
+        )
+        .await;
+
+        assert_eq!(cancelled, Err("timed out"));
+        assert_eq!(rx.recv(&cx).await, Ok(1));
+
+        tx.send(&cx, 3)
+            .await
+            .expect("channel should recover after cancelled blocked send");
+        assert_eq!(rx.recv(&cx).await, Ok(3));
+    });
+
+    test_complete!("mpsc_backpressure_cancellation_recovers_channel_flow");
+}
