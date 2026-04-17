@@ -50,6 +50,8 @@ pub mod metrics;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
+#[cfg(feature = "metrics")]
+pub mod histogram_conformance;
 pub mod otel_structured_concurrency;
 pub mod resource_accounting;
 pub mod runtime_integration;
