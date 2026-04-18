@@ -169,6 +169,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "websocket_frame"
+path = "fuzz_targets/websocket_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_trace_event_fuzzing"
 path = "fuzz_targets/trace_event_fuzzing.rs"
 test = false
@@ -731,6 +738,13 @@ bench = false
 [[bin]]
 name = "h3_client"
 path = "fuzz_targets/h3_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_hpack"
+path = "fuzz_targets/h2_hpack.rs"
 test = false
 doc = false
 bench = false
