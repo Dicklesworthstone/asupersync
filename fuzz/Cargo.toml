@@ -253,6 +253,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tls_x509"
+path = "fuzz_targets/tls_x509.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_postgres_scram_auth"
 path = "fuzz_targets/postgres_scram_auth.rs"
 test = false
