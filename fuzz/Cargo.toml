@@ -162,6 +162,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_status_line"
+path = "fuzz_targets/h1_status_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_gf256_operations"
 path = "fuzz_targets/gf256_operations.rs"
 test = false
@@ -969,6 +976,13 @@ bench = false
 [[bin]]
 name = "hpack_never_indexed"
 path = "fuzz_targets/hpack_never_indexed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_bypass"
+path = "fuzz_targets/length_delimited_bypass.rs"
 test = false
 doc = false
 bench = false
