@@ -1009,6 +1009,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_goaway"
+path = "fuzz_targets/h2_goaway.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "diagnostics_snapshot"
 path = "fuzz_targets/diagnostics_snapshot.rs"
 test = false
