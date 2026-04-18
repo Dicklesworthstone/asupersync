@@ -190,7 +190,7 @@ proptest! {
 
         // Verify received values count matches successful sends
         let mut recv_count = 0;
-        while block_on(rx.try_recv()).is_ok() {
+        while rx.try_recv().is_ok() {
             recv_count += 1;
         }
         prop_assert_eq!(recv_count, send_count,
@@ -662,5 +662,11 @@ proptest! {
             "Compound test: value preservation violated");
         prop_assert_eq!(received_values.len(), send_count,
             "Compound test: send count mismatch");
+    }
+}
+ch");
+    }
+}
+count mismatch");
     }
 }

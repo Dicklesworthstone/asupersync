@@ -506,7 +506,7 @@ fn cx_root_cancel_cause_api() {
 
     let root = cx.root_cancel_cause().expect("should have root");
     assert_eq!(root.kind, CancelKind::CostBudget);
-    assert_eq!(root.message, Some("cost limit exceeded"));
+    assert_eq!(root.message.as_deref(), Some("cost limit exceeded"));
     tracing::info!(
         root_kind = ?root.kind,
         root_message = ?root.message,

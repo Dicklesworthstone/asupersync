@@ -122,7 +122,7 @@ struct OperationResult {
 
 impl RateLimitTestHarness {
     fn new(config: RateLimitTestConfig) -> Self {
-        let lab = LabRuntime::new();
+        let lab = LabRuntime::new(LabConfig::default());
 
         let policy = RateLimitPolicy {
             name: "test".into(),
@@ -318,7 +318,7 @@ proptest! {
     ) {
         let harness = RateLimitTestHarness::new(config.clone());
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             // Start with empty bucket by draining initial tokens
             let initial_time = harness.time_from_ms(0);
             for _ in 0..config.burst {
@@ -373,7 +373,7 @@ proptest! {
     ) {
         let harness = RateLimitTestHarness::new(config.clone());
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             // Execute rapid-fire operations to test rate enforcement
             for &timing_offset in &burst_timings {
                 let timestamp = timing_offset;
@@ -413,7 +413,7 @@ proptest! {
     ) {
         let harness = RateLimitTestHarness::new(config.clone());
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let mut cumulative_time = 0u64;
 
             for interval in refill_intervals {
@@ -464,7 +464,7 @@ proptest! {
     ) {
         let harness = RateLimitTestHarness::new(config.clone());
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             // Drain initial tokens
             for _ in 0..config.burst {
                 harness.limiter.try_acquire(1, harness.time_from_ms(0));
@@ -513,7 +513,7 @@ proptest! {
     ) {
         let harness = RateLimitTestHarness::new(config.clone());
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let mut time = 0u64;
 
             for interval in long_intervals {
@@ -574,7 +574,7 @@ proptest! {
 
         let harness = RateLimitTestHarness::new(config.clone());
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
 
             for (i, (&cost, &timing)) in attempts.iter().zip(timing_offsets.iter()).enumerate() {
                 let timestamp = (i as u64) * 1000 + timing;
@@ -626,7 +626,7 @@ proptest! {
     ) {
         let harness = RateLimitTestHarness::new(config.clone());
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let mut time = 0u64;
 
             for (op_type, &cost) in mixed_operations.iter().zip(operation_costs.iter()) {

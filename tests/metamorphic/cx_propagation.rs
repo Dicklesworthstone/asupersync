@@ -266,7 +266,7 @@ fn mr_parent_cancel_propagation() {
 
         let mut tracker = CancellationTracker::new();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
             let mut contexts = Vec::new();
 
@@ -333,7 +333,7 @@ fn mr_child_cancel_isolation() {
 
         let mut tracker = CancellationTracker::new();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Create parent and multiple children
             let parent_cx = test_cx_with_ids(0, 0);
             let child1_cx = test_cx_with_ids(0, 1);
@@ -385,7 +385,7 @@ fn mr_detached_token_resilience() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let mut detached_cx = None;
 
             // Create and drop parent context, but keep child
@@ -439,7 +439,7 @@ fn mr_cancel_mask_isolation() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let parent_cx = test_cx_with_ids(0, 0);
             let child_cx = test_cx_with_ids(0, 1);
 
@@ -488,7 +488,7 @@ fn mr_deadline_inheritance() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let parent_deadline = Time::from_secs(parent_deadline_secs);
             let child_deadline = Time::from_secs(child_deadline_secs);
 
@@ -544,7 +544,7 @@ fn mr_budget_flow_direction() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let parent_budget = Budget::new()
                 .with_poll_quota(parent_quota)
                 .with_priority(parent_priority);
@@ -612,7 +612,7 @@ fn mr_checkpoint_masking_semantics() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx_with_ids(0, 0);
 
             // Cancel the context
@@ -658,7 +658,7 @@ fn mr_cancel_reason_attribution() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let parent_cx = test_cx_with_ids(0, 0);
             let child_cx = test_cx_with_ids(0, 1);
 
@@ -716,7 +716,7 @@ fn test_basic_cancellation() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Initially not cancelled
@@ -747,7 +747,7 @@ fn test_budget_inheritance() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let parent_deadline = Time::from_secs(30);
         let child_deadline = Time::from_secs(10);
 
@@ -776,7 +776,7 @@ fn test_masking_behavior() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Cancel context
@@ -802,7 +802,7 @@ fn test_cancel_fast() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Initially not cancelled
@@ -829,7 +829,7 @@ fn test_scope_budget_creation() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
         let budget = Budget::new().with_deadline(Time::from_secs(60)).with_poll_quota(200);
 
@@ -850,7 +850,7 @@ fn test_cancel_chain_traversal() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Initially no cancel chain

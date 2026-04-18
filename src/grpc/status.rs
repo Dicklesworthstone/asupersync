@@ -815,12 +815,12 @@ mod tests {
                 as_str
             );
 
-            let display = code.to_string();
+            let display_str = code.to_string();
             crate::assert_with_log!(
-                display == expected_str,
+                display_str == expected_str,
                 format!("Code {:?} display", code),
                 expected_str,
-                display
+                display_str
             );
         }
 

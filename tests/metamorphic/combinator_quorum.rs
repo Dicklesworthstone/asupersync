@@ -169,7 +169,7 @@ fn mr1_quorum_returns_when_k_outcomes_land() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Create operations: first success_count succeed, rest fail
@@ -234,7 +234,7 @@ fn mr2_k_equals_one_race_semantics() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Create operations where first_success_index succeeds first, others later or fail
@@ -286,7 +286,7 @@ fn mr3_k_equals_n_join_semantics() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Create operations: all succeed if all_succeed, otherwise one fails
@@ -342,7 +342,7 @@ fn mr4_k_greater_than_n_errors_immediately() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Operations don't matter - should error before execution
@@ -382,7 +382,7 @@ fn mr5_cancel_during_quorum_drains_all_pending() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Test cancellation by using a nested region that we close early
@@ -439,7 +439,7 @@ fn mr6_losers_after_threshold_drained_before_return() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Create fast winners and slow losers
@@ -494,7 +494,7 @@ fn mr_composite_quorum_scenarios() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             for (i, (total, required, success_count)) in scenarios.into_iter().enumerate() {
@@ -557,7 +557,7 @@ fn mr_edge_case_zero_required() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Create operations (shouldn't matter - quorum(0,n) succeeds immediately)

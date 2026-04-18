@@ -196,7 +196,7 @@ fn separation_scenario_strategy() -> impl Strategy<Value = SeparationTestScenari
 /// MR1: Frame rule preserves disjoint resources
 #[test]
 fn mr_frame_rule_preserves_disjoint_resources() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(scenario in separation_scenario_strategy())| {
@@ -262,7 +262,7 @@ fn mr_frame_rule_preserves_disjoint_resources() {
 /// MR2: Heap merging commutative
 #[test]
 fn mr_heap_merging_commutative() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -337,7 +337,7 @@ fn mr_heap_merging_commutative() {
 /// MR3: Assertion validity through composition
 #[test]
 fn mr_assertion_validity_through_composition() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -439,7 +439,7 @@ fn mr_assertion_validity_through_composition() {
 /// MR4: Cancel preserves separation
 #[test]
 fn mr_cancel_preserves_separation() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -558,7 +558,7 @@ fn mr_cancel_preserves_separation() {
 /// MR5: Concurrent modification of disjoint heaps independent
 #[test]
 fn mr_concurrent_modification_disjoint_heaps_independent() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -696,7 +696,7 @@ fn mr_concurrent_modification_disjoint_heaps_independent() {
 /// Integration test: Combined separation logic properties
 #[test]
 fn mr_combined_separation_properties() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(scenario in separation_scenario_strategy())| {
@@ -763,7 +763,7 @@ mod property_validation {
     /// Verify test framework setup
     #[test]
     fn test_framework_validation() {
-        let runtime = LabRuntime::new();
+        let runtime = LabRuntime::new(LabConfig::default());
         let cx = runtime.cx();
 
         runtime.block_on(&cx, async {

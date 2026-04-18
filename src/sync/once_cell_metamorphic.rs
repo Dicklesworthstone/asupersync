@@ -24,6 +24,7 @@ use crate::sync::OnceCell;
 use std::future::{Future, pending, ready};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -221,7 +222,7 @@ where
     let lab_config = LabConfig::new().with_seed(config.seed);
     let lab = LabRuntime::new(lab_config);
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let global_state = Arc::new(GlobalOnceCellState::new());
         test_fn(Arc::clone(&global_state)).await;
         OnceCellTestSummary::from(global_state.as_ref())

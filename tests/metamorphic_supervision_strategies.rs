@@ -68,13 +68,13 @@ impl ChildStart for MockChild {
     ) -> Result<TaskId, SpawnError> {
         *self.start_count.lock().unwrap() += 1;
 
-        let (task_id, _handle) = state.create_task(scope.region(), Budget::from_millis(100), async {}).unwrap();
+        let (task_id, _handle) = state.create_task(scope.region_id(), Budget::INFINITE, async {}).unwrap();
 
         if self.will_fail {
             *self.failure_count.lock().unwrap() += 1;
             // Simulate task failure by setting it to failed state
             if let Some(task) = state.task_mut(task_id) {
-                task.state = asupersync::record::task::TaskState::Completed(Outcome::Err(
+                task.state = asupersync::record::task::TaskState::Completed(Outcome::Cancelled(
                     CancelReason::user(&format!("{} failed", self.name)),
                 ));
             }

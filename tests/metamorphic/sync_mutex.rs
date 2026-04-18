@@ -212,7 +212,7 @@ fn mr_mutual_exclusion() {
         let mutex = Arc::new(Mutex::new(initial_value));
         let mut tracker = MutexTracker::new();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Test sequential access first
             let cx1 = test_cx_with_slot(1);
             {
@@ -254,7 +254,7 @@ fn mr_cancellation_safety() {
         let mutex = Arc::new(Mutex::new(initial_value));
         let mut tracker = MutexTracker::new();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx1 = test_cx_with_slot(1);
             let cx2 = test_cx_with_slot(2);
 
@@ -300,7 +300,7 @@ fn mr_guard_lifecycle() {
 
         let mutex = Arc::new(Mutex::new(initial_value));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx1 = test_cx_with_slot(1);
 
             // Test normal drop path
@@ -331,7 +331,7 @@ fn mr_fifo_ordering() {
         let mutex = Arc::new(Mutex::new(initial_value));
         let acquisition_order = Arc::new(StdMutex::new(Vec::new()));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
 
             // First task holds the lock
@@ -395,7 +395,7 @@ fn mr_try_lock_non_blocking() {
 
         // More comprehensive non-blocking test
         let cx = test_cx();
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // First acquire the lock asynchronously
             let _guard = mutex.lock(&cx).await.expect("Should acquire lock");
 
@@ -429,13 +429,13 @@ fn mr_poison_consistency() {
 
         let mutex = Arc::new(Mutex::new(initial_value));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx1 = test_cx_with_slot(1);
 
             // Poison the mutex by panicking while holding lock
             let mutex_clone = Arc::clone(&mutex);
             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                lab.block_on(async move {
+                futures_lite::future::block_on(async move {
                     let _guard = mutex_clone.lock(&cx1).await.expect("Should acquire lock");
                     panic!("Intentional panic to poison mutex");
                 });
@@ -468,7 +468,7 @@ fn mr_lock_state_consistency() {
 
         let mutex = Mutex::new(initial_value);
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
 
             // Initially unlocked
@@ -503,7 +503,7 @@ fn mr_waiter_count_accuracy() {
 
         let mutex = Arc::new(Mutex::new(initial_value));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
 
             // Initially no waiters
@@ -545,7 +545,7 @@ fn test_basic_mutex() {
 
     let mutex = Mutex::new(42u32);
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Basic lock/unlock
@@ -571,7 +571,7 @@ fn test_try_lock_basic() {
 
     let mutex = Mutex::new(42u32);
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // try_lock on unlocked mutex should succeed
@@ -603,7 +603,7 @@ fn test_cancellation_cleanup() {
 
     let mutex = Arc::new(Mutex::new(42u32));
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx1 = test_cx_with_slot(1);
         let cx2 = test_cx_with_slot(2);
 
@@ -650,7 +650,7 @@ fn test_poison_state() {
 
     let mutex = Arc::new(Mutex::new(42u32));
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx1 = test_cx_with_slot(1);
 
         // Initially not poisoned
@@ -659,7 +659,7 @@ fn test_poison_state() {
         // Cause panic while holding lock
         let mutex_clone = Arc::clone(&mutex);
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            lab.block_on(async move {
+            futures_lite::future::block_on(async move {
                 let _guard = mutex_clone.lock(&cx1).await.expect("Should acquire");
                 panic!("Test panic");
             });

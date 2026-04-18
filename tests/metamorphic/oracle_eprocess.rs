@@ -177,7 +177,7 @@ fn mr1_evidence_monotonicity_under_valid_updates() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Process observations with base configuration
@@ -239,7 +239,7 @@ fn mr2_rejection_threshold_triggers_at_alpha_level() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             let (violation_rate, sequence_length) = violation_pattern;
@@ -320,7 +320,7 @@ fn mr3_sequential_testing_preserves_type_i_error_budget() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             let p0 = config.p0; // Null violation rate
@@ -399,7 +399,7 @@ fn mr4_calibration_preserves_evalue_validity() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             let (lambda_mult, alpha_mult) = calibration_params;
@@ -486,7 +486,7 @@ fn mr5_cancel_mid_test_does_not_poison_future_invocations() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Phase 1: Create and run e-process until cancellation point
@@ -568,7 +568,7 @@ fn integration_eprocess_monitor_with_virtual_time() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Create monitor for standard invariants
@@ -626,7 +626,7 @@ fn integration_reset_preserves_independence() {
         let tracker = ViolationTracker::new();
         let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             let mut ep = EProcess::new("test_invariant", config);

@@ -309,7 +309,7 @@ impl SerializedPlan {
 /// MR1: DAG rewrites preserve semantic equivalence
 #[test]
 fn mr_dag_rewrites_preserve_semantic_equivalence() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -400,7 +400,7 @@ fn mr_dag_rewrites_preserve_semantic_equivalence() {
 /// MR2: Dead-code elimination preserves required outputs
 #[test]
 fn mr_dead_code_elimination_preserves_required_outputs() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(config in plan_config_strategy())| {
@@ -538,7 +538,7 @@ impl TestPlanConfig {
 /// MR3: Combinator fusion identities hold
 #[test]
 fn mr_combinator_fusion_identities_hold() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -626,7 +626,7 @@ fn mr_combinator_fusion_identities_hold() {
 /// MR4: Plan canonicalization idempotent
 #[test]
 fn mr_plan_canonicalization_idempotent() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(config in plan_config_strategy())| {
@@ -715,7 +715,7 @@ impl TestPlanConfig {
 /// MR5: Plan serialization roundtrip preserves equivalence
 #[test]
 fn mr_plan_serialization_roundtrip_preserves_equivalence() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(config in plan_config_strategy())| {
@@ -788,7 +788,7 @@ fn mr_plan_serialization_roundtrip_preserves_equivalence() {
 /// Integration test: Combined plan analysis properties
 #[test]
 fn mr_combined_plan_analysis_properties() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -866,7 +866,7 @@ mod property_validation {
     /// Verify test framework setup
     #[test]
     fn test_framework_validation() {
-        let runtime = LabRuntime::new();
+        let runtime = LabRuntime::new(LabConfig::default());
         let cx = runtime.cx();
 
         runtime.block_on(&cx, async {

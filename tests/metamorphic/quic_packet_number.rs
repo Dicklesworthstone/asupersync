@@ -105,7 +105,7 @@ fn packet_number_width_strategy() -> impl Strategy<Value = (u32, u8)> {
 /// MR1: Encoding roundtrip preservation - decode(encode(pn)) == pn
 #[test]
 fn mr_encoding_roundtrip_preservation() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -141,7 +141,7 @@ fn mr_encoding_roundtrip_preservation() {
 /// MR2: Width validation consistency - valid widths work, invalid widths fail
 #[test]
 fn mr_width_validation_consistency() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(width in any::<u8>())| {
@@ -184,7 +184,7 @@ fn mr_width_validation_consistency() {
 /// MR3: Minimum width determination - smallest width that fits the value
 #[test]
 fn mr_minimum_width_determination() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(packet_number in packet_number_strategy())| {
@@ -228,7 +228,7 @@ fn mr_minimum_width_determination() {
 /// MR4: Boundary behavior - width requirements at boundary values
 #[test]
 fn mr_boundary_behavior() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(offset in 0u32..=10)| {
@@ -277,7 +277,7 @@ fn mr_boundary_behavior() {
 /// MR5: Wire format consistency - network byte order preservation
 #[test]
 fn mr_wire_format_consistency() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -329,7 +329,7 @@ fn mr_wire_format_consistency() {
 /// Integration test: Combined metamorphic relations
 #[test]
 fn mr_combined_properties() {
-    let runtime = LabRuntime::new();
+    let runtime = LabRuntime::new(LabConfig::default());
     let cx = runtime.cx();
 
     proptest!(|(
@@ -381,7 +381,7 @@ mod property_validation {
     /// Verify test framework setup
     #[test]
     fn test_framework_validation() {
-        let runtime = LabRuntime::new();
+        let runtime = LabRuntime::new(LabConfig::default());
         let cx = runtime.cx();
 
         runtime.block_on(&cx, async {

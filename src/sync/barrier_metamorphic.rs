@@ -237,25 +237,24 @@ async fn execute_barrier_work_unit(
 
     // Apply start delay if configured
     if work_unit.start_delay_ms > 0 {
-        crate::time::sleep(Duration::from_millis(work_unit.start_delay_ms)).await;
+        crate::time::sleep(cx.now(), Duration::from_millis(work_unit.start_delay_ms)).await;
     }
 
     // Simulate spurious wakeup injection if enabled
     if config.inject_spurious_wakeups {
-        let mut rng = DetRng::from_seed(config.seed.wrapping_add(id as u64));
-        if rng.gen_bool(0.1) {
+        let mut rng = crate::util::det_rng::DetRng::new(config.seed.wrapping_add(id as u64));
+        if rng.next_u64() % 10 == 0 {
             global_state
                 .spurious_wakeups_injected
                 .store(true, Ordering::SeqCst);
-            crate::cx::yield_now().await;
+            futures_lite::future::yield_now().await;
         }
     }
 
     let result = if work_unit.should_cancel {
         // Cancel before or during wait
-        let cancel_cx = cx.with_cancel();
-        cancel_cx.cancel();
-        match barrier.wait(&cancel_cx).await {
+        cx.set_cancel_requested(true);
+        match barrier.wait(cx).await {
             Ok(result) => BarrierWorkResult::Completed {
                 is_leader: result.is_leader(),
             },
@@ -268,7 +267,7 @@ async fn execute_barrier_work_unit(
         // Start the wait, then drop the future (simulates select! cancellation)
         let wait_future = barrier.wait(cx);
         // Poll once to register with the barrier
-        std::future::poll_once(wait_future).await;
+        let _ = futures_lite::future::poll_once(wait_future).await;
         // Future is dropped here, triggering cleanup
         BarrierWorkResult::Dropped
     } else {
@@ -317,7 +316,7 @@ fn mr1_party_count_invariant(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new();
+                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
                 execute_barrier_work_unit(
                     &cx,
                     &barrier_clone,
@@ -426,7 +425,7 @@ fn mr3_drop_cleanup_correctness(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new();
+                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
                 execute_barrier_work_unit(
                     &cx,
                     &barrier_clone,
@@ -457,7 +456,7 @@ fn mr3_drop_cleanup_correctness(
             let (task_id, _handle) = runtime
                 .state
                 .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::new();
+                    let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
                     match barrier_clone.wait(&cx).await {
                         Ok(result) => {
                             fresh_global_state_clone.record_result(
@@ -572,7 +571,7 @@ fn execute_barrier_scenario(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new();
+                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
                 execute_barrier_work_unit(
                     &cx,
                     &barrier_clone,
@@ -610,7 +609,7 @@ fn execute_barrier_scenario_with_leader_tracking(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new();
+                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
                 if !work_unit.should_cancel && !work_unit.should_drop {
                     if let Ok(result) = barrier_clone.wait(&cx).await {
                         if result.is_leader() {

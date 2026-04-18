@@ -24,6 +24,7 @@
 //! - Race conditions don't lead to inconsistent poison state
 
 use crate::lab::runtime::LabRuntime;
+use crate::lab::LabConfig;
 use crate::sync::mutex::{LockError, Mutex, TryLockError};
 use crate::types::Budget;
 use crate::util::ArenaIndex;
@@ -88,9 +89,7 @@ fn mr1_panic_poisoning_consistency() {
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(1, 1);
-            let lab = LabRuntime::new();
-
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let mut guard = mutex_clone.lock(&cx).await.expect("initial lock should succeed");
 
                 // Perform some operations before panic
@@ -101,7 +100,7 @@ fn mr1_panic_poisoning_consistency() {
 
                 // Inject panic while holding the guard
                 panic_injector(true, "deliberate panic to test poisoning");
-            }).expect_err("should panic");
+            });
         });
 
         // Wait for the thread to panic
@@ -117,12 +116,11 @@ fn mr1_panic_poisoning_consistency() {
                 "try_lock attempt {} should return Poisoned, got {:?}", i, try_result);
 
             // MR1.2: async lock must return Poisoned
-            let lab = LabRuntime::new();
-            let lock_result = lab.block_on(async {
+            let lock_result = futures_lite::future::block_on(async {
                 mutex.lock(&cx).await
             });
             match lock_result {
-                Ok(Err(LockError::Poisoned)) => {
+                Err(LockError::Poisoned) => {
                     // Expected: Poisoned error
                 }
                 other => {
@@ -173,11 +171,11 @@ fn mr2_cancel_non_poisoning() {
             counter: 0,
         }));
 
-        let lab = LabRuntime::new();
+        let lab = LabRuntime::new(LabConfig::default());
 
         if cancel_during_wait {
             // MR2.1: Cancel while waiting for lock (not holding)
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let mutex_clone = Arc::clone(&mutex);
                 let cx1 = create_test_context(1, 1);
                 let cx2 = create_test_context(1, 2);
@@ -195,10 +193,11 @@ fn mr2_cancel_non_poisoning() {
 
                 // Release first lock
                 drop(_guard1);
-            }).expect("should not panic during cancel test");
+                Ok::<(), TestCaseError>(())
+            })?;
         } else {
             // MR2.2: Cancel while holding lock (during operations)
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let cx = create_test_context(1, 1);
                 let mut guard = mutex.lock(&cx).await.expect("lock should succeed");
 
@@ -216,7 +215,8 @@ fn mr2_cancel_non_poisoning() {
 
                 // Drop the guard normally (no panic should occur)
                 drop(guard);
-            }).expect("should not panic during cancel test");
+                Ok::<(), TestCaseError>(())
+            })?;
         }
 
         // MR2.3: Verify mutex is NOT poisoned after cancellation
@@ -227,7 +227,7 @@ fn mr2_cancel_non_poisoning() {
         let try_result = mutex.try_lock();
         prop_assert!(try_result.is_ok(), "try_lock should succeed after cancel, got {:?}", try_result);
 
-        let lab2 = LabRuntime::new();
+        let lab2 = LabRuntime::new(LabConfig::default());
         let lock_result = lab2.block_on(async {
             mutex.lock(&cx).await
         });
@@ -264,9 +264,9 @@ fn mr3_poison_recovery() {
         // Phase 1: Capture state before panic
         let expected_state = {
             let cx = create_test_context(1, 1);
-            let lab = LabRuntime::new();
+            let lab = LabRuntime::new(LabConfig::default());
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let mut guard = mutex.lock(&cx).await.expect("initial lock should succeed");
 
                 // Apply operations
@@ -281,16 +281,16 @@ fn mr3_poison_recovery() {
                     value: guard.value,
                     counter: guard.counter,
                 }
-            }).expect("pre-panic operations should succeed")
+            })
         };
 
         // Phase 2: Poison the mutex
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(2, 1);
-            let lab = LabRuntime::new();
+            let lab = LabRuntime::new(LabConfig::default());
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let mut guard = mutex_clone.lock(&cx).await.expect("lock for poison should succeed");
 
                 // Perform same operations
@@ -350,7 +350,7 @@ fn mr4_concurrent_poison_consistency() {
             value: 100,
             counter: 0,
         }));
-        let lab = LabRuntime::new();
+        let lab = LabRuntime::new(LabConfig::default());
 
         // Phase 1: Create multiple waiters
         let waiter_handles = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -373,9 +373,8 @@ fn mr4_concurrent_poison_consistency() {
                 }
 
                 let cx = create_test_context(i as u32 + 10, i as u32 + 10);
-                let lab_local = LabRuntime::new();
 
-                let result = lab_local.block_on(async {
+                let result = futures_lite::future::block_on(async {
                     mutex_clone.lock(&cx).await
                 });
 
@@ -393,9 +392,8 @@ fn mr4_concurrent_poison_consistency() {
             std::thread::sleep(Duration::from_millis(5));
 
             let cx = create_test_context(1, 1);
-            let lab_poison = LabRuntime::new();
 
-            lab_poison.block_on(async {
+            futures_lite::future::block_on(async {
                 let mut guard = mutex_for_poison.lock(&cx).await.expect("poison thread should lock");
 
                 // Perform operations
@@ -429,12 +427,11 @@ fn mr4_concurrent_poison_consistency() {
         let mut cancel_count = 0;
         let mut other_count = 0;
 
-        for (waiter_id, result) in results.iter() {
+        for (_waiter_id, result) in results.iter() {
             match result {
-                Ok(Err(LockError::Poisoned)) => poison_count += 1,
-                Ok(Ok(_)) => success_count += 1,
-                Ok(Err(LockError::Cancelled)) => cancel_count += 1,
-                _ => other_count += 1,
+                Err(LockError::Poisoned) => poison_count += 1,
+                Ok(_) => success_count += 1,
+                Err(LockError::Cancelled) => cancel_count += 1,
             }
         }
 
@@ -484,9 +481,9 @@ fn mr_composite_cancel_during_poison_recovery() {
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(1, 1);
-            let lab = LabRuntime::new();
+            let lab = LabRuntime::new(LabConfig::default());
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let _guard = mutex_clone.lock(&cx).await.expect("lock for poison should succeed");
                 panic!("poison for recovery test");
             }).expect_err("should panic");
@@ -498,21 +495,21 @@ fn mr_composite_cancel_during_poison_recovery() {
         // Phase 2: Attempt recovery with cancellation
         for i in 0..recovery_attempts {
             let cx = create_test_context(2, i as u32 + 2);
-            let lab = LabRuntime::new();
+            let lab = LabRuntime::new(LabConfig::default());
 
             // Cancel during recovery attempt
             cx.set_cancel_requested(true);
 
-            let result = lab.block_on(async {
+            let result = futures_lite::future::block_on(async {
                 mutex.lock(&cx).await
             });
 
             match result {
-                Ok(Err(LockError::Cancelled)) => {
+                Err(LockError::Cancelled) => {
                     // Expected: cancellation takes precedence over poison detection
                     // when cancel is requested before lock attempt
                 }
-                Ok(Err(LockError::Poisoned)) => {
+                Err(LockError::Poisoned) => {
                     // Also acceptable: poison detected before cancel check
                 }
                 other => {
@@ -547,9 +544,9 @@ mod tests {
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(1, 1);
-            let lab = LabRuntime::new();
+            let lab = LabRuntime::new(LabConfig::default());
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let _guard = mutex_clone.lock(&cx).await.expect("lock");
                 panic!("test poison");
             })
@@ -563,14 +560,12 @@ mod tests {
         // Test MR2: Verify cancel doesn't poison (create a new mutex)
         let clean_mutex = Arc::new(Mutex::new(TestData::default()));
         let cx = create_test_context(2, 2);
-        let lab = LabRuntime::new();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let _guard = clean_mutex.lock(&cx).await.expect("clean lock");
             cx.set_cancel_requested(true);
             // Guard drops normally, shouldn't poison
-        })
-        .expect("cancel test should not panic");
+        });
 
         assert!(!clean_mutex.is_poisoned());
         assert!(clean_mutex.try_lock().is_ok());

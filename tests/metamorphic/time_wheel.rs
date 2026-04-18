@@ -290,7 +290,7 @@ fn mr_monotonic_firing_order() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let base_time = Time::from_millis(1000);
             let mut wheel = TimerWheel::with_config(
                 base_time,
@@ -350,7 +350,7 @@ fn mr_cancelled_timers_do_not_fire() {
             return Ok(()); // Skip invalid combinations
         }
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let base_time = Time::from_millis(1000);
             let mut wheel = TimerWheel::new_at(base_time);
             let mut tracker = TimerWheelTracker::new();
@@ -404,7 +404,7 @@ fn mr_same_tick_firing_order() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let base_time = Time::from_millis(1000);
             let mut wheel = TimerWheel::new_at(base_time);
             let mut handles = Vec::new();
@@ -446,7 +446,7 @@ fn mr_wheel_advancement_coverage() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let base_time = Time::from_millis(1000);
             let mut wheel = TimerWheel::new_at(base_time);
             let mut tracker = TimerWheelTracker::new();
@@ -499,7 +499,7 @@ fn mr_expired_timer_immediate_firing() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let base_time = Time::from_millis(2000);
             let mut wheel = TimerWheel::new_at(base_time);
 
@@ -545,7 +545,7 @@ fn mr_overflow_level_migration() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let base_time = Time::from_millis(1000);
             let config = TimerWheelConfig::new()
                 .max_wheel_duration(Duration::from_hours(24))  // 24 hour wheel
@@ -602,7 +602,7 @@ fn mr_large_time_jump_handling() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let base_time = Time::from_millis(1000);
             let mut wheel = TimerWheel::new_at(base_time);
 
@@ -652,7 +652,7 @@ fn mr_timer_coalescing_boundaries() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             use asupersync::time::wheel::CoalescingConfig;
 
             let base_time = Time::from_millis(1000);
@@ -704,7 +704,7 @@ fn test_basic_timer_wheel() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let base_time = Time::from_millis(1000);
         let mut wheel = TimerWheel::new_at(base_time);
 
@@ -729,7 +729,7 @@ fn test_timer_cancellation() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let base_time = Time::from_millis(1000);
         let mut wheel = TimerWheel::new_at(base_time);
 
@@ -753,7 +753,7 @@ fn test_multiple_timers() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let base_time = Time::from_millis(1000);
         let mut wheel = TimerWheel::new_at(base_time);
 
@@ -780,7 +780,7 @@ fn test_overflow_handling() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let base_time = Time::from_millis(1000);
         let config = TimerWheelConfig::new()
             .max_wheel_duration(Duration::from_hours(1))  // Small wheel
@@ -809,7 +809,7 @@ fn test_empty_wheel() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let base_time = Time::from_millis(1000);
         let mut wheel = TimerWheel::new_at(base_time);
 

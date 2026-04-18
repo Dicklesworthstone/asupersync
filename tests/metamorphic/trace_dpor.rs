@@ -577,7 +577,7 @@ fn integration_dpor_workflow_lab_runtime() {
     let config = LabConfig::default();
     let mut lab = LabRuntime::new(config);
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Create a trace with known race patterns

@@ -109,7 +109,7 @@
 //! let config = LabConfig::new(42).worker_count(4);
 //! ```
 
-use super::chaos::ChaosConfig;
+use crate::lab::chaos::ChaosConfig;
 use crate::trace::RecorderConfig;
 use crate::util::DetRng;
 

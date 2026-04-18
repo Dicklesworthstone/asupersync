@@ -8871,7 +8871,7 @@ mod tests {
         // Simulate concurrent cancel events on both workers
         let task_base = 3000;
         for i in 0..50 {
-            for (worker_idx, worker) in workers.iter().enumerate() {
+            for (worker_idx, worker) in workers.iter_mut().enumerate() {
                 let task_id = TaskId::new_for_test(task_base + worker_idx * 100, i);
                 worker.schedule_local_cancel(task_id, 100);
             }
@@ -8880,7 +8880,7 @@ mod tests {
         // Process events concurrently
         let mut total_processed = [0; 2];
         for _ in 0..100 {
-            for (worker_idx, worker) in workers.iter().enumerate() {
+            for (worker_idx, worker) in workers.iter_mut().enumerate() {
                 if worker.next_task().is_some() {
                     total_processed[worker_idx] += 1;
                 }

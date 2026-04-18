@@ -1000,6 +1000,7 @@ impl TcpStreamApi for TcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::io::AsRawFd;
     use crate::runtime::reactor::{Events, Reactor, Token};
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId, Time};

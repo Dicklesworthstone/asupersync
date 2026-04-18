@@ -6,7 +6,7 @@
 //! - Trace capture for replay
 //! - Chaos injection for stress testing
 
-use super::chaos::{ChaosRng, ChaosStats};
+use crate::lab::chaos::{ChaosRng, ChaosStats};
 use super::config::LabConfig;
 use super::oracle::OracleSuite;
 use crate::record::ObligationKind;
@@ -357,7 +357,7 @@ pub struct ChaosConfigSummary {
 impl ChaosConfigSummary {
     /// Build a chaos summary from the full chaos configuration.
     #[must_use]
-    pub fn from_config(config: &super::chaos::ChaosConfig) -> Self {
+    pub fn from_config(config: &crate::lab::chaos::ChaosConfig) -> Self {
         Self {
             seed: config.seed,
             cancel_probability: config.cancel_probability,
@@ -5467,7 +5467,7 @@ mod tests {
     fn conformance_chaos_injection_deterministic() {
         init_test("conformance_chaos_injection_deterministic");
 
-        let chaos_config = super::chaos::ChaosConfig::new(789)
+        let chaos_config = crate::lab::chaos::ChaosConfig::new(789)
             .with_cancel_probability(0.1)
             .with_delay_probability(0.05)
             .with_io_error_probability(0.02);
@@ -5585,7 +5585,7 @@ mod tests {
     fn conformance_comprehensive_determinism_stress() {
         init_test("conformance_comprehensive_determinism_stress");
 
-        let chaos_config = super::chaos::ChaosConfig::new(555)
+        let chaos_config = crate::lab::chaos::ChaosConfig::new(555)
             .with_cancel_probability(0.05)
             .with_delay_probability(0.03);
         let config = LabConfig::new(777)

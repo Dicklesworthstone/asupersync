@@ -346,8 +346,7 @@ impl EpochConsistencyTracker {
         }
 
         // Generate correlation ID for cross-module analysis
-        let _correlation_id = self.global_transition_count.load(Ordering::Relaxed) + 1;
-        let _transition_start = std::time::Instant::now();
+        let correlation_id = self.global_transition_count.load(Ordering::Relaxed) + 1;
 
         let mut records = self.module_records.write();
         let record = records
@@ -360,7 +359,7 @@ impl EpochConsistencyTracker {
             });
 
         // Check for expected transition sequence
-        let _sync_status = if record.current_epoch == from_epoch {
+        let sync_status = if record.current_epoch == from_epoch {
             "synchronized"
         } else {
             let violation = EpochConsistencyViolation::MissingTransition {
@@ -415,7 +414,7 @@ impl EpochConsistencyTracker {
         drop(records); // Release lock before consistency check
         let processing_start = std::time::Instant::now();
         self.check_consistency_internal(now);
-        let _processing_latency = processing_start.elapsed().as_nanos() as u64;
+        let processing_latency = processing_start.elapsed().as_nanos() as u64;
 
         // Log consistency check performance
         debug!(
@@ -449,7 +448,6 @@ impl EpochConsistencyTracker {
             return None;
         }
 
-        self.check_consistency_internal(Time::from_nanos(0)); // Use epoch 0 for external checks
         let violations = self.violations.read();
         violations.last().cloned()
     }
@@ -573,6 +571,21 @@ impl EpochConsistencyTracker {
 
     /// Records a violation, maintaining bounded storage.
     fn record_violation(&self, violation: EpochConsistencyViolation) {
+        {
+            let violations = self.violations.read();
+            if let Some(last) = violations.last() {
+                match (last, &violation) {
+                    (EpochConsistencyViolation::ModuleDesync { max_skew: s1, .. }, 
+                     EpochConsistencyViolation::ModuleDesync { max_skew: s2, .. }) if s1 == s2 => return,
+                    (EpochConsistencyViolation::AdvancementOrderViolation { module: m1, advanced_to: a1, .. }, 
+                     EpochConsistencyViolation::AdvancementOrderViolation { module: m2, advanced_to: a2, .. }) if m1 == m2 && a1 == a2 => return,
+                    (EpochConsistencyViolation::SlowTransition { module: m1, to_epoch: t1, .. }, 
+                     EpochConsistencyViolation::SlowTransition { module: m2, to_epoch: t2, .. }) if m1 == m2 && t1 == t2 => return,
+                    _ => {}
+                }
+            }
+        }
+
         // Generate correlation ID for this violation
         let _violation_id = self.global_transition_count.load(Ordering::Relaxed);
 
@@ -580,10 +593,10 @@ impl EpochConsistencyTracker {
         match &violation {
             EpochConsistencyViolation::ModuleDesync {
                 modules,
-                detected_at: _,
-                max_skew: _,
+                detected_at,
+                max_skew,
             } => {
-                let _affected_modules: Vec<String> = modules
+                let affected_modules: Vec<String> = modules
                     .iter()
                     .map(|(module, epoch)| format!("{module}@{epoch}"))
                     .collect();
@@ -601,12 +614,12 @@ impl EpochConsistencyTracker {
                 );
             }
             EpochConsistencyViolation::SlowTransition {
-                module: _,
-                from_epoch: _,
-                to_epoch: _,
-                started_at: _,
-                detected_at: _,
-                duration_ns: _,
+                module,
+                from_epoch,
+                to_epoch,
+                started_at,
+                detected_at,
+                duration_ns,
             } => {
                 error!(
                     violation_type = "slow_transition",
@@ -624,12 +637,12 @@ impl EpochConsistencyTracker {
                 );
             }
             EpochConsistencyViolation::MissingTransition {
-                module: _,
+                module,
                 expected_epoch,
                 actual_epoch,
-                detected_at: _,
+                detected_at,
             } => {
-                let _epoch_skew = if actual_epoch > expected_epoch {
+                let epoch_skew = if actual_epoch > expected_epoch {
                     actual_epoch.as_u64() - expected_epoch.as_u64()
                 } else {
                     expected_epoch.as_u64() - actual_epoch.as_u64()
@@ -650,13 +663,13 @@ impl EpochConsistencyTracker {
                 );
             }
             EpochConsistencyViolation::AdvancementOrderViolation {
-                module: _,
+                module,
                 advanced_to,
-                dependency_module: _,
+                dependency_module,
                 dependency_epoch,
-                detected_at: _,
+                detected_at,
             } => {
-                let _epoch_skew = if advanced_to > dependency_epoch {
+                let epoch_skew = if advanced_to > dependency_epoch {
                     advanced_to.as_u64() - dependency_epoch.as_u64()
                 } else {
                     dependency_epoch.as_u64() - advanced_to.as_u64()
@@ -813,7 +826,7 @@ impl EpochConsistencyTracker {
     pub fn log_epoch_state(&self) {
         let records = self.module_records.read();
         let violation_count = self.violation_count();
-        let _total_transitions = self.global_transition_count.load(Ordering::Relaxed);
+        let total_transitions = self.global_transition_count.load(Ordering::Relaxed);
 
         // Log overall epoch state
         info!(
@@ -832,7 +845,6 @@ impl EpochConsistencyTracker {
 
         // Log per-module state
         for (&module, record) in records.iter() {
-            let _ = (module, record);
             debug!(
                 module_id = %module,
                 current_epoch = %record.current_epoch,
@@ -848,7 +860,6 @@ impl EpochConsistencyTracker {
         if violation_count > 0 {
             let violations = self.violations.read();
             for (idx, violation) in violations.iter().enumerate().take(5) {
-                let _ = (idx, violation);
                 debug!(
                     violation_index = idx,
                     violation_type = match violation {
@@ -879,11 +890,11 @@ impl EpochConsistencyTracker {
     /// This allows tuning the sensitivity of slow transition detection
     /// based on runtime conditions or performance requirements.
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
-        let _old_threshold = self.config.slow_transition_threshold_ns;
+        let old_threshold = self.config.slow_transition_threshold_ns;
         self.config.slow_transition_threshold_ns = threshold_ns;
 
         info!(
-            old_threshold_ns = _old_threshold,
+            old_threshold_ns = old_threshold,
             new_threshold_ns = threshold_ns,
             "epoch_tracker_threshold_updated"
         );

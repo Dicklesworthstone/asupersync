@@ -73,7 +73,8 @@ pub struct TaskHandle<T> {
 impl<T> TaskHandle<T> {
     /// Creates a new TaskHandle (internal use).
     #[inline]
-    pub(crate) fn new(
+    #[doc(hidden)]
+    pub fn new(
         task_id: TaskId,
         receiver: oneshot::Receiver<Result<T, JoinError>>,
         inner: Weak<RwLock<CxInner>>,

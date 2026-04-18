@@ -2309,6 +2309,7 @@ mod tests {
         // Any attempt to wait for changes should return Closed error
         let mut future1 = rx1.changed(&cx);
         let result1 = poll_ready(&mut future1);
+        drop(future1);
         crate::assert_with_log!(
             matches!(result1, Err(RecvError::Closed)),
             "rx1 changed() returns Closed",
@@ -2318,6 +2319,7 @@ mod tests {
 
         let mut future2 = rx2.changed(&cx);
         let result2 = poll_ready(&mut future2);
+        drop(future2);
         crate::assert_with_log!(
             matches!(result2, Err(RecvError::Closed)),
             "rx2 changed() returns Closed",
@@ -2327,6 +2329,7 @@ mod tests {
 
         let mut future3 = rx3.changed(&cx);
         let result3 = poll_ready(&mut future3);
+        drop(future3);
         crate::assert_with_log!(
             matches!(result3, Err(RecvError::Closed)),
             "rx3 changed() returns Closed",
@@ -2373,6 +2376,7 @@ mod tests {
         // rx5's pending changes should now be reported as Closed
         let mut future5 = rx5.changed(&cx);
         let result5 = poll_ready(&mut future5);
+        drop(future5);
         crate::assert_with_log!(
             matches!(result5, Err(RecvError::Closed)),
             "rx5 pending changed() returns Closed",

@@ -332,7 +332,7 @@ fn generate_test_tasks(config: &EdfMetamorphicConfig) -> Vec<EdfTestTask> {
 
     for i in 0..config.num_tasks {
         // Generate task ID
-        let region_id = RegionId::new_for_test(i as u32, rng.next_u32());
+        let region_id = crate::types::RegionId::new_for_test(i as u32, rng.next_u32());
         let task_id = TaskId::new_for_test(i as u32, rng.next_u32());
 
         // Assign priority

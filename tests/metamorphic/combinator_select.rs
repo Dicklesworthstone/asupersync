@@ -286,7 +286,7 @@ fn mr_first_ready_semantics() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Create two controllable futures
             let future_a = ControllableFuture::new(0);
             let future_b = ControllableFuture::new(1);
@@ -336,7 +336,7 @@ fn mr_reordering_stability() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Test 1: Select(A, B) where both are immediately ready
             let future_a1 = ControllableFuture::new_ready(0, value_a);
             let future_b1 = ControllableFuture::new_ready(1, value_b);
@@ -382,7 +382,7 @@ fn mr_cancel_propagation() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
 
             // Create two pending futures
@@ -440,7 +440,7 @@ fn mr_empty_select_handling() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Test SelectAll with empty vector
             let empty_futures: Vec<ControllableFuture> = Vec::new();
 
@@ -493,7 +493,7 @@ fn mr_region_ownership_preservation() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let region_id = RegionId::from_arena(ArenaIndex::new(0, 42));
             let cx = Cx::new(
                 region_id,
@@ -543,7 +543,7 @@ fn mr_error_propagation() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let error_future = async { Err::<i32, &'static str>("test error") };
             let success_future = async move { Ok::<i32, &'static str>(success_value) };
 
@@ -602,7 +602,7 @@ fn mr_selectall_fairness() {
             return Ok(()); // Skip invalid combinations
         }
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Create multiple futures, only one will be made ready
             let mut futures = Vec::new();
             for i in 0..num_futures {
@@ -642,7 +642,7 @@ fn mr_selectall_drain_losers() {
             return Ok(()); // Skip invalid combinations
         }
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Create multiple futures
             let mut futures = Vec::new();
             for i in 0..num_futures {
@@ -689,7 +689,7 @@ fn test_basic_select() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         // Test with left future ready
         let left_ready = async { 42 };
         let right_pending = async {
@@ -714,7 +714,7 @@ fn test_select_both_ready() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let left = async { 1 };
         let right = async { 2 };
 
@@ -735,7 +735,7 @@ fn test_selectall_basic() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let futures = vec![
             async { asupersync::time::sleep(Duration::from_millis(50)).await; 1 },
             async { 2 }, // This should complete first
@@ -757,7 +757,7 @@ fn test_selectall_drain() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let futures = vec![
             async { asupersync::time::sleep(Duration::from_millis(50)).await; 1 },
             async { 2 }, // This should complete first
@@ -779,7 +779,7 @@ fn test_select_error_handling() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let mut select = Select::new(async { 42 }, async { 24 });
 
         // First poll should succeed

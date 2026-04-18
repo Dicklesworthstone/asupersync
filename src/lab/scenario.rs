@@ -715,7 +715,7 @@ impl Scenario {
             } => {
                 use std::time::Duration;
                 let chaos_seed = self.lab.entropy_seed.unwrap_or(self.lab.seed);
-                let chaos = super::chaos::ChaosConfig::new(chaos_seed)
+                let chaos = crate::lab::chaos::ChaosConfig::new(chaos_seed)
                     .with_cancel_probability(*cancel_probability)
                     .with_delay_probability(*delay_probability)
                     .with_delay_range(

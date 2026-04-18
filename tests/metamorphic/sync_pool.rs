@@ -275,7 +275,7 @@ fn mr_resource_tracking() {
         let pool = Arc::new(GenericPool::new(factory, config.clone()));
         let mut tracker = PoolTracker::new();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let mut active_acquisitions: std::collections::HashMap<usize, PooledResource<TestResource>> = std::collections::HashMap::new();
 
             for op in operations.iter().take(20) {
@@ -335,7 +335,7 @@ fn mr_capacity_bounds() {
         let factory = TestResourceFactory::new();
         let pool = Arc::new(GenericPool::new(factory, config.clone()));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
             let acquisitions = Arc::new(StdMutex::new(Vec::new()));
 
@@ -390,7 +390,7 @@ fn mr_reset_semantics() {
         let factory = TestResourceFactory::new();
         let pool = Arc::new(GenericPool::new(factory, config.clone()));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Acquire and release some resources to populate the idle pool
             let cx = test_cx();
             let mut resources = Vec::new();
@@ -450,7 +450,7 @@ fn mr_cancel_safety() {
         let factory = TestResourceFactory::new();
         let pool = Arc::new(GenericPool::new(factory, small_config.clone()));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx1 = test_cx_with_slot(1);
             let cx2 = test_cx_with_slot(2);
             let cx3 = test_cx_with_slot(3);
@@ -511,7 +511,7 @@ fn mr_idle_timeout() {
         let factory = TestResourceFactory::new();
         let pool = Arc::new(GenericPool::new(factory, config));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
 
             // Acquire and release a resource to put it in idle pool
@@ -561,7 +561,7 @@ fn mr_try_acquire_non_blocking() {
                 "try_acquire took too long: {:?}", elapsed);
         }
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
             let mut acquired_resources = Vec::new();
 
@@ -603,7 +603,7 @@ fn mr_factory_error_handling() {
         let factory = TestResourceFactory::with_failure_rate(failure_rate);
         let pool = GenericPool::new(factory, config.clone());
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
             let mut successes = 0;
             let mut failures = 0;
@@ -645,7 +645,7 @@ fn mr_concurrent_access_consistency() {
         let pool = Arc::new(GenericPool::new(factory, config.clone()));
         let operations_log = Arc::new(StdMutex::new(Vec::new()));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
 
             for task_id in 0..num_tasks {
@@ -686,7 +686,7 @@ fn mr_concurrent_access_consistency() {
         prop_assert!(!log.is_empty(), "Should have recorded some operations");
 
         // Pool should still be functional after concurrent access
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
             let _resource = pool.acquire(&cx).await.expect("Pool should still work after concurrent access");
         });
@@ -706,7 +706,7 @@ fn test_basic_pool() {
     let factory = TestResourceFactory::new();
     let pool = GenericPool::new(factory, PoolConfig::default());
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Basic acquire/release
@@ -731,7 +731,7 @@ fn test_try_acquire_basic() {
     let factory = TestResourceFactory::new();
     let pool = GenericPool::new(factory, config);
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // try_acquire on empty pool should succeed
@@ -762,7 +762,7 @@ fn test_pool_limits() {
     let factory = TestResourceFactory::new();
     let pool = Arc::new(GenericPool::new(factory, config));
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx1 = test_cx_with_slot(1);
         let cx2 = test_cx_with_slot(2);
         let cx3 = test_cx_with_slot(3);

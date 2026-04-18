@@ -77,7 +77,7 @@ fn mr1_borrow_returns_latest_value() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             // Start with initial value
@@ -121,7 +121,7 @@ fn mr2_changed_wakes_on_version_increment() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
             let (tx, mut rx) = watch::channel(initial_value);
 
@@ -172,7 +172,7 @@ fn mr3_consecutive_sends_preserve_final_only() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
 
             for sequence in send_sequences {
@@ -224,7 +224,7 @@ fn mr4_receiver_wakes_only_on_newer_version() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx1 = create_test_context(1, 1);
             let cx2 = create_test_context(1, 2);
             let (tx, mut rx1) = watch::channel(initial_value);
@@ -303,7 +303,7 @@ fn mr5_sender_drop_marks_closed() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let (tx, rx) = watch::channel(initial_value);
 
             // Create multiple receivers
@@ -366,7 +366,7 @@ fn mr6_cancel_during_changed_drains_without_leak() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
             let (tx, mut rx) = watch::channel(initial_value);
 
@@ -423,7 +423,7 @@ fn mr_composite_operations_preserve_semantics() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             let cx = create_test_context(1, 1);
             let (tx, mut rx) = watch::channel(values[0]);
             let mut expected_value = values[0];
@@ -532,7 +532,7 @@ fn mr_performance_large_values_high_contention() {
         let config = LabConfig::default();
         let lab = LabRuntime::new(config);
 
-        lab.block_on(|| async {
+        futures_lite::future::block_on(|| async {
             // Create large value
             let large_value: Vec<u8> = (0..value_size).map(|i| (i % 256) as u8).collect();
 

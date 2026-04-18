@@ -2329,9 +2329,9 @@ mod tests {
                 // For testing, we'll create trace events that represent fork/join operations
                 runtime
                     .trace()
-                    .record_event(&crate::trace::TraceEvent::user_trace(
-                        i as u64,
-                        runtime.time(),
+                    .record_event(|id| crate::trace::TraceEvent::user_trace(
+                        id,
+                        runtime.now(),
                         format!("fork_task_{}", i),
                     ));
             }
@@ -2485,9 +2485,9 @@ mod tests {
             let mut join_events = Vec::new();
 
             for event in trace {
-                if event.data.contains("fork_task_") {
+                if matches!(&event.data, crate::trace::event::TraceData::Message(msg) if msg.contains("fork_task_")) {
                     fork_events.push(event.clone());
-                } else if event.data.contains("join_task_") {
+                } else if matches!(&event.data, crate::trace::event::TraceData::Message(msg) if msg.contains("join_task_")) {
                     join_events.push(event.clone());
                 }
             }
@@ -2531,17 +2531,17 @@ mod tests {
                     // 25% chance of panic
                     runtime
                         .trace()
-                        .record_event(&crate::trace::TraceEvent::user_trace(
-                            i as u64,
-                            runtime.time(),
+                        .record_event(|id| crate::trace::TraceEvent::user_trace(
+                            id,
+                            runtime.now(),
                             format!("panic_task_{}", i),
                         ));
                 } else {
                     runtime
                         .trace()
-                        .record_event(&crate::trace::TraceEvent::user_trace(
-                            i as u64,
-                            runtime.time(),
+                        .record_event(|id| crate::trace::TraceEvent::user_trace(
+                            id,
+                            runtime.now(),
                             format!("normal_task_{}", i),
                         ));
                 }
@@ -2660,14 +2660,16 @@ mod tests {
                 std::collections::BTreeMap::new();
 
             for event in trace {
-                if event.data.contains("region_") {
-                    if let Some(region_start) = event.data.find("region_") {
-                        if let Some(region_end) = event.data[region_start + 7..].find('_') {
-                            if let Ok(region_id) = event.data
-                                [region_start + 7..region_start + 7 + region_end]
-                                .parse::<u32>()
-                            {
-                                region_events.entry(region_id).or_default().push(event);
+                if let crate::trace::event::TraceData::Message(ref data_str) = event.data {
+                    if data_str.contains("region_") {
+                        if let Some(region_start) = data_str.find("region_") {
+                            if let Some(region_end) = data_str[region_start + 7..].find('_') {
+                                if let Ok(region_id) = data_str
+                                    [region_start + 7..region_start + 7 + region_end]
+                                    .parse::<u32>()
+                                {
+                                    region_events.entry(region_id).or_default().push(event);
+                                }
                             }
                         }
                     }
@@ -2750,9 +2752,9 @@ mod tests {
 
                 runtime
                     .trace()
-                    .record_event(&crate::trace::TraceEvent::user_trace(
-                        i as u64,
-                        runtime.time(),
+                    .record_event(|id| crate::trace::TraceEvent::user_trace(
+                        id,
+                        runtime.now(),
                         format!("{}_{}", event_type, i),
                     ));
             }
@@ -2930,6 +2932,6 @@ mod tests {
         for (i, validation) in multi_validation.iter().enumerate() {
             assert!(validation.matched, "Multi-seed run {} failed validation", i);
         }
-crate::test_complete!("metamorphic_composite_replay_invariants");
-}
+        crate::test_complete!("metamorphic_composite_replay_invariants");
+    }
 }

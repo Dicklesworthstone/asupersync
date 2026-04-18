@@ -817,7 +817,7 @@ mod integration_tests {
     fn integration_complete_certificate_lifecycle() {
         init_test("integration_complete_certificate_lifecycle");
 
-        let mut runtime = LabRuntime::new();
+        let mut runtime = LabRuntime::new(LabConfig::default());
         runtime.run_to_completion(|| async {
             // Create progress certificate with actual data
             let config = ProgressConfig::default();

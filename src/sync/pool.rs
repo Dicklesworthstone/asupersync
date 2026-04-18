@@ -4783,7 +4783,7 @@ mod tests {
                 final_stats.active
             );
             crate::assert_with_log!(
-                final_stats.total_acquisitions == num_tasks as u32,
+                final_stats.total_acquisitions == num_tasks as u64,
                 "serialization: all acquisitions counted",
                 num_tasks as u32,
                 final_stats.total_acquisitions
@@ -4802,7 +4802,7 @@ mod tests {
 
         let run_sequence = || -> (Vec<u32>, Vec<u32>, Vec<u32>) {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
-            let runtime = crate::lab::runtime::LabRuntime::new();
+            let runtime = crate::lab::runtime::LabRuntime::new(LabConfig::default());
 
             let (active_history, idle_history, total_history) = runtime.block_on(async {
                 let cx = crate::cx::Cx::for_testing();
@@ -4886,7 +4886,7 @@ mod tests {
         // Test determinism with timing-dependent operations
         let timed_sequence = || -> Vec<u32> {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(2));
-            let runtime = crate::lab::runtime::LabRuntime::new();
+            let runtime = crate::lab::runtime::LabRuntime::new(LabConfig::default());
 
             runtime.block_on(async {
                 let cx = crate::cx::Cx::for_testing();

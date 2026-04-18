@@ -412,7 +412,7 @@ fn integration_certificate_lifecycle_lab_runtime() {
     let config = LabConfig::default();
     let mut lab = LabRuntime::new(config);
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let cx = test_cx();
 
         // Create certificate with aggressive configuration

@@ -150,7 +150,7 @@ pub struct Metadata {
 }
 
 /// A metadata value (either ASCII or binary).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {
     /// ASCII text value.
     Ascii(String),

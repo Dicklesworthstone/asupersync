@@ -254,7 +254,7 @@ fn mr_first_to_complete() {
 
         let tracker = Arc::new(StdMutex::new(RaceTracker::new()));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
             let cx = test_cx();
 
@@ -310,7 +310,7 @@ fn mr_loser_drain() {
         let tracker = Arc::new(StdMutex::new(RaceTracker::new()));
         let drain_signal = Arc::new(StdMutex::new(false));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
             let cx = test_cx();
 
@@ -352,7 +352,7 @@ fn mr_region_quiescence() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
             let cx = test_cx();
 
@@ -391,7 +391,7 @@ fn mr_cancel_propagation() {
         let lab = test_lab_runtime_with_seed(seed);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
 
             // Create a cancellable scope
@@ -447,7 +447,7 @@ fn mr_empty_race_semantics() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let scope = Scope::new();
         let cx = test_cx();
 
@@ -497,7 +497,7 @@ fn mr_deterministic_winner() {
             let lab = test_lab_runtime_with_seed(seed);
             let _guard = lab.enter();
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let scope = Scope::new();
                 let cx = test_cx();
 
@@ -519,7 +519,7 @@ fn mr_deterministic_winner() {
             let lab = test_lab_runtime_with_seed(seed);
             let _guard = lab.enter();
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let scope = Scope::new();
                 let cx = test_cx();
 
@@ -550,7 +550,7 @@ fn mr_race_all_correctness() {
         let lab = test_lab_runtime_with_seed(scenario.seed as u64);
         let _guard = lab.enter();
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let scope = Scope::new();
             let cx = test_cx();
 
@@ -614,7 +614,7 @@ fn mr_race_commutativity() {
             let lab = test_lab_runtime_with_seed(seed);
             let _guard = lab.enter();
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let scope = Scope::new();
                 let cx = test_cx();
 
@@ -636,7 +636,7 @@ fn mr_race_commutativity() {
             let lab = test_lab_runtime_with_seed(seed);
             let _guard = lab.enter();
 
-            lab.block_on(async {
+            futures_lite::future::block_on(async {
                 let scope = Scope::new();
                 let cx = test_cx();
 
@@ -681,7 +681,7 @@ fn test_basic_race() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let scope = Scope::new();
         let cx = test_cx();
 
@@ -707,7 +707,7 @@ fn test_race_immediate() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let scope = Scope::new();
         let cx = test_cx();
 
@@ -731,7 +731,7 @@ fn test_race_all_single() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let scope = Scope::new();
         let cx = test_cx();
 
@@ -752,7 +752,7 @@ fn test_race_error_handling() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let scope = Scope::new();
         let cx = test_cx();
 
@@ -778,7 +778,7 @@ fn test_loser_drain_blocking() {
     let lab = test_lab_runtime();
     let _guard = lab.enter();
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let scope = Scope::new();
         let cx = test_cx();
 

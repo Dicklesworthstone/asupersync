@@ -2027,6 +2027,7 @@ Connection: Upgrade\n\
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
             protocols: vec![],
             extensions: vec![],
+            headers: std::collections::BTreeMap::new(),
         };
 
         // Test various invalid status codes
@@ -2135,7 +2136,7 @@ Connection: Upgrade\n\
     fn golden_end_to_end_handshake_validation() {
         // Test complete handshake flow with all components
 
-        let entropy = crate::util::DetRng::from_seed(12345);
+        let entropy = crate::util::det_rng::DetRng::new(12345);
         let mut client = ClientHandshake::new("ws://localhost:8080/socket", &entropy)
             .expect("Client handshake should initialize")
             .protocol("chat")

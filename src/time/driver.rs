@@ -1954,10 +1954,10 @@ mod tests {
         let short_duration = Duration::from_millis(5);
         let start_time = wall_clock.now();
 
-        let timer_id = handle.sleep(short_duration, waker_that_increments(counter.clone()));
+        let timer_id = handle.register(handle.now().saturating_add_nanos(short_duration.as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()));
 
         // Busy wait for timer to fire (this is a test, so it's acceptable)
-        let timeout = start_time.saturating_add_duration(Duration::from_millis(100));
+        let timeout = start_time.saturating_add_nanos(Duration::from_millis(100).as_nanos().min(u128::from(u64::MAX)) as u64);
         while wall_clock.now() < timeout && counter.load(Ordering::SeqCst) == 0 {
             handle.process_timers();
             std::thread::sleep(Duration::from_millis(1));
@@ -2025,7 +2025,7 @@ mod tests {
 
         let mut expected_fired = 0;
         for advance_duration in &advance_steps {
-            virtual_clock.advance(*advance_duration);
+            virtual_clock.advance(advance_duration.as_nanos() as u64);
             handle.process_timers();
 
             expected_fired += 1;
@@ -2064,7 +2064,7 @@ mod tests {
         let mut timer_ids = Vec::new();
         for (i, counter) in counters.iter().enumerate() {
             let duration = Duration::from_millis(10 + (i as u64 % 100)); // Varying durations
-            let timer_id = handle.sleep(duration, waker_that_increments(counter.clone()));
+            let timer_id = handle.register(handle.now().saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()));
             timer_ids.push(timer_id);
         }
 
@@ -2076,7 +2076,7 @@ mod tests {
         );
 
         // Advance time to fire all timers
-        virtual_clock.advance(Duration::from_millis(200));
+        virtual_clock.advance(Duration::from_millis(200).as_nanos() as u64);
         handle.process_timers();
 
         let fired_count = counters
@@ -2114,9 +2114,8 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(0));
 
         // Register timer and immediately cancel
-        let timer_id = handle.sleep(
-            Duration::from_millis(100),
-            waker_that_increments(counter.clone()),
+        let timer_id = handle.register(handle.now().saturating_add_nanos(
+            Duration::from_millis(100).as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()),
         );
         crate::assert_with_log!(
             handle.pending_count() == 1,
@@ -2125,7 +2124,7 @@ mod tests {
             handle.pending_count()
         );
 
-        let cancelled = handle.cancel(timer_id);
+        let cancelled = handle.cancel(&timer_id);
         crate::assert_with_log!(cancelled, "timer cancelled", true, cancelled);
 
         crate::assert_with_log!(
@@ -2136,7 +2135,7 @@ mod tests {
         );
 
         // Advance past deadline - cancelled timer should not fire
-        virtual_clock.advance(Duration::from_millis(200));
+        virtual_clock.advance(Duration::from_millis(200).as_nanos() as u64);
         handle.process_timers();
 
         crate::assert_with_log!(
@@ -2147,7 +2146,7 @@ mod tests {
         );
 
         // Double cancellation should return false
-        let double_cancel = handle.cancel(timer_id);
+        let double_cancel = handle.cancel(&timer_id);
         crate::assert_with_log!(
             !double_cancel,
             "double cancel returns false",
@@ -2165,9 +2164,9 @@ mod tests {
 
         // Test browser clock maintains monotonicity
         let config = BrowserClockConfig::default();
-        let mut browser_clock = BrowserMonotonicClock::new(config);
+        let browser_clock = Arc::new(BrowserMonotonicClock::new(config));
 
-        let driver = Arc::new(TimerDriver::with_clock(Arc::new(browser_clock.clone())));
+        let driver = Arc::new(TimerDriver::with_clock(browser_clock.clone()));
         let handle = TimerDriverHandle::new(driver);
 
         let counter = Arc::new(AtomicU64::new(0));
@@ -2177,7 +2176,7 @@ mod tests {
 
         let mut last_time = Time::ZERO;
         for &sample_ms in &host_samples {
-            browser_clock.observe_host_time(sample_ms);
+            browser_clock.observe_host_time(Duration::from_millis(sample_ms as u64));
             let current_time = browser_clock.now();
 
             // Time should never go backward
@@ -2195,13 +2194,12 @@ mod tests {
         }
 
         // Register a timer and verify it works with browser clock
-        let timer_id = handle.sleep(
-            Duration::from_millis(5),
-            waker_that_increments(counter.clone()),
+        let timer_id = handle.register(handle.now().saturating_add_nanos(
+            Duration::from_millis(5).as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()),
         );
 
         // Advance browser clock
-        browser_clock.observe_host_time(50.0);
+        browser_clock.observe_host_time(Duration::from_millis(50));
         handle.process_timers();
 
         crate::assert_with_log!(

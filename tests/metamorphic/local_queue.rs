@@ -60,7 +60,7 @@ struct LocalQueueTestHarness {
 
 impl LocalQueueTestHarness {
     fn new(config: &LocalQueueTestConfig) -> Self {
-        let lab = LabRuntime::new();
+        let lab = LabRuntime::new(LabConfig::default());
         let state = LocalQueue::test_state((config.task_count - 1) as u32);
 
         // Create multiple queues for testing
@@ -186,7 +186,7 @@ proptest! {
     ) {
         let harness = LocalQueueTestHarness::new(&config);
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let queue_idx = 0;
             let task_ids: Vec<u32> = task_sequence.into_iter().take(config.task_count.min(50)).collect();
 
@@ -235,7 +235,7 @@ proptest! {
     ) {
         let harness = LocalQueueTestHarness::new(&config);
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let limited_ids: Vec<u32> = task_ids.into_iter()
                 .take(config.task_count.min(100))
                 .collect();
@@ -309,7 +309,7 @@ proptest! {
     ) {
         let harness = LocalQueueTestHarness::new(&config);
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let queue_idx = 0;
             let capacity_limit = 256; // VecDeque default capacity
 
@@ -363,7 +363,7 @@ proptest! {
     ) {
         let harness = LocalQueueTestHarness::new(&config);
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let queue_idx = 0;
             let max_lookahead = 8; // SKIPPED_LOCALS_INLINE_CAP
 
@@ -434,7 +434,7 @@ proptest! {
     ) {
         let harness = LocalQueueTestHarness::new(&config);
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             let queue_idx = 0;
 
             // Setup: separate cancelled (local) and active tasks
@@ -521,7 +521,7 @@ proptest! {
     ) {
         let harness = LocalQueueTestHarness::new(&config);
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             // Setup: Each lane has its own task sequence
             let mut lane_tasks: Vec<Vec<u32>> = lane_sequences.into_iter()
                 .take(harness.queues.len().min(4))
@@ -674,7 +674,7 @@ proptest! {
     ) {
         let harness = LocalQueueTestHarness::new(&config);
 
-        harness.lab.block_on(region!(|cx: &Cx, scope: &Scope| async move {
+        harness.futures_lite::future::block_on(region!(|cx: &Cx, scope: &Scope| async move {
             // Initial population
             let task_ids: Vec<u32> = (0..config.task_count as u32).collect();
             harness.fill_queue(0, &task_ids);

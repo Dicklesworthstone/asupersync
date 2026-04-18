@@ -4,6 +4,7 @@
 //! correctly in a simplified environment without requiring the full test suite.
 
 use asupersync::lab::runtime::LabRuntime;
+use asupersync::lab::LabConfig;
 use asupersync::sync::{LockError, Mutex, TryLockError};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
@@ -46,9 +47,9 @@ fn mr1_panic_poisoning_consistency_integration() {
     let mutex_clone = Arc::clone(&mutex);
     let handle = std::thread::spawn(move || {
         let cx = create_test_context(1, 1);
-        let lab = LabRuntime::new();
+        let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let mut guard = mutex_clone.lock(&cx).await.expect("lock should succeed");
             guard.counter += 1;
             panic!("deliberate panic to test poisoning");
@@ -71,8 +72,8 @@ fn mr1_panic_poisoning_consistency_integration() {
 
     // MR1.2: async lock returns Poisoned
     let cx = create_test_context(2, 1);
-    let lab = LabRuntime::new();
-    let lock_result = lab.block_on(async { mutex.lock(&cx).await });
+    let lab = LabRuntime::new(LabConfig::default());
+    let lock_result = futures_lite::future::block_on(async { mutex.lock(&cx).await });
     assert!(
         matches!(lock_result, Err(LockError::Poisoned)),
         "async lock should return Poisoned, got {:?}",
@@ -89,9 +90,9 @@ fn mr2_cancel_non_poisoning_integration() {
 
     // Phase 1: Test cancellation while holding lock
     let cx = create_test_context(1, 1);
-    let lab = LabRuntime::new();
+    let lab = LabRuntime::new(LabConfig::default());
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let mut guard = mutex.lock(&cx).await.expect("lock should succeed");
 
         // Perform operations
@@ -124,7 +125,7 @@ fn mr2_cancel_non_poisoning_integration() {
     );
 
     let cx2 = create_test_context(2, 1);
-    let lab2 = LabRuntime::new();
+    let lab2 = LabRuntime::new(LabConfig::default());
     let lock_result = lab2.block_on(async { mutex.lock(&cx2).await });
     assert!(
         lock_result.is_ok(),
@@ -164,9 +165,9 @@ fn mr4_concurrent_poison_consistency_integration() {
     let mutex_for_poison = Arc::clone(&mutex);
     let poison_handle = std::thread::spawn(move || {
         let cx = create_test_context(1, 1);
-        let lab = LabRuntime::new();
+        let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let _guard = mutex_for_poison
                 .lock(&cx)
                 .await
@@ -222,9 +223,9 @@ fn comprehensive_metamorphic_integration() {
     let mutex1_clone = Arc::clone(&mutex1);
     let handle1 = std::thread::spawn(move || {
         let cx = create_test_context(1, 1);
-        let lab = LabRuntime::new();
+        let lab = LabRuntime::new(LabConfig::default());
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let _guard = mutex1_clone.lock(&cx).await.expect("lock");
             panic!("test poison");
         })
@@ -238,9 +239,9 @@ fn comprehensive_metamorphic_integration() {
     // Test MR2: Cancel doesn't poison
     let mutex2 = Arc::new(Mutex::new(TestData::default()));
     let cx = create_test_context(2, 2);
-    let lab = LabRuntime::new();
+    let lab = LabRuntime::new(LabConfig::default());
 
-    lab.block_on(async {
+    futures_lite::future::block_on(async {
         let _guard = mutex2.lock(&cx).await.expect("clean lock");
         cx.set_cancel_requested(true);
         // Guard drops normally, shouldn't poison
@@ -260,6 +261,4 @@ fn comprehensive_metamorphic_integration() {
     );
 
     println!("All metamorphic relations verified successfully!");
-}
-phic relations verified successfully!");
 }

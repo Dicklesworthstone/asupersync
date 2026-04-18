@@ -266,7 +266,7 @@ fn mr_cancellation_safety() {
 
         let semaphore = Arc::new(Semaphore::new(initial_permits));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             let cx = test_cx();
 
             // Fill semaphore to capacity with try_acquire
@@ -355,7 +355,7 @@ fn mr_fifo_ordering() {
 
         let semaphore = Arc::new(Semaphore::new(initial_permits));
 
-        lab.block_on(async {
+        futures_lite::future::block_on(async {
             // Fill semaphore to capacity
             let mut held_permits = Vec::new();
             while semaphore.available_permits() >= acquire_count {

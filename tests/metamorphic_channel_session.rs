@@ -405,7 +405,7 @@ fn mr_permit_lifecycle_invariant() {
                 }
 
                 // Test oneshot permit lifecycle
-                let (os_sender, _os_receiver) = oneshot::channel();
+                let (os_sender, _os_receiver) = oneshot::channel::<i32>();
                 let tracked_sender = TrackedOneshotSender::new(os_sender);
                 let permit = tracked_sender.reserve(&cx);
 

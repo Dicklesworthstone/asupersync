@@ -2209,7 +2209,7 @@ mod tests {
             );
 
             // Cleanup: consume the message
-            drop(futures);
+            drop(fut);
             block_on(rx.recv(&cx)).expect("cleanup recv");
         }
 
