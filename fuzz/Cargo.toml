@@ -937,3 +937,10 @@ path = "fuzz_targets/h1_header_values.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "kafka_protocol"
+path = "fuzz_targets/kafka_protocol.rs"
+test = false
+doc = false
+bench = false
