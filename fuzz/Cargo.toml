@@ -1126,3 +1126,10 @@ path = "fuzz_targets/raptorq_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_headers"
+path = "fuzz_targets/h2_headers.rs"
+test = false
+doc = false
+bench = false
