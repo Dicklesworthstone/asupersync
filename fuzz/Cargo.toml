@@ -811,3 +811,10 @@ path = "fuzz_targets/hpack_integer.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_frame_parse"
+path = "fuzz_targets/h2_frame_parse.rs"
+test = false
+doc = false
+bench = false
