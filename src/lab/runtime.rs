@@ -5266,7 +5266,7 @@ mod tests {
                     .create_task(root, Budget::INFINITE, async move {
                         // Simulate work with deterministic operations
                         for j in 0..10 {
-                            crate::cx::yield_now().await;
+                            futures_lite::future::yield_now().await;
                             if (i + j) % 3 == 0 {
                                 crate::time::sleep(Duration::from_millis(1)).await;
                             }
@@ -5412,7 +5412,7 @@ mod tests {
                     .create_task(root, Budget::INFINITE, async move {
                         // Add some yield points to allow preemption
                         for _ in 0..3 {
-                            crate::cx::yield_now().await;
+                            futures_lite::future::yield_now().await;
                         }
                         task_idx
                     })
@@ -5483,7 +5483,7 @@ mod tests {
                     .create_task(root, Budget::INFINITE, async move {
                         // Multiple poll points where chaos can be injected
                         for j in 0..20 {
-                            crate::cx::yield_now().await;
+                            futures_lite::future::yield_now().await;
                             if j % 5 == 0 {
                                 crate::time::sleep(Duration::from_millis(1)).await;
                             }
@@ -5538,7 +5538,7 @@ mod tests {
 
                         // Other tasks continue working
                         for j in 0..10 {
-                            crate::cx::yield_now().await;
+                            futures_lite::future::yield_now().await;
                         }
                         i * 10
                     })

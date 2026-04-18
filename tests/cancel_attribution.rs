@@ -83,7 +83,7 @@ fn cancel_reason_basic_construction() {
     test_section!("user cancellation");
     let reason = CancelReason::user("stop");
     assert_eq!(reason.kind, CancelKind::User);
-    assert_eq!(reason.message, Some("stop"));
+    assert_eq!(reason.message, Some("stop".to_string()));
     tracing::info!(kind = ?reason.kind, "User cancellation constructed");
 
     test_section!("timeout cancellation");

@@ -2664,7 +2664,7 @@ mod tests {
                     i
                 );
 
-                previous_azuma_bound = verdict.azuma_bound;
+                let previous_azuma_bound = verdict.azuma_bound;
             }
         }
     }

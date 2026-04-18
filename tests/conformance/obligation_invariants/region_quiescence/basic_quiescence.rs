@@ -12,7 +12,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use tokio::time::sleep;
 
 use crate::runtime::{ObligationId, RegionId};
-use crate::tests::conformance::obligation_invariants::src::{
+use crate::conformance::obligation_invariants::src::{
     invariant_harness::{
         InvariantTestCategory, InvariantTestResult, ObligationInvariantTest, ObligationTestContext,
         TestMetrics, TestOutcome,
@@ -450,8 +450,8 @@ mod tests {
             .max_steps(10000);
         LabRuntime::new(config)
     }
-    use crate::runtime::test_helpers::*;
-    use crate::tests::conformance::obligation_invariants::src::invariant_harness::{
+    // removed crate::runtime::test_helpers::*
+    use crate::conformance::obligation_invariants::src::invariant_harness::{
         InvariantTestConfig, ObligationInvariantHarness,
     };
 
@@ -512,5 +512,8 @@ mod tests {
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
+    }
+}
+_empty());
     }
 }

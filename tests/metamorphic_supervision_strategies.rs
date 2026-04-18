@@ -68,7 +68,7 @@ impl ChildStart for MockChild {
     ) -> Result<TaskId, SpawnError> {
         *self.start_count.lock().unwrap() += 1;
 
-        let task_id = state.spawn_task(scope.region(), Budget::from_millis(100), None);
+        let (task_id, _handle) = state.create_task(scope.region(), Budget::from_millis(100), async {}).unwrap();
 
         if self.will_fail {
             *self.failure_count.lock().unwrap() += 1;

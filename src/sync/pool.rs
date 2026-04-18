@@ -4749,7 +4749,7 @@ mod tests {
                     let resource = pool_clone.acquire(&cx_clone).await.unwrap();
 
                     // Simulate brief usage
-                    tokio::task::yield_now().await;
+                    futures_lite::future::yield_now().await;
 
                     resource.return_to_pool();
                     i // Return task ID

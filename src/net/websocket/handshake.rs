@@ -326,10 +326,28 @@ pub struct ClientHandshake {
     extensions: Vec<String>,
     /// Additional headers.
     headers: BTreeMap<String, String>,
-}
+    }
 
-impl ClientHandshake {
-    /// Create a new client handshake for the given URL.
+    impl ClientHandshake {
+    /// Internal constructor for deterministic testing.
+    #[doc(hidden)]
+    pub fn new_for_test(
+        url: WsUrl,
+        key: String,
+        protocols: Vec<String>,
+        extensions: Vec<String>,
+        headers: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            url,
+            key,
+            protocols,
+            extensions,
+            headers,
+        }
+    }
+
+    /// Initiates a new client handshake to the specified URL.
     ///
     /// # Errors
     ///

@@ -405,8 +405,8 @@ mod tests {
             .max_steps(10000);
         LabRuntime::new(config)
     }
-    use crate::runtime::test_helpers::*;
-    use crate::tests::conformance::obligation_invariants::src::invariant_harness::{
+    // removed crate::runtime::test_helpers::*
+    use crate::conformance::obligation_invariants::src::invariant_harness::{
         InvariantTestConfig, ObligationInvariantHarness,
     };
 
@@ -472,5 +472,7 @@ mod tests {
         assert!(result.violations.is_empty());
         assert_eq!(result.metrics.obligations_created, 20);
         assert!(result.metrics.cancellation_events > 0);
+    }
+}
     }
 }

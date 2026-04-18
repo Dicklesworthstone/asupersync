@@ -17,6 +17,7 @@ use asupersync::net::websocket::{
     compute_accept_key,
 };
 use asupersync::util::DetEntropy;
+use base64::Engine;
 
 /// Test comprehensive Sec-WebSocket-Key validation and Sec-WebSocket-Accept derivation
 /// per RFC 6455 Section 4.2.2
@@ -58,17 +59,17 @@ fn test_rfc6455_sec_websocket_key_accept_derivation() {
 
     // Test 3: Client validates server response accept key
     let entropy = DetEntropy::new(42);
-    let handshake = ClientHandshake::new("ws://localhost/test", &entropy)
+    let _handshake = ClientHandshake::new("ws://localhost/test", &entropy)
         .expect("Client handshake should initialize");
 
     // Create client with known key for deterministic testing
-    let client_with_test_key = ClientHandshake {
-        url: WsUrl::parse("ws://localhost/test").unwrap(),
-        key: client_key.to_string(),
-        protocols: vec![],
-        extensions: vec![],
-        headers: std::collections::BTreeMap::new(),
-    };
+    let client_with_test_key = ClientHandshake::new_for_test(
+        WsUrl::parse("ws://localhost/test").unwrap(),
+        client_key.to_string(),
+        vec![],
+        vec![],
+        std::collections::BTreeMap::new(),
+    );
 
     let response_data = format!(
         "HTTP/1.1 101 Switching Protocols\r\n\
@@ -539,13 +540,13 @@ fn test_rfc6455_subprotocol_negotiation() {
         Sec-WebSocket-Protocol: superchat\r\n\r\n";
 
     // Need to create client with fixed key for this test
-    let client_with_test_key = ClientHandshake {
-        url: WsUrl::parse("ws://localhost/test").unwrap(),
-        key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
-        protocols: vec!["chat".to_string(), "echo".to_string()],
-        extensions: vec![],
-        headers: std::collections::BTreeMap::new(),
-    };
+    let client_with_test_key = ClientHandshake::new_for_test(
+        WsUrl::parse("ws://localhost/test").unwrap(),
+        "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+        vec!["chat".to_string(), "echo".to_string()],
+        vec![],
+        std::collections::BTreeMap::new(),
+    );
 
     let response = HttpResponse::parse(response_with_wrong_protocol.as_bytes())
         .expect("Response should parse");
@@ -714,13 +715,13 @@ fn test_rfc6455_permessage_deflate_extension_negotiation() {
 
     // Test 5: Client-side extension validation
     let entropy = DetEntropy::new(42);
-    let client_with_test_key = ClientHandshake {
-        url: WsUrl::parse("ws://localhost/test").unwrap(),
-        key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
-        protocols: vec![],
-        extensions: vec!["permessage-deflate".to_string()],
-        headers: std::collections::BTreeMap::new(),
-    };
+    let client_with_test_key = ClientHandshake::new_for_test(
+        WsUrl::parse("ws://localhost/test").unwrap(),
+        "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+        vec![],
+        vec!["permessage-deflate".to_string()],
+        std::collections::BTreeMap::new(),
+    );
 
     // Server responds with unrequested extension
     let response_unrequested = "HTTP/1.1 101 Switching Protocols\r\n\
@@ -820,13 +821,13 @@ fn test_rfc6455_status_101_switching_protocols() {
 
     // Test 2: Client validates status code
     let entropy = DetEntropy::new(42);
-    let client_with_test_key = ClientHandshake {
-        url: WsUrl::parse("ws://localhost/test").unwrap(),
-        key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
-        protocols: vec!["chat".to_string()],
-        extensions: vec![],
-        headers: std::collections::BTreeMap::new(),
-    };
+    let client_with_test_key = ClientHandshake::new_for_test(
+        WsUrl::parse("ws://localhost/test").unwrap(),
+        "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+        vec!["chat".to_string()],
+        vec![],
+        std::collections::BTreeMap::new(),
+    );
 
     // Parse the server response and validate it
     let response = HttpResponse::parse(&response_bytes).expect("Server response should parse");
@@ -879,13 +880,13 @@ fn test_rfc6455_status_101_switching_protocols() {
     }
 
     // Test 4: Response must have all required headers
-    let client_simple = ClientHandshake {
-        url: WsUrl::parse("ws://localhost/test").unwrap(),
-        key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
-        protocols: vec![],
-        extensions: vec![],
-        headers: std::collections::BTreeMap::new(),
-    };
+    let client_simple = ClientHandshake::new_for_test(
+        WsUrl::parse("ws://localhost/test").unwrap(),
+        "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+        vec![],
+        vec![],
+        std::collections::BTreeMap::new(),
+    );
 
     let missing_header_tests = vec![
         // (response, missing_header, description)
@@ -1048,7 +1049,7 @@ fn test_rfc6455_error_handling_edge_cases() {
     }
 
     // Test 2: Malformed HTTP request
-    let malformed_requests = vec![
+    let malformed_requests: Vec<&[u8]> = vec![
         b"NOT HTTP\r\n\r\n",
         b"GET\r\n\r\n", // Missing path and version
         b"",            // Empty request

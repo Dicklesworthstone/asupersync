@@ -508,14 +508,14 @@ mod tests {
         let mut server_codec = FrameCodec::server();
 
         let large_text = "A".repeat(1000);
-        let test_payloads = [
+        let test_payloads = vec![
             // Text frames
-            ("", Opcode::Text),
-            ("Hello", Opcode::Text),
-            ("WebSocket test with special chars: üñíçødé", Opcode::Text),
-            (&large_text, Opcode::Text), // Large text
+            ("".to_string(), Opcode::Text),
+            ("Hello".to_string(), Opcode::Text),
+            ("WebSocket test with special chars: üñíçødé".to_string(), Opcode::Text),
+            (large_text, Opcode::Text), // Large text
             // Binary frames
-            ("", Opcode::Binary),
+            ("".to_string(), Opcode::Binary),
             // Need to use a separate binary test below for actual binary data
         ];
 
@@ -527,7 +527,7 @@ mod tests {
 
         // Test text payloads
         for (payload, opcode) in &test_payloads {
-            let frame = Frame::text(*payload);
+            let frame = Frame::text(payload.clone());
 
             // Client encodes (with masking)
             let mut buf = BytesMut::new();

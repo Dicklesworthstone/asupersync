@@ -1959,7 +1959,7 @@ mod tests {
         // Busy wait for timer to fire (this is a test, so it's acceptable)
         let timeout = start_time.saturating_add_duration(Duration::from_millis(100));
         while wall_clock.now() < timeout && counter.load(Ordering::SeqCst) == 0 {
-            handle.poll_expired();
+            handle.process_timers();
             std::thread::sleep(Duration::from_millis(1));
         }
 
@@ -2026,7 +2026,7 @@ mod tests {
         let mut expected_fired = 0;
         for advance_duration in &advance_steps {
             virtual_clock.advance(*advance_duration);
-            handle.poll_expired();
+            handle.process_timers();
 
             expected_fired += 1;
             let actual_fired = counter.load(Ordering::SeqCst);
@@ -2077,7 +2077,7 @@ mod tests {
 
         // Advance time to fire all timers
         virtual_clock.advance(Duration::from_millis(200));
-        handle.poll_expired();
+        handle.process_timers();
 
         let fired_count = counters
             .iter()
@@ -2137,7 +2137,7 @@ mod tests {
 
         // Advance past deadline - cancelled timer should not fire
         virtual_clock.advance(Duration::from_millis(200));
-        handle.poll_expired();
+        handle.process_timers();
 
         crate::assert_with_log!(
             counter.load(Ordering::SeqCst) == 0,
@@ -2202,7 +2202,7 @@ mod tests {
 
         // Advance browser clock
         browser_clock.observe_host_time(50.0);
-        handle.poll_expired();
+        handle.process_timers();
 
         crate::assert_with_log!(
             counter.load(Ordering::SeqCst) > 0,

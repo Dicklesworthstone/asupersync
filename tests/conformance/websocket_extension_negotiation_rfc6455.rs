@@ -887,10 +887,6 @@ impl Default for WsExtensionConformanceHarness {
     }
 }
 
-pub use RequirementLevel;
-pub use TestCategory;
-pub use TestVerdict;
-pub use WsExtensionConformanceHarness;
 /// Re-export types for conformance system integration.
 pub use WsExtensionConformanceResult as WsConformanceResult;
 
