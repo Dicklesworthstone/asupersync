@@ -499,3 +499,10 @@ path = "fuzz_targets/tls_handshake_sequence.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_quic_stream_lifecycle"
+path = "fuzz_targets/quic_stream_lifecycle.rs"
+test = false
+doc = false
+bench = false
