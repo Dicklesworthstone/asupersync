@@ -16,6 +16,7 @@ pub mod hpack_table_size;
 // pub mod hpack_rfc7541;
 pub mod cancel_dag_determinism;
 pub mod kafka_record_batch_v2;
+pub mod kafka_offsets;
 pub mod obligation_lifecycle_metamorphic;
 pub mod quic_retry_rfc9000;
 pub mod race_loser_drain_metamorphic;
