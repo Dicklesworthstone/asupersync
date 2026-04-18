@@ -12,7 +12,7 @@
 //! 5. Extension negotiation (permessage-deflate)
 //! 6. Status 101 Switching Protocols response
 
-use asupersync::net::websocket::handshake::{
+use asupersync::net::websocket::{
     ClientHandshake, HandshakeError, HttpRequest, HttpResponse, ServerHandshake, WsUrl,
     compute_accept_key,
 };

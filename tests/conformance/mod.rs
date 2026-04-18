@@ -61,6 +61,7 @@ pub use kafka_record_batch_v2::{
     TestCategory as KafkaTestCategory,
 };
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
+#[cfg(feature = "deterministic-mode")]
 pub use cancel_dag_determinism::{
     CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory,
 };

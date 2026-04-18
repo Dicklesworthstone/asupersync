@@ -1182,6 +1182,11 @@ mod cancel_dag_determinism_tests {
     }
 }
 
+#[cfg(feature = "deterministic-mode")]
+pub use cancel_dag_determinism_tests::{
+    CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory,
+};
+
 // Tests that always run regardless of features
 #[test]
 fn cancel_dag_determinism_conformance_suite_availability() {

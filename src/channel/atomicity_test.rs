@@ -493,7 +493,7 @@ mod tests {
             }
 
             // Close sender to signal completion
-            std::mem::forget(channel.sender); // Drop sender to close channel
+            drop(channel.sender); // Drop sender to close channel
 
             // Wait for consumer
             let received = consumer.await.unwrap().unwrap();

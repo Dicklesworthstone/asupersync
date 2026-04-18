@@ -62,6 +62,7 @@ impl<T: Clone> BroadcastStream<T> {
         // SAFETY: We've manually performed the cleanup that Drop would do,
         // and we use mem::forget to prevent Drop from running again.
         let inner = unsafe { ptr::read(&raw const self.inner) };
+        unsafe { ptr::drop_in_place(&raw mut self.cx) };
 
         // Prevent Drop from running
         std::mem::forget(self);
