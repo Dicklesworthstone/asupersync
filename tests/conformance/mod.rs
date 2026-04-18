@@ -6,6 +6,7 @@
 // pub mod codec_framing;
 pub mod h1_rfc9112;
 pub mod h2_alpn_negotiation_rfc7540;
+pub mod h2_connect;
 pub mod h2_rst_stream_ping_rfc9113;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
