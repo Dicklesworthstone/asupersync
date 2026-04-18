@@ -727,3 +727,10 @@ path = "fuzz_targets/trace_integrity.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h3_client"
+path = "fuzz_targets/h3_client.rs"
+test = false
+doc = false
+bench = false
