@@ -520,3 +520,10 @@ path = "fuzz_targets/quic_stream_lifecycle.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_protobuf_fuzzing"
+path = "fuzz_targets/protobuf_fuzzing.rs"
+test = false
+doc = false
+bench = false
