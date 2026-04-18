@@ -1077,3 +1077,10 @@ path = "fuzz_targets/encoding_universal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_ping"
+path = "fuzz_targets/h2_ping.rs"
+test = false
+doc = false
+bench = false
