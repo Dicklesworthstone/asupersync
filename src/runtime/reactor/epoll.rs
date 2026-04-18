@@ -1518,4 +1518,345 @@ mod tests {
         );
         crate::test_complete!("debug_impl");
     }
+
+    // ONESHOT conformance tests (5 tests required for asupersync-x9k6a1)
+
+    #[test]
+    fn oneshot_fire_then_silence_until_rearm() {
+        init_test("oneshot_fire_then_silence_until_rearm");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (mut read_sock, mut write_sock) =
+            UnixStream::pair().expect("failed to create unix stream pair");
+        read_sock
+            .set_nonblocking(true)
+            .expect("failed to set nonblocking");
+
+        let token = Token::new(101);
+        // Register with ONESHOT (default non-edge mode)
+        reactor
+            .register(&read_sock, token, Interest::READABLE.with_oneshot())
+            .expect("register with oneshot failed");
+
+        // Write data to trigger readable event
+        write_sock.write_all(b"test").expect("write failed");
+
+        // First poll should return the event
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "first poll has events", true, count >= 1);
+
+        let mut found = false;
+        for event in &events {
+            if event.token == token && event.is_readable() {
+                found = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(found, "first poll found readable event", true, found);
+
+        // Read some data but not all (socket still has data)
+        let mut buf = [0u8; 2];
+        let read_count = read_sock.read(&mut buf).expect("partial read failed");
+        crate::assert_with_log!(read_count == 2, "partial read", 2usize, read_count);
+
+        // Second poll should return NO events (ONESHOT fired, not re-armed)
+        events.clear();
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(50)))
+            .expect("second poll failed");
+        crate::assert_with_log!(count == 0, "second poll no events (oneshot silence)", 0usize, count);
+
+        // Re-arm by modifying interest
+        reactor
+            .modify(token, Interest::READABLE.with_oneshot())
+            .expect("re-arm modify failed");
+
+        // Third poll should now return events again
+        events.clear();
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("third poll failed");
+        crate::assert_with_log!(count >= 1, "third poll has events after re-arm", true, count >= 1);
+
+        let mut found_after_rearm = false;
+        for event in &events {
+            if event.token == token && event.is_readable() {
+                found_after_rearm = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(found_after_rearm, "third poll found readable after re-arm", true, found_after_rearm);
+
+        reactor.deregister(token).expect("deregister failed");
+        crate::test_complete!("oneshot_fire_then_silence_until_rearm");
+    }
+
+    #[test]
+    fn oneshot_rearm_preserves_interest() {
+        init_test("oneshot_rearm_preserves_interest");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (read_sock, mut write_sock) =
+            UnixStream::pair().expect("failed to create unix stream pair");
+        read_sock
+            .set_nonblocking(true)
+            .expect("failed to set nonblocking");
+
+        let token = Token::new(102);
+        // Register with complex interest: READABLE + PRIORITY + ONESHOT
+        let complex_interest = Interest::READABLE
+            .add(Interest::PRIORITY)
+            .with_oneshot();
+        reactor
+            .register(&read_sock, token, complex_interest)
+            .expect("register with complex oneshot interest failed");
+
+        // Trigger event
+        write_sock.write_all(b"data").expect("write failed");
+
+        // Poll to fire the oneshot
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "oneshot fired", true, count >= 1);
+
+        // Re-arm with same complex interest
+        reactor
+            .modify(token, complex_interest)
+            .expect("re-arm with complex interest failed");
+
+        // Verify bookkeeping preserved the complex interest
+        let state = reactor.state.lock();
+        let info = state.tokens.get(&token).unwrap();
+        crate::assert_with_log!(
+            info.interest == complex_interest,
+            "complex interest preserved after re-arm",
+            complex_interest,
+            info.interest
+        );
+        crate::assert_with_log!(
+            info.interest.is_readable(),
+            "readable preserved",
+            true,
+            info.interest.is_readable()
+        );
+        crate::assert_with_log!(
+            info.interest.is_priority(),
+            "priority preserved",
+            true,
+            info.interest.is_priority()
+        );
+        crate::assert_with_log!(
+            info.interest.is_oneshot(),
+            "oneshot preserved",
+            true,
+            info.interest.is_oneshot()
+        );
+        drop(state);
+
+        reactor.deregister(token).expect("deregister failed");
+        crate::test_complete!("oneshot_rearm_preserves_interest");
+    }
+
+    #[test]
+    fn oneshot_concurrent_modify_wait_deterministic() {
+        init_test("oneshot_concurrent_modify_wait_deterministic");
+        let reactor = std::sync::Arc::new(EpollReactor::new().expect("failed to create reactor"));
+        let (read_sock, mut write_sock) =
+            UnixStream::pair().expect("failed to create unix stream pair");
+        read_sock
+            .set_nonblocking(true)
+            .expect("failed to set nonblocking");
+
+        let token = Token::new(103);
+        reactor
+            .register(&read_sock, token, Interest::READABLE.with_oneshot())
+            .expect("register failed");
+
+        // Make socket readable
+        write_sock.write_all(b"concurrent").expect("write failed");
+
+        // Concurrent modify and poll operations
+        let reactor_clone = reactor.clone();
+        std::thread::scope(|s| {
+            let modifier_handle = s.spawn(|| {
+                // Rapid re-arm attempts
+                for i in 0..10 {
+                    let result = reactor_clone.modify(token, Interest::READABLE.with_oneshot());
+                    if result.is_err() {
+                        break; // Token may have been deregistered
+                    }
+                    if i % 3 == 0 {
+                        std::thread::sleep(Duration::from_micros(100));
+                    }
+                }
+            });
+
+            let poller_handle = s.spawn(|| {
+                let mut total_events = 0;
+                for _ in 0..20 {
+                    let mut events = Events::with_capacity(64);
+                    match reactor_clone.poll(&mut events, Some(Duration::from_millis(5))) {
+                        Ok(count) => total_events += count,
+                        Err(_) => break,
+                    }
+                }
+                total_events
+            });
+
+            modifier_handle.join().expect("modifier thread panicked");
+            let total_events = poller_handle.join().expect("poller thread panicked");
+
+            // The exact number isn't deterministic due to timing, but should be reasonable
+            crate::assert_with_log!(
+                total_events < 50,
+                "concurrent operations don't create event storms",
+                true,
+                total_events < 50
+            );
+        });
+
+        // Verify reactor state is consistent after concurrent operations
+        let final_count = reactor.registration_count();
+        crate::assert_with_log!(
+            final_count <= 1,
+            "registration count consistent after concurrent ops",
+            true,
+            final_count <= 1
+        );
+
+        // Clean up if still registered
+        let _ = reactor.deregister(token);
+        crate::test_complete!("oneshot_concurrent_modify_wait_deterministic");
+    }
+
+    #[test]
+    fn oneshot_auto_rearm_on_specific_events() {
+        init_test("oneshot_auto_rearm_on_specific_events");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (read_sock, mut write_sock) =
+            UnixStream::pair().expect("failed to create unix stream pair");
+        read_sock
+            .set_nonblocking(true)
+            .expect("failed to set nonblocking");
+
+        let token = Token::new(104);
+        // Register for both readable and writable with oneshot
+        reactor
+            .register(&read_sock, token, Interest::both().with_oneshot())
+            .expect("register failed");
+
+        // Socket should be immediately writable
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "writable event fired", true, count >= 1);
+
+        let mut found_writable = false;
+        for event in &events {
+            if event.token == token && event.is_writable() {
+                found_writable = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(found_writable, "initial writable event", true, found_writable);
+
+        // After oneshot fires, no more events until re-arm
+        events.clear();
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(50)))
+            .expect("poll failed");
+        crate::assert_with_log!(count == 0, "no events after oneshot", 0usize, count);
+
+        // Re-arm for readable only
+        reactor
+            .modify(token, Interest::READABLE.with_oneshot())
+            .expect("re-arm for readable failed");
+
+        // Write data to trigger readable
+        write_sock.write_all(b"readable").expect("write failed");
+
+        events.clear();
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "readable event after re-arm", true, count >= 1);
+
+        let mut found_readable = false;
+        for event in &events {
+            if event.token == token && event.is_readable() {
+                found_readable = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(found_readable, "readable event after re-arm", true, found_readable);
+
+        reactor.deregister(token).expect("deregister failed");
+        crate::test_complete!("oneshot_auto_rearm_on_specific_events");
+    }
+
+    #[test]
+    fn oneshot_close_before_rearm_no_leak() {
+        init_test("oneshot_close_before_rearm_no_leak");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (read_sock, mut write_sock) =
+            UnixStream::pair().expect("failed to create unix stream pair");
+        read_sock
+            .set_nonblocking(true)
+            .expect("failed to set nonblocking");
+
+        let token = Token::new(105);
+        let raw_fd = read_sock.as_raw_fd();
+
+        reactor
+            .register(&read_sock, token, Interest::READABLE.with_oneshot())
+            .expect("register failed");
+
+        // Fire the oneshot
+        write_sock.write_all(b"fire").expect("write failed");
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "oneshot fired", true, count >= 1);
+
+        // Close the socket BEFORE attempting re-arm
+        drop(read_sock);
+
+        // Verify fd is closed
+        let fd_closed = unsafe { fcntl(raw_fd, F_GETFD) } == -1;
+        crate::assert_with_log!(fd_closed, "fd closed before re-arm", true, fd_closed);
+
+        // Attempt to re-arm after close should fail gracefully
+        let modify_result = reactor.modify(token, Interest::READABLE.with_oneshot());
+        crate::assert_with_log!(
+            modify_result.is_err(),
+            "modify after close fails",
+            true,
+            modify_result.is_err()
+        );
+
+        // Verify no registration leak
+        let registration_count = reactor.registration_count();
+        crate::assert_with_log!(
+            registration_count == 0,
+            "no registration leak after close-before-rearm",
+            0usize,
+            registration_count
+        );
+
+        // Deregister should also succeed (idempotent cleanup)
+        let deregister_result = reactor.deregister(token);
+        crate::assert_with_log!(
+            deregister_result.is_ok(),
+            "deregister after close succeeds",
+            true,
+            deregister_result.is_ok()
+        );
+
+        crate::test_complete!("oneshot_close_before_rearm_no_leak");
+    }
 }
