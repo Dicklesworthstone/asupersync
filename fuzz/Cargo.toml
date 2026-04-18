@@ -1098,3 +1098,10 @@ path = "fuzz_targets/h3_native_frames.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bytes_mut_ops"
+path = "fuzz_targets/bytes_mut_ops.rs"
+test = false
+doc = false
+bench = false
