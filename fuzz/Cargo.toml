@@ -818,3 +818,10 @@ path = "fuzz_targets/h2_frame_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h3_body"
+path = "fuzz_targets/h3_body.rs"
+test = false
+doc = false
+bench = false
