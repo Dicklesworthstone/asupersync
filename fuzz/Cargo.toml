@@ -1203,3 +1203,10 @@ path = "fuzz_targets/h2_data.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "quic_stream_flow"
+path = "fuzz_targets/quic_stream_flow.rs"
+test = false
+doc = false
+bench = false
