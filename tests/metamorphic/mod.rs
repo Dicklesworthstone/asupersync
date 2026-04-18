@@ -14,5 +14,6 @@ pub mod runtime_waker;
 pub mod rwlock;
 pub mod scheduler_migration;
 pub mod separation_logic;
+pub mod symbol_cancel;
 pub mod task_table;
 pub mod types_budget;
