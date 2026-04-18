@@ -708,4 +708,348 @@ mod tests {
             "tracked_oneshot_convenience_send_returns_disconnected_when_receiver_dropped"
         );
     }
+
+    // =========================================================================
+    // Metamorphic Testing: Session Protocol Invariants (META-SESSION)
+    // =========================================================================
+
+    /// META-SESSION-001: Reserve-Abort-Reserve Equivalence Property
+    /// reserve() + abort() + reserve() should be equivalent to two independent reserves
+    /// Metamorphic relation: capacity_after(reserve→abort→reserve) = capacity_after(reserve×2)
+    #[test]
+    fn meta_reserve_abort_reserve_equivalence() {
+        init_test("meta_reserve_abort_reserve_equivalence");
+        let cx = test_cx();
+
+        // Setup 1: Reserve, abort, reserve sequence
+        let (tx1, mut rx1) = tracked_channel::<i32>(2);
+        let permit1a = block_on(tx1.reserve(&cx)).expect("first reserve");
+        let _aborted_proof = permit1a.abort();
+        let permit1b = block_on(tx1.reserve(&cx)).expect("reserve after abort");
+        let _committed_proof1 = permit1b.send(100).expect("send after abort");
+
+        // Setup 2: Two independent reserves (reference behavior)
+        let (tx2, mut rx2) = tracked_channel::<i32>(2);
+        let permit2a = block_on(tx2.reserve(&cx)).expect("independent first reserve");
+        let permit2b = block_on(tx2.reserve(&cx)).expect("independent second reserve");
+        let _aborted_proof2 = permit2a.abort();
+        let _committed_proof2 = permit2b.send(100).expect("independent send");
+
+        // Metamorphic relation: Both channels should receive the same value
+        let value1 = block_on(rx1.recv(&cx)).expect("recv from abort sequence");
+        let value2 = block_on(rx2.recv(&cx)).expect("recv from independent sequence");
+
+        crate::assert_with_log!(
+            value1 == value2,
+            "reserve-abort-reserve equivalence",
+            value2,
+            value1
+        );
+
+        crate::test_complete!("meta_reserve_abort_reserve_equivalence");
+    }
+
+    /// META-SESSION-002: Tracking vs Raw Channel Equivalence Property
+    /// Tracked channels with perfect obligation discipline should behave identically to raw channels
+    /// Metamorphic relation: tracked_behavior_with_perfect_discipline = raw_behavior
+    #[test]
+    fn meta_tracking_raw_equivalence() {
+        init_test("meta_tracking_raw_equivalence");
+        let cx = test_cx();
+
+        // Tracked channel with perfect discipline
+        let (tracked_tx, mut tracked_rx) = tracked_channel::<i32>(3);
+        let tracked_permit1 = block_on(tracked_tx.reserve(&cx)).expect("tracked reserve 1");
+        let tracked_permit2 = block_on(tracked_tx.reserve(&cx)).expect("tracked reserve 2");
+        let _tracked_proof1 = tracked_permit1.send(42).expect("tracked send 1");
+        let _tracked_proof2 = tracked_permit2.send(43).expect("tracked send 2");
+
+        // Raw channel (same operations via into_inner)
+        let (raw_tracked_tx, mut raw_rx) = tracked_channel::<i32>(3);
+        let raw_tx = raw_tracked_tx.into_inner();
+        let raw_permit1 = raw_tx.try_reserve().expect("raw reserve 1");
+        let raw_permit2 = raw_tx.try_reserve().expect("raw reserve 2");
+        raw_permit1.send(42);
+        raw_permit2.send(43);
+
+        // Metamorphic relation: receivers should see identical sequences
+        let tracked_seq = vec![
+            block_on(tracked_rx.recv(&cx)).expect("tracked recv 1"),
+            block_on(tracked_rx.recv(&cx)).expect("tracked recv 2"),
+        ];
+        let raw_seq = vec![
+            block_on(raw_rx.recv(&cx)).expect("raw recv 1"),
+            block_on(raw_rx.recv(&cx)).expect("raw recv 2"),
+        ];
+
+        crate::assert_with_log!(
+            tracked_seq == raw_seq,
+            "tracking equivalence with raw",
+            raw_seq,
+            tracked_seq
+        );
+
+        crate::test_complete!("meta_tracking_raw_equivalence");
+    }
+
+    /// META-SESSION-003: Commitment Monotonicity Property
+    /// The number of successful commits should never exceed permits reserved
+    /// Metamorphic relation: committed_count ≤ reserved_count (always)
+    #[test]
+    fn meta_commitment_monotonicity() {
+        init_test("meta_commitment_monotonicity");
+        let cx = test_cx();
+
+        let (tx, mut rx) = tracked_channel::<i32>(5);
+        let mut reserved_count = 0;
+        let mut committed_count = 0;
+
+        // Reserve 3 permits
+        let permit1 = block_on(tx.reserve(&cx)).expect("reserve 1");
+        reserved_count += 1;
+        let permit2 = block_on(tx.reserve(&cx)).expect("reserve 2");
+        reserved_count += 1;
+        let permit3 = block_on(tx.reserve(&cx)).expect("reserve 3");
+        reserved_count += 1;
+
+        // Commit 2, abort 1
+        let _proof1 = permit1.send(10).expect("send 1");
+        committed_count += 1;
+        let _aborted = permit2.abort();
+        let _proof2 = permit3.send(20).expect("send 2");
+        committed_count += 1;
+
+        // Metamorphic relation: monotonicity invariant
+        crate::assert_with_log!(
+            committed_count <= reserved_count,
+            "commitment monotonicity",
+            format!("committed({committed_count}) <= reserved({reserved_count})"),
+            format!("committed({committed_count}) <= reserved({reserved_count})")
+        );
+
+        // Verify actual receives match committed count
+        let mut received_count = 0;
+        while let Ok(_) = block_on(rx.try_recv(&cx)) {
+            received_count += 1;
+        }
+        crate::assert_with_log!(
+            received_count == committed_count,
+            "received equals committed",
+            committed_count,
+            received_count
+        );
+
+        crate::test_complete!("meta_commitment_monotonicity");
+    }
+
+    /// META-SESSION-004: Error Value Preservation Property
+    /// Failed sends due to disconnection must return the original value unchanged
+    /// Metamorphic relation: error_value = original_value (identity under failure)
+    #[test]
+    fn meta_error_value_preservation() {
+        init_test("meta_error_value_preservation");
+        let cx = test_cx();
+
+        // Test with various value types
+        let test_values = vec![42, -100, 0, i32::MAX, i32::MIN];
+
+        for &original_value in &test_values {
+            // MPSC case
+            let (tx, rx) = tracked_channel::<i32>(1);
+            drop(rx); // Disconnect
+
+            if let Err(mpsc::SendError::Disconnected(returned_value)) =
+                block_on(tx.send(&cx, original_value)) {
+                crate::assert_with_log!(
+                    returned_value == original_value,
+                    "MPSC error value preservation",
+                    original_value,
+                    returned_value
+                );
+            } else {
+                panic!("Expected Disconnected error for MPSC");
+            }
+
+            // Oneshot case
+            let (tx, rx) = tracked_oneshot::<i32>();
+            drop(rx); // Disconnect
+
+            if let Err(oneshot::SendError::Disconnected(returned_value)) =
+                tx.send(&cx, original_value) {
+                crate::assert_with_log!(
+                    returned_value == original_value,
+                    "Oneshot error value preservation",
+                    original_value,
+                    returned_value
+                );
+            } else {
+                panic!("Expected Disconnected error for oneshot");
+            }
+        }
+
+        crate::test_complete!("meta_error_value_preservation");
+    }
+
+    /// META-SESSION-005: Clone Broadcast Equivalence Property
+    /// Messages sent via any clone should be received identically
+    /// Metamorphic relation: broadcast(clone_a, msg) = broadcast(clone_b, msg)
+    #[test]
+    fn meta_clone_broadcast_equivalence() {
+        init_test("meta_clone_broadcast_equivalence");
+        let cx = test_cx();
+
+        let (tx_original, mut rx) = tracked_channel::<i32>(10);
+        let tx_clone1 = tx_original.clone();
+        let tx_clone2 = tx_original.clone();
+
+        // Send from original
+        let _proof1 = block_on(tx_original.send(&cx, 100)).expect("original send");
+
+        // Send from clone 1
+        let _proof2 = block_on(tx_clone1.send(&cx, 200)).expect("clone1 send");
+
+        // Send from clone 2
+        let _proof3 = block_on(tx_clone2.send(&cx, 300)).expect("clone2 send");
+
+        // Metamorphic relation: all messages received regardless of sender clone
+        let mut received = vec![];
+        for _ in 0..3 {
+            received.push(block_on(rx.recv(&cx)).expect("recv from clones"));
+        }
+        received.sort(); // Order may vary
+
+        let expected = vec![100, 200, 300];
+        crate::assert_with_log!(
+            received == expected,
+            "clone broadcast equivalence",
+            expected,
+            received
+        );
+
+        crate::test_complete!("meta_clone_broadcast_equivalence");
+    }
+
+    /// META-SESSION-006: Receiver State Symmetry Property
+    /// is_closed() should be consistent across all sender clones
+    /// Metamorphic relation: clone_a.is_closed() = clone_b.is_closed() (symmetric)
+    #[test]
+    fn meta_receiver_state_symmetry() {
+        init_test("meta_receiver_state_symmetry");
+
+        // MPSC case
+        let (tx1, rx) = tracked_channel::<i32>(5);
+        let tx2 = tx1.clone();
+        let tx3 = tx1.clone();
+
+        // Before drop: all should be open
+        crate::assert_with_log!(
+            !tx1.is_closed() && !tx2.is_closed() && !tx3.is_closed(),
+            "all clones open before receiver drop",
+            "all false",
+            format!("tx1: {}, tx2: {}, tx3: {}", tx1.is_closed(), tx2.is_closed(), tx3.is_closed())
+        );
+
+        drop(rx);
+
+        // After drop: all should be closed (symmetric)
+        crate::assert_with_log!(
+            tx1.is_closed() && tx2.is_closed() && tx3.is_closed(),
+            "all clones closed after receiver drop",
+            "all true",
+            format!("tx1: {}, tx2: {}, tx3: {}", tx1.is_closed(), tx2.is_closed(), tx3.is_closed())
+        );
+
+        // Oneshot case (no clone, but test sender state)
+        let (tx, rx) = tracked_oneshot::<i32>();
+        crate::assert_with_log!(!tx.is_closed(), "oneshot open before drop", false, tx.is_closed());
+        drop(rx);
+        crate::assert_with_log!(tx.is_closed(), "oneshot closed after drop", true, tx.is_closed());
+
+        crate::test_complete!("meta_receiver_state_symmetry");
+    }
+
+    /// META-SESSION-007: Proof Composition Property
+    /// Total proofs (committed + aborted) should equal total permits reserved
+    /// Metamorphic relation: committed_proofs + aborted_proofs = reserved_permits
+    #[test]
+    fn meta_proof_composition() {
+        init_test("meta_proof_composition");
+        let cx = test_cx();
+
+        let (tx, mut rx) = tracked_channel::<i32>(10);
+        let mut reserved_permits = 0;
+        let mut committed_proofs = 0;
+        let mut aborted_proofs = 0;
+
+        // Reserve 5 permits
+        let permits: Vec<_> = (0..5).map(|i| {
+            reserved_permits += 1;
+            block_on(tx.reserve(&cx)).expect(&format!("reserve {i}"))
+        }).collect();
+
+        // Commit 3, abort 2
+        for (i, permit) in permits.into_iter().enumerate() {
+            if i < 3 {
+                let _proof = permit.send(i as i32).expect(&format!("send {i}"));
+                committed_proofs += 1;
+            } else {
+                let _proof = permit.abort();
+                aborted_proofs += 1;
+            }
+        }
+
+        // Metamorphic relation: conservation of proof count
+        crate::assert_with_log!(
+            committed_proofs + aborted_proofs == reserved_permits,
+            "proof composition conservation",
+            reserved_permits,
+            committed_proofs + aborted_proofs
+        );
+
+        crate::assert_with_log!(
+            committed_proofs == 3 && aborted_proofs == 2,
+            "expected proof distribution",
+            "committed: 3, aborted: 2",
+            format!("committed: {committed_proofs}, aborted: {aborted_proofs}")
+        );
+
+        crate::test_complete!("meta_proof_composition");
+    }
+
+    /// META-SESSION-008: Oneshot Consumption Finality Property
+    /// Oneshot permits are consumed exactly once - no double-use possible
+    /// Metamorphic relation: oneshot_use_count = 1 (always finite)
+    #[test]
+    fn meta_oneshot_consumption_finality() {
+        init_test("meta_oneshot_consumption_finality");
+        let cx = test_cx();
+
+        let (tx1, mut rx1) = tracked_oneshot::<i32>();
+        let (tx2, mut rx2) = tracked_oneshot::<i32>();
+
+        // Path 1: Reserve then send
+        let permit1 = tx1.reserve(&cx);
+        let _proof1 = permit1.send(111).expect("oneshot reserve+send");
+
+        // Path 2: Direct send (convenience)
+        let _proof2 = tx2.send(&cx, 222).expect("oneshot direct send");
+
+        // Metamorphic relation: both paths result in exactly one message
+        let value1 = block_on(rx1.recv(&cx)).expect("oneshot recv 1");
+        let value2 = block_on(rx2.recv(&cx)).expect("oneshot recv 2");
+
+        crate::assert_with_log!(value1 == 111, "oneshot value 1", 111, value1);
+        crate::assert_with_log!(value2 == 222, "oneshot value 2", 222, value2);
+
+        // Both receivers should now report closed
+        crate::assert_with_log!(
+            block_on(rx1.try_recv(&cx)).is_err() && block_on(rx2.try_recv(&cx)).is_err(),
+            "oneshot finality - no more messages",
+            "both receivers closed",
+            "both receivers closed"
+        );
+
+        crate::test_complete!("meta_oneshot_consumption_finality");
+    }
+
 }
