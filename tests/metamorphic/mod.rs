@@ -17,3 +17,4 @@ pub mod separation_logic;
 pub mod symbol_cancel;
 pub mod task_table;
 pub mod types_budget;
+pub mod vclock_merge;
