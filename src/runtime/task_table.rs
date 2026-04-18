@@ -398,4 +398,372 @@ mod tests {
         assert_eq!(table.stored_future_count(), 0);
         assert!(table.get_stored_future(unknown).is_none());
     }
+
+    // === Lock Ordering Conformance Tests ===
+
+    mod conformance_lock_ordering {
+        use super::*;
+        use crate::runtime::{ShardedState, ShardGuard};
+        use crate::observability::metrics::NoOpMetrics;
+        use crate::observability::ObservabilityConfig;
+        use crate::runtime::config::RuntimeConfig;
+        use crate::trace::TraceBufferHandle;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::Duration;
+
+        fn test_config() -> Arc<crate::runtime::ShardedConfig> {
+            Arc::new(crate::runtime::ShardedConfig {
+                runtime: RuntimeConfig::default(),
+                observability: ObservabilityConfig::default(),
+            })
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn test_task_table_operations_preserve_lock_order() {
+            // Test 1: Verify task table operations through ShardGuard maintain lock ordering
+            let trace = TraceBufferHandle::new(1024);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let shards = ShardedState::new(trace, metrics, test_config());
+
+            // Test single shard operations (Tasks only)
+            {
+                let mut guard = ShardGuard::tasks_only(&shards);
+                let tasks = guard.tasks.as_mut().unwrap();
+
+                // Basic insert/lookup operations
+                let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+                let record = make_task_record(owner);
+                let idx = tasks.insert_task(record);
+                let task_id = TaskId::from_arena(idx);
+
+                assert!(tasks.task(task_id).is_some());
+                let removed = tasks.remove_task(task_id);
+                assert!(removed.is_some());
+            }
+
+            // Verify lock order is properly tracked during multi-shard operations
+            #[cfg(debug_assertions)]
+            {
+                use crate::runtime::sharded_state::lock_order;
+
+                assert_eq!(lock_order::held_count(), 0, "No locks should be held after guard drop");
+
+                // Test proper ordering B→A→C (Regions→Tasks→Obligations)
+                let guard = ShardGuard::for_task_completed(&shards);
+                assert_eq!(lock_order::held_count(), 3);
+                assert_eq!(
+                    lock_order::held_labels(),
+                    vec!["B:Regions", "A:Tasks", "C:Obligations"]
+                );
+                drop(guard);
+                assert_eq!(lock_order::held_count(), 0);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn test_concurrent_task_operations_no_lock_order_violations() {
+            // Test 2: Concurrent task table operations should not cause lock order violations
+            use std::sync::Barrier;
+
+            let trace = TraceBufferHandle::new(1024);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
+            let barrier = Arc::new(Barrier::new(4));
+
+            let handles: Vec<_> = (0..4)
+                .map(|thread_id| {
+                    let shards = Arc::clone(&shards);
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+
+                        // Each thread performs different operations using proper guards
+                        for i in 0..50 {
+                            match thread_id % 4 {
+                                0 => {
+                                    // Tasks-only operations (hotpath polling)
+                                    let mut guard = ShardGuard::tasks_only(&shards);
+                                    let tasks = guard.tasks.as_mut().unwrap();
+                                    let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                                    let record = make_task_record(owner);
+                                    let idx = tasks.insert_task(record);
+                                    if i % 10 == 9 {
+                                        // Occasionally remove task
+                                        let task_id = TaskId::from_arena(idx);
+                                        let _ = tasks.remove_task(task_id);
+                                    }
+                                }
+                                1 => {
+                                    // Spawn operations (B→A)
+                                    let mut guard = ShardGuard::for_spawn(&shards);
+                                    if let Some(tasks) = guard.tasks.as_mut() {
+                                        let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                                        let record = make_task_record(owner);
+                                        let _ = tasks.insert_task(record);
+                                    }
+                                }
+                                2 => {
+                                    // Task completion operations (B→A→C)
+                                    let mut guard = ShardGuard::for_task_completed(&shards);
+                                    if let Some(tasks) = guard.tasks.as_mut() {
+                                        let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                                        let record = make_task_record(owner);
+                                        let idx = tasks.insert_task(record);
+                                        let task_id = TaskId::from_arena(idx);
+                                        let _ = tasks.remove_task(task_id);
+                                    }
+                                }
+                                3 => {
+                                    // Cancel operations (B→A→C)
+                                    let mut guard = ShardGuard::for_cancel(&shards);
+                                    if let Some(tasks) = guard.tasks.as_mut() {
+                                        // Lookup operations to simulate cancel processing
+                                        let task_id = TaskId::from_arena(ArenaIndex::new(i % 100, 0));
+                                        let _ = tasks.task(task_id);
+                                    }
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("Thread should not panic - no lock order violations");
+            }
+        }
+
+        #[test]
+        fn test_task_table_reallocation_safety() {
+            // Test 3: Table growth and shrinking should be safe under concurrent access
+            let trace = TraceBufferHandle::new(1024);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
+            let barrier = Arc::new(Barrier::new(3));
+
+            let handles: Vec<_> = (0..3)
+                .map(|thread_id| {
+                    let shards = Arc::clone(&shards);
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+
+                        match thread_id {
+                            0 => {
+                                // Growth thread: rapid task insertions
+                                for i in 0..200 {
+                                    let mut guard = ShardGuard::tasks_only(&shards);
+                                    let tasks = guard.tasks.as_mut().unwrap();
+                                    let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+                                    let record = make_task_record(owner);
+                                    let _idx = tasks.insert_task(record);
+
+                                    // Verify table remains consistent during growth
+                                    assert!(tasks.live_task_count() > 0);
+
+                                    if i % 50 == 0 {
+                                        // Brief pause to allow other threads to interleave
+                                        thread::sleep(Duration::from_micros(1));
+                                    }
+                                }
+                            }
+                            1 => {
+                                // Shrinking thread: task removals
+                                thread::sleep(Duration::from_millis(1)); // Let growth start first
+
+                                for i in 0..150 {
+                                    let mut guard = ShardGuard::tasks_only(&shards);
+                                    let tasks = guard.tasks.as_mut().unwrap();
+
+                                    // Find a task to remove (iterate through possible indices)
+                                    for idx_val in 0..200 {
+                                        let task_id = TaskId::from_arena(ArenaIndex::new(idx_val, 0));
+                                        if tasks.remove_task(task_id).is_some() {
+                                            break; // Successfully removed one
+                                        }
+                                    }
+
+                                    if i % 50 == 0 {
+                                        thread::sleep(Duration::from_micros(1));
+                                    }
+                                }
+                            }
+                            2 => {
+                                // Reader thread: continuous lookups during reallocation
+                                for i in 0..300 {
+                                    let guard = ShardGuard::tasks_only(&shards);
+                                    let tasks = guard.tasks.as_ref().unwrap();
+
+                                    // Try to lookup various task IDs
+                                    for idx_val in (i * 10)..((i + 1) * 10) {
+                                        let task_id = TaskId::from_arena(ArenaIndex::new(idx_val % 200, 0));
+                                        let _ = tasks.task(task_id); // May or may not exist
+                                    }
+
+                                    // Verify table integrity during concurrent access
+                                    assert!(tasks.live_task_count() < 1000, "Table growth should be reasonable");
+
+                                    if i % 30 == 0 {
+                                        thread::sleep(Duration::from_micros(1));
+                                    }
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("Reallocation safety test should not panic");
+            }
+
+            // Final verification: table should be in a consistent state
+            let guard = ShardGuard::tasks_only(&shards);
+            let tasks = guard.tasks.as_ref().unwrap();
+            let final_count = tasks.live_task_count();
+
+            // We can't predict exact count due to race conditions, but it should be reasonable
+            assert!(final_count < 300, "Final task count should be bounded");
+
+            // Verify no stored futures are orphaned
+            assert!(
+                tasks.stored_future_count() <= tasks.live_task_count(),
+                "Stored futures should not exceed live tasks"
+            );
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic(expected = "lock order violation")]
+        fn test_lock_order_violation_detection() {
+            // Test 4: Verify that incorrect lock ordering is detected and panics
+            use crate::runtime::sharded_state::lock_order;
+            use crate::runtime::sharded_state::LockShard;
+
+            // Simulate acquiring locks in wrong order (Tasks before Regions)
+            // This should panic in debug builds due to lock order violation
+            lock_order::before_lock(LockShard::Tasks);
+            lock_order::after_lock(LockShard::Tasks);
+
+            // This should panic: trying to acquire Regions after Tasks violates B→A ordering
+            lock_order::before_lock(LockShard::Regions);
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn test_proper_lock_order_sequences() {
+            // Test 5: Verify that correct lock ordering sequences work properly
+            use crate::runtime::sharded_state::lock_order;
+            use crate::runtime::sharded_state::LockShard;
+
+            // Test valid sequence: B→A→C (Regions→Tasks→Obligations)
+            lock_order::before_lock(LockShard::Regions);
+            lock_order::after_lock(LockShard::Regions);
+            lock_order::before_lock(LockShard::Tasks);
+            lock_order::after_lock(LockShard::Tasks);
+            lock_order::before_lock(LockShard::Obligations);
+            lock_order::after_lock(LockShard::Obligations);
+
+            assert_eq!(lock_order::held_count(), 3);
+            assert_eq!(
+                lock_order::held_labels(),
+                vec!["B:Regions", "A:Tasks", "C:Obligations"]
+            );
+
+            // Clean up for next test
+            lock_order::unlock_n(3);
+            assert_eq!(lock_order::held_count(), 0);
+
+            // Test partial sequence: B→C (skip A)
+            lock_order::before_lock(LockShard::Regions);
+            lock_order::after_lock(LockShard::Regions);
+            lock_order::before_lock(LockShard::Obligations);
+            lock_order::after_lock(LockShard::Obligations);
+
+            assert_eq!(lock_order::held_count(), 2);
+            lock_order::unlock_n(2);
+        }
+
+        #[test]
+        fn test_task_table_arena_operations_thread_safety() {
+            // Test 6: Arena operations should be thread-safe under proper locking
+            let trace = TraceBufferHandle::new(1024);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
+            let barrier = Arc::new(Barrier::new(4));
+
+            // Track task IDs created across threads for verification
+            let created_tasks = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            let handles: Vec<_> = (0..4)
+                .map(|thread_id| {
+                    let shards = Arc::clone(&shards);
+                    let barrier = Arc::clone(&barrier);
+                    let created_tasks = Arc::clone(&created_tasks);
+
+                    thread::spawn(move || {
+                        barrier.wait();
+
+                        let mut local_tasks = Vec::new();
+
+                        // Create tasks
+                        for i in 0..25 {
+                            let mut guard = ShardGuard::for_spawn(&shards);
+                            let tasks = guard.tasks.as_mut().unwrap();
+
+                            let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                            let record = make_task_record(owner);
+                            let idx = tasks.insert_task(record);
+                            let task_id = TaskId::from_arena(idx);
+
+                            // Verify task was inserted correctly
+                            assert!(tasks.task(task_id).is_some());
+                            assert_eq!(tasks.task(task_id).unwrap().owner, owner);
+
+                            local_tasks.push(task_id);
+                        }
+
+                        // Store in shared list for final verification
+                        {
+                            let mut global_tasks = created_tasks.lock().unwrap();
+                            global_tasks.extend(local_tasks.iter());
+                        }
+
+                        // Verify tasks can be looked up
+                        for &task_id in &local_tasks {
+                            let guard = ShardGuard::tasks_only(&shards);
+                            let tasks = guard.tasks.as_ref().unwrap();
+                            assert!(tasks.task(task_id).is_some(), "Task should still exist");
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("Arena operations should be thread-safe");
+            }
+
+            // Final verification: all created tasks should be accessible
+            let final_guard = ShardGuard::tasks_only(&shards);
+            let final_tasks = final_guard.tasks.as_ref().unwrap();
+
+            let created_task_list = created_tasks.lock().unwrap();
+            assert_eq!(created_task_list.len(), 100, "Should have created 100 tasks total");
+
+            for &task_id in created_task_list.iter() {
+                assert!(
+                    final_tasks.task(task_id).is_some(),
+                    "Task {:?} should be accessible in final state",
+                    task_id
+                );
+            }
+
+            assert_eq!(final_tasks.live_task_count(), 100);
+        }
+    }
 }
