@@ -1119,3 +1119,10 @@ path = "fuzz_targets/web_multipart.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "raptorq_roundtrip"
+path = "fuzz_targets/raptorq_roundtrip.rs"
+test = false
+doc = false
+bench = false
