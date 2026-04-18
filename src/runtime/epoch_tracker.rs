@@ -828,6 +828,7 @@ impl EpochConsistencyTracker {
 
         // Log per-module state
         for (&module, record) in records.iter() {
+            let _ = (module, record);
             debug!(
                 module_id = %module,
                 current_epoch = %record.current_epoch,
@@ -842,7 +843,8 @@ impl EpochConsistencyTracker {
         // Log recent violations summary
         if violation_count > 0 {
             let violations = self.violations.read();
-            for (_idx, _violation) in violations.iter().enumerate().take(5) {
+            for (idx, violation) in violations.iter().enumerate().take(5) {
+                let _ = (idx, violation);
                 debug!(
                     violation_index = idx,
                     violation_type = match violation {

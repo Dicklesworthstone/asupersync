@@ -415,7 +415,7 @@ mod tests {
         fn test_config() -> Arc<crate::runtime::ShardedConfig> {
             Arc::new(crate::runtime::ShardedConfig {
                 runtime: RuntimeConfig::default(),
-                observability: ObservabilityConfig::default(),
+                observability: None,
             })
         }
 

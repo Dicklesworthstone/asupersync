@@ -4646,7 +4646,7 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
-        let workers = scheduler.take_workers();
+        let mut workers = scheduler.take_workers();
         assert_eq!(workers.len(), 2);
 
         // Spawn threads for workers
@@ -4887,8 +4887,8 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // Worker should have timer driver
         assert!(
@@ -4915,7 +4915,7 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         // Workers should not have timer driver
-        let workers = scheduler.take_workers();
+        let mut workers = scheduler.take_workers();
         assert!(workers[0].timer_driver.is_none());
         assert!(workers[1].timer_driver.is_none());
 
@@ -5391,8 +5391,8 @@ mod tests {
         };
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // First schedule to local
         worker.schedule_local(task_id, 100);
@@ -5430,8 +5430,8 @@ mod tests {
         };
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         worker.schedule_local(task_id, 100);
 
@@ -5465,8 +5465,8 @@ mod tests {
         };
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         worker.schedule_local_timed(task_id, Time::from_nanos(42));
 
@@ -5498,8 +5498,8 @@ mod tests {
         };
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // Schedule locally first (consumes the notify)
         worker.schedule_local(task_id, 100);
@@ -6099,8 +6099,8 @@ mod tests {
         scheduler.inject_ready(task_id1, 100);
         scheduler.inject_ready(task_id2, 100);
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // Execute both tasks
         worker.execute(task_id1);
@@ -7515,8 +7515,8 @@ mod tests {
         scheduler.inject_cancel(cancel_task, 100);
         scheduler.inject_timed(timed_task, Time::from_nanos(500));
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // Fast queue should be empty.
         assert!(
@@ -7852,8 +7852,8 @@ mod tests {
         }
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
         let local_ready = Arc::clone(&worker.local_ready);
 
         worker.execute(task_id);
@@ -7971,8 +7971,8 @@ mod tests {
         }
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         worker.execute(task_id);
 
@@ -8121,8 +8121,8 @@ mod tests {
     fn task_table_backed_schedule_local() {
         let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 3);
         let task_id = TaskId::new_for_test(1, 0);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // schedule_local should use with_task_table_ref to check wake_state.
         worker.schedule_local(task_id, 50);
@@ -8137,8 +8137,8 @@ mod tests {
     fn task_table_backed_schedule_local_cancel() {
         let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 3);
         let task_id = TaskId::new_for_test(1, 0);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // schedule_local_cancel should use with_task_table_ref for wake_state.
         worker.schedule_local_cancel(task_id, 50);
@@ -8153,8 +8153,8 @@ mod tests {
     fn task_table_backed_schedule_local_timed() {
         let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 3);
         let task_id = TaskId::new_for_test(1, 0);
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         let deadline = Time::from_nanos(1000);
         worker.schedule_local_timed(task_id, deadline);
@@ -8227,8 +8227,8 @@ mod tests {
             guard.cancel_acknowledged = true;
         }
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // consume_cancel_ack should use the task table path.
         let result = worker.consume_cancel_ack(task_id);
@@ -8269,8 +8269,8 @@ mod tests {
         // Inject cancel tasks at various points during ready consumption
         let cancel_tasks: Vec<TaskId> = (100..110).map(|i| TaskId::new_for_test(i, 0)).collect();
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // Consume a few ready tasks
         let _ready1 = worker.next_task();
@@ -8340,8 +8340,8 @@ mod tests {
             scheduler.inject_timed(task_id, Time::from_nanos(1500), 200);
         }
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // Start consuming ready tasks (P2 lane)
         let ready_dispatch_count = 3;
@@ -8410,8 +8410,8 @@ mod tests {
             scheduler.inject_timed(task_id, deadlines[i], 100);
         }
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // Expected EDF order: deadlines sorted -> [1700, 1800, 1900, 1950]
         // Which corresponds to task indices: [2, 0, 1, 3]
@@ -8466,8 +8466,8 @@ mod tests {
         // Promote ready task to cancel lane
         scheduler.inject_cancel(ready_task, 0);
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         // First task should be the promoted task (most recent cancel injection)
         let first_cancel = worker.next_task();
@@ -8526,8 +8526,8 @@ mod tests {
             scheduler.inject_cancel(task_id, 0);
         }
 
-        let workers = scheduler.take_workers();
-        let worker = &workers[0];
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         let mut cancel_dispatches = 0;
         let mut ready_dispatches = 0;
@@ -8604,7 +8604,7 @@ mod tests {
 
             // Sample queue state every 20 tasks
             if i % 20 == 0 {
-                let workers = scheduler.take_workers();
+                let mut workers = scheduler.take_workers();
                 if let Some(worker) = workers.first() {
                     // Check current ready queue size
                     let ready_queue_size = {
@@ -8655,7 +8655,7 @@ mod tests {
         );
 
         // Drain some tasks and verify queue reduces
-        let workers = scheduler.take_workers();
+        let mut workers = scheduler.take_workers();
         if let Some(worker) = workers.first() {
             for _ in 0..50 {
                 worker.next_task();
@@ -8857,7 +8857,7 @@ mod tests {
         // Golden test: Concurrent cancel events should not cause double-penalization
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state); // 2 workers
-        let workers = scheduler.take_workers();
+        let mut workers = scheduler.take_workers();
 
         // Setup initial EXP3 state
         for worker in &workers {

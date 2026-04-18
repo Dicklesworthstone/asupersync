@@ -153,9 +153,7 @@ fn mr4_concurrent_poison_consistency_integration() {
             std::thread::sleep(std::time::Duration::from_millis(i * 10));
 
             let cx = create_test_context(i + 10, i + 10);
-            let lab = LabRuntime::new();
-
-            let result = lab.block_on(async { mutex_clone.lock(&cx).await });
+            let result = futures_lite::future::block_on(async { mutex_clone.lock(&cx).await });
             results_clone.lock().unwrap().push((i, result));
         });
 
@@ -263,4 +261,7 @@ fn comprehensive_metamorphic_integration() {
     );
 
     println!("All metamorphic relations verified successfully!");
+}
+!");
+}
 }

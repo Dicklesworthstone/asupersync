@@ -893,12 +893,8 @@ mod grpc_trailer_conformance_tests {
         }
     }
 
-    pub use GrpcTrailerConformanceHarness;
     /// Re-export types for conformance system integration.
     pub use GrpcTrailerConformanceResult as GrpcConformanceResult;
-    pub use RequirementLevel;
-    pub use TestCategory;
-    pub use TestVerdict;
 }
 
 // Tests that always run regardless of features

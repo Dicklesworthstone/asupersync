@@ -664,7 +664,7 @@ fn e2e_debugging_workflow() {
                 indent,
                 cause.kind,
                 cause.origin_region,
-                cause.message.unwrap_or("no message")
+                cause.message.unwrap_or("no message".to_string())
             );
         }
 
@@ -682,7 +682,7 @@ fn e2e_debugging_workflow() {
             tracing::warn!("Consider: Increase timeout or optimize query");
 
             // Verify the chain structure
-            assert_eq!(root.message, Some("database query timeout (100ms)"));
+            assert_eq!(root.message, Some("database query timeout (100ms)".to_string()));
         }
 
         // Step 4: Check if any cause is a specific type

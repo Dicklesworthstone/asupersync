@@ -736,16 +736,17 @@ mod tests {
 
             let cancel_observed = Arc::new(AtomicBool::new(false));
             let cancel_observed_clone = Arc::clone(&cancel_observed);
+            let cx_clone = cx.clone();
 
             // Simulate client disconnect by setting cancel after a brief delay
-            std::thread::spawn(move || {
+            let _handle = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(1)); // Simulate network delay
-                cx.set_cancel_requested(true);
+                cx_clone.set_cancel_requested(true);
             });
 
             let outcome = region.run(|ctx| {
                 // Handler checks cancellation repeatedly
-                for i in 0..10 {
+                for _i in 0..10 {
                     if ctx.cx().is_cancel_requested() {
                         cancel_observed_clone.store(true, Ordering::SeqCst);
                         return Response::new(
@@ -779,25 +780,27 @@ mod tests {
             let task_cancelled = Arc::new(AtomicBool::new(false));
             let task_cancelled_clone = Arc::clone(&task_cancelled);
 
-            let outcome = region.run(|ctx| {
-                // Spawn a background task that monitors cancellation
-                let task_ctx = ctx.cx();
-                std::thread::spawn(move || {
-                    for _ in 0..100 {
-                        if task_ctx.is_cancel_requested() {
-                            task_cancelled_clone.store(true, Ordering::SeqCst);
-                            break;
+            let _outcome = region.run(|ctx| {
+                std::thread::scope(|s| {
+                    // Spawn a background task that monitors cancellation
+                    let task_ctx = ctx.cx().clone();
+                    s.spawn(move || {
+                        for _ in 0..100 {
+                            if task_ctx.is_cancel_requested() {
+                                task_cancelled_clone.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
                         }
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
+                    });
+
+                    // Simulate client disconnect
+                    std::thread::sleep(Duration::from_millis(5));
+                    ctx.cx().set_cancel_requested(true);
+
+                    // Give spawned task time to observe cancellation
+                    std::thread::sleep(Duration::from_millis(10));
                 });
-
-                // Simulate client disconnect
-                std::thread::sleep(Duration::from_millis(5));
-                ctx.cx().set_cancel_requested(true);
-
-                // Give spawned task time to observe cancellation
-                std::thread::sleep(Duration::from_millis(10));
 
                 Response::new(StatusCode::OK, b"ok".to_vec())
             });
@@ -1011,35 +1014,42 @@ mod tests {
             let cleanup_count_clone = Arc::clone(&cleanup_count);
 
             let outcome = region.run(|ctx| {
-                // Spawn multiple concurrent tasks
-                for i in 0..3 {
-                    let task_ctx = ctx.cx();
-                    let task_counter = Arc::clone(&task_count_clone);
-                    let cleanup_counter = Arc::clone(&cleanup_count_clone);
+                std::thread::scope(|s| {
+                    // Spawn multiple concurrent tasks
+                    let mut handles = Vec::new();
+                    for _i in 0..3 {
+                        let task_ctx = ctx.cx().clone();
+                        let task_counter = Arc::clone(&task_count_clone);
+                        let cleanup_counter = Arc::clone(&cleanup_count_clone);
 
-                    std::thread::spawn(move || {
-                        task_counter.fetch_add(1, Ordering::SeqCst);
+                        handles.push(s.spawn(move || {
+                            task_counter.fetch_add(1, Ordering::SeqCst);
 
-                        // Simulate work with cleanup
-                        let _cleanup = CleanupGuard {
-                            counter: cleanup_counter,
-                        };
+                            // Simulate work with cleanup
+                            let _cleanup = CleanupGuard {
+                                counter: cleanup_counter,
+                            };
 
-                        for _ in 0..20 {
-                            if task_ctx.is_cancel_requested() {
-                                return; // Task cancelled
+                            for _ in 0..20 {
+                                if task_ctx.is_cancel_requested() {
+                                    return; // Task cancelled
+                                }
+                                std::thread::sleep(Duration::from_micros(100));
                             }
-                            std::thread::sleep(Duration::from_micros(100));
-                        }
-                    });
-                }
+                        }));
+                    }
 
-                // Simulate client disconnect after brief work
-                std::thread::sleep(Duration::from_millis(2));
-                ctx.cx().set_cancel_requested(true);
+                    // Simulate client disconnect after brief work
+                    std::thread::sleep(Duration::from_millis(2));
+                    ctx.cx().set_cancel_requested(true);
 
-                // Give tasks time to observe cancellation and clean up
-                std::thread::sleep(Duration::from_millis(10));
+                    // Give tasks time to observe cancellation and clean up
+                    std::thread::sleep(Duration::from_millis(10));
+                    
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                });
 
                 Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec())
             });

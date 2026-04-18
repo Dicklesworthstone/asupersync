@@ -116,7 +116,7 @@ impl TimeoutTestConfig {
 }
 
 /// Test operation that can be configured for various timeout scenarios.
-#[derive(Clone)]
+
 struct TestOperation {
     /// Unique identifier for this operation.
     id: u32,

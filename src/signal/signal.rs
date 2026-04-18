@@ -791,24 +791,28 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // First recv should succeed
-        let mut recv1 = Box::pin(stream.recv());
-        let poll1 = recv1.as_mut().poll(&mut cx);
-        crate::assert_with_log!(
-            matches!(poll1, Poll::Ready(Some(()))),
-            "First SIGPIPE delivery received",
-            "Poll::Ready(Some(()))",
-            poll1
-        );
+        {
+            let mut recv1 = Box::pin(stream.recv());
+            let poll1 = recv1.as_mut().poll(&mut cx);
+            crate::assert_with_log!(
+                matches!(poll1, Poll::Ready(Some(()))),
+                "First SIGPIPE delivery received",
+                "Poll::Ready(Some(()))",
+                poll1
+            );
+        }
 
         // Second recv should also succeed (no lost signals)
-        let mut recv2 = Box::pin(stream.recv());
-        let poll2 = recv2.as_mut().poll(&mut cx);
-        crate::assert_with_log!(
-            matches!(poll2, Poll::Ready(Some(()))),
-            "Second SIGPIPE delivery received",
-            "Poll::Ready(Some(()))",
-            poll2
-        );
+        {
+            let mut recv2 = Box::pin(stream.recv());
+            let poll2 = recv2.as_mut().poll(&mut cx);
+            crate::assert_with_log!(
+                matches!(poll2, Poll::Ready(Some(()))),
+                "Second SIGPIPE delivery received",
+                "Poll::Ready(Some(()))",
+                poll2
+            );
+        }
 
         crate::test_complete!("sigpipe_multiple_deliveries_preserved");
     }

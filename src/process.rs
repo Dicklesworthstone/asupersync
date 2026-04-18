@@ -2880,19 +2880,21 @@ mod tests {
                 .expect("spawn failed");
 
             let pid = child.id().expect("no pid");
-            children.push((child, pid));
+            children.push((child, pid, i));
         }
 
         // Wait for all children and verify they're properly reaped
-        for (mut child, pid) in children {
+        for (mut child, pid, expected_code) in children {
             let status = child.wait().expect("wait failed");
 
             // Verify the expected exit code
-            let expected_code = if pid % 1000 < 3 {
-                (pid % 1000) as i32
-            } else {
-                0
-            };
+            assert_eq!(
+                status.code(),
+                Some(expected_code),
+                "Process {} should have exit code {}",
+                pid,
+                expected_code
+            );
 
             // After wait(), the process should be reaped (not zombie)
             // Sending signal 0 should fail with ESRCH (No such process)

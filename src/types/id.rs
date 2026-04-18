@@ -28,6 +28,13 @@ impl RegionId {
         Self(index)
     }
 
+    /// Returns a 64-bit integer representation of this RegionId.
+    #[inline]
+    #[must_use]
+    pub fn as_u64(&self) -> u64 {
+        ((self.0.generation() as u64) << 32) | (self.0.index() as u64)
+    }
+
     /// Returns the underlying arena index (internal use).
     #[inline]
     #[must_use]

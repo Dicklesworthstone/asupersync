@@ -179,6 +179,24 @@ fn test_cx() -> Cx {
 }
 
 /// Simple block_on for tests.
+
+struct YieldSleep {
+    end: std::time::Instant,
+}
+impl Future for YieldSleep {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        if std::time::Instant::now() >= self.end {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+fn yield_sleep(dur: Duration) -> YieldSleep {
+    YieldSleep { end: std::time::Instant::now() + dur }
+}
+
 fn block_on<F: Future>(f: F) -> F::Output {
     struct NoopWaker;
     impl std::task::Wake for NoopWaker {
@@ -256,7 +274,7 @@ async fn execute_race_scenario(
 
             // Small delay to ensure close happens before send
             if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
+                yield_sleep(delay).await;
             }
 
             tracker.lock().unwrap().record_operation_start(OneShotOperation::Send, 1);
@@ -280,7 +298,7 @@ async fn execute_race_scenario(
 
             // Small delay then close
             if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
+                yield_sleep(delay).await;
             }
 
             tracker.lock().unwrap().record_operation_start(OneShotOperation::Close, 1);
@@ -312,7 +330,7 @@ async fn execute_race_scenario(
 
             // Small delay then drop
             if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
+                yield_sleep(delay).await;
             }
 
             tracker.lock().unwrap().record_operation_start(OneShotOperation::Drop, 1);
@@ -337,7 +355,7 @@ async fn execute_race_scenario(
             let close_future = async move {
                 // Small delay to create race window
                 if !delay.is_zero() {
-                    tokio::time::sleep(delay / 2).await;
+                    yield_sleep(delay / 2).await;
                 }
                 tracker_clone.lock().unwrap().record_operation_start(OneShotOperation::Close, 1);
                 drop(rx);
@@ -345,7 +363,7 @@ async fn execute_race_scenario(
             };
 
             // Run both concurrently
-            tokio::join!(send_future, close_future);
+            futures_lite::future::zip(send_future, close_future).await;
         },
 
         RaceScenario::ConcurrentDropSend => {
@@ -356,7 +374,7 @@ async fn execute_race_scenario(
             let send_future = async move {
                 // Small delay to create race
                 if !delay.is_zero() {
-                    tokio::time::sleep(delay / 2).await;
+                    yield_sleep(delay / 2).await;
                 }
                 tracker_clone.lock().unwrap().record_operation_start(OneShotOperation::Send, 0);
                 let send_result = permit.send(test_value);
@@ -375,7 +393,7 @@ async fn execute_race_scenario(
             };
 
             // Run both concurrently
-            tokio::join!(send_future, drop_future);
+            futures_lite::future::zip(send_future, drop_future).await;
         },
     }
 
@@ -396,7 +414,7 @@ proptest! {
         test_value in arb_test_values(),
         delay in arb_delays(),
     ) {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        block_on(async {
             let tracker = execute_race_scenario(
                 RaceScenario::CloseBeforeSend,
                 test_value,
@@ -432,7 +450,7 @@ proptest! {
         test_value in arb_test_values(),
         delay in arb_delays(),
     ) {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        block_on(async {
             let tracker = execute_race_scenario(
                 RaceScenario::SendThenClose,
                 test_value,
@@ -477,7 +495,7 @@ proptest! {
         test_value in arb_test_values(),
         delay in arb_delays(),
     ) {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        block_on(async {
             let tracker = execute_race_scenario(
                 RaceScenario::SendThenDrop,
                 test_value,
@@ -524,7 +542,7 @@ proptest! {
         test_value in arb_test_values(),
         delay in arb_delays(),
     ) {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        block_on(async {
             let tracker = execute_race_scenario(
                 RaceScenario::ConcurrentCloseSend,
                 test_value,
@@ -566,7 +584,7 @@ proptest! {
         delay in arb_delays(),
         scenario in arb_race_scenarios(),
     ) {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        block_on(async {
             let tracker = execute_race_scenario(scenario, test_value, delay).await;
             let tracker_data = tracker.lock().unwrap();
 
@@ -606,7 +624,7 @@ proptest! {
         values in prop::collection::vec(arb_test_values(), 1..=3),
         delays in prop::collection::vec(arb_delays(), 1..=3),
     ) {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        block_on(async {
             let mut all_trackers = Vec::new();
 
             for (i, (&value, &delay)) in values.iter().zip(delays.iter()).enumerate() {
@@ -633,8 +651,9 @@ proptest! {
 }
 
 /// Test that receiver drop during send is handled correctly.
-#[tokio::test]
-async fn test_receiver_drop_during_send_commit() {
+#[test]
+fn test_receiver_drop_during_send_commit() {
+    block_on(async {
     let tracker = RaceTracker::new();
     let (tx, rx) = oneshot::channel::<i64>();
     let cx = test_cx();
@@ -667,11 +686,13 @@ async fn test_receiver_drop_during_send_commit() {
     // Value should still be tracked
     assert_eq!(tracker_data.values_sent.len(), 1);
     assert_eq!(tracker_data.values_sent[0], 42);
+    });
 }
 
 /// Test ordering guarantees under deterministic execution.
-#[tokio::test]
-async fn test_deterministic_ordering_guarantees() {
+#[test]
+fn test_deterministic_ordering_guarantees() {
+    block_on(async {
     for scenario in [
         RaceScenario::CloseBeforeSend,
         RaceScenario::SendThenClose,
@@ -692,4 +713,5 @@ async fn test_deterministic_ordering_guarantees() {
         assert!(tracker_data.verify_race_exclusivity(),
             "Race exclusivity for scenario: {scenario:?}");
     }
+    });
 }

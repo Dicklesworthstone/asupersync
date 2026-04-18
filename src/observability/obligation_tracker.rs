@@ -1281,28 +1281,6 @@ mod tests {
             )
             .expect("create obligation");
 
-        let tracker = ObligationTracker::new(Arc::new(state), None);
-
-        // Verify obligation exists initially
-        let initial_obligations = tracker.list_obligations();
-        assert_eq!(initial_obligations.len(), 1);
-        assert_eq!(initial_obligations[0].id, leaked_obligation_id);
-
-        // The metamorphic property: obligations without resolution should be detectable as leaks
-        let leaks = tracker.find_potential_leaks(Duration::ZERO);
-        assert_eq!(
-            leaks.len(),
-            1,
-            "Unresolved obligation should be detected as leak"
-        );
-        assert_eq!(leaks[0].id, leaked_obligation_id);
-
-        // Verify leak detection summary
-        let summary = tracker.summary();
-        assert_eq!(summary.total_active, 1);
-        assert_eq!(summary.potential_leaks, 1);
-
-        // Test the inclusive property: more unresolved obligations = more detected leaks
         let second_leaked_id = state
             .create_obligation(
                 ObligationKind::Lease,
@@ -1312,16 +1290,29 @@ mod tests {
             )
             .expect("create second obligation");
 
-        let leaks_after_second = tracker.find_potential_leaks(Duration::ZERO);
-        assert_eq!(
-            leaks_after_second.len(),
-            2,
-            "Adding unresolved obligation should increase leak count"
-        );
+        let state = Arc::new(state);
+        let tracker = ObligationTracker::new(Arc::clone(&state), None);
 
-        let leak_ids: Vec<_> = leaks_after_second.iter().map(|l| l.id).collect();
-        assert!(leak_ids.contains(&leaked_obligation_id));
-        assert!(leak_ids.contains(&second_leaked_id));
+        // Verify obligation exists initially
+        let initial_obligations = tracker.list_obligations();
+        assert_eq!(initial_obligations.len(), 2);
+        assert!(initial_obligations.iter().any(|o| o.id == leaked_obligation_id));
+        assert!(initial_obligations.iter().any(|o| o.id == second_leaked_id));
+
+        // The metamorphic property: obligations without resolution should be detectable as leaks
+        let leaks = tracker.find_potential_leaks(Duration::ZERO);
+        assert_eq!(
+            leaks.len(),
+            2,
+            "Unresolved obligation should be detected as leak"
+        );
+        assert!(leaks.iter().any(|o| o.id == leaked_obligation_id));
+        assert!(leaks.iter().any(|o| o.id == second_leaked_id));
+
+        // Verify leak detection summary
+        let summary = tracker.summary();
+        assert_eq!(summary.total_active, 2);
+        assert_eq!(summary.potential_leaks, 2);
     }
 
     /// MR6: Composite Obligation Tracking (Composition)

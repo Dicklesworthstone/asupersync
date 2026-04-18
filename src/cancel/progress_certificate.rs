@@ -2616,8 +2616,7 @@ mod tests {
             epsilon: 1e-12,
         };
 
-        let mut cert = ProgressCertificate::new(config);
-        let mut previous_azuma_bound = 1.0; // Start with worst possible bound
+        let mut cert = ProgressCertificate::new(config.clone());
 
         // Sequential updates with consistent progress
         let base_potential = 500.0;
@@ -2770,7 +2769,7 @@ mod tests {
             epsilon: 1e-12,
         };
 
-        let mut cert = ProgressCertificate::new(config);
+        let mut cert = ProgressCertificate::new(config.clone());
 
         // Step 1: Normal observation
         cert.observe(100.0);

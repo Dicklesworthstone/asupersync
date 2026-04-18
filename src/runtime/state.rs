@@ -8321,7 +8321,7 @@ mod tests {
 
                 // Metamorphic relation: Second call should be no-op
                 prop_assert_eq!(second_close_result, false, "Second close should return false (idempotent)");
-                prop_assert_eq!(first_outcome, second_outcome, "Region state should be unchanged by second close");
+                prop_assert_eq!(&first_outcome, &second_outcome, "Region state should be unchanged by second close");
 
                 if let Some(outcome) = first_outcome {
                     prop_assert_eq!(outcome.final_state, crate::record::region::RegionState::Closed);
