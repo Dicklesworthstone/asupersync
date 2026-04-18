@@ -1056,3 +1056,10 @@ path = "fuzz_targets/jetstream_records.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "transport_router"
+path = "fuzz_targets/transport_router.rs"
+test = false
+doc = false
+bench = false
