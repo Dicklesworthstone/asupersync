@@ -169,6 +169,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_server"
+path = "fuzz_targets/grpc_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_channel_state_machine"
 path = "fuzz_targets/channel_state_machine.rs"
 test = false
@@ -878,6 +885,13 @@ bench = false
 [[bin]]
 name = "sqlite_sql"
 path = "fuzz_targets/sqlite_sql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation"
+path = "fuzz_targets/h2_continuation.rs"
 test = false
 doc = false
 bench = false
