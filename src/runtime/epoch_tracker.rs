@@ -353,7 +353,7 @@ impl EpochConsistencyTracker {
         let record = records
             .entry(module)
             .or_insert_with(|| EpochTransitionRecord {
-                current_epoch: EpochId::GENESIS,
+                current_epoch: from_epoch,
                 last_transition_time: now,
                 transition_start_time: None,
                 transition_count: 0,
@@ -426,15 +426,19 @@ impl EpochConsistencyTracker {
     }
 
     /// Notifies the tracker that a module is starting an epoch transition.
-    pub fn notify_epoch_transition_start(&self, module: ModuleId, _from_epoch: EpochId, now: Time) {
+    pub fn notify_epoch_transition_start(&self, module: ModuleId, from_epoch: EpochId, now: Time) {
         if !self.config.enabled {
             return;
         }
 
         let mut records = self.module_records.write();
-        if let Some(record) = records.get_mut(&module) {
-            record.transition_start_time = Some(now);
-        }
+        let record = records.entry(module).or_insert_with(|| EpochTransitionRecord {
+            current_epoch: from_epoch,
+            last_transition_time: now,
+            transition_start_time: None,
+            transition_count: 0,
+        });
+        record.transition_start_time = Some(now);
     }
 
     /// Checks for epoch consistency violations.
