@@ -965,3 +965,10 @@ path = "fuzz_targets/dns_response.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hpack_never_indexed"
+path = "fuzz_targets/hpack_never_indexed.rs"
+test = false
+doc = false
+bench = false
