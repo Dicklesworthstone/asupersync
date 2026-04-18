@@ -279,7 +279,7 @@ impl TlsConnectorBuilder {
         if let Ok(cert_dir) = std::env::var("SSL_CERT_DIR") {
             let dir = std::path::Path::new(&cert_dir);
             if dir.is_dir() {
-                #[allow(unused_mut, unused_variables)]
+                #[allow(unused_mut, unused_variables, unused_assignments)]
                 let mut added = 0usize;
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.filter_map(Result::ok) {

@@ -2,6 +2,8 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use asupersync::tls::{TlsConnector, TlsError};
+use std::time::Duration;
 
 /// Comprehensive fuzz target for TLS handshake sequence edge cases
 ///
@@ -219,90 +221,80 @@ const MAX_ALPN_PROTOCOLS: usize = 10;
 const MAX_READ_CHUNKS: usize = 20;
 
 fuzz_target!(|input: TlsHandshakeFuzz| {
-    #[cfg(not(feature = "tls"))]
-    return; // Skip if TLS feature is not enabled
 
-    #[cfg(feature = "tls")]
-    {
-        use asupersync::tls::{TlsConnector, TlsConnectorBuilder};
-        use asupersync::tls::error::TlsError;
-        use std::time::Duration;
+    let domain = if input.domain.len() > MAX_DOMAIN_LEN {
+        &input.domain[..MAX_DOMAIN_LEN]
+    } else {
+        &input.domain
+    };
 
-        let domain = if input.domain.len() > MAX_DOMAIN_LEN {
-            &input.domain[..MAX_DOMAIN_LEN]
-        } else {
-            &input.domain
-        };
+    // Skip empty domains as they're trivially invalid
+    if domain.is_empty() {
+        return;
+    }
 
-        // Skip empty domains as they're trivially invalid
-        if domain.is_empty() {
-            return;
+    // Create TLS connector with fuzzing configuration
+    let connector_result = create_test_connector(&input.config);
+    let connector = match connector_result {
+        Ok(c) => c,
+        Err(_) => return, // Invalid configuration, skip
+    };
+
+    // Create mock I/O with limited read data
+    let limited_behavior = MockIoBehavior {
+        read_data: input.io_behavior.read_data
+            .into_iter()
+            .take(MAX_READ_CHUNKS)
+            .collect(),
+        ..input.io_behavior
+    };
+
+    let mock_io = MockIo::new(limited_behavior);
+
+    // Test domain validation first (this can fail gracefully)
+    let domain_validation_result = TlsConnector::validate_domain(domain);
+
+    // Create a simple runtime for async execution
+    let rt = match simple_runtime() {
+        Ok(rt) => rt,
+        Err(_) => return, // Skip if runtime creation fails
+    };
+
+    let connection_result = rt.block_on(async {
+        // Add timeout to prevent hangs in fuzzing
+        let timeout_duration = Duration::from_millis(500);
+        // Use asupersync timeout with current time
+        let now = asupersync::time::wall_now();
+        match asupersync::time::timeout(now, timeout_duration, connector.connect(domain, mock_io)).await {
+            Ok(result) => Some(result),
+            Err(_) => None, // Timeout
         }
+    });
 
-        // Create TLS connector with fuzzing configuration
-        let connector_result = create_test_connector(&input.config);
-        let connector = match connector_result {
-            Ok(c) => c,
-            Err(_) => return, // Invalid configuration, skip
-        };
-
-        // Create mock I/O with limited read data
-        let limited_behavior = MockIoBehavior {
-            read_data: input.io_behavior.read_data
-                .into_iter()
-                .take(MAX_READ_CHUNKS)
-                .collect(),
-            ..input.io_behavior
-        };
-
-        let mock_io = MockIo::new(limited_behavior);
-
-        // Test domain validation first (this can fail gracefully)
-        let domain_validation_result = TlsConnector::validate_domain(domain);
-
-        // Create a simple runtime for async execution
-        let rt = match simple_runtime() {
-            Ok(rt) => rt,
-            Err(_) => return, // Skip if runtime creation fails
-        };
-
-        let connection_result = rt.block_on(async {
-            // Add timeout to prevent hangs in fuzzing
-            let timeout_duration = Duration::from_millis(500);
-            match tokio::time::timeout(
-                timeout_duration,
-                connector.connect(domain, mock_io)
-            ).await {
-                Ok(result) => Some(result),
-                Err(_) => None, // Timeout
-            }
-        });
-
-        // Verify results make sense
-        match connection_result {
-            Some(Ok(_tls_stream)) => {
-                // Handshake succeeded - domain should have been valid
-                assert!(domain_validation_result.is_ok(),
-                    "Handshake succeeded but domain validation failed for: {:?}", domain);
-            },
-            Some(Err(tls_error)) => {
-                // Handshake failed - verify error is reasonable
-                verify_tls_error(&tls_error, domain, &input.config);
-            },
-            None => {
-                // Timeout occurred - acceptable for fuzzing scenarios
-            }
+    // Verify results make sense
+    match connection_result {
+        Some(Ok(_tls_stream)) => {
+            // Handshake succeeded - domain should have been valid
+            assert!(domain_validation_result.is_ok(),
+                "Handshake succeeded but domain validation failed for: {:?}", domain);
+        },
+        Some(Err(tls_error)) => {
+            // Handshake failed - verify error is reasonable
+            verify_tls_error(&tls_error, domain, &input.config);
+        },
+        None => {
+            // Timeout occurred - acceptable for fuzzing scenarios
         }
     }
 });
 
-#[cfg(feature = "tls")]
-fn create_test_connector(config: &ConnectorConfig) -> Result<asupersync::tls::TlsConnector, asupersync::tls::error::TlsError> {
-    let mut builder = asupersync::tls::TlsConnectorBuilder::new();
+fn create_test_connector(config: &ConnectorConfig) -> Result<TlsConnector, TlsError> {
+    use asupersync::tls::TlsConnectorBuilder;
+    let mut builder = TlsConnectorBuilder::new();
 
     // Add root certificates if requested
     if config.use_webpki_roots {
-        builder = builder.with_webpki_roots()?;
+        builder = builder.with_webpki_roots();
     }
 
     // Configure ALPN protocols
@@ -318,29 +310,28 @@ fn create_test_connector(config: &ConnectorConfig) -> Result<asupersync::tls::Tl
             })
             .collect();
 
-        builder = builder.alpn_protocols(protocols)?;
+        builder = builder.alpn_protocols(protocols);
 
         if config.alpn_required {
-            builder = builder.alpn_required()?;
+            builder = builder.require_alpn();
         }
     }
 
     // Configure SNI
     if config.disable_sni {
-        builder = builder.disable_sni()?;
+        builder = builder.disable_sni();
     }
 
     // Configure timeout
     if config.timeout_ms > 0 {
         let timeout = Duration::from_millis(config.timeout_ms as u64);
-        builder = builder.handshake_timeout(timeout)?;
+        builder = builder.handshake_timeout(timeout);
     }
 
     builder.build()
 }
 
-#[cfg(feature = "tls")]
-fn verify_tls_error(error: &asupersync::tls::error::TlsError, domain: &str, config: &ConnectorConfig) {
+fn verify_tls_error(error: &TlsError, domain: &str, config: &ConnectorConfig) {
     match error {
         TlsError::InvalidDnsName(name) => {
             assert_eq!(name, domain, "Invalid DNS name error should match input domain");
@@ -374,26 +365,14 @@ fn verify_tls_error(error: &asupersync::tls::error::TlsError, domain: &str, conf
         TlsError::PinMismatch { .. } => {
             // Certificate errors are expected with mock transport
         },
-        #[cfg(feature = "tls")]
         TlsError::Rustls(_) => {
             // Rustls errors are expected with malformed TLS data
         },
     }
 }
 
-/// Create a simple tokio runtime for async execution
-fn simple_runtime() -> Result<tokio::runtime::Runtime, tokio::runtime::Error> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
+/// Create a simple runtime for async execution
+fn simple_runtime() -> Result<asupersync::runtime::Runtime, asupersync::error::Error> {
+    asupersync::runtime::RuntimeBuilder::current_thread().build()
 }
 
-#[cfg(not(feature = "tls"))]
-fn create_test_connector(_config: &ConnectorConfig) -> Result<(), ()> {
-    Err(()) // Always fail when TLS is disabled
-}
-
-#[cfg(not(feature = "tls"))]
-fn verify_tls_error(_error: &(), _domain: &str, _config: &ConnectorConfig) {
-    // No-op when TLS is disabled
-}
