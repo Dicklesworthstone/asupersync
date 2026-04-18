@@ -1105,3 +1105,10 @@ path = "fuzz_targets/bytes_mut_ops.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "codec_raptorq"
+path = "fuzz_targets/codec_raptorq.rs"
+test = false
+doc = false
+bench = false
