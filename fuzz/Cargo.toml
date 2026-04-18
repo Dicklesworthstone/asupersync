@@ -1133,3 +1133,10 @@ path = "fuzz_targets/h2_headers.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bytes_codec"
+path = "fuzz_targets/bytes_codec.rs"
+test = false
+doc = false
+bench = false
