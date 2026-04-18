@@ -1182,3 +1182,10 @@ path = "fuzz_targets/hpack_huffman_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "web_extract"
+path = "fuzz_targets/web_extract.rs"
+test = false
+doc = false
+bench = false
