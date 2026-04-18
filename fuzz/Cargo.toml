@@ -592,6 +592,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "gf256_simd_edge_cases"
+path = "fuzz_targets/gf256_simd_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "consistent_hash_ring"
 path = "fuzz_targets/consistent_hash_ring.rs"
 test = false
