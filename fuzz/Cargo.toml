@@ -456,6 +456,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_raptorq_rfc6330"
+path = "fuzz_targets/raptorq_rfc6330.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_hpack_eviction"
 path = "fuzz_targets/hpack_eviction.rs"
 test = false
@@ -892,6 +899,13 @@ bench = false
 [[bin]]
 name = "h2_continuation"
 path = "fuzz_targets/h2_continuation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "symbol_auth"
+path = "fuzz_targets/symbol_auth.rs"
 test = false
 doc = false
 bench = false
