@@ -667,3 +667,10 @@ path = "fuzz_targets/tcp_accept_loop_fuzz.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "framed_read_fuzz"
+path = "fuzz_targets/framed_read_fuzz.rs"
+test = false
+doc = false
+bench = false
