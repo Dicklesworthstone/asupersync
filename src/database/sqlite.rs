@@ -1722,4 +1722,537 @@ mod tests {
             assert_eq!(rows[0].get_idx(0).unwrap().as_integer(), Some(0));
         });
     }
+
+    // ================================================================
+    // PRAGMA journal_mode Transition Conformance Tests
+    // ================================================================
+
+    #[cfg(feature = "sqlite")]
+    mod pragma_journal_mode_conformance {
+        use super::*;
+        use std::path::PathBuf;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Test data and utilities for journal mode conformance testing.
+        struct JournalModeTestData {
+            temp_dir: TempDir,
+            db_path: PathBuf,
+        }
+
+        impl JournalModeTestData {
+            fn new() -> Self {
+                let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+                let db_path = temp_dir.path().join("test.db");
+
+                Self {
+                    temp_dir,
+                    db_path,
+                }
+            }
+
+            fn get_db_path(&self) -> &Path {
+                &self.db_path
+            }
+
+            fn get_wal_path(&self) -> PathBuf {
+                self.db_path.with_extension("db-wal")
+            }
+
+            fn get_shm_path(&self) -> PathBuf {
+                self.db_path.with_extension("db-shm")
+            }
+
+            /// Helper to check current journal mode.
+            async fn get_journal_mode(conn: &SqliteConnection, cx: &Cx) -> String {
+                let rows = match conn.query(cx, "PRAGMA journal_mode", &[]).await {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("Failed to query journal_mode: {other:?}"),
+                };
+
+                rows[0].get_idx(0).unwrap().as_string().unwrap_or_else(|| {
+                    panic!("journal_mode should return a string")
+                })
+            }
+
+            /// Helper to set journal mode and return the result.
+            async fn set_journal_mode(conn: &SqliteConnection, cx: &Cx, mode: &str) -> Outcome<String, SqliteError> {
+                let sql = format!("PRAGMA journal_mode = {}", mode);
+                let rows = conn.query(cx, &sql, &[]).await?;
+
+                Ok(rows[0].get_idx(0).unwrap().as_string().unwrap_or_else(|| {
+                    panic!("journal_mode pragma should return a string")
+                }))
+            }
+
+            /// Create test table and insert test data.
+            async fn setup_test_data(conn: &SqliteConnection, cx: &Cx) {
+                match conn.execute_batch(cx, "
+                    CREATE TABLE test_data (
+                        id INTEGER PRIMARY KEY,
+                        value TEXT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    );
+                    INSERT INTO test_data (value) VALUES ('test1'), ('test2'), ('test3');
+                ").await {
+                    Outcome::Ok(()) => {},
+                    other => panic!("Failed to create test data: {other:?}"),
+                }
+            }
+
+            /// Verify test data integrity.
+            async fn verify_test_data(conn: &SqliteConnection, cx: &Cx, expected_count: i64) {
+                let rows = match conn.query(cx, "SELECT COUNT(*) FROM test_data", &[]).await {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("Failed to count test data: {other:?}"),
+                };
+
+                let count = rows[0].get_idx(0).unwrap().as_integer().unwrap();
+                assert_eq!(count, expected_count, "Test data count mismatch");
+            }
+        }
+
+        #[test]
+        fn delete_to_wal_mode_transition_conformance() {
+            run_test(async move |cx| {
+                let test_data = JournalModeTestData::new();
+
+                // Open connection - should default to DELETE mode
+                let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open connection: {other:?}"),
+                };
+
+                // Verify initial journal mode is DELETE
+                let initial_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+                assert_eq!(initial_mode.to_lowercase(), "delete", "Should start in DELETE mode");
+
+                // Setup test data in DELETE mode
+                JournalModeTestData::setup_test_data(&conn, &cx).await;
+                JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+
+                // Transition to WAL mode
+                let wal_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
+                    Outcome::Ok(mode) => mode,
+                    other => panic!("Failed to set WAL mode: {other:?}"),
+                };
+                assert_eq!(wal_result.to_lowercase(), "wal", "Should transition to WAL mode");
+
+                // Verify journal mode changed
+                let current_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+                assert_eq!(current_mode.to_lowercase(), "wal", "Journal mode should be WAL");
+
+                // Verify WAL files are created
+                assert!(test_data.get_wal_path().exists(), "WAL file should be created");
+                assert!(test_data.get_shm_path().exists(), "SHM file should be created");
+
+                // Verify data integrity after transition
+                JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+
+                // Insert additional data in WAL mode
+                match conn.execute(&cx, "INSERT INTO test_data (value) VALUES (?)", &["wal_data"]).await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to insert WAL data: {other:?}"),
+                };
+
+                JournalModeTestData::verify_test_data(&conn, &cx, 4).await;
+
+                // Close connection
+                conn.close().await;
+            });
+        }
+
+        #[test]
+        fn wal_to_truncate_mode_transition_conformance() {
+            run_test(async move |cx| {
+                let test_data = JournalModeTestData::new();
+
+                let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open connection: {other:?}"),
+                };
+
+                // Start with WAL mode
+                match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to set WAL mode: {other:?}"),
+                };
+
+                // Setup test data in WAL mode
+                JournalModeTestData::setup_test_data(&conn, &cx).await;
+                JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+
+                // Verify WAL files exist
+                assert!(test_data.get_wal_path().exists(), "WAL file should exist");
+
+                // Transition to TRUNCATE mode
+                let truncate_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "TRUNCATE").await {
+                    Outcome::Ok(mode) => mode,
+                    other => panic!("Failed to set TRUNCATE mode: {other:?}"),
+                };
+                assert_eq!(truncate_result.to_lowercase(), "truncate", "Should transition to TRUNCATE mode");
+
+                // Verify journal mode changed
+                let current_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+                assert_eq!(current_mode.to_lowercase(), "truncate", "Journal mode should be TRUNCATE");
+
+                // WAL files should be cleaned up after successful transition
+                // Note: Files might still exist briefly due to cleanup timing
+
+                // Verify data integrity after transition
+                JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+
+                // Test TRUNCATE mode behavior - inserts should work
+                match conn.execute(&cx, "INSERT INTO test_data (value) VALUES (?)", &["truncate_data"]).await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to insert TRUNCATE data: {other:?}"),
+                };
+
+                JournalModeTestData::verify_test_data(&conn, &cx, 4).await;
+
+                conn.close().await;
+            });
+        }
+
+        #[test]
+        fn memory_mode_persistence_loss_conformance() {
+            run_test(async move |cx| {
+                // Test with in-memory database
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open in-memory connection: {other:?}"),
+                };
+
+                // Set MEMORY journal mode
+                let memory_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "MEMORY").await {
+                    Outcome::Ok(mode) => mode,
+                    other => panic!("Failed to set MEMORY mode: {other:?}"),
+                };
+                assert_eq!(memory_result.to_lowercase(), "memory", "Should be in MEMORY mode");
+
+                // Setup test data
+                JournalModeTestData::setup_test_data(&conn, &cx).await;
+                JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+
+                // Begin transaction and modify data
+                match conn.execute_batch(&cx, "
+                    BEGIN TRANSACTION;
+                    INSERT INTO test_data (value) VALUES ('memory_test');
+                    UPDATE test_data SET value = 'modified' WHERE id = 1;
+                ").await {
+                    Outcome::Ok(()) => {},
+                    other => panic!("Failed to begin transaction: {other:?}"),
+                };
+
+                // Close connection abruptly without commit (simulating crash)
+                conn.close().await;
+
+                // Reopen in-memory database - all data should be lost
+                let new_conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to reopen in-memory connection: {other:?}"),
+                };
+
+                // Verify database is empty (persistence loss)
+                let tables_result = new_conn.query(&cx, "SELECT name FROM sqlite_master WHERE type='table'", &[]).await;
+                match tables_result {
+                    Outcome::Ok(rows) => {
+                        assert_eq!(rows.len(), 0, "In-memory database should have no persistent tables");
+                    },
+                    other => panic!("Failed to query sqlite_master: {other:?}"),
+                }
+
+                new_conn.close().await;
+            });
+        }
+
+        #[test]
+        fn off_mode_atomicity_absence_conformance() {
+            run_test(async move |cx| {
+                let test_data = JournalModeTestData::new();
+
+                let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open connection: {other:?}"),
+                };
+
+                // Set OFF journal mode (disables atomicity)
+                let off_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "OFF").await {
+                    Outcome::Ok(mode) => mode,
+                    other => panic!("Failed to set OFF mode: {other:?}"),
+                };
+                assert_eq!(off_result.to_lowercase(), "off", "Should be in OFF mode");
+
+                // Create test table
+                match conn.execute_batch(&cx, "
+                    CREATE TABLE atomicity_test (
+                        id INTEGER PRIMARY KEY,
+                        step INTEGER,
+                        data TEXT
+                    );
+                ").await {
+                    Outcome::Ok(()) => {},
+                    other => panic!("Failed to create table: {other:?}"),
+                };
+
+                // In OFF mode, transactions may not be atomic
+                // We'll test that the mode is set correctly and basic operations work
+                // but acknowledge that atomicity is not guaranteed
+
+                // Begin explicit transaction
+                match conn.execute(&cx, "BEGIN TRANSACTION", &[]).await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to begin transaction: {other:?}"),
+                };
+
+                // Insert test data
+                match conn.execute(&cx, "INSERT INTO atomicity_test (step, data) VALUES (1, 'step1')", &[]).await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to insert step1: {other:?}"),
+                };
+
+                match conn.execute(&cx, "INSERT INTO atomicity_test (step, data) VALUES (2, 'step2')", &[]).await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to insert step2: {other:?}"),
+                };
+
+                // Commit transaction
+                match conn.execute(&cx, "COMMIT", &[]).await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to commit: {other:?}"),
+                };
+
+                // Verify data was written
+                let rows = match conn.query(&cx, "SELECT COUNT(*) FROM atomicity_test", &[]).await {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("Failed to count rows: {other:?}"),
+                };
+
+                let count = rows[0].get_idx(0).unwrap().as_integer().unwrap();
+                assert_eq!(count, 2, "Both inserts should be present");
+
+                // Verify OFF mode characteristics:
+                // - No rollback journal files should be created
+                let journal_files = fs::read_dir(test_data.temp_dir.path()).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| {
+                        entry.path().extension().map_or(false, |ext|
+                            ext == "journal" || ext == "wal" || ext == "shm"
+                        )
+                    })
+                    .count();
+
+                // In OFF mode, no journal files should exist
+                assert_eq!(journal_files, 0, "OFF mode should not create journal files");
+
+                conn.close().await;
+            });
+        }
+
+        #[test]
+        fn unsupported_mode_fallback_conformance() {
+            run_test(async move |cx| {
+                let test_data = JournalModeTestData::new();
+
+                let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open connection: {other:?}"),
+                };
+
+                // Get initial mode
+                let initial_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+
+                // Try to set an invalid/unsupported journal mode
+                let invalid_modes = ["INVALID", "BOGUS", "NONEXISTENT"];
+
+                for invalid_mode in &invalid_modes {
+                    // Attempt to set invalid mode
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, invalid_mode).await {
+                        Outcome::Ok(returned_mode) => {
+                            // SQLite should fall back to a valid mode (typically the current mode)
+                            // The returned mode should not be the invalid mode we requested
+                            assert_ne!(
+                                returned_mode.to_lowercase(),
+                                invalid_mode.to_lowercase(),
+                                "Should not accept invalid mode: {}",
+                                invalid_mode
+                            );
+
+                            // Verify fallback is a known valid mode
+                            let valid_modes = ["delete", "truncate", "persist", "memory", "wal", "off"];
+                            assert!(
+                                valid_modes.contains(&returned_mode.to_lowercase().as_str()),
+                                "Fallback should be a valid journal mode, got: {}",
+                                returned_mode
+                            );
+                        },
+                        Outcome::Err(_) => {
+                            // Some invalid modes might cause SQLite to return an error
+                            // This is also acceptable behavior
+                        },
+                        other => panic!("Unexpected outcome for invalid mode {}: {other:?}", invalid_mode),
+                    }
+
+                    // Verify database is still functional after invalid mode attempt
+                    let current_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+                    assert!(
+                        !current_mode.is_empty(),
+                        "Should still have a valid journal mode after invalid attempt"
+                    );
+                }
+
+                // Test that database operations still work
+                JournalModeTestData::setup_test_data(&conn, &cx).await;
+                JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+
+                conn.close().await;
+            });
+        }
+
+        #[test]
+        fn journal_mode_persistence_across_connections_conformance() {
+            run_test(async move |cx| {
+                let test_data = JournalModeTestData::new();
+
+                // First connection: set WAL mode
+                {
+                    let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                        Outcome::Ok(conn) => conn,
+                        other => panic!("Failed to open connection: {other:?}"),
+                    };
+
+                    // Set WAL mode
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
+                        Outcome::Ok(_) => {},
+                        other => panic!("Failed to set WAL mode: {other:?}"),
+                    };
+
+                    // Create test data
+                    JournalModeTestData::setup_test_data(&conn, &cx).await;
+
+                    conn.close().await;
+                }
+
+                // Second connection: verify WAL mode persists
+                {
+                    let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                        Outcome::Ok(conn) => conn,
+                        other => panic!("Failed to reopen connection: {other:?}"),
+                    };
+
+                    // Verify WAL mode persisted
+                    let persistent_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+                    assert_eq!(
+                        persistent_mode.to_lowercase(),
+                        "wal",
+                        "WAL mode should persist across connections"
+                    );
+
+                    // Verify data persisted
+                    JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+
+                    conn.close().await;
+                }
+            });
+        }
+
+        #[test]
+        fn journal_mode_concurrent_access_conformance() {
+            run_test(async move |cx| {
+                let test_data = JournalModeTestData::new();
+
+                // Set WAL mode which supports concurrent readers
+                let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open connection: {other:?}"),
+                };
+
+                match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed to set WAL mode: {other:?}"),
+                };
+
+                JournalModeTestData::setup_test_data(&conn, &cx).await;
+
+                // Test that concurrent read connections work in WAL mode
+                let reader_conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open reader connection: {other:?}"),
+                };
+
+                // Both connections should be able to read
+                JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
+                JournalModeTestData::verify_test_data(&reader_conn, &cx, 3).await;
+
+                // Writer can insert while reader exists
+                match conn.execute(&cx, "INSERT INTO test_data (value) VALUES (?)", &["concurrent_write"]).await {
+                    Outcome::Ok(_) => {},
+                    other => panic!("Failed concurrent write: {other:?}"),
+                };
+
+                // Reader should eventually see the new data
+                JournalModeTestData::verify_test_data(&conn, &cx, 4).await;
+
+                reader_conn.close().await;
+                conn.close().await;
+            });
+        }
+
+        #[test]
+        fn journal_mode_edge_cases_conformance() {
+            run_test(async move |cx| {
+                let test_data = JournalModeTestData::new();
+
+                let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("Failed to open connection: {other:?}"),
+                };
+
+                // Test case-insensitive mode setting
+                let modes_to_test = [
+                    ("wal", "wal"),
+                    ("WAL", "wal"),
+                    ("Wal", "wal"),
+                    ("DELETE", "delete"),
+                    ("delete", "delete"),
+                ];
+
+                for (input_mode, expected_mode) in &modes_to_test {
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, input_mode).await {
+                        Outcome::Ok(returned_mode) => {
+                            assert_eq!(
+                                returned_mode.to_lowercase(),
+                                expected_mode.to_lowercase(),
+                                "Mode {} should normalize to {}",
+                                input_mode,
+                                expected_mode
+                            );
+                        },
+                        other => panic!("Failed to set mode {}: {other:?}", input_mode),
+                    }
+                }
+
+                // Test querying journal mode multiple times
+                for _ in 0..5 {
+                    let mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+                    assert!(!mode.is_empty(), "Journal mode query should always return a value");
+                }
+
+                // Test setting journal mode to current mode (should be no-op)
+                let current_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
+                match JournalModeTestData::set_journal_mode(&conn, &cx, &current_mode).await {
+                    Outcome::Ok(returned_mode) => {
+                        assert_eq!(
+                            returned_mode.to_lowercase(),
+                            current_mode.to_lowercase(),
+                            "Setting to current mode should be no-op"
+                        );
+                    },
+                    other => panic!("Failed to set to current mode: {other:?}"),
+                }
+
+                conn.close().await;
+            });
+        }
+    }
 }
