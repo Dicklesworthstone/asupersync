@@ -220,11 +220,21 @@ mod tests {
 
     /// A layer that multiplies the response by a factor.
     #[derive(Clone)]
-    struct MultiplyLayer(u32);
+    struct MultiplyLayer {
+        factor: u32,
+        id: u32,
+    }
+
+    impl MultiplyLayer {
+        fn new(factor: u32, id: u32) -> Self {
+            Self { factor, id }
+        }
+    }
 
     struct MultiplyService<S> {
         inner: S,
         factor: u32,
+        id: u32,
     }
 
     impl<S> Layer<S> for MultiplyLayer {
@@ -233,7 +243,8 @@ mod tests {
         fn layer(&self, inner: S) -> Self::Service {
             MultiplyService {
                 inner,
-                factor: self.0,
+                factor: self.factor,
+                id: self.id,
             }
         }
     }
@@ -644,81 +655,6 @@ mod tests {
         }
     }
 
-    /// Multiply layer that multiplies the response by a factor
-    #[derive(Clone)]
-    struct MultiplyLayer {
-        factor: u32,
-        id: u32,
-    }
-
-    impl MultiplyLayer {
-        fn new(factor: u32, id: u32) -> Self {
-            Self { factor, id }
-        }
-    }
-
-    impl<S> Layer<S> for MultiplyLayer
-    where
-        S: Service<u32, Response = u32>,
-        S::Future: Unpin,
-    {
-        type Service = MultiplyService<S>;
-
-        fn layer(&self, inner: S) -> Self::Service {
-            MultiplyService {
-                inner,
-                factor: self.factor,
-                id: self.id,
-            }
-        }
-    }
-
-    struct MultiplyService<S> {
-        inner: S,
-        factor: u32,
-        id: u32,
-    }
-
-    impl<S> Service<u32> for MultiplyService<S>
-    where
-        S: Service<u32, Response = u32>,
-        S::Future: Unpin,
-    {
-        type Response = u32;
-        type Error = S::Error;
-        type Future = MultiplyFuture<S::Future>;
-
-        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            self.inner.poll_ready(cx)
-        }
-
-        fn call(&mut self, req: u32) -> Self::Future {
-            MultiplyFuture {
-                inner: self.inner.call(req),
-                factor: self.factor,
-            }
-        }
-    }
-
-    struct MultiplyFuture<F> {
-        inner: F,
-        factor: u32,
-    }
-
-    impl<F> Future for MultiplyFuture<F>
-    where
-        F: Future<Output = Result<u32, std::convert::Infallible>> + Unpin,
-    {
-        type Output = F::Output;
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            match Pin::new(&mut self.inner).poll(cx) {
-                Poll::Ready(Ok(value)) => Poll::Ready(Ok(value * self.factor)),
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                Poll::Pending => Poll::Pending,
-            }
-        }
-    }
 
     /// Helper to execute a service call and get the result
     fn execute_service_call<S>(mut service: S, request: u32) -> S::Response

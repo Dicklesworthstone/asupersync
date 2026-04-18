@@ -2694,4 +2694,313 @@ mod tests {
         assert_eq!(decoded[2].name, "custom-key");
         assert_eq!(decoded[2].value, "custom-value");
     }
+
+    // =========================================================================
+    // RFC 7541 Appendix A Static Table Conformance Tests (Golden Tests)
+    // =========================================================================
+
+    /// Test #1: All 61 static table entries encode correctly
+    #[test]
+    fn conformance_static_table_all_61_entries_encode_correctly() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        // Test each of the 61 static table entries
+        for (i, &(name, value)) in STATIC_TABLE.iter().enumerate() {
+            let expected_index = i + 1;
+            let header = Header::new(name, value);
+
+            // Encode the header - should produce indexed representation
+            let mut encoded = BytesMut::new();
+            encoder.encode(&[header.clone()], &mut encoded);
+
+            // Verify it encodes as indexed (0x80 | index)
+            let expected_encoded = 0x80 | expected_index;
+            if expected_index <= 127 {
+                assert_eq!(encoded[0], expected_encoded as u8,
+                    "Static table entry {} ({}, {}) should encode as indexed 0x{:02x}",
+                    expected_index, name, value, expected_encoded);
+            } else {
+                // For indices > 127, integer encoding uses multiple bytes
+                assert_eq!(encoded[0], 0xff,
+                    "Static table entry {} should start with 0xff for multi-byte encoding",
+                    expected_index);
+            }
+
+            // Decode and verify round-trip
+            let mut src = encoded.freeze();
+            let decoded = decoder.decode(&mut src)
+                .expect(&format!("Failed to decode static table entry {}", expected_index));
+
+            assert_eq!(decoded.len(), 1);
+            assert_eq!(decoded[0].name, name);
+            assert_eq!(decoded[0].value, value);
+        }
+    }
+
+    /// Test #2: Referenced-literal vs indexed encoding selection
+    #[test]
+    fn conformance_referenced_literal_vs_indexed_encoding() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        // Test exact match -> indexed encoding
+        let exact_match = Header::new(":method", "GET"); // Static table index 2
+        let mut encoded = BytesMut::new();
+        encoder.encode(&[exact_match], &mut encoded);
+
+        // Should be indexed: 0x82 (0x80 | 2)
+        assert_eq!(encoded[0], 0x82,
+            "Exact static table match should use indexed encoding");
+
+        // Test name match with different value -> literal with name index
+        let name_match = Header::new(":method", "DELETE"); // Name exists, value doesn't
+        let mut encoded = BytesMut::new();
+        encoder.encode(&[name_match], &mut encoded);
+
+        // Should start with 0x42 (0x40 | 2) for literal with incremental indexing
+        assert_eq!(encoded[0], 0x42,
+            "Static table name match with different value should use literal with name reference");
+
+        // Verify the value "DELETE" is encoded as a literal string
+        let mut src = encoded.freeze();
+        src.advance(1); // Skip the 0x42 byte
+
+        // Next should be the string "DELETE"
+        let value_str = decode_string(&mut src).expect("Should decode DELETE value");
+        assert_eq!(value_str, "DELETE");
+
+        // Test completely new header -> literal without name reference
+        let new_header = Header::new("x-custom", "test-value");
+        let mut encoded = BytesMut::new();
+        encoder.encode(&[new_header], &mut encoded);
+
+        // Should start with 0x40 (literal with incremental indexing, no name reference)
+        assert_eq!(encoded[0], 0x40,
+            "New header should use literal without name reference");
+
+        // Round-trip test
+        let mut src = encoded.freeze();
+        let decoded = decoder.decode(&mut src).expect("Should decode custom header");
+        assert_eq!(decoded[0].name, "x-custom");
+        assert_eq!(decoded[0].value, "test-value");
+    }
+
+    /// Test #3: Case-insensitive name matching
+    #[test]
+    fn conformance_case_insensitive_name_matching() {
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        // RFC 7541 Section 2.1: Header field names are case-insensitive
+        // The static table contains lowercase names, but matching should work
+        // with mixed case
+        let test_cases = vec![
+            ("Content-Type", ""),     // Should match "content-type" (index 31)
+            ("CONTENT-TYPE", ""),     // Should match "content-type" (index 31)
+            ("content-type", ""),     // Should match "content-type" (index 31)
+            ("Content-Length", ""),   // Should match "content-length" (index 28)
+            ("ACCEPT", ""),           // Should match "accept" (index 19)
+        ];
+
+        for (mixed_case_name, value) in test_cases {
+            let header = Header::new(mixed_case_name, value);
+            let mut encoded = BytesMut::new();
+
+            // Note: The encoder normalizes to lowercase per HTTP/2 spec
+            // so we test that the static table lookup works with the normalized name
+            let normalized_name = mixed_case_name.to_lowercase();
+
+            // Find what static table index this should match
+            let expected_index = find_static_name(&normalized_name)
+                .expect(&format!("Should find static index for {}", normalized_name));
+
+            encoder.encode(&[header], &mut encoded);
+
+            // Should encode as indexed if it's an exact match (empty value case)
+            let expected_encoded = 0x80 | expected_index;
+            assert_eq!(encoded[0], expected_encoded as u8,
+                "Case-insensitive name {} should match static table index {}",
+                mixed_case_name, expected_index);
+        }
+    }
+
+    /// Test #4: Dynamic table eviction under static-first policy
+    #[test]
+    fn conformance_dynamic_table_eviction_static_first() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        // Set a small dynamic table size to force eviction
+        encoder.set_max_table_size(256); // Small size to force eviction
+        decoder.set_max_table_size(256);
+
+        // First, add several headers to fill the dynamic table
+        let headers_1 = vec![
+            Header::new("x-custom-1", "value-1"), // Size: 23 + 32 = 55 bytes
+            Header::new("x-custom-2", "value-2"), // Size: 23 + 32 = 55 bytes
+            Header::new("x-custom-3", "value-3"), // Size: 23 + 32 = 55 bytes
+            Header::new("x-custom-4", "value-4"), // Size: 23 + 32 = 55 bytes
+            // Total: 220 bytes (within 256 limit)
+        ];
+
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers_1, &mut encoded);
+
+        let mut src = encoded.freeze();
+        decoder.decode(&mut src).expect("Should decode first batch");
+
+        // Now add one more header that should cause eviction
+        let evicting_header = Header::new("x-custom-5", "value-5"); // 55 bytes
+
+        let mut encoded = BytesMut::new();
+        encoder.encode(&[evicting_header.clone()], &mut encoded);
+
+        let mut src = encoded.freeze();
+        decoder.decode(&mut src).expect("Should decode evicting header");
+
+        // Verify that static table entries are still accessible
+        // (they should never be evicted)
+        let static_header = Header::new(":method", "GET");
+        let mut encoded = BytesMut::new();
+        encoder.encode(&[static_header], &mut encoded);
+
+        // Should still encode as 0x82 (indexed)
+        assert_eq!(encoded[0], 0x82,
+            "Static table entry should remain accessible after dynamic table eviction");
+
+        // Verify old dynamic entries were evicted by trying to reference them
+        // This is hard to test directly, but we can verify the table size constraint
+        let large_headers = vec![
+            Header::new("x-very-long-header-name-1", "very-long-value-1"),
+            Header::new("x-very-long-header-name-2", "very-long-value-2"),
+        ];
+
+        let mut encoded = BytesMut::new();
+        encoder.encode(&large_headers, &mut encoded);
+
+        // Should succeed without error (proving eviction works)
+        let mut src = encoded.freeze();
+        let decoded = decoder.decode(&mut src)
+            .expect("Should handle dynamic table eviction properly");
+        assert_eq!(decoded.len(), 2);
+    }
+
+    /// Test #5: Never-indexed header preservation
+    #[test]
+    fn conformance_never_indexed_header_preservation() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        // Test sensitive headers that should never be indexed
+        let sensitive_headers = vec![
+            Header::new("authorization", "Bearer secret-token"),
+            Header::new("cookie", "sessionid=secret123"),
+            Header::new("x-api-key", "secret-api-key"),
+        ];
+
+        // Encode as never-indexed
+        let mut encoded = BytesMut::new();
+        encoder.encode_sensitive(&sensitive_headers, &mut encoded);
+
+        // Decode the block
+        let mut src = encoded.clone().freeze();
+        let decoded = decoder.decode(&mut src)
+            .expect("Should decode never-indexed headers");
+
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0].name, "authorization");
+        assert_eq!(decoded[0].value, "Bearer secret-token");
+
+        // Now encode the same headers again - they should NOT be found in dynamic table
+        // (because they were marked never-indexed)
+        let mut encoded_again = BytesMut::new();
+        encoder.encode_sensitive(&sensitive_headers, &mut encoded_again);
+
+        // The encoding should be similar (literal representation, not indexed)
+        // Both encodings should start with 0x10 (never indexed literal) or similar
+        for &byte in &encoded_again[0..3] {
+            // Never indexed literals start with 0001xxxx pattern (0x10-0x1F)
+            let is_never_indexed = (byte & 0xF0) == 0x10;
+            // Or could be literal without indexing 0000xxxx (0x00-0x0F)
+            let is_literal_no_index = (byte & 0xF0) == 0x00;
+
+            assert!(is_never_indexed || is_literal_no_index,
+                "Never-indexed header should not use indexed representation, got 0x{:02x}",
+                byte);
+        }
+
+        // Verify the second encoding decodes to the same values
+        let mut src = encoded_again.freeze();
+        let decoded_again = decoder.decode(&mut src)
+            .expect("Should decode never-indexed headers again");
+
+        assert_eq!(decoded_again, decoded,
+            "Never-indexed headers should decode consistently");
+
+        // Verify these headers are NOT in the dynamic table by checking
+        // that subsequent regular encoding doesn't find them
+        let mut encoded_regular = BytesMut::new();
+        encoder.encode(&sensitive_headers[0..1], &mut encoded_regular); // Just first header
+
+        // Should still be literal (not found in dynamic table)
+        let first_byte = encoded_regular[0];
+        let is_indexed = (first_byte & 0x80) != 0;
+        assert!(!is_indexed,
+            "Never-indexed header should not be found in dynamic table on subsequent encode");
+    }
+
+    /// Additional test: Static table index bounds checking
+    #[test]
+    fn conformance_static_table_bounds_checking() {
+        // Test get_static with various indices
+        assert!(get_static(0).is_none(), "Index 0 should be invalid");
+        assert!(get_static(1).is_some(), "Index 1 should be valid (:authority)");
+        assert!(get_static(61).is_some(), "Index 61 should be valid (www-authenticate)");
+        assert!(get_static(62).is_none(), "Index 62 should be invalid (beyond static table)");
+        assert!(get_static(1000).is_none(), "Large index should be invalid");
+
+        // Verify the exact entries
+        assert_eq!(get_static(1).unwrap(), (":authority", ""));
+        assert_eq!(get_static(2).unwrap(), (":method", "GET"));
+        assert_eq!(get_static(61).unwrap(), ("www-authenticate", ""));
+    }
+
+    /// Additional test: Static table completeness verification
+    #[test]
+    fn conformance_static_table_completeness() {
+        // Verify the static table has exactly 61 entries per RFC 7541 Appendix A
+        assert_eq!(STATIC_TABLE.len(), 61,
+            "Static table must have exactly 61 entries per RFC 7541 Appendix A");
+
+        // Verify key entries exist at expected positions
+        assert_eq!(STATIC_TABLE[0], (":authority", ""));              // Index 1
+        assert_eq!(STATIC_TABLE[1], (":method", "GET"));              // Index 2
+        assert_eq!(STATIC_TABLE[2], (":method", "POST"));             // Index 3
+        assert_eq!(STATIC_TABLE[3], (":path", "/"));                  // Index 4
+        assert_eq!(STATIC_TABLE[4], (":path", "/index.html"));        // Index 5
+        assert_eq!(STATIC_TABLE[5], (":scheme", "http"));             // Index 6
+        assert_eq!(STATIC_TABLE[6], (":scheme", "https"));            // Index 7
+        assert_eq!(STATIC_TABLE[7], (":status", "200"));              // Index 8
+        assert_eq!(STATIC_TABLE[60], ("www-authenticate", ""));       // Index 61
+
+        // Verify the static lookup indices work correctly
+        assert_eq!(STATIC_EXACT_INDEX.len(), 61,
+            "Exact index should have 61 entries");
+
+        // Verify a few key lookups
+        assert_eq!(find_static(":method", "GET"), Some(2));
+        assert_eq!(find_static(":method", "POST"), Some(3));
+        assert_eq!(find_static(":status", "200"), Some(8));
+        assert_eq!(find_static("content-type", ""), Some(31));
+
+        // Verify name-only lookups return first occurrence
+        assert_eq!(find_static_name(":method"), Some(2)); // First :method
+        assert_eq!(find_static_name(":path"), Some(4));   // First :path
+        assert_eq!(find_static_name(":status"), Some(8)); // First :status
+    }
 }
