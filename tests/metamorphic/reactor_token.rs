@@ -30,7 +30,7 @@ use std::time::Duration;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::reactor::{
     Interest, LabReactor, SlabToken, TokenSlab,
-    Event, Token, FaultConfig
+    Event, Events, Token, FaultConfig
 };
 
 // =============================================================================
@@ -39,12 +39,12 @@ use asupersync::runtime::reactor::{
 
 /// Create a test LabRuntime for deterministic testing.
 fn test_lab_runtime() -> LabRuntime {
-    LabRuntime::with_config(LabConfig::deterministic())
+    LabRuntime::new(LabConfig::new(42))
 }
 
 /// Create a test LabRuntime with specific seed.
 fn test_lab_runtime_with_seed(seed: u64) -> LabRuntime {
-    LabRuntime::with_config(LabConfig::deterministic().with_seed(seed))
+    LabRuntime::new(LabConfig::new(seed))
 }
 
 /// Mock waker for testing token slab operations.
