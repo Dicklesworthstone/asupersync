@@ -9,6 +9,7 @@ pub mod blocking_pool;
 pub mod evidence_serialization;
 pub mod metrics;
 pub mod monad_laws;
+pub mod obligation_marking;
 pub mod plan_analysis;
 pub mod quic_packet_number;
 pub mod runtime_waker;
