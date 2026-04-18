@@ -84,6 +84,7 @@ fn parse_canonicalize_operations(input: &mut &[u8]) -> Vec<CanonicalizeOperation
             4 => {
                 let mut events = generate_linear_trace(event_count, &mut rng_state);
                 // Simulate UTF-8 corruption by generating events with extreme values
+                *rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
                 for event in &mut events {
                     if (*rng_state % 4) == 0 {
                         // Corrupt by using extreme sequence numbers
