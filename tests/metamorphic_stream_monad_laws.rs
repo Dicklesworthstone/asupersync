@@ -71,7 +71,7 @@ struct FlatMapStream<S, F, Out> {
     source: S,
     mapper: F,
     current: Option<Out>,
-    buffer: VecDeque<Out::Item>,
+    buffer: VecDeque<Out>,
     done: bool,
 }
 

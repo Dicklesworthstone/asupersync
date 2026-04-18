@@ -379,7 +379,7 @@ impl Eq for BackoffStrategy {}
 /// Restart policy for supervised children.
 ///
 /// Determines how failures in one child affect other children.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum RestartPolicy {
     /// Only the failed child is restarted.
     ///

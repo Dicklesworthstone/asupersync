@@ -650,7 +650,7 @@ fn test_metamorphic_backoff_strategy_equivalence() {
         .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(100)));
 
     // Scenario with exponential backoff
-    let config_exponential_backoff = SupervisionConfig::new(3, Duration::from_secs(60))
+    let _config_exponential_backoff = SupervisionConfig::new(3, Duration::from_secs(60))
         .with_restart_policy(RestartPolicy::OneForOne)
         .with_backoff(BackoffStrategy::Exponential {
             initial: Duration::from_millis(50),

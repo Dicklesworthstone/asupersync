@@ -5605,7 +5605,7 @@ mod tests {
                         // Mix of operations: yields, sleeps, work
                         for j in 0..30 {
                             match (i + j) % 4 {
-                                0 => crate::cx::yield_now().await,
+                                0 => futures_lite::future::yield_now().await,
                                 1 => crate::time::sleep(Duration::from_millis(j as u64 % 5)).await,
                                 2 => {
                                     // Simulate CPU work
@@ -5615,7 +5615,7 @@ mod tests {
                                     }
                                     sum
                                 }
-                                _ => crate::cx::yield_now().await,
+                                _ => futures_lite::future::yield_now().await,
                             };
                         }
                         i * 1000 + 42

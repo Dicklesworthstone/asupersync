@@ -151,7 +151,7 @@ fn mr_obligation_conservation() {
             // For direct sends, each successful send creates one proof
             // In practice, this would need to track actual permit reservations
             prop_assert_eq!(permits_reserved, 0); // Simplified for this test
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -191,7 +191,7 @@ fn mr_channel_state_consistency() {
                     Err(_) => {}, // Expected
                 }
             }
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -248,7 +248,7 @@ fn mr_proof_type_preservation() {
                 let proof = permit.abort();
                 let _: AbortedProof<SendPermit> = proof;
             }
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -322,7 +322,7 @@ fn mr_operation_commutativity() {
 
             drop(receiver_a2);
             drop(receiver_b2);
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -369,7 +369,7 @@ fn mr_error_propagation_preservation() {
                     _ => prop_assert!(false, "Expected Disconnected error"),
                 }
             }
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -413,7 +413,7 @@ fn mr_permit_lifecycle_invariant() {
                 let _proof = permit.abort(); // Consume via abort
                 // permit is now consumed and cannot be used again
             }
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -449,7 +449,7 @@ fn mr_channel_capacity_consistency() {
             // The exact behavior depends on backpressure handling
             prop_assert!(successful_sends <= send_count);
             prop_assert_eq!(successful_sends + failed_sends, send_count);
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -483,7 +483,7 @@ fn mr_proof_uniqueness() {
 
             // Each proof in the vector is unique (by move semantics)
             prop_assert_eq!(proofs.len(), values.iter().take(10).count());
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -525,7 +525,7 @@ fn mr_session_type_safety() {
 
             // All valid protocols should work without panics
             prop_assert!(true); // If we reach here, no protocol violation occurred
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }
@@ -576,7 +576,7 @@ fn mr_temporal_consistency() {
             let success2 = results2.iter().filter(|&&s| s == "committed").count();
 
             prop_assert_eq!(success1, success2);
-            Ok(())
+            Ok::<(), TestCaseError>(())
         })?;
     });
 }

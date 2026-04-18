@@ -474,5 +474,3 @@ mod tests {
         assert!(result.metrics.cancellation_events > 0);
     }
 }
-    }
-}

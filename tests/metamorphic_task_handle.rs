@@ -422,40 +422,38 @@ fn mr3_defused_drop_no_abort() {
 // MR4: Error Propagation Preservation
 // ============================================================================
 
-proptest! {
-    #[test]
-    fn mr4_error_propagation_preservation_channels_closed() {
-        let cx = test_cx();
-        let task_id = TaskId::from_arena(ArenaIndex::new(9, 0));
+#[test]
+fn mr4_error_propagation_preservation_channels_closed() {
+    let cx = test_cx();
+    let task_id = TaskId::from_arena(ArenaIndex::new(9, 0));
 
-        // Set up cancel reason in context
-        let test_reason = CancelReason::timeout();
-        {
-            let mut guard = cx.inner.write();
-            guard.cancel_requested = true;
-            guard.cancel_reason = Some(test_reason.clone());
-        }
+    // Set up cancel reason in context
+    let test_reason = CancelReason::timeout();
+    {
+        let mut guard = cx.inner.write();
+        guard.cancel_requested = true;
+        guard.cancel_reason = Some(test_reason.clone());
+    }
 
-        // Create handle with closed channel (sender dropped)
-        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-        drop(tx);
+    // Create handle with closed channel (sender dropped)
+    let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+    drop(tx);
 
-        let mut handle1 = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-        let join_result = block_on(handle1.join(&cx));
+    let mut handle1 = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+    let join_result = block_on(handle1.join(&cx));
 
-        let (tx2, rx2) = oneshot::channel::<Result<i32, JoinError>>();
-        drop(tx2);
-        let mut handle2 = TaskHandle::new(task_id, rx2, std::sync::Arc::downgrade(&cx.inner));
-        let try_join_result = handle2.try_join();
+    let (tx2, rx2) = oneshot::channel::<Result<i32, JoinError>>();
+    drop(tx2);
+    let mut handle2 = TaskHandle::new(task_id, rx2, std::sync::Arc::downgrade(&cx.inner));
+    let try_join_result = handle2.try_join();
 
-        // MR4: Error propagation must preserve cancel reasons consistently
-        match (join_result, try_join_result) {
-            (Err(JoinError::Cancelled(r1)), Err(JoinError::Cancelled(r2))) => {
-                prop_assert_eq!(r1.kind, r2.kind, "Cancel kinds must match across methods");
-                prop_assert_eq!(r1.kind, CancelKind::Timeout, "Should preserve timeout cancel kind");
-            },
-            _ => prop_assert!(false, "Both methods should propagate Cancelled error with timeout"),
-        }
+    // MR4: Error propagation must preserve cancel reasons consistently
+    match (join_result, try_join_result) {
+        (Err(JoinError::Cancelled(r1)), Err(JoinError::Cancelled(r2))) => {
+            assert_eq!(r1.kind, r2.kind, "Cancel kinds must match across methods");
+            assert_eq!(r1.kind, CancelKind::Timeout, "Should preserve timeout cancel kind");
+        },
+        _ => panic!("Both methods should propagate Cancelled error with timeout"),
     }
 }
 

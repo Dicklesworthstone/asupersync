@@ -2174,17 +2174,12 @@ mod tests {
                 rx = tx.subscribe();
             }
 
-            let mut futures = Vec::new();
-
-            // Create multiple recv futures but only poll one receiver
-            for _ in 0..3 {
-                futures.push(Box::pin(rx.recv(&cx)));
-            }
-
-            // Poll each future once (should register at most 1 waker)
-            for fut in &mut futures {
-                let _ = fut.as_mut().poll(&mut ctx);
-            }
+            // You cannot have multiple active futures borrowing the same receiver mutably.
+            // Instead, we just poll one future multiple times to simulate the scenario.
+            let mut fut = Box::pin(rx.recv(&cx));
+            let _ = fut.as_mut().poll(&mut ctx);
+            let _ = fut.as_mut().poll(&mut ctx);
+            let _ = fut.as_mut().poll(&mut ctx);
 
             // METAMORPHIC RELATION: Waker arena should have ≤ 1 entry for single receiver
             let waker_count = {

@@ -1964,7 +1964,7 @@ mod tests {
         }
 
         let end_time = wall_clock.now();
-        let elapsed = end_time.saturating_duration_since(start_time);
+        let elapsed = Duration::from_nanos(end_time.duration_since(start_time));
 
         crate::assert_with_log!(
             counter.load(Ordering::SeqCst) > 0,
@@ -2011,7 +2011,7 @@ mod tests {
 
         let mut timer_ids = Vec::new();
         for duration in &durations {
-            let timer_id = handle.sleep(*duration, waker_that_increments(counter.clone()));
+            let timer_id = handle.register(handle.now().saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()));
             timer_ids.push(timer_id);
         }
 
@@ -2165,7 +2165,7 @@ mod tests {
 
         // Test browser clock maintains monotonicity
         let config = BrowserClockConfig::default();
-        let mut browser_clock = BrowserClock::new(config);
+        let mut browser_clock = BrowserMonotonicClock::new(config);
 
         let driver = Arc::new(TimerDriver::with_clock(Arc::new(browser_clock.clone())));
         let handle = TimerDriverHandle::new(driver);
@@ -2214,3 +2214,4 @@ mod tests {
         crate::test_complete!("conformance_timer_driver_browser_clock_monotonic");
     }
 }
+

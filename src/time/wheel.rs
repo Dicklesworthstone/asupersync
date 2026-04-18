@@ -2681,12 +2681,12 @@ mod tests {
         let base_time = Time::from_millis(10);
         for (i, counter) in counters.iter().enumerate() {
             let offset = Duration::from_millis(i as u64); // 0ms, 1ms, 2ms, ...
-            let deadline = base_time.saturating_add_duration(offset);
+            let deadline = base_time.saturating_add_nanos(offset.as_nanos().min(u128::from(u64::MAX)) as u64);
             wheel.register(deadline, counter_waker(counter.clone()));
         }
 
         // Fire at window boundary - should coalesce timers within window
-        let fire_time = base_time.saturating_add_duration(Duration::from_millis(5));
+        let fire_time = base_time.saturating_add_nanos(5_000_000);
         let wakers = wheel.collect_expired(fire_time);
 
         for waker in wakers {

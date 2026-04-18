@@ -527,12 +527,6 @@ fn test_rfc6455_subprotocol_negotiation() {
     );
 
     // Test 4: Client-side validation - server selects unrecquested protocol
-    let entropy = DetEntropy::new(42);
-    let client = ClientHandshake::new("ws://localhost/test", &entropy)
-        .expect("Client should initialize")
-        .protocol("chat")
-        .protocol("echo");
-
     let response_with_wrong_protocol = "HTTP/1.1 101 Switching Protocols\r\n\
         Upgrade: websocket\r\n\
         Connection: Upgrade\r\n\
@@ -714,7 +708,6 @@ fn test_rfc6455_permessage_deflate_extension_negotiation() {
     );
 
     // Test 5: Client-side extension validation
-    let entropy = DetEntropy::new(42);
     let client_with_test_key = ClientHandshake::new_for_test(
         WsUrl::parse("ws://localhost/test").unwrap(),
         "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
@@ -820,7 +813,6 @@ fn test_rfc6455_status_101_switching_protocols() {
     );
 
     // Test 2: Client validates status code
-    let entropy = DetEntropy::new(42);
     let client_with_test_key = ClientHandshake::new_for_test(
         WsUrl::parse("ws://localhost/test").unwrap(),
         "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
