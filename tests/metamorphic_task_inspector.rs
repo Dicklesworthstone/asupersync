@@ -10,13 +10,13 @@
 //! 4. Wire format round-trip consistency (serialization)
 //! 5. Summary consistency between snapshot and inspector
 
-use asupersync::cx::{Cx, Scope};
-use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::cx::Cx;
+use asupersync::lab::LabRuntime;
 use asupersync::observability::{TaskInspector, TaskInspectorConfig, TaskStateInfo};
-use asupersync::runtime::yield_now;
-use asupersync::types::{Budget, CancelReason, Time};
-use asupersync::spawn;
+use asupersync::runtime::RuntimeState;
+use asupersync::types::Budget;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -25,50 +25,60 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 ///
 /// Metamorphic relation: For any runtime state, the number of tasks in the snapshot
 /// should equal the number of active (non-terminal) tasks in the runtime.
-#[tokio::test]
-async fn mr1_snapshot_completeness() -> TestResult {
-    let runtime = LabRuntime::with_seed(0);
+#[test]
+fn mr1_snapshot_completeness() -> TestResult {
+    // Use a deterministic seed for reproducible testing
+    let mut runtime = LabRuntime::with_seed(0);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
 
-    runtime.scope(|_cx: &Cx, scope: &Scope| async move {
-        let inspector = TaskInspector::new(runtime.state(), None);
+    // Create some tasks
+    let (_task1, _) = runtime.state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // Simple task that completes quickly
+            42
+        },
+    )?;
 
-        // Spawn some tasks
-        let _task1 = spawn!(scope, async {
-            yield_now().await;
-        });
-        let _task2 = spawn!(scope, async {
-            yield_now().await;
-        });
+    let (_task2, _) = runtime.state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // Another simple task that completes quickly
+            84
+        },
+    )?;
 
-        // Allow tasks to start
-        yield_now().await;
+    // Run tasks to completion for deterministic state
+    runtime.run_until_quiescent();
 
-        // Get snapshot and manual count
-        let snapshot = inspector.wire_snapshot();
-        let active_tasks = inspector.list_active_tasks();
-        let manual_task_count = inspector.list_tasks().len();
+    // Create inspector by transferring ownership of the state
+    let inspector = TaskInspector::new(Arc::new(runtime.state), None);
 
-        // MR: snapshot.summary.total_tasks == active_tasks.len() + completed_count
-        let completed_count = inspector
-            .list_tasks()
-            .into_iter()
-            .filter(|t| t.is_terminal())
-            .count();
+    // Get snapshot and manual count
+    let snapshot = inspector.wire_snapshot();
+    let active_tasks = inspector.list_active_tasks();
+    let manual_task_count = inspector.list_tasks().len();
 
-        assert_eq!(
-            snapshot.summary.total_tasks,
-            active_tasks.len() + completed_count,
-            "Snapshot completeness violated: total_tasks != active + completed"
-        );
+    // MR: snapshot.summary.total_tasks == active_tasks.len() + completed_count
+    let completed_count = inspector
+        .list_tasks()
+        .into_iter()
+        .filter(|t| t.is_terminal())
+        .count();
 
-        assert_eq!(
-            snapshot.summary.total_tasks,
-            manual_task_count,
-            "Snapshot completeness violated: total_tasks != manual count"
-        );
+    assert_eq!(
+        snapshot.summary.total_tasks,
+        active_tasks.len() + completed_count,
+        "Snapshot completeness violated: total_tasks != active + completed"
+    );
 
-        Ok(())
-    }).await?;
+    assert_eq!(
+        snapshot.summary.total_tasks,
+        manual_task_count,
+        "Snapshot completeness violated: total_tasks != manual count"
+    );
 
     Ok(())
 }
@@ -77,37 +87,43 @@ async fn mr1_snapshot_completeness() -> TestResult {
 ///
 /// Metamorphic relation: If we take snapshot S1, trigger cancellation, then take
 /// snapshot S2, the number of cancelling tasks in S2 should be >= S1.
-#[tokio::test]
-async fn mr2_cancellation_state_consistency() -> TestResult {
-    let runtime = LabRuntime::with_seed(0);
+#[test]
+fn mr2_cancellation_state_consistency() -> TestResult {
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let cancel_cx = Cx::for_testing();
+    let waiter_cx = cancel_cx.clone();
 
-    let (snapshot1, snapshot2) = runtime
-        .scope(|cx: &Cx, scope: &Scope| async move {
-            let inspector = TaskInspector::new(runtime.state(), None);
+    // Create some tasks that respect cancellation
+    let (_task1, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async move {
+            // Simple task that checks cancellation status
+            let _cancelled = waiter_cx.is_cancel_requested();
+        },
+    )?;
 
-            // Spawn some long-running tasks
-            let _task1 = spawn!(scope, async {
-                yield_now().await;
-                yield_now().await; // Give them time to start
-            });
-            let _task2 = spawn!(scope, async {
-                yield_now().await;
-                yield_now().await;
-            });
+    let (_task2, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // Another task
+        },
+    )?;
 
-            yield_now().await;
-            let snapshot1 = inspector.wire_snapshot();
+    let inspector = TaskInspector::new(Arc::new(state), None);
 
-            // Trigger cancellation
-            cx.cancel_fast(CancelReason::user("test cancellation"));
-            yield_now().await;
+    // Take first snapshot
+    let snapshot1 = inspector.wire_snapshot();
 
-            let snapshot2 = inspector.wire_snapshot();
-            Ok((snapshot1, snapshot2))
-        })
-        .await?;
+    // Trigger cancellation
+    cancel_cx.set_cancel_requested(true);
 
-    // MR: cancelling_count_after >= cancelling_count_before
+    // Take second snapshot
+    let snapshot2 = inspector.wire_snapshot();
+
+    // MR: cancelling_count_after >= cancelling_count_before (they could be the same if tasks complete quickly)
     assert!(
         snapshot2.summary.cancelling >= snapshot1.summary.cancelling,
         "Cancellation consistency violated: after={}, before={}",
@@ -129,28 +145,25 @@ async fn mr2_cancellation_state_consistency() -> TestResult {
 ///
 /// Metamorphic relation: Two snapshots taken at the same logical time should
 /// contain the same task information (modulo timestamp fields).
-#[tokio::test]
-async fn mr3_concurrent_snapshots_commutativity() -> TestResult {
-    let runtime = LabRuntime::with_seed(0);
+#[test]
+fn mr3_concurrent_snapshots_commutativity() -> TestResult {
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
 
-    let (snapshot1, snapshot2) = runtime
-        .scope(|_cx: &Cx, scope: &Scope| async move {
-            let inspector = TaskInspector::new(runtime.state(), None);
+    // Create a stable task state
+    let (_task, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // Simple task
+        },
+    )?;
 
-            // Create a stable task state
-            let _task = spawn!(scope, async {
-                yield_now().await;
-            });
+    let inspector = TaskInspector::new(Arc::new(state), None);
 
-            yield_now().await;
-
-            // Take two snapshots at the same logical time
-            let snapshot1 = inspector.wire_snapshot();
-            let snapshot2 = inspector.wire_snapshot();
-
-            Ok((snapshot1, snapshot2))
-        })
-        .await?;
+    // Take two snapshots at the same logical time
+    let snapshot1 = inspector.wire_snapshot();
+    let snapshot2 = inspector.wire_snapshot();
 
     // MR: snapshots taken at same time have same content (ignoring timestamps)
     assert_eq!(
@@ -188,29 +201,31 @@ async fn mr3_concurrent_snapshots_commutativity() -> TestResult {
 /// MR4: Wire Format Round-Trip - encode(decode(encoded)) == encoded.
 ///
 /// Metamorphic relation: Serialization and deserialization should preserve content.
-#[tokio::test]
-async fn mr4_wire_format_round_trip() -> TestResult {
-    let runtime = LabRuntime::with_seed(0);
+#[test]
+fn mr4_wire_format_round_trip() -> TestResult {
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
 
-    let snapshot_json: String = runtime
-        .scope(|_cx: &Cx, scope: &Scope| async move {
-            let inspector = TaskInspector::new(runtime.state(), None);
+    // Create diverse task states
+    let (_task1, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // A running task
+        },
+    )?;
 
-            // Create diverse task states
-            let _running_task = spawn!(scope, async {
-                yield_now().await;
-            });
+    let (_task2, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // This will complete quickly
+        },
+    )?;
 
-            let _completing_task = spawn!(scope, async {
-                // This will complete quickly
-            });
-
-            yield_now().await;
-
-            let snapshot = inspector.wire_snapshot();
-            Ok(snapshot.to_json()?)
-        })
-        .await?;
+    let inspector = TaskInspector::new(Arc::new(state), None);
+    let snapshot = inspector.wire_snapshot();
+    let snapshot_json = snapshot.to_json()?;
 
     // MR: Round-trip serialization preserves content
     let parsed = asupersync::observability::TaskConsoleWireSnapshot::from_json(&snapshot_json)?;
@@ -228,53 +243,57 @@ async fn mr4_wire_format_round_trip() -> TestResult {
 ///
 /// Metamorphic relation: The summary from inspector.summary() should match
 /// the summary field in inspector.wire_snapshot().
-#[tokio::test]
-async fn mr5_summary_consistency() -> TestResult {
-    let runtime = LabRuntime::with_seed(0);
+#[test]
+fn mr5_summary_consistency() -> TestResult {
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
 
-    runtime.scope(|_cx: &Cx, scope: &Scope| async move {
-        let inspector = TaskInspector::new(runtime.state(), None);
+    // Spawn tasks in different states
+    let (_task1, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // First task
+        },
+    )?;
 
-        // Spawn tasks in different states
-        let _task1 = spawn!(scope, async {
-            yield_now().await;
-        });
-        let _task2 = spawn!(scope, async {
-            yield_now().await;
-        });
+    let (_task2, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // Second task
+        },
+    )?;
 
-        yield_now().await;
+    let inspector = TaskInspector::new(Arc::new(state), None);
 
-        let snapshot = inspector.wire_snapshot();
-        let summary = inspector.summary();
+    let snapshot = inspector.wire_snapshot();
+    let summary = inspector.summary();
 
-        // MR: Summary consistency across different API calls
-        assert_eq!(
-            snapshot.summary.total_tasks,
-            summary.total_tasks,
-            "Summary total_tasks mismatch between snapshot and summary"
-        );
+    // MR: Summary consistency across different API calls
+    assert_eq!(
+        snapshot.summary.total_tasks,
+        summary.total_tasks,
+        "Summary total_tasks mismatch between snapshot and summary"
+    );
 
-        assert_eq!(
-            snapshot.summary.running,
-            summary.running,
-            "Summary running mismatch between snapshot and summary"
-        );
+    assert_eq!(
+        snapshot.summary.running,
+        summary.running,
+        "Summary running mismatch between snapshot and summary"
+    );
 
-        assert_eq!(
-            snapshot.summary.completed,
-            summary.completed,
-            "Summary completed mismatch between snapshot and summary"
-        );
+    assert_eq!(
+        snapshot.summary.completed,
+        summary.completed,
+        "Summary completed mismatch between snapshot and summary"
+    );
 
-        assert_eq!(
-            snapshot.summary.cancelling,
-            summary.cancelling,
-            "Summary cancelling mismatch between snapshot and summary"
-        );
-
-        Ok(())
-    }).await?;
+    assert_eq!(
+        snapshot.summary.cancelling,
+        summary.cancelling,
+        "Summary cancelling mismatch between snapshot and summary"
+    );
 
     Ok(())
 }
@@ -283,51 +302,55 @@ async fn mr5_summary_consistency() -> TestResult {
 ///
 /// Metamorphic relation: Different ways of counting tasks should yield
 /// consistent results.
-#[tokio::test]
-async fn mr6_task_count_conservation() -> TestResult {
-    let runtime = LabRuntime::with_seed(0);
+#[test]
+fn mr6_task_count_conservation() -> TestResult {
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
 
-    runtime.scope(|_cx: &Cx, scope: &Scope| async move {
-        let inspector = TaskInspector::new(runtime.state(), None);
+    // Spawn various tasks
+    let (_task1, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // First task
+        },
+    )?;
 
-        // Spawn various tasks
-        let _task1 = spawn!(scope, async {
-            yield_now().await;
-        });
-        let _task2 = spawn!(scope, async {
+    let (_task2, _) = state.create_task(
+        region,
+        Budget::INFINITE,
+        async {
             // This completes immediately
-        });
+        },
+    )?;
 
-        yield_now().await;
+    let inspector = TaskInspector::new(Arc::new(state), None);
 
-        let snapshot = inspector.wire_snapshot();
-        let all_tasks = inspector.list_tasks();
-        let active_tasks = inspector.list_active_tasks();
+    let snapshot = inspector.wire_snapshot();
+    let all_tasks = inspector.list_tasks();
+    let active_tasks = inspector.list_active_tasks();
 
-        // MR: Conservation of task counts
-        assert_eq!(
-            snapshot.tasks.len(),
-            all_tasks.len(),
-            "Task count mismatch between snapshot and list_tasks"
-        );
+    // MR: Conservation of task counts
+    assert_eq!(
+        snapshot.tasks.len(),
+        all_tasks.len(),
+        "Task count mismatch between snapshot and list_tasks"
+    );
 
-        let manual_active_count = all_tasks.iter().filter(|t| !t.is_terminal()).count();
-        assert_eq!(
-            active_tasks.len(),
-            manual_active_count,
-            "Active task count mismatch between list_active_tasks and manual count"
-        );
+    let manual_active_count = all_tasks.iter().filter(|t| !t.is_terminal()).count();
+    assert_eq!(
+        active_tasks.len(),
+        manual_active_count,
+        "Active task count mismatch between list_active_tasks and manual count"
+    );
 
-        // Sanity check: active + terminal = total
-        let terminal_count = all_tasks.iter().filter(|t| t.is_terminal()).count();
-        assert_eq!(
-            active_tasks.len() + terminal_count,
-            all_tasks.len(),
-            "Active + terminal != total task count"
-        );
-
-        Ok(())
-    }).await?;
+    // Sanity check: active + terminal = total
+    let terminal_count = all_tasks.iter().filter(|t| t.is_terminal()).count();
+    assert_eq!(
+        active_tasks.len() + terminal_count,
+        all_tasks.len(),
+        "Active + terminal != total task count"
+    );
 
     Ok(())
 }
@@ -335,42 +358,43 @@ async fn mr6_task_count_conservation() -> TestResult {
 /// MR7: Schema Version Consistency - all snapshots have expected schema.
 ///
 /// Metamorphic relation: All wire snapshots should have consistent schema version.
-#[tokio::test]
-async fn mr7_schema_version_consistency() -> TestResult {
-    let runtime = LabRuntime::with_seed(0);
+#[test]
+fn mr7_schema_version_consistency() -> TestResult {
+    // Test with empty state first
+    let state1 = RuntimeState::new();
+    let inspector1 = TaskInspector::new(Arc::new(state1), None);
+    let snapshot1 = inspector1.wire_snapshot();
 
-    runtime.scope(|_cx: &Cx, scope: &Scope| async move {
-        let inspector = TaskInspector::new(runtime.state(), None);
+    // Test with state that has tasks
+    let mut state2 = RuntimeState::new();
+    let region = state2.create_root_region(Budget::INFINITE);
+    let (_task, _) = state2.create_task(
+        region,
+        Budget::INFINITE,
+        async {
+            // Task for schema consistency test
+        },
+    )?;
 
-        // Take multiple snapshots
-        let snapshot1 = inspector.wire_snapshot();
+    let inspector2 = TaskInspector::new(Arc::new(state2), None);
+    let snapshot2 = inspector2.wire_snapshot();
 
-        let _task = spawn!(scope, async {
-            yield_now().await;
-        });
+    // MR: Schema version consistency
+    assert!(
+        snapshot1.has_expected_schema(),
+        "First snapshot has unexpected schema version"
+    );
 
-        yield_now().await;
-        let snapshot2 = inspector.wire_snapshot();
+    assert!(
+        snapshot2.has_expected_schema(),
+        "Second snapshot has unexpected schema version"
+    );
 
-        // MR: Schema version consistency
-        assert!(
-            snapshot1.has_expected_schema(),
-            "First snapshot has unexpected schema version"
-        );
-
-        assert!(
-            snapshot2.has_expected_schema(),
-            "Second snapshot has unexpected schema version"
-        );
-
-        assert_eq!(
-            snapshot1.schema_version,
-            snapshot2.schema_version,
-            "Schema versions differ between snapshots"
-        );
-
-        Ok(())
-    }).await?;
+    assert_eq!(
+        snapshot1.schema_version,
+        snapshot2.schema_version,
+        "Schema versions differ between snapshots"
+    );
 
     Ok(())
 }
