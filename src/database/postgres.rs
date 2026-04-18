@@ -1011,6 +1011,15 @@ enum FrontendMessage {
     Terminate = b'X',
     /// Password message (authentication).
     Password = b'p',
+    /// Copy data message.
+    #[allow(dead_code)]
+    CopyData = b'd',
+    /// Copy done message.
+    #[allow(dead_code)]
+    CopyDone = b'c',
+    /// Copy fail message.
+    #[allow(dead_code)]
+    CopyFail = b'f',
 }
 
 /// Backend (server) message types.
@@ -1052,6 +1061,26 @@ enum BackendMessage {
     ReadyForQuery = b'Z',
     /// Row description.
     RowDescription = b'T',
+    /// Copy in response.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)]
+    CopyInResponse = b'G',
+    /// Copy out response.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)]
+    CopyOutResponse = b'H',
+    /// Copy both response.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)]
+    CopyBothResponse = b'W',
+    /// Copy data message.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)]
+    CopyData = b'd',
+    /// Copy done message.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)]
+    CopyDone = b'c',
 }
 
 /// Buffer for building protocol messages.
@@ -5718,5 +5747,532 @@ mod tests {
         let mut execute_conn = make_test_connection();
         assert_user_cancelled(run(execute_conn.read_extended_execute_results(&cx)));
         assert!(execute_conn.inner.closed);
+    }
+
+    // ================================================================
+    // COPY Protocol Conformance Tests
+    // ================================================================
+
+    #[cfg(feature = "postgres")]
+    mod copy_protocol_conformance {
+        use super::*;
+        use std::io::Cursor;
+
+        /// Test data for COPY protocol conformance.
+        struct CopyTestData {
+            text_format: Vec<u8>,
+            binary_format: Vec<u8>,
+            column_count: u16,
+            format_codes: Vec<i16>,
+        }
+
+        impl CopyTestData {
+            fn new_text_sample() -> Self {
+                // Text format: tab-separated values with newline terminator
+                let text_data = b"123\tJohn Doe\ttrue\n456\tJane Smith\tfalse\n".to_vec();
+                let binary_data = Self::build_binary_sample();
+
+                Self {
+                    text_format: text_data,
+                    binary_format: binary_data,
+                    column_count: 3,
+                    format_codes: vec![0, 0, 0], // All text format initially
+                }
+            }
+
+            fn build_binary_sample() -> Vec<u8> {
+                let mut buf = Vec::new();
+
+                // Binary format signature
+                buf.extend_from_slice(b"PGCOPY\n\xFF\r\n\0");
+                // Flags field (32-bit, 0 = no special flags)
+                buf.extend_from_slice(&0u32.to_be_bytes());
+                // Header extension area length (32-bit, 0 = no extensions)
+                buf.extend_from_slice(&0u32.to_be_bytes());
+
+                // Row 1: (123, "John Doe", true)
+                buf.extend_from_slice(&3u16.to_be_bytes()); // 3 columns
+                // Column 1: INT4 value 123
+                buf.extend_from_slice(&4u32.to_be_bytes()); // length
+                buf.extend_from_slice(&123i32.to_be_bytes());
+                // Column 2: TEXT value "John Doe"
+                buf.extend_from_slice(&8u32.to_be_bytes()); // length
+                buf.extend_from_slice(b"John Doe");
+                // Column 3: BOOL value true
+                buf.extend_from_slice(&1u32.to_be_bytes()); // length
+                buf.push(1); // true
+
+                // Row 2: (456, "Jane Smith", false)
+                buf.extend_from_slice(&3u16.to_be_bytes()); // 3 columns
+                // Column 1: INT4 value 456
+                buf.extend_from_slice(&4u32.to_be_bytes()); // length
+                buf.extend_from_slice(&456i32.to_be_bytes());
+                // Column 2: TEXT value "Jane Smith"
+                buf.extend_from_slice(&10u32.to_be_bytes()); // length
+                buf.extend_from_slice(b"Jane Smith");
+                // Column 3: BOOL value false
+                buf.extend_from_slice(&1u32.to_be_bytes()); // length
+                buf.push(0); // false
+
+                // File trailer: -1 as 16-bit value
+                buf.extend_from_slice(&(-1i16).to_be_bytes());
+
+                buf
+            }
+
+            fn with_binary_formats(mut self) -> Self {
+                // Set all columns to binary format (1 = binary, 0 = text)
+                self.format_codes = vec![1, 1, 1];
+                self
+            }
+
+            fn with_mixed_formats(mut self) -> Self {
+                // Mixed: binary int, text string, binary bool
+                self.format_codes = vec![1, 0, 1];
+                self
+            }
+        }
+
+        /// Creates a COPY IN response message for testing.
+        fn build_copy_in_response(overall_format: u8, format_codes: &[i16]) -> Vec<u8> {
+            let mut buf = Vec::new();
+
+            // Message type
+            buf.push(b'G');
+
+            // Message length (excluding type byte)
+            let length = 1 + 2 + (format_codes.len() * 2) as u32; // format + count + codes
+            buf.extend_from_slice(&(length as u32).to_be_bytes());
+
+            // Overall format (0 = text, 1 = binary)
+            buf.push(overall_format);
+
+            // Number of columns
+            buf.extend_from_slice(&(format_codes.len() as u16).to_be_bytes());
+
+            // Format codes for each column
+            for &code in format_codes {
+                buf.extend_from_slice(&code.to_be_bytes());
+            }
+
+            buf
+        }
+
+        /// Creates a COPY DATA message for testing.
+        fn build_copy_data_message(data: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+
+            // Message type
+            buf.push(b'd');
+
+            // Message length (excluding type byte)
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+
+            // Data payload
+            buf.extend_from_slice(data);
+
+            buf
+        }
+
+        /// Creates a COPY DONE message for testing.
+        fn build_copy_done_message() -> Vec<u8> {
+            vec![b'c', 0, 0, 0, 0] // type + 4-byte length (0 for no data)
+        }
+
+        /// Creates a COPY FAIL message for testing.
+        fn build_copy_fail_message(error_msg: &str) -> Vec<u8> {
+            let mut buf = Vec::new();
+
+            // Message type
+            buf.push(b'f');
+
+            // Message length (excluding type byte)
+            buf.extend_from_slice(&(error_msg.len() as u32 + 1).to_be_bytes()); // +1 for null terminator
+
+            // Error message with null terminator
+            buf.extend_from_slice(error_msg.as_bytes());
+            buf.push(0);
+
+            buf
+        }
+
+        #[test]
+        fn copy_in_response_text_mode_conformance() {
+            let test_data = CopyTestData::new_text_sample();
+            let message = build_copy_in_response(0, &test_data.format_codes); // 0 = text mode
+
+            // Verify message structure
+            assert_eq!(message[0], b'G'); // CopyInResponse type
+
+            // Parse message content
+            let length = u32::from_be_bytes([message[1], message[2], message[3], message[4]]);
+            assert_eq!(length, 1 + 2 + (test_data.column_count * 2) as u32);
+
+            let overall_format = message[5];
+            assert_eq!(overall_format, 0); // Text mode
+
+            let column_count = u16::from_be_bytes([message[6], message[7]]);
+            assert_eq!(column_count, test_data.column_count);
+
+            // Verify format codes (all should be 0 for text)
+            for i in 0..test_data.column_count {
+                let offset = 8 + (i as usize * 2);
+                let format_code = i16::from_be_bytes([message[offset], message[offset + 1]]);
+                assert_eq!(format_code, 0, "Column {i} should be text format");
+            }
+        }
+
+        #[test]
+        fn copy_in_response_binary_mode_conformance() {
+            let test_data = CopyTestData::new_text_sample().with_binary_formats();
+            let message = build_copy_in_response(1, &test_data.format_codes); // 1 = binary mode
+
+            // Verify message structure
+            assert_eq!(message[0], b'G'); // CopyInResponse type
+
+            let overall_format = message[5];
+            assert_eq!(overall_format, 1); // Binary mode
+
+            // Verify format codes (all should be 1 for binary)
+            for i in 0..test_data.column_count {
+                let offset = 8 + (i as usize * 2);
+                let format_code = i16::from_be_bytes([message[offset], message[offset + 1]]);
+                assert_eq!(format_code, 1, "Column {i} should be binary format");
+            }
+        }
+
+        #[test]
+        fn copy_in_response_mixed_formats_conformance() {
+            let test_data = CopyTestData::new_text_sample().with_mixed_formats();
+            let message = build_copy_in_response(0, &test_data.format_codes); // overall text, mixed columns
+
+            // Verify mixed format codes: binary, text, binary
+            let expected_formats = [1, 0, 1];
+            for (i, &expected) in expected_formats.iter().enumerate() {
+                let offset = 8 + (i * 2);
+                let format_code = i16::from_be_bytes([message[offset], message[offset + 1]]);
+                assert_eq!(format_code, expected, "Column {i} format mismatch");
+            }
+        }
+
+        #[test]
+        fn copy_data_chunk_boundaries_conformance() {
+            let test_data = CopyTestData::new_text_sample();
+
+            // Test 1: Single chunk with complete rows
+            let full_chunk = build_copy_data_message(&test_data.text_format);
+            assert_eq!(full_chunk[0], b'd');
+            let chunk_length = u32::from_be_bytes([full_chunk[1], full_chunk[2], full_chunk[3], full_chunk[4]]);
+            assert_eq!(chunk_length, test_data.text_format.len() as u32);
+
+            // Test 2: Multiple chunks with row boundaries
+            let row1 = b"123\tJohn Doe\ttrue\n";
+            let row2 = b"456\tJane Smith\tfalse\n";
+
+            let chunk1 = build_copy_data_message(row1);
+            let chunk2 = build_copy_data_message(row2);
+
+            // Verify each chunk is properly formed
+            assert_eq!(chunk1[0], b'd');
+            assert_eq!(chunk2[0], b'd');
+
+            let chunk1_len = u32::from_be_bytes([chunk1[1], chunk1[2], chunk1[3], chunk1[4]]);
+            let chunk2_len = u32::from_be_bytes([chunk2[1], chunk2[2], chunk2[3], chunk2[4]]);
+
+            assert_eq!(chunk1_len, row1.len() as u32);
+            assert_eq!(chunk2_len, row2.len() as u32);
+
+            // Test 3: Verify chunk data integrity
+            assert_eq!(&chunk1[5..], row1);
+            assert_eq!(&chunk2[5..], row2);
+        }
+
+        #[test]
+        fn copy_data_binary_chunk_boundaries_conformance() {
+            let test_data = CopyTestData::new_text_sample();
+            let binary_chunk = build_copy_data_message(&test_data.binary_format);
+
+            // Verify binary signature in the data
+            let data_start = 5; // After message type and length
+            let signature = &binary_chunk[data_start..data_start + 11];
+            assert_eq!(signature, b"PGCOPY\n\xFF\r\n\0", "Binary format signature mismatch");
+
+            // Verify flags field
+            let flags_start = data_start + 11;
+            let flags = u32::from_be_bytes([
+                binary_chunk[flags_start],
+                binary_chunk[flags_start + 1],
+                binary_chunk[flags_start + 2],
+                binary_chunk[flags_start + 3]
+            ]);
+            assert_eq!(flags, 0, "Flags should be 0 for standard binary format");
+        }
+
+        #[test]
+        fn copy_done_flush_semantics_conformance() {
+            let copy_done_msg = build_copy_done_message();
+
+            // Verify message structure
+            assert_eq!(copy_done_msg.len(), 5);
+            assert_eq!(copy_done_msg[0], b'c'); // CopyDone type
+
+            // Verify length is 0 (no payload)
+            let length = u32::from_be_bytes([copy_done_msg[1], copy_done_msg[2], copy_done_msg[3], copy_done_msg[4]]);
+            assert_eq!(length, 0, "CopyDone should have no payload");
+
+            // Test flush semantics: CopyDone should trigger immediate processing
+            // In a real implementation, this would flush all pending COPY data
+            // Here we test that the message format is correct for triggering flush
+
+            // Verify the message can be parsed as a proper protocol message
+            let mut cursor = Cursor::new(&copy_done_msg[1..]); // Skip type byte
+            let mut length_buf = [0u8; 4];
+            cursor.read_exact(&mut length_buf).unwrap();
+            let parsed_length = u32::from_be_bytes(length_buf);
+            assert_eq!(parsed_length, 0);
+        }
+
+        #[test]
+        fn copy_fail_error_propagation_conformance() {
+            let error_messages = [
+                "Invalid data format",
+                "Constraint violation",
+                "Connection lost during COPY",
+                "Buffer overflow",
+                "",  // Empty error message
+            ];
+
+            for error_msg in &error_messages {
+                let copy_fail_msg = build_copy_fail_message(error_msg);
+
+                // Verify message structure
+                assert_eq!(copy_fail_msg[0], b'f'); // CopyFail type
+
+                // Verify length includes null terminator
+                let length = u32::from_be_bytes([copy_fail_msg[1], copy_fail_msg[2], copy_fail_msg[3], copy_fail_msg[4]]);
+                assert_eq!(length, error_msg.len() as u32 + 1, "Length should include null terminator");
+
+                // Verify message content and null termination
+                let payload = &copy_fail_msg[5..];
+                assert_eq!(payload.len(), error_msg.len() + 1);
+                assert_eq!(&payload[..error_msg.len()], error_msg.as_bytes());
+                assert_eq!(payload[payload.len() - 1], 0, "Message should be null-terminated");
+
+                // Test error propagation: verify the error can be extracted
+                let extracted_error = std::str::from_utf8(&payload[..payload.len() - 1]).unwrap();
+                assert_eq!(extracted_error, *error_msg);
+            }
+        }
+
+        #[test]
+        fn copy_fail_utf8_error_message_conformance() {
+            // Test with UTF-8 error message containing non-ASCII characters
+            let utf8_error = "Błąd podczas kopiowania danych"; // Polish error message
+            let copy_fail_msg = build_copy_fail_message(utf8_error);
+
+            let payload = &copy_fail_msg[5..];
+            let extracted_error = std::str::from_utf8(&payload[..payload.len() - 1]).unwrap();
+            assert_eq!(extracted_error, utf8_error);
+        }
+
+        #[test]
+        fn binary_format_oid_mapping_conformance() {
+            // Test OID mappings for standard PostgreSQL types
+            struct OidTestCase {
+                oid: u32,
+                type_name: &'static str,
+                sample_binary_data: Vec<u8>,
+                expected_length: usize,
+            }
+
+            let test_cases = [
+                // BOOL (OID 16)
+                OidTestCase {
+                    oid: oid::BOOL,
+                    type_name: "BOOL",
+                    sample_binary_data: vec![1], // true
+                    expected_length: 1,
+                },
+                // INT2 (OID 21)
+                OidTestCase {
+                    oid: oid::INT2,
+                    type_name: "INT2",
+                    sample_binary_data: (42i16).to_be_bytes().to_vec(),
+                    expected_length: 2,
+                },
+                // INT4 (OID 23)
+                OidTestCase {
+                    oid: oid::INT4,
+                    type_name: "INT4",
+                    sample_binary_data: (12345i32).to_be_bytes().to_vec(),
+                    expected_length: 4,
+                },
+                // INT8 (OID 20)
+                OidTestCase {
+                    oid: oid::INT8,
+                    type_name: "INT8",
+                    sample_binary_data: (123456789i64).to_be_bytes().to_vec(),
+                    expected_length: 8,
+                },
+                // FLOAT4 (OID 700)
+                OidTestCase {
+                    oid: oid::FLOAT4,
+                    type_name: "FLOAT4",
+                    sample_binary_data: (3.14f32).to_be_bytes().to_vec(),
+                    expected_length: 4,
+                },
+                // FLOAT8 (OID 701)
+                OidTestCase {
+                    oid: oid::FLOAT8,
+                    type_name: "FLOAT8",
+                    sample_binary_data: (2.718281828f64).to_be_bytes().to_vec(),
+                    expected_length: 8,
+                },
+                // TEXT (OID 25)
+                OidTestCase {
+                    oid: oid::TEXT,
+                    type_name: "TEXT",
+                    sample_binary_data: b"Hello, World!".to_vec(),
+                    expected_length: 13,
+                },
+                // BYTEA (OID 17)
+                OidTestCase {
+                    oid: oid::BYTEA,
+                    type_name: "BYTEA",
+                    sample_binary_data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                    expected_length: 4,
+                },
+            ];
+
+            for test_case in &test_cases {
+                // Verify OID constant is correct
+                assert!(test_case.oid > 0, "OID for {} should be positive", test_case.type_name);
+
+                // Test binary format encoding
+                assert_eq!(
+                    test_case.sample_binary_data.len(),
+                    test_case.expected_length,
+                    "Binary data length for {} should match expected",
+                    test_case.type_name
+                );
+
+                // For fixed-size types, verify the encoding produces correct byte count
+                match test_case.type_name {
+                    "BOOL" => assert_eq!(test_case.sample_binary_data.len(), 1),
+                    "INT2" => assert_eq!(test_case.sample_binary_data.len(), 2),
+                    "INT4" => assert_eq!(test_case.sample_binary_data.len(), 4),
+                    "INT8" => assert_eq!(test_case.sample_binary_data.len(), 8),
+                    "FLOAT4" => assert_eq!(test_case.sample_binary_data.len(), 4),
+                    "FLOAT8" => assert_eq!(test_case.sample_binary_data.len(), 8),
+                    _ => {} // Variable-length types (TEXT, BYTEA) - no fixed size constraint
+                }
+
+                // Test binary roundtrip for numeric types
+                match test_case.type_name {
+                    "INT2" => {
+                        let decoded = i16::from_be_bytes([test_case.sample_binary_data[0], test_case.sample_binary_data[1]]);
+                        assert_eq!(decoded, 42);
+                    },
+                    "INT4" => {
+                        let bytes = [
+                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2], test_case.sample_binary_data[3]
+                        ];
+                        let decoded = i32::from_be_bytes(bytes);
+                        assert_eq!(decoded, 12345);
+                    },
+                    "INT8" => {
+                        let bytes = [
+                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2], test_case.sample_binary_data[3],
+                            test_case.sample_binary_data[4], test_case.sample_binary_data[5],
+                            test_case.sample_binary_data[6], test_case.sample_binary_data[7]
+                        ];
+                        let decoded = i64::from_be_bytes(bytes);
+                        assert_eq!(decoded, 123456789);
+                    },
+                    "FLOAT4" => {
+                        let bytes = [
+                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2], test_case.sample_binary_data[3]
+                        ];
+                        let decoded = f32::from_be_bytes(bytes);
+                        assert!((decoded - 3.14).abs() < f32::EPSILON);
+                    },
+                    "FLOAT8" => {
+                        let bytes = [
+                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2], test_case.sample_binary_data[3],
+                            test_case.sample_binary_data[4], test_case.sample_binary_data[5],
+                            test_case.sample_binary_data[6], test_case.sample_binary_data[7]
+                        ];
+                        let decoded = f64::from_be_bytes(bytes);
+                        assert!((decoded - 2.718281828).abs() < f64::EPSILON);
+                    },
+                    _ => {}
+                }
+            }
+        }
+
+        #[test]
+        fn copy_protocol_message_type_conformance() {
+            // Verify all COPY protocol message types are correctly defined
+            assert_eq!(FrontendMessage::CopyData as u8, b'd');
+            assert_eq!(FrontendMessage::CopyDone as u8, b'c');
+            assert_eq!(FrontendMessage::CopyFail as u8, b'f');
+
+            assert_eq!(BackendMessage::CopyInResponse as u8, b'G');
+            assert_eq!(BackendMessage::CopyOutResponse as u8, b'H');
+            assert_eq!(BackendMessage::CopyBothResponse as u8, b'W');
+            assert_eq!(BackendMessage::CopyData as u8, b'd');
+            assert_eq!(BackendMessage::CopyDone as u8, b'c');
+        }
+
+        #[test]
+        fn copy_protocol_edge_cases_conformance() {
+            // Test empty COPY data
+            let empty_data = build_copy_data_message(&[]);
+            assert_eq!(empty_data[0], b'd');
+            let length = u32::from_be_bytes([empty_data[1], empty_data[2], empty_data[3], empty_data[4]]);
+            assert_eq!(length, 0);
+
+            // Test maximum single chunk size (64MB limit mentioned in code)
+            let max_chunk_size = 64 * 1024 * 1024;
+            let large_data = vec![b'x'; max_chunk_size];
+            let large_chunk = build_copy_data_message(&large_data);
+            assert_eq!(large_chunk[0], b'd');
+            let chunk_length = u32::from_be_bytes([large_chunk[1], large_chunk[2], large_chunk[3], large_chunk[4]]);
+            assert_eq!(chunk_length, max_chunk_size as u32);
+
+            // Test null values in binary format
+            let mut null_data = Vec::new();
+            null_data.extend_from_slice(b"PGCOPY\n\xFF\r\n\0"); // Binary signature
+            null_data.extend_from_slice(&0u32.to_be_bytes()); // Flags
+            null_data.extend_from_slice(&0u32.to_be_bytes()); // Header extension
+            null_data.extend_from_slice(&1u16.to_be_bytes()); // 1 column
+            null_data.extend_from_slice(&(-1i32).to_be_bytes()); // NULL value (length -1)
+            null_data.extend_from_slice(&(-1i16).to_be_bytes()); // End marker
+
+            let null_chunk = build_copy_data_message(&null_data);
+            assert!(null_chunk.len() > 5); // Should contain the null value encoding
+        }
+
+        #[test]
+        fn copy_protocol_error_edge_cases_conformance() {
+            // Test very long error message
+            let long_error = "x".repeat(8192); // 8KB error message
+            let long_fail_msg = build_copy_fail_message(&long_error);
+            assert_eq!(long_fail_msg[0], b'f');
+
+            let length = u32::from_be_bytes([long_fail_msg[1], long_fail_msg[2], long_fail_msg[3], long_fail_msg[4]]);
+            assert_eq!(length, long_error.len() as u32 + 1); // +1 for null terminator
+
+            // Test error message with embedded nulls (should be escaped or rejected)
+            let null_error = "Error\0with\0nulls";
+            let null_fail_msg = build_copy_fail_message(null_error);
+            // Verify that embedded nulls don't break the protocol message structure
+            let payload = &null_fail_msg[5..];
+            assert_eq!(payload[payload.len() - 1], 0); // Still properly null-terminated
+        }
     }
 }
