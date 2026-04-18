@@ -53,8 +53,7 @@ fn mr1_panic_poisoning_consistency_integration() {
             let mut guard = mutex_clone.lock(&cx).await.expect("lock should succeed");
             guard.counter += 1;
             panic!("deliberate panic to test poisoning");
-        })
-        .expect_err("should panic");
+        });
     });
 
     let _ = handle.join();
@@ -107,8 +106,7 @@ fn mr2_cancel_non_poisoning_integration() {
 
         // Drop guard normally (no panic should occur)
         drop(guard);
-    })
-    .expect("cancel test should not panic");
+    });
 
     // Phase 2: Verify mutex is NOT poisoned
     assert!(
@@ -173,8 +171,7 @@ fn mr4_concurrent_poison_consistency_integration() {
                 .await
                 .expect("poison thread should lock");
             panic!("deliberate poison");
-        })
-        .expect_err("poison thread should panic");
+        });
     });
 
     // Phase 3: Wait for all threads
@@ -228,8 +225,7 @@ fn comprehensive_metamorphic_integration() {
         futures_lite::future::block_on::<()>(async {
             let _guard = mutex1_clone.lock(&cx).await.expect("lock");
             panic!("test poison");
-        })
-        .expect_err("should panic");
+        });
     });
 
     let _ = handle1.join();

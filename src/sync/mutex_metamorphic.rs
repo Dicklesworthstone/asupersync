@@ -302,10 +302,10 @@ fn mr3_poison_recovery() {
 
                 // Now panic to poison
                 panic!("deliberate panic for poison recovery test");
-            }).expect_err("should panic");
+            });
         });
 
-        let _ = handle.join();
+        let _ = handle.join().expect_err("should panic");
 
         // Phase 3: Verify poison state
         prop_assert!(mutex.is_poisoned(), "mutex should be poisoned");
@@ -404,14 +404,14 @@ fn mr4_concurrent_poison_consistency() {
 
                 // Poison the mutex
                 panic!("deliberate panic to test concurrent poison consistency");
-            }).expect_err("poison thread should panic");
+            });
         });
 
         // Phase 3: Let waiters start
         barrier.wait();
 
         // Phase 4: Wait for poison to complete
-        let _ = poison_handle.join();
+        let _ = poison_handle.join().expect_err("poison thread should panic");
 
         // Phase 5: Wait for all waiters to complete
         for handle in waiter_handles.lock().unwrap().drain(..) {
@@ -486,10 +486,10 @@ fn mr_composite_cancel_during_poison_recovery() {
             futures_lite::future::block_on(async {
                 let _guard = mutex_clone.lock(&cx).await.expect("lock for poison should succeed");
                 panic!("poison for recovery test");
-            }).expect_err("should panic");
+            });
         });
 
-        let _ = handle.join();
+        let _ = handle.join().expect_err("should panic");
         prop_assert!(mutex.is_poisoned(), "mutex should be poisoned");
 
         // Phase 2: Attempt recovery with cancellation
@@ -549,11 +549,10 @@ mod tests {
             futures_lite::future::block_on(async {
                 let _guard = mutex_clone.lock(&cx).await.expect("lock");
                 panic!("test poison");
-            })
-            .expect_err("should panic");
+            });
         });
 
-        let _ = handle.join();
+        let _ = handle.join().expect_err("should panic");
         assert!(mutex.is_poisoned());
         assert!(matches!(mutex.try_lock(), Err(TryLockError::Poisoned)));
 

@@ -225,7 +225,7 @@ fn mr_proof_type_preservation() {
                 }
 
                 // Test MPSC abort proof type
-                let (sender2, _receiver2) = tracked_channel(10);
+                let (sender2, _receiver2) = tracked_channel::<()>(10);
                 if let Ok(permit) = sender2.try_reserve() {
                     let proof = permit.abort();
                     let _: AbortedProof<SendPermit> = proof; // Type verified by compilation
@@ -242,7 +242,7 @@ fn mr_proof_type_preservation() {
                 }
 
                 // Test oneshot abort proof type
-                let (sender4, _receiver4) = oneshot::channel();
+                let (sender4, _receiver4) = oneshot::channel::<()>();
                 let tracked_sender4 = TrackedOneshotSender::new(sender4);
                 let permit = tracked_sender4.reserve(&cx);
                 let proof = permit.abort();
