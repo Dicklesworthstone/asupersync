@@ -646,3 +646,10 @@ path = "fuzz_targets/fuzz_unix_datagram_comprehensive.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "lab_runtime_virtual_time_fuzz"
+path = "fuzz_targets/lab_runtime_virtual_time_fuzz.rs"
+test = false
+doc = false
+bench = false
