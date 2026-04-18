@@ -986,3 +986,10 @@ path = "fuzz_targets/length_delimited_bypass.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_push_promise"
+path = "fuzz_targets/h2_push_promise.rs"
+test = false
+doc = false
+bench = false
