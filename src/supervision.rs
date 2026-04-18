@@ -8482,7 +8482,7 @@ mod tests {
     /// Deterministic RNG extension for supervision testing
     trait SupervisionDetRngExt {
         fn gen_range(&mut self, range: std::ops::Range<usize>) -> usize;
-        fn choose<T>(&mut self, items: &[T]) -> &T;
+        fn choose<'a, T>(&mut self, items: &'a [T]) -> &'a T;
         fn shuffle<T>(&mut self, slice: &mut [T]);
     }
 
@@ -8509,7 +8509,11 @@ mod tests {
     }
 
     /// Mock start function for metamorphic testing
-    fn noop_start_metamorphic(_ctx: &crate::cx::Cx, _name: &str) -> Result<TaskId, SpawnError> {
+    fn noop_start_metamorphic(
+        _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+        _state: &mut crate::runtime::RuntimeState,
+        _cx: &crate::cx::Cx,
+    ) -> Result<TaskId, SpawnError> {
         // Return a dummy TaskId for testing
         use crate::util::ArenaIndex;
         let arena_idx = ArenaIndex::new(42, 0);
@@ -8548,7 +8552,7 @@ mod tests {
             );
 
             builder = builder.child(
-                ChildSpec::new(&child_name, noop_start_metamorphic)
+                ChildSpec::new(&*child_name, noop_start_metamorphic)
                     .with_restart(SupervisionStrategy::Restart(restart_config)),
             );
         }

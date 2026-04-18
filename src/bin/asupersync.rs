@@ -6781,31 +6781,32 @@ fn trace_diff(path_a: &Path, path_b: &Path) -> Result<TraceDiffOutput, CliError>
 
 fn export_trace(path: &Path, format: ExportFormat) -> Result<(), CliError> {
     let mut reader = TraceReader::open(path).map_err(|err| trace_file_error(path, err))?;
-    let mut stdout = io::stdout();
+    let stdout = io::stdout();
+    let mut writer = io::BufWriter::new(stdout.lock());
 
     match format {
         ExportFormat::Json => {
-            write!(stdout, "[").map_err(output_cli_error)?;
+            write!(writer, "[").map_err(output_cli_error)?;
             let mut first = true;
             while let Some(event) = reader
                 .read_event()
                 .map_err(|err| trace_file_error(path, err))?
             {
                 if !first {
-                    write!(stdout, ",").map_err(output_cli_error)?;
+                    write!(writer, ",").map_err(output_cli_error)?;
                 }
                 first = false;
-                serde_json::to_writer(&mut stdout, &event).map_err(output_cli_error)?;
+                serde_json::to_writer(&mut writer, &event).map_err(output_cli_error)?;
             }
-            writeln!(stdout, "]").map_err(output_cli_error)?;
+            writeln!(writer, "]").map_err(output_cli_error)?;
         }
         ExportFormat::Ndjson => {
             while let Some(event) = reader
                 .read_event()
                 .map_err(|err| trace_file_error(path, err))?
             {
-                let json = serde_json::to_string(&event).map_err(output_cli_error)?;
-                writeln!(stdout, "{json}").map_err(output_cli_error)?;
+                serde_json::to_writer(&mut writer, &event).map_err(output_cli_error)?;
+                writeln!(writer).map_err(output_cli_error)?;
             }
         }
     }
@@ -7064,9 +7065,9 @@ fn write_cli_error(err: &CliError, format: OutputFormat, color: ColorChoice) -> 
         }
         OutputFormat::JsonPretty => writeln!(stderr, "{}", err.json_pretty_format()),
         OutputFormat::Tsv => {
-            let mut line = String::new();
-            let _ = write!(line, "{}\t{}\t{}", err.error_type, err.title, err.detail);
-            writeln!(stderr, "{line}")
+            let title = err.title.replace('\n', " ").replace('\t', " ");
+            let detail = err.detail.replace('\n', " ").replace('\t', " ");
+            writeln!(stderr, "{}\t{}\t{}", err.error_type, title, detail)
         }
     }
 }

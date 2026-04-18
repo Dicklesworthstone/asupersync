@@ -3548,7 +3548,7 @@ mod tests {
     /// Relation: Logical time monotonic through auth flow
     #[test]
     fn mr_trace_macaroon_causal_ordering() {
-        use super::macaroon::{CaveatPredicate, MacaroonToken};
+        use crate::cx::macaroon::{CaveatPredicate, MacaroonToken};
         use crate::security::key::AuthKey;
 
         let key = AuthKey::from_seed(42);
@@ -3688,7 +3688,7 @@ mod tests {
     /// Combines parent-child + clone + macaroon relations
     #[test]
     fn mr_trace_composite_ordering() {
-        use super::macaroon::{CaveatPredicate, MacaroonToken};
+        use crate::cx::macaroon::{CaveatPredicate, MacaroonToken};
         use crate::security::key::AuthKey;
 
         let key = AuthKey::from_seed(789);

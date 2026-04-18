@@ -333,7 +333,7 @@ fn mr1_loser_drain_completeness(
                 let waker = Waker::from(Arc::new(TestWaker));
                 let mut cx = Context::from_waker(&waker);
                 let pinned = Pin::new(future);
-                match pinned.poll(&mut cx) {
+                match pinned.as_mut().poll(&mut cx) {
                     Poll::Ready(val) => {
                         any_ready = true;
                         completed_futures += 1;
@@ -365,7 +365,7 @@ fn mr1_loser_drain_completeness(
             let pinned = Pin::new(future);
             // Poll until drained (Ready)
             loop {
-                match pinned.poll(&mut cx) {
+                match pinned.as_mut().poll(&mut cx) {
                     Poll::Ready(_) => break,
                     Poll::Pending => {}
                 }
@@ -427,13 +427,13 @@ fn mr2_panic_isolation(
         let waker = Waker::from(Arc::new(TestWaker));
         let mut cx = Context::from_waker(&waker);
         let pinned = Pin::new(&mut futures[winner_index]);
-        match pinned.poll(&mut cx) {
+        match pinned.as_mut().poll(&mut cx) {
             Poll::Ready(val) => winner_value = Some(val),
             Poll::Pending => {
                 // Poll until ready
                 loop {
                     let pinned = Pin::new(&mut futures[winner_index]);
-                    match pinned.poll(&mut cx) {
+                    match pinned.as_mut().poll(&mut cx) {
                         Poll::Ready(val) => {
                             winner_value = Some(val);
                             break;
@@ -454,7 +454,7 @@ fn mr2_panic_isolation(
                     let mut cx = Context::from_waker(&waker);
                     let pinned = Pin::new(future);
                     loop {
-                        match pinned.poll(&mut cx) {
+                        match pinned.as_mut().poll(&mut cx) {
                             Poll::Ready(_) => break,
                             Poll::Pending => {}
                         }
@@ -514,7 +514,7 @@ fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, seed
                 let waker = Waker::from(Arc::new(TestWaker));
                 let mut cx = Context::from_waker(&waker);
                 let pinned = Pin::new(future);
-                match pinned.poll(&mut cx) {
+                match pinned.as_mut().poll(&mut cx) {
                     Poll::Ready(val) => {
                         outcomes[i] = Some(Outcome::Ok(val));
                         if i == winner_index {
@@ -586,7 +586,7 @@ fn mr4_cancel_propagation_consistency(
                 let waker = Waker::from(Arc::new(TestWaker));
                 let mut cx = Context::from_waker(&waker);
                 let pinned = Pin::new(future);
-                match pinned.poll(&mut cx) {
+                match pinned.as_mut().poll(&mut cx) {
                     Poll::Ready(val) => {
                         outcomes[i] = Some(Outcome::Ok(val));
                         any_completed = true;
@@ -621,7 +621,7 @@ fn mr4_cancel_propagation_consistency(
             let mut cx = Context::from_waker(&waker);
             let pinned = Pin::new(future);
             loop {
-                match pinned.poll(&mut cx) {
+                match pinned.as_mut().poll(&mut cx) {
                     Poll::Ready(_) => break,
                     Poll::Pending => {}
                 }
