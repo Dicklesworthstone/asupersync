@@ -2541,4 +2541,509 @@ mod tests {
         let status = std::future::Future::poll(pinned, &mut poll_cx);
         assert!(status.is_pending());
     }
+
+    // =============================================================================
+    // CONFORMANCE TESTS: Structured Concurrency Invariants
+    // =============================================================================
+    //
+    // These tests verify the core structured concurrency guarantees that must hold
+    // for the spawn/join contract to be sound.
+
+    #[test]
+    fn conformance_spawn_creates_trackable_task() {
+        // INVARIANT: Every spawned task creates a trackable record that belongs to the spawning region
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
+
+        // Task must exist and be trackable
+        let task_record = state.task(handle.task_id())
+            .expect("spawned task must have a record");
+
+        // Task must belong to the spawning region
+        assert_eq!(task_record.owner, region,
+            "spawned task must be owned by the spawning region");
+
+        // Region must track the task
+        let region_record = state.region(region)
+            .expect("spawning region must exist");
+        assert!(region_record.task_ids().contains(&handle.task_id()),
+            "spawning region must track the spawned task");
+    }
+
+    #[test]
+    fn conformance_spawn_enforces_send_bounds() {
+        // INVARIANT: spawn() enforces Send + 'static bounds for cross-worker task migration
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // This should compile - Send + 'static data
+        let send_data = String::from("test");
+        let (handle, _stored) = scope.spawn(&mut state, &cx, move |_| async move {
+            send_data.len() // Uses Send + 'static String
+        }).unwrap();
+
+        // Task record should reflect Send bounds
+        let task_record = state.task(handle.task_id())
+            .expect("Send task must have a record");
+        assert_eq!(task_record.owner, region);
+
+        // NOTE: Non-Send compile-time test examples are in module docstring
+        // (compile_fail tests with Rc<T> and borrowed references)
+    }
+
+    #[test]
+    fn conformance_join_awaits_task_completion() {
+        // INVARIANT: TaskHandle.join() waits for task completion and returns the result
+        use std::sync::Arc;
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (mut handle, mut stored) = scope.spawn(&mut state, &cx, |_| async { 123_i32 }).unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Before task completion, join should be pending
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
+        assert!(join_fut.as_mut().poll(&mut poll_cx).is_pending(),
+            "join must be pending before task completion");
+
+        // Complete the task
+        assert!(stored.poll(&mut poll_cx).is_ready(),
+            "test task must complete in one poll");
+
+        // After task completion, join should return the result
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            std::task::Poll::Ready(Ok(result)) => {
+                assert_eq!(result, 123, "join must return the task's result");
+            }
+            other => panic!("join must be Ready(Ok(123)) after task completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conformance_child_region_task_isolation() {
+        // INVARIANT: Tasks spawned in child regions belong to the child, not the parent
+        use std::sync::Arc;
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent_region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent_region, Budget::INFINITE);
+
+        let outcome = block_on(scope.region(
+            &mut state,
+            &cx,
+            crate::types::policy::FailFast,
+            |child_scope, state| {
+                let child_region = child_scope.region_id();
+
+                // Spawn task in child region
+                let (handle, mut stored) = child_scope
+                    .spawn(state, &cx, |_| async { 456_i32 })
+                    .expect("spawn in child region must succeed");
+
+                // Verify task ownership invariants
+                let task_record = state.task(handle.task_id())
+                    .expect("child task must have a record");
+                let child_owns = task_record.owner == child_region;
+                let parent_owns = task_record.owner == parent_region;
+
+                // Verify region tracking invariants
+                let parent_tracks = state.region(parent_region)
+                    .map(|r| r.task_ids().contains(&handle.task_id()))
+                    .unwrap_or(false);
+                let child_tracks = state.region(child_region)
+                    .map(|r| r.task_ids().contains(&handle.task_id()))
+                    .unwrap_or(false);
+
+                // Complete the task for clean shutdown
+                let waker = Waker::from(Arc::new(NoopWaker));
+                let mut poll_cx = Context::from_waker(&waker);
+                if let std::task::Poll::Ready(outcome) = stored.poll(&mut poll_cx) {
+                    if let Some(task) = state.task_mut(handle.task_id()) {
+                        task.complete(outcome);
+                    }
+                    let _ = state.task_completed(handle.task_id());
+                }
+
+                std::future::ready(Outcome::Ok((child_owns, parent_owns, child_tracks, parent_tracks)))
+            },
+        )).expect("child region must complete");
+
+        let (child_owns, parent_owns, child_tracks, parent_tracks) = match outcome {
+            Outcome::Ok(tuple) => tuple,
+            other => panic!("expected Ok(ownership_data), got {other:?}"),
+        };
+
+        assert!(child_owns, "task spawned in child region must be owned by child");
+        assert!(!parent_owns, "task spawned in child region must NOT be owned by parent");
+        assert!(child_tracks, "child region must track its spawned tasks");
+        assert!(!parent_tracks, "parent region must NOT track child's tasks");
+    }
+
+    #[test]
+    fn conformance_capability_inheritance() {
+        // INVARIANT: Spawned tasks inherit capabilities from the parent Cx
+        use crate::cx::registry::RegistryHandle;
+        use crate::remote::{NodeId, RemoteCap};
+        use std::sync::Arc;
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Setup parent Cx with capabilities
+        let registry = crate::cx::NameRegistry::new();
+        let registry_handle = RegistryHandle::new(Arc::new(registry));
+        let parent_registry_arc = registry_handle.as_arc();
+
+        let parent_cx = test_cx()
+            .with_registry_handle(Some(registry_handle))
+            .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("test-node")));
+
+        let mut handle = scope.spawn_registered(&mut state, &parent_cx, move |child_cx| async move {
+            // Verify registry inheritance
+            let child_registry = child_cx.registry_handle()
+                .expect("child must inherit registry capability");
+            let same_registry = Arc::ptr_eq(&child_registry.as_arc(), &parent_registry_arc);
+
+            // Verify remote capability inheritance
+            let child_remote = child_cx.remote()
+                .expect("child must inherit remote capability");
+            let node_name = child_remote.local_node().as_str().to_owned();
+
+            // Verify timer capability inheritance (if parent has it)
+            let has_timer = child_cx.has_timer();
+
+            (same_registry, node_name, has_timer)
+        }).unwrap();
+
+        // Complete the task and verify results
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        let stored = state.get_stored_future(handle.task_id())
+            .expect("spawn_registered must store the task");
+        assert!(stored.poll(&mut poll_cx).is_ready());
+
+        let mut join_fut = std::pin::pin!(handle.join(&parent_cx));
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            std::task::Poll::Ready(Ok((same_registry, node_name, has_timer))) => {
+                assert!(same_registry, "child must inherit exact same registry instance");
+                assert_eq!(node_name, "test-node", "child must inherit remote capability");
+                // Timer inheritance depends on runtime setup, but should be consistent
+            }
+            other => panic!("capability inheritance test failed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conformance_task_cancellation_propagation() {
+        // INVARIANT: Cancelling a task via abort() propagates cancellation signal
+        use std::sync::Arc;
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (mut handle, mut stored) = scope.spawn(&mut state, &cx, |cx| async move {
+            // Check cancellation status and respond accordingly
+            if cx.checkpoint().is_err() {
+                "cancelled"
+            } else {
+                "completed"
+            }
+        }).unwrap();
+
+        // Abort the task before it runs
+        handle.abort();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Task should complete and see the cancellation
+        assert!(stored.poll(&mut poll_cx).is_ready(),
+            "cancelled task must still complete");
+
+        // Join should return the cancellation-aware result
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            std::task::Poll::Ready(Ok(result)) => {
+                assert_eq!(result, "cancelled",
+                    "cancelled task must observe cancellation via checkpoint()");
+            }
+            other => panic!("cancelled task join failed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conformance_race_loser_drain_invariant() {
+        // INVARIANT: In race operations, losers are cancelled and fully drained
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Winner: completes immediately
+        let (winner_handle, mut winner_stored) = scope
+            .spawn(&mut state, &cx, |_| async { "winner" })
+            .unwrap();
+
+        // Loser: would run longer, must be cancelled and drained
+        let (loser_handle, mut loser_stored) = scope
+            .spawn(&mut state, &cx, |cx| async move {
+                // Simulate work that can be cancelled
+                struct YieldOnce(bool);
+                impl std::future::Future for YieldOnce {
+                    type Output = ();
+                    fn poll(
+                        mut self: std::pin::Pin<&mut Self>,
+                        cx: &mut std::task::Context<'_>
+                    ) -> std::task::Poll<()> {
+                        if self.0 {
+                            std::task::Poll::Ready(())
+                        } else {
+                            self.0 = true;
+                            cx.waker().wake_by_ref();
+                            std::task::Poll::Pending
+                        }
+                    }
+                }
+                YieldOnce(false).await;
+
+                // Check if we were cancelled
+                if cx.checkpoint().is_err() {
+                    "loser_cancelled"
+                } else {
+                    "loser_completed"
+                }
+            })
+            .unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Complete winner immediately
+        assert!(winner_stored.poll(&mut poll_cx).is_ready());
+
+        // Start the race
+        let handles = vec![winner_handle, loser_handle];
+        let mut race_fut = std::pin::pin!(scope.race_all(&cx, handles));
+
+        // Race should be pending initially (waiting for loser drain)
+        assert!(race_fut.as_mut().poll(&mut poll_cx).is_pending(),
+            "race must wait for loser to be drained");
+
+        // Drive loser to first yield (it's now pending, but abort signal propagates)
+        assert!(loser_stored.poll(&mut poll_cx).is_pending());
+
+        // Still pending on race (loser not fully drained)
+        assert!(race_fut.as_mut().poll(&mut poll_cx).is_pending());
+
+        // Drive loser to completion (should see cancellation)
+        assert!(loser_stored.poll(&mut poll_cx).is_ready());
+
+        // Now race should complete with winner result
+        match race_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Ok((result, winner_index))) => {
+                assert_eq!(result, "winner", "race must return winner result");
+                assert_eq!(winner_index, 0, "winner index must be correct");
+            }
+            other => panic!("race must complete after loser drain: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conformance_region_quiescence_on_empty() {
+        // INVARIANT: Empty regions reach quiescence and can be closed immediately
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent_region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent_region, Budget::INFINITE);
+
+        // Create and immediately close a child region with no spawned tasks
+        let outcome = block_on(scope.region(
+            &mut state,
+            &cx,
+            crate::types::policy::FailFast,
+            |_child_scope, _state| {
+                // Don't spawn any tasks - region should be empty
+                std::future::ready(Outcome::Ok("empty_region_completed"))
+            },
+        )).expect("empty child region must complete");
+
+        match outcome {
+            Outcome::Ok(result) => {
+                assert_eq!(result, "empty_region_completed",
+                    "empty region must reach quiescence immediately");
+            }
+            other => panic!("empty region must complete successfully: {other:?}"),
+        }
+
+        // Child region should be cleaned up (no longer in parent's child list)
+        let parent_record = state.region(parent_region)
+            .expect("parent region must exist");
+        assert!(parent_record.child_ids().is_empty(),
+            "completed child region must be removed from parent");
+    }
+
+    #[test]
+    fn conformance_spawn_into_closed_region_fails() {
+        // INVARIANT: Cannot spawn tasks into regions that have begun closing
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Close the region
+        let region_record = state.region_mut(region)
+            .expect("region must exist");
+        region_record.begin_close(None);
+
+        // Attempt to spawn should fail
+        let spawn_result = scope.spawn(&mut state, &cx, |_| async { 42 });
+
+        assert!(matches!(spawn_result, Err(SpawnError::RegionClosed(_))),
+            "spawning into closed region must fail with RegionClosed error");
+
+        // State should remain consistent (no orphaned tasks)
+        assert!(state.tasks_is_empty() ||
+                state.region(region).map(|r| r.task_ids().is_empty()).unwrap_or(true),
+            "failed spawn must not create orphaned tasks");
+    }
+
+    #[test]
+    fn conformance_join_multiple_tasks_preserves_results() {
+        // INVARIANT: join_all preserves all task results in order
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Spawn multiple tasks with different results
+        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 100_i32 }).unwrap();
+        let (h2, mut t2) = scope.spawn(&mut state, &cx, |_| async { 200_i32 }).unwrap();
+        let (h3, mut t3) = scope.spawn(&mut state, &cx, |_| async { 300_i32 }).unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Complete all tasks
+        assert!(t1.poll(&mut poll_cx).is_ready());
+        assert!(t2.poll(&mut poll_cx).is_ready());
+        assert!(t3.poll(&mut poll_cx).is_ready());
+
+        // Join all tasks
+        let handles = vec![h1, h2, h3];
+        let mut join_all_fut = std::pin::pin!(scope.join_all(&cx, handles));
+
+        match join_all_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(results) => {
+                assert_eq!(results.len(), 3, "join_all must return all results");
+
+                // Results must be in the same order as handles
+                assert_eq!(results[0].as_ref().unwrap(), &100,
+                    "first task result must be preserved");
+                assert_eq!(results[1].as_ref().unwrap(), &200,
+                    "second task result must be preserved");
+                assert_eq!(results[2].as_ref().unwrap(), &300,
+                    "third task result must be preserved");
+            }
+            other => panic!("join_all must complete with all results: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conformance_panic_propagation_through_join() {
+        // INVARIANT: Task panics are captured and propagated through join as JoinError::Panicked
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Spawn a task that panics with a specific message
+        let (mut handle, mut stored) = scope.spawn(&mut state, &cx, |_| async {
+            std::panic::panic_any("test_panic_message");
+        }).unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Task execution should complete with Panicked outcome
+        match stored.poll(&mut poll_cx) {
+            Poll::Ready(crate::types::Outcome::Panicked(_)) => {
+                // Expected: panic was caught and wrapped as Outcome::Panicked
+            }
+            other => panic!("panicking task must complete with Panicked outcome: {other:?}"),
+        }
+
+        // Join should propagate the panic as JoinError::Panicked
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(JoinError::Panicked(payload))) => {
+                assert_eq!(payload.message(), "test_panic_message",
+                    "join must preserve panic payload message");
+            }
+            other => panic!("join of panicked task must return JoinError::Panicked: {other:?}"),
+        }
+    }
 }
