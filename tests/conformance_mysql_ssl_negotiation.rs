@@ -11,6 +11,8 @@
 //! 3. **caching_sha2_password failures**: Full auth fails due to missing secure connection
 //! 4. **Server capability checking**: No validation that server supports SSL when Required
 
+#![cfg(feature = "mysql")]
+
 use asupersync::database::mysql::{MySqlConnectOptions, MySqlError, SslMode};
 use asupersync::test_utils::init_test_logging;
 
