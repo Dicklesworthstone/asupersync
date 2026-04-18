@@ -944,3 +944,10 @@ path = "fuzz_targets/kafka_protocol.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tls_record"
+path = "fuzz_targets/tls_record.rs"
+test = false
+doc = false
+bench = false
