@@ -776,3 +776,10 @@ path = "fuzz_targets/postgres_scram.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_frames"
+path = "fuzz_targets/h2_frames.rs"
+test = false
+doc = false
+bench = false
