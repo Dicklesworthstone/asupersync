@@ -627,6 +627,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "postgres_prepared_statement_injection_fuzz"
+path = "fuzz_targets/postgres_prepared_statement_injection_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_h1_client_comprehensive"
 path = "fuzz_targets/fuzz_h1_client_comprehensive.rs"
 test = false
