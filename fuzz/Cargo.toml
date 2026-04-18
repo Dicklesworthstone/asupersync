@@ -158,6 +158,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_websocket_frame_fuzzing"
+path = "fuzz_targets/websocket_frame_fuzzing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_h3_native_protocol"
 path = "fuzz_targets/h3_native_protocol.rs"
 test = false
