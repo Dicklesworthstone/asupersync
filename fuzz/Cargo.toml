@@ -193,6 +193,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_quic_tls_state_machine"
+path = "fuzz_targets/quic_tls_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_tls_message_parsing"
 path = "fuzz_targets/tls_message_parsing.rs"
 test = false
@@ -594,6 +601,13 @@ bench = false
 [[bin]]
 name = "gf256_simd_edge_cases"
 path = "fuzz_targets/gf256_simd_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_canonicalize"
+path = "fuzz_targets/trace_canonicalize.rs"
 test = false
 doc = false
 bench = false
