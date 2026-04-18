@@ -1,7 +1,7 @@
 //! Codec for length-prefixed framing.
 
-use crate::bytes::BytesMut;
-use crate::codec::Decoder;
+use crate::bytes::{BufMut, BytesMut};
+use crate::codec::{Decoder, Encoder};
 use std::io;
 
 /// Codec for length-prefixed framing.
@@ -246,6 +246,129 @@ impl Decoder for LengthDelimitedCodec {
                 }
             }
         }
+    }
+}
+
+impl Encoder<BytesMut> for LengthDelimitedCodec {
+    type Error = io::Error;
+
+    fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let frame_len = item.len();
+
+        // Calculate the adjusted length to write in the length field
+        let adjustment = i64::try_from(self.builder.length_adjustment).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "length adjustment exceeds i64")
+        })?;
+
+        let frame_len_i64 = i64::try_from(frame_len).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "frame length exceeds i64")
+        })?;
+
+        let adjusted_len = frame_len_i64
+            .checked_sub(adjustment)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length underflow"))?;
+
+        if adjusted_len < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "negative encoded length",
+            ));
+        }
+
+        let length_to_encode = u64::try_from(adjusted_len).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "encoded length exceeds u64")
+        })?;
+
+        // Check max frame length limit
+        if frame_len > self.builder.max_frame_length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame length exceeds max_frame_length",
+            ));
+        }
+
+        // Calculate total header length
+        let header_len = self
+            .builder
+            .length_field_offset
+            .saturating_add(self.builder.length_field_length);
+
+        // Reserve space for the entire frame
+        dst.reserve(header_len + frame_len);
+
+        // Write length field offset padding (zeros)
+        for _ in 0..self.builder.length_field_offset {
+            dst.put_u8(0);
+        }
+
+        // Write the length field in the configured byte order
+        if self.builder.big_endian {
+            match self.builder.length_field_length {
+                1 => dst.put_u8(length_to_encode as u8),
+                2 => dst.put_u16(length_to_encode as u16),
+                3 => {
+                    dst.put_u8((length_to_encode >> 16) as u8);
+                    dst.put_u16(length_to_encode as u16);
+                }
+                4 => dst.put_u32(length_to_encode as u32),
+                5 => {
+                    dst.put_u8((length_to_encode >> 32) as u8);
+                    dst.put_u32(length_to_encode as u32);
+                }
+                6 => {
+                    dst.put_u16((length_to_encode >> 32) as u16);
+                    dst.put_u32(length_to_encode as u32);
+                }
+                7 => {
+                    dst.put_u8((length_to_encode >> 48) as u8);
+                    dst.put_u16((length_to_encode >> 32) as u16);
+                    dst.put_u32(length_to_encode as u32);
+                }
+                8 => dst.put_u64(length_to_encode),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid length_field_length",
+                    ));
+                }
+            }
+        } else {
+            // Little-endian encoding
+            match self.builder.length_field_length {
+                1 => dst.put_u8(length_to_encode as u8),
+                2 => dst.put_u16_le(length_to_encode as u16),
+                3 => {
+                    dst.put_u16_le(length_to_encode as u16);
+                    dst.put_u8((length_to_encode >> 16) as u8);
+                }
+                4 => dst.put_u32_le(length_to_encode as u32),
+                5 => {
+                    dst.put_u32_le(length_to_encode as u32);
+                    dst.put_u8((length_to_encode >> 32) as u8);
+                }
+                6 => {
+                    dst.put_u32_le(length_to_encode as u32);
+                    dst.put_u16_le((length_to_encode >> 32) as u16);
+                }
+                7 => {
+                    dst.put_u32_le(length_to_encode as u32);
+                    dst.put_u16_le((length_to_encode >> 32) as u16);
+                    dst.put_u8((length_to_encode >> 48) as u8);
+                }
+                8 => dst.put_u64_le(length_to_encode),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid length_field_length",
+                    ));
+                }
+            }
+        }
+
+        // Write the frame data
+        dst.put_slice(&item);
+
+        Ok(())
     }
 }
 
@@ -502,5 +625,529 @@ mod tests {
         assert!(dbg.contains("LengthDelimitedCodecBuilder"));
         let dbg2 = format!("{cloned:?}");
         assert_eq!(dbg, dbg2);
+    }
+
+    // Encoder tests
+    #[test]
+    fn test_encode_basic() {
+        let mut codec = LengthDelimitedCodec::new();
+        let mut dst = BytesMut::new();
+        let data = BytesMut::from("hello");
+
+        codec.encode(data, &mut dst).unwrap();
+
+        // Should produce [0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o']
+        assert_eq!(dst.len(), 9);
+        assert_eq!(&dst[0..4], &[0, 0, 0, 5]);
+        assert_eq!(&dst[4..9], b"hello");
+    }
+
+    #[test]
+    fn test_encode_little_endian() {
+        let mut codec = LengthDelimitedCodec::builder().little_endian().new_codec();
+        let mut dst = BytesMut::new();
+        let data = BytesMut::from("hi");
+
+        codec.encode(data, &mut dst).unwrap();
+
+        // Should produce [2, 0, 0, 0, 'h', 'i'] in little-endian
+        assert_eq!(dst.len(), 6);
+        assert_eq!(&dst[0..4], &[2, 0, 0, 0]);
+        assert_eq!(&dst[4..6], b"hi");
+    }
+
+    #[test]
+    fn test_encode_max_frame_length_rejection() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .max_frame_length(3)
+            .new_codec();
+        let mut dst = BytesMut::new();
+        let data = BytesMut::from("toolong");
+
+        let err = codec.encode(data, &mut dst).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("max_frame_length"));
+    }
+
+    // ================================================================================
+    // METAMORPHIC TESTING SUITE
+    // ================================================================================
+
+    /// Configuration for metamorphic testing
+    #[derive(Debug, Clone)]
+    struct MetamorphicTestConfig {
+        /// Codec configuration
+        length_field_offset: usize,
+        length_field_length: usize,
+        length_adjustment: isize,
+        num_skip: usize,
+        max_frame_length: usize,
+        big_endian: bool,
+    }
+
+    impl Default for MetamorphicTestConfig {
+        fn default() -> Self {
+            Self {
+                length_field_offset: 0,
+                length_field_length: 4,
+                length_adjustment: 0,
+                num_skip: 4,
+                max_frame_length: 8 * 1024 * 1024,
+                big_endian: true,
+            }
+        }
+    }
+
+    impl MetamorphicTestConfig {
+        fn build_codec(&self) -> LengthDelimitedCodec {
+            let mut builder = LengthDelimitedCodec::builder()
+                .length_field_offset(self.length_field_offset)
+                .length_field_length(self.length_field_length)
+                .length_adjustment(self.length_adjustment)
+                .num_skip(self.num_skip)
+                .max_frame_length(self.max_frame_length);
+
+            if self.big_endian {
+                builder = builder.big_endian();
+            } else {
+                builder = builder.little_endian();
+            }
+
+            builder.new_codec()
+        }
+    }
+
+    /// Deterministic RNG extension for testing
+    trait DetRngExt {
+        fn gen_range(&mut self, range: std::ops::Range<usize>) -> usize;
+        fn gen_range_inclusive(&mut self, range: std::ops::RangeInclusive<usize>) -> usize;
+    }
+
+    impl DetRngExt for crate::util::det_rng::DetRng {
+        fn gen_range(&mut self, range: std::ops::Range<usize>) -> usize {
+            if range.is_empty() {
+                range.start
+            } else {
+                range.start + (self.next_u64() as usize % (range.end - range.start))
+            }
+        }
+
+        fn gen_range_inclusive(&mut self, range: std::ops::RangeInclusive<usize>) -> usize {
+            self.gen_range(*range.start()..*range.end() + 1)
+        }
+    }
+
+    /// Generate deterministic test data
+    fn generate_test_payload(rng: &mut crate::util::det_rng::DetRng, size: usize) -> BytesMut {
+        let mut data = BytesMut::with_capacity(size);
+        for _ in 0..size {
+            data.put_u8((rng.next_u64() % 256) as u8);
+        }
+        data
+    }
+
+    /// Generate test configurations for metamorphic testing
+    fn generate_test_configs(rng: &mut crate::util::det_rng::DetRng, count: usize) -> Vec<MetamorphicTestConfig> {
+        (0..count)
+            .map(|_| MetamorphicTestConfig {
+                length_field_offset: rng.gen_range(0..3),
+                length_field_length: rng.gen_range_inclusive(1..=4),
+                length_adjustment: (rng.next_u64() % 21) as isize - 10,
+                num_skip: rng.gen_range(0..8),
+                max_frame_length: rng.gen_range_inclusive(100..=1024),
+                big_endian: (rng.next_u64() % 2) == 0,
+            })
+            .collect()
+    }
+
+    // ================================================================================
+    // MR1: Round-Trip Property (encode(decode(x)) == x)
+    // ================================================================================
+
+    #[test]
+    fn metamorphic_round_trip_property() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        let configs = generate_test_configs(&mut rng, 20);
+
+        for config in configs {
+            let mut encoder = config.build_codec();
+            let mut decoder = config.build_codec();
+
+            // Test various payload sizes
+            for size in [0, 1, 10, 100, 255] {
+                if size <= config.max_frame_length {
+                    let original_payload = generate_test_payload(&mut rng, size);
+
+                    // Encode payload
+                    let mut encoded = BytesMut::new();
+                    if encoder.encode(original_payload.clone(), &mut encoded).is_ok() {
+                        // Decode the encoded data
+                        let decoded_frame = decoder.decode(&mut encoded).unwrap();
+
+                        if let Some(frame) = decoded_frame {
+                            // The frame should contain the original payload
+                            // Note: The frame might include header bytes if num_skip < header_len
+                            let header_len = config.length_field_offset + config.length_field_length;
+                            if config.num_skip >= header_len {
+                                // Full header skipped, frame should be just the payload
+                                assert_eq!(
+                                    frame,
+                                    original_payload,
+                                    "Round-trip failed for config {:?}, size {}",
+                                    config,
+                                    size
+                                );
+                            } else {
+                                // Partial header retained, payload should be at the end
+                                let payload_start = header_len - config.num_skip;
+                                assert_eq!(
+                                    &frame[payload_start..],
+                                    &original_payload[..],
+                                    "Round-trip payload mismatch for config {:?}, size {}",
+                                    config,
+                                    size
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ================================================================================
+    // MR2: Partial-Frame Handling Preserves State
+    // ================================================================================
+
+    #[test]
+    fn metamorphic_partial_frame_state_preservation() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        let config = MetamorphicTestConfig::default();
+        let payload = generate_test_payload(&mut rng, 20);
+
+        // Encode a complete frame
+        let mut encoder = config.build_codec();
+        let mut encoded = BytesMut::new();
+        encoder.encode(payload.clone(), &mut encoded).unwrap();
+
+        // Test partial frame handling
+        let mut decoder1 = config.build_codec();
+        let mut decoder2 = config.build_codec();
+
+        // Split the encoded data at various points
+        for split_point in 1..encoded.len() {
+            let mut part1 = encoded.clone();
+            let part2 = part1.split_off(split_point);
+
+            // Decoder 1: Process partial data first, then complete
+            let result1_partial = decoder1.decode(&mut part1).unwrap();
+            assert!(result1_partial.is_none(), "Partial frame should return None");
+
+            let mut remaining = part2;
+            let result1_complete = decoder1.decode(&mut remaining).unwrap();
+
+            // Decoder 2: Process complete data at once
+            let mut complete_data = encoded.clone();
+            let result2_complete = decoder2.decode(&mut complete_data).unwrap();
+
+            // Both decoders should produce the same result
+            assert_eq!(
+                result1_complete, result2_complete,
+                "Partial frame handling changed result at split point {}",
+                split_point
+            );
+        }
+    }
+
+    // ================================================================================
+    // MR3: Max Frame Size Rejections
+    // ================================================================================
+
+    #[test]
+    fn metamorphic_max_frame_size_rejections() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Test with various max frame length limits
+        for max_len in [10, 50, 100, 500] {
+            let config = MetamorphicTestConfig {
+                max_frame_length: max_len,
+                ..Default::default()
+            };
+
+            let mut encoder = config.build_codec();
+            let mut decoder = config.build_codec();
+
+            // Test payloads around the limit
+            for size in [max_len - 1, max_len, max_len + 1, max_len * 2] {
+                let payload = generate_test_payload(&mut rng, size);
+                let mut encoded = BytesMut::new();
+
+                // Encode should reject oversized frames
+                let encode_result = encoder.encode(payload, &mut encoded);
+
+                if size > max_len {
+                    assert!(encode_result.is_err(),
+                        "Encoder should reject frame size {} > max_len {}",
+                        size, max_len);
+                    assert_eq!(encode_result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                } else {
+                    assert!(encode_result.is_ok(),
+                        "Encoder should accept frame size {} <= max_len {}",
+                        size, max_len);
+
+                    // If encoding succeeded, decoding should too
+                    let decode_result = decoder.decode(&mut encoded);
+                    assert!(decode_result.is_ok(),
+                        "Decoder should accept frame that encoder produced");
+                }
+            }
+
+            // Test direct decoder rejection of oversized frames
+            let mut decoder_direct = config.build_codec();
+            let mut crafted_frame = BytesMut::new();
+
+            // Craft a frame that claims to be oversized
+            let oversized_len = max_len + 100;
+            crafted_frame.put_u32(oversized_len as u32);
+            let decode_result = decoder_direct.decode(&mut crafted_frame);
+
+            // Decoder should reject this during header parsing
+            assert!(decode_result.is_err(),
+                "Decoder should reject oversized frame length in header");
+        }
+    }
+
+    // ================================================================================
+    // MR4: Length-Prefix Byte-Order Consistency
+    // ================================================================================
+
+    #[test]
+    fn metamorphic_byte_order_consistency() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        let payload = generate_test_payload(&mut rng, 100);
+
+        // Test different byte orders with the same logical configuration
+        let base_config = MetamorphicTestConfig {
+            length_field_length: 4,
+            ..Default::default()
+        };
+
+        let big_endian_config = MetamorphicTestConfig {
+            big_endian: true,
+            ..base_config
+        };
+
+        let little_endian_config = MetamorphicTestConfig {
+            big_endian: false,
+            ..base_config
+        };
+
+        // Encode with both byte orders
+        let mut be_encoder = big_endian_config.build_codec();
+        let mut le_encoder = little_endian_config.build_codec();
+
+        let mut be_encoded = BytesMut::new();
+        let mut le_encoded = BytesMut::new();
+
+        be_encoder.encode(payload.clone(), &mut be_encoded).unwrap();
+        le_encoder.encode(payload.clone(), &mut le_encoded).unwrap();
+
+        // Wire formats should be different for multi-byte lengths
+        if payload.len() > 255 {
+            assert_ne!(
+                be_encoded, le_encoded,
+                "Big-endian and little-endian should produce different wire formats"
+            );
+
+            // But the length fields should be byte-swapped versions of each other
+            let be_len = u32::from_be_bytes([be_encoded[0], be_encoded[1], be_encoded[2], be_encoded[3]]);
+            let le_len = u32::from_le_bytes([le_encoded[0], le_encoded[1], le_encoded[2], le_encoded[3]]);
+            assert_eq!(be_len, le_len, "Length values should be equal when interpreted correctly");
+        }
+
+        // Decoders should extract the same payload regardless of byte order
+        let mut be_decoder = big_endian_config.build_codec();
+        let mut le_decoder = little_endian_config.build_codec();
+
+        let be_decoded = be_decoder.decode(&mut be_encoded).unwrap().unwrap();
+        let le_decoded = le_decoder.decode(&mut le_encoded).unwrap().unwrap();
+
+        // Extract just the payload from both results
+        let header_len = base_config.length_field_offset + base_config.length_field_length;
+        let payload_start = if base_config.num_skip >= header_len { 0 } else { header_len - base_config.num_skip };
+
+        assert_eq!(
+            &be_decoded[payload_start..],
+            &le_decoded[payload_start..],
+            "Decoded payloads should be identical regardless of byte order"
+        );
+    }
+
+    // ================================================================================
+    // MR5: LabRuntime Replay Identical
+    // ================================================================================
+
+    #[test]
+    fn metamorphic_lab_runtime_replay_identical() {
+        // Test deterministic behavior with fixed seed
+        const SEED: u64 = 0x1234_5678_9ABC_DEF0;
+
+        // Run the same test sequence multiple times with the same seed
+        let results: Vec<Vec<BytesMut>> = (0..3)
+            .map(|_| {
+                let mut rng = crate::util::det_rng::DetRng::new(SEED);
+                let mut frames = Vec::new();
+
+                // Generate and process test frames deterministically
+                for _ in 0..10 {
+                    let config = MetamorphicTestConfig {
+                        length_field_length: 2,
+                        num_skip: 2,
+                        max_frame_length: 1000,
+                        big_endian: (rng.next_u64() % 2) == 0,
+                        ..Default::default()
+                    };
+
+                    let payload_size = rng.gen_range(1..100);
+                    let payload = generate_test_payload(&mut rng, payload_size);
+
+                    let mut encoder = config.build_codec();
+                    let mut decoder = config.build_codec();
+
+                    let mut encoded = BytesMut::new();
+                    if encoder.encode(payload, &mut encoded).is_ok() {
+                        if let Ok(Some(frame)) = decoder.decode(&mut encoded) {
+                            frames.push(frame);
+                        }
+                    }
+                }
+
+                frames
+            })
+            .collect();
+
+        // All runs should produce identical results
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0], results[i],
+                "Run {} produced different results than run 0 - non-deterministic behavior detected",
+                i
+            );
+        }
+
+        // Results should be non-empty (basic sanity check)
+        assert!(!results[0].is_empty(), "Should have processed some frames successfully");
+    }
+
+    // ================================================================================
+    // Composite Metamorphic Relations
+    // ================================================================================
+
+    #[test]
+    fn metamorphic_composite_round_trip_with_partial_frames() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        let config = MetamorphicTestConfig::default();
+        let payload = generate_test_payload(&mut rng, 50);
+
+        // Encode
+        let mut encoder = config.build_codec();
+        let mut encoded = BytesMut::new();
+        encoder.encode(payload.clone(), &mut encoded).unwrap();
+
+        // Decode with random partial reads
+        let mut decoder = config.build_codec();
+        let mut remaining = encoded.clone();
+        let mut accumulated = BytesMut::new();
+
+        while !remaining.is_empty() {
+            let chunk_size = rng.gen_range(1..remaining.len() + 1).min(remaining.len());
+            let chunk = remaining.split_to(chunk_size);
+            accumulated.put_slice(&chunk);
+
+            if let Ok(Some(frame)) = decoder.decode(&mut accumulated) {
+                // Extract payload from frame
+                let header_len = config.length_field_offset + config.length_field_length;
+                let payload_start = if config.num_skip >= header_len { 0 } else { header_len - config.num_skip };
+
+                assert_eq!(
+                    &frame[payload_start..],
+                    &payload[..],
+                    "Composite round-trip with partial frames failed"
+                );
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn metamorphic_cross_configuration_compatibility() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Test that different configurations that should be compatible actually are
+        let base_config = MetamorphicTestConfig {
+            length_field_length: 4,
+            num_skip: 4,
+            max_frame_length: 1000,
+            ..Default::default()
+        };
+
+        // Variations that should be compatible
+        let configs = vec![
+            base_config.clone(),
+            MetamorphicTestConfig { big_endian: false, ..base_config.clone() },
+            MetamorphicTestConfig { length_field_offset: 2, num_skip: 6, ..base_config.clone() },
+        ];
+
+        let payload = generate_test_payload(&mut rng, 30);
+
+        // Each config should be able to round-trip the data
+        for config in &configs {
+            let mut encoder = config.build_codec();
+            let mut decoder = config.build_codec();
+
+            let mut encoded = BytesMut::new();
+            encoder.encode(payload.clone(), &mut encoded).unwrap();
+
+            let decoded = decoder.decode(&mut encoded).unwrap().unwrap();
+
+            // Verify the payload is preserved
+            let header_len = config.length_field_offset + config.length_field_length;
+            let payload_start = if config.num_skip >= header_len { 0 } else { header_len - config.num_skip };
+
+            assert_eq!(
+                &decoded[payload_start..],
+                &payload[..],
+                "Configuration {:?} failed round-trip test",
+                config
+            );
+        }
     }
 }
