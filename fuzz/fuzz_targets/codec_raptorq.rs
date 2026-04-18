@@ -23,7 +23,9 @@ use libfuzzer_sys::fuzz_target;
 /// - Malformed Object Transmission Information
 /// - Resource exhaustion via oversized frames
 /// - Cross-block contamination attacks
-use asupersync::codec::raptorq::{EncodedSymbol, EncodingConfig, EncodingError, EncodingPipeline, EncodingStats};
+use asupersync::codec::raptorq::{
+    EncodedSymbol, EncodingConfig, EncodingError, EncodingPipeline, EncodingStats,
+};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 
 /// Maximum frame size for testing (1MB)
@@ -156,11 +158,11 @@ fn test_block_index_bounds(data: &[u8]) {
 
     // Test various SBN values including overflow cases
     let sbn_test_cases = [
-        0u16,                    // Minimum
-        255,                     // Maximum valid u8
-        256,                     // Just over u8 boundary
-        sbn_raw,                 // From fuzz input
-        u16::MAX,                // Maximum u16
+        0u16,     // Minimum
+        255,      // Maximum valid u8
+        256,      // Just over u8 boundary
+        sbn_raw,  // From fuzz input
+        u16::MAX, // Maximum u16
     ];
 
     for sbn in sbn_test_cases {
@@ -195,11 +197,11 @@ fn test_symbol_size_oti_consistency(data: &[u8]) {
 
     // Test various size mismatches
     let size_test_cases = [
-        (0u16, vec![]),                                           // Zero size
-        (1, vec![0x42]),                                         // Minimal size
-        (declared_size, data[2..].to_vec()),                    // Declared size
-        (MAX_SYMBOL_SIZE as u16, vec![0; MAX_SYMBOL_SIZE]),     // Maximum size
-        (u16::MAX, data[2..].to_vec()),                         // Oversized declaration
+        (0u16, vec![]),                                               // Zero size
+        (1, vec![0x42]),                                              // Minimal size
+        (declared_size, data[2..].to_vec()),                          // Declared size
+        (MAX_SYMBOL_SIZE as u16, vec![0; MAX_SYMBOL_SIZE]),           // Maximum size
+        (u16::MAX, data[2..].to_vec()),                               // Oversized declaration
         ((actual_size as u16).wrapping_add(100), data[2..].to_vec()), // Size overflow
     ];
 
@@ -238,13 +240,13 @@ fn test_fec_payload_id_parsing(data: &[u8]) {
 
     // Test ESI edge cases per RFC 6330
     let esi_test_cases = [
-        0,                           // First source symbol
-        k as u32 - 1,               // Last source symbol
-        k as u32,                   // First repair symbol
-        0x00FFFFFF,                 // Maximum 24-bit ESI
-        0x01000000,                 // Beyond 24-bit limit
-        esi_raw,                    // From fuzz input
-        u32::MAX,                   // Maximum u32
+        0,            // First source symbol
+        k as u32 - 1, // Last source symbol
+        k as u32,     // First repair symbol
+        0x00FFFFFF,   // Maximum 24-bit ESI
+        0x01000000,   // Beyond 24-bit limit
+        esi_raw,      // From fuzz input
+        u32::MAX,     // Maximum u32
     ];
 
     for esi in esi_test_cases {
@@ -253,7 +255,11 @@ fn test_fec_payload_id_parsing(data: &[u8]) {
 
         // Determine if symbol should be source or repair based on ESI
         let is_source = esi < k as u32;
-        let kind = if is_source { SymbolKind::Source } else { SymbolKind::Repair };
+        let kind = if is_source {
+            SymbolKind::Source
+        } else {
+            SymbolKind::Repair
+        };
 
         let symbol = Symbol::new(symbol_id, data[6..].to_vec(), kind);
 
@@ -282,7 +288,12 @@ fn test_partial_symbol_buffering(data: &[u8]) {
     let split_point = (data[2] as usize) % total_size.max(1);
 
     // Create partial symbol data
-    let full_data = data[3..].iter().cycle().take(total_size).cloned().collect::<Vec<_>>();
+    let full_data = data[3..]
+        .iter()
+        .cycle()
+        .take(total_size)
+        .cloned()
+        .collect::<Vec<_>>();
     let (part1, part2) = full_data.split_at(split_point);
 
     // Test partial symbol scenarios
@@ -310,10 +321,10 @@ fn test_oversized_frame_rejection(data: &[u8]) {
 
     // Test various oversized scenarios
     let size_test_cases = [
-        (MAX_FRAME_SIZE + 1, vec![0; 100]),                    // Just over limit
-        (declared_size, data[4..].to_vec()),                  // From fuzz input
-        (u32::MAX, vec![0; 1000]),                             // Maximum declaration
-        (0, vec![0; MAX_FRAME_SIZE + 1]),                      // Size/data mismatch
+        (MAX_FRAME_SIZE + 1, vec![0; 100]),  // Just over limit
+        (declared_size, data[4..].to_vec()), // From fuzz input
+        (u32::MAX, vec![0; 1000]),           // Maximum declaration
+        (0, vec![0; MAX_FRAME_SIZE + 1]),    // Size/data mismatch
     ];
 
     for (decl_size, frame_data) in size_test_cases {
@@ -343,7 +354,11 @@ fn test_encoding_pipeline_with_symbol(symbol: &Symbol) {
         let _result = pipeline.encode_object(object_id, symbol.data());
     });
 
-    assert!(result.is_ok(), "Encoding pipeline panicked with symbol: {:?}", symbol.id());
+    assert!(
+        result.is_ok(),
+        "Encoding pipeline panicked with symbol: {:?}",
+        symbol.id()
+    );
 }
 
 /// Helper: Test oversized symbol rejection
@@ -351,7 +366,10 @@ fn test_oversized_symbol_rejection(symbol: &Symbol, expected_size: usize) {
     if symbol.data().len() > MAX_SYMBOL_SIZE {
         // Oversized symbols should be handled gracefully
         // This is implementation-specific behavior
-        assert!(symbol.data().len() <= MAX_FRAME_SIZE, "Symbol exceeds maximum frame size");
+        assert!(
+            symbol.data().len() <= MAX_FRAME_SIZE,
+            "Symbol exceeds maximum frame size"
+        );
     }
 }
 
@@ -381,7 +399,11 @@ fn test_partial_symbol_state_machine(part1: &[u8], part2: &[u8], total_size: usi
 
     // Process second part
     buffer.extend_from_slice(part2);
-    assert_eq!(buffer.len(), total_size, "Combined parts should equal total size");
+    assert_eq!(
+        buffer.len(),
+        total_size,
+        "Combined parts should equal total size"
+    );
 
     // Test that partial state is maintained correctly
     let object_id = ObjectId::new(0x5555555555555555, 0x6666666666666666);
@@ -399,7 +421,11 @@ fn test_multi_part_symbol_buffering(parts: &[&[u8]], total_size: usize) {
         buffer.extend_from_slice(part);
     }
 
-    assert_eq!(buffer.len(), total_size, "Multi-part assembly should equal total size");
+    assert_eq!(
+        buffer.len(),
+        total_size,
+        "Multi-part assembly should equal total size"
+    );
 
     // Test symbol creation from assembled parts
     let object_id = ObjectId::new(0x7777777777777777, 0x8888888888888888);
@@ -440,7 +466,8 @@ fn test_frame_rejection(declared_size: u32, frame_data: &[u8]) {
 /// Helper: Test frame acceptance for valid sizes
 fn test_frame_acceptance(declared_size: u32, frame_data: &[u8]) {
     // Frame should be accepted if within limits
-    let is_valid_size = declared_size as usize <= MAX_FRAME_SIZE && frame_data.len() <= MAX_FRAME_SIZE;
+    let is_valid_size =
+        declared_size as usize <= MAX_FRAME_SIZE && frame_data.len() <= MAX_FRAME_SIZE;
 
     if is_valid_size {
         // Should be processed without issues
@@ -463,7 +490,9 @@ fn test_codec_round_trip(data: &[u8]) {
 
     // Test encoding
     let object_id = ObjectId::new(
-        u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]),
+        u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]),
         0xBBBBBBBBBBBBBBBB,
     );
 
@@ -512,7 +541,7 @@ fn parse_raptorq_frame(data: &[u8]) -> Result<(ObjectId, u8, u32, Vec<u8>), &'st
 
     // Parse frame header
     let object_id_high = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]);
     let sbn = data[8];
     let esi = u32::from_le_bytes([data[9], data[10], data[11], data[12]]);
@@ -571,7 +600,11 @@ fuzz_target!(|frame: RaptorQFrame| {
             let symbol = Symbol::new(
                 symbol_id,
                 serialized[i % serialized.len()..].to_vec(),
-                if i % 2 == 0 { SymbolKind::Source } else { SymbolKind::Repair },
+                if i % 2 == 0 {
+                    SymbolKind::Source
+                } else {
+                    SymbolKind::Repair
+                },
             );
 
             // Test encoding pipeline

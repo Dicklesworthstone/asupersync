@@ -20,8 +20,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use asupersync::http::h2::hpack::{Decoder as HpackDecoder};
 use asupersync::bytes::Bytes;
+use asupersync::http::h2::hpack::Decoder as HpackDecoder;
 
 /// Simplified fuzz input for HPACK decoder testing
 #[derive(Arbitrary, Debug, Clone)]
@@ -230,7 +230,10 @@ fn normalize_fuzz_input(input: &mut HpackDecoderFuzzInput) {
                 // Limit raw HPACK data size
                 raw_hpack_data.truncate(16384); // 16KB max
             }
-            HpackOperation::TableSizeUpdate { size_update_sequence, max_allowed_size } => {
+            HpackOperation::TableSizeUpdate {
+                size_update_sequence,
+                max_allowed_size,
+            } => {
                 // Limit sequence length and bound sizes
                 size_update_sequence.truncate(20);
                 *max_allowed_size = (*max_allowed_size).min(128 * 1024); // 128KB max
@@ -245,7 +248,11 @@ fn normalize_fuzz_input(input: &mut HpackDecoderFuzzInput) {
                     *index = (*index).min(10000); // Max index value
                 }
             }
-            HpackOperation::LiteralHeaderField { name_data, value_data, .. } => {
+            HpackOperation::LiteralHeaderField {
+                name_data,
+                value_data,
+                ..
+            } => {
                 // Limit literal field data
                 name_data.data.truncate(8192);
                 value_data.data.truncate(64 * 1024); // Values can be larger
@@ -256,12 +263,19 @@ fn normalize_fuzz_input(input: &mut HpackDecoderFuzzInput) {
                 // Limit Huffman test data
                 huffman_data.truncate(8192);
             }
-            HpackOperation::IntegerOverflowTest { prefix_bits, integer_bytes, .. } => {
+            HpackOperation::IntegerOverflowTest {
+                prefix_bits,
+                integer_bytes,
+                ..
+            } => {
                 // Limit integer test parameters
                 *prefix_bits = (*prefix_bits).clamp(1, 8);
                 integer_bytes.truncate(20); // Reasonable limit for integer bytes
             }
-            HpackOperation::ComplexHeaderBlock { instructions, table_size_limit } => {
+            HpackOperation::ComplexHeaderBlock {
+                instructions,
+                table_size_limit,
+            } => {
                 // Limit instruction count and table size
                 instructions.truncate(50);
                 *table_size_limit = (*table_size_limit).min(128 * 1024);
@@ -272,9 +286,9 @@ fn normalize_fuzz_input(input: &mut HpackDecoderFuzzInput) {
                         HpackInstruction::IndexedHeader { index } => {
                             *index = (*index).min(10000);
                         }
-                        HpackInstruction::LiteralIncremental { name_index, value } |
-                        HpackInstruction::LiteralNoIndexing { name_index, value } |
-                        HpackInstruction::LiteralNeverIndexed { name_index, value } => {
+                        HpackInstruction::LiteralIncremental { name_index, value }
+                        | HpackInstruction::LiteralNoIndexing { name_index, value }
+                        | HpackInstruction::LiteralNeverIndexed { name_index, value } => {
                             *name_index = (*name_index).min(10000);
                             value.truncate(8192);
                         }
@@ -296,7 +310,11 @@ fn test_decode_header_block(
     op: &HpackOperation,
     shadow: &HpackDecoderShadowModel,
 ) -> Result<(), String> {
-    if let HpackOperation::DecodeHeaderBlock { raw_hpack_data, expected_error } = op {
+    if let HpackOperation::DecodeHeaderBlock {
+        raw_hpack_data,
+        expected_error,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let mut decoder = HpackDecoder::new();
@@ -327,7 +345,11 @@ fn test_table_size_updates(
     op: &HpackOperation,
     shadow: &HpackDecoderShadowModel,
 ) -> Result<(), String> {
-    if let HpackOperation::TableSizeUpdate { size_update_sequence, max_allowed_size } = op {
+    if let HpackOperation::TableSizeUpdate {
+        size_update_sequence,
+        max_allowed_size,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         shadow.set_table_size_limit(*max_allowed_size);
@@ -355,7 +377,11 @@ fn test_indexed_header_fields(
     op: &HpackOperation,
     shadow: &HpackDecoderShadowModel,
 ) -> Result<(), String> {
-    if let HpackOperation::IndexedHeaderField { index_values, test_invalid_indices } = op {
+    if let HpackOperation::IndexedHeaderField {
+        index_values,
+        test_invalid_indices,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let mut decoder = HpackDecoder::new();
@@ -395,7 +421,12 @@ fn test_literal_header_fields(
     op: &HpackOperation,
     shadow: &HpackDecoderShadowModel,
 ) -> Result<(), String> {
-    if let HpackOperation::LiteralHeaderField { name_data, value_data, indexing_mode } = op {
+    if let HpackOperation::LiteralHeaderField {
+        name_data,
+        value_data,
+        indexing_mode,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let hpack_data = create_literal_header_instruction(name_data, value_data, indexing_mode);
@@ -421,7 +452,11 @@ fn test_huffman_strings(
     op: &HpackOperation,
     shadow: &HpackDecoderShadowModel,
 ) -> Result<(), String> {
-    if let HpackOperation::HuffmanStringTest { huffman_data, expect_decode_failure } = op {
+    if let HpackOperation::HuffmanStringTest {
+        huffman_data,
+        expect_decode_failure,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         // Create a literal header with Huffman-encoded value
@@ -452,9 +487,7 @@ fn test_huffman_strings(
             }
             Err(_panic) => {
                 // Panic on malformed Huffman is a violation
-                shadow.record_violation(format!(
-                    "Huffman decoder panicked on malformed input"
-                ));
+                shadow.record_violation(format!("Huffman decoder panicked on malformed input"));
                 return Err("Huffman decoder panicked".to_string());
             }
         }
@@ -467,7 +500,12 @@ fn test_integer_overflow(
     op: &HpackOperation,
     shadow: &HpackDecoderShadowModel,
 ) -> Result<(), String> {
-    if let HpackOperation::IntegerOverflowTest { prefix_bits, integer_bytes, expect_overflow } = op {
+    if let HpackOperation::IntegerOverflowTest {
+        prefix_bits,
+        integer_bytes,
+        expect_overflow,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let hpack_data = create_integer_overflow_test(*prefix_bits, integer_bytes);
@@ -497,9 +535,7 @@ fn test_integer_overflow(
             }
             Err(_panic) => {
                 // Panic on integer overflow is a violation
-                shadow.record_violation(format!(
-                    "Integer decoder panicked on overflow input"
-                ));
+                shadow.record_violation(format!("Integer decoder panicked on overflow input"));
                 return Err("Integer decoder panicked".to_string());
             }
         }
@@ -512,7 +548,11 @@ fn test_complex_header_blocks(
     op: &HpackOperation,
     shadow: &HpackDecoderShadowModel,
 ) -> Result<(), String> {
-    if let HpackOperation::ComplexHeaderBlock { instructions, table_size_limit } = op {
+    if let HpackOperation::ComplexHeaderBlock {
+        instructions,
+        table_size_limit,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         shadow.set_table_size_limit(*table_size_limit);
@@ -526,20 +566,16 @@ fn test_complex_header_blocks(
         });
 
         match result {
-            Ok(decode_result) => {
-                match decode_result {
-                    Ok(_headers) => {
-                        shadow.record_operation_success();
-                    }
-                    Err(_err) => {
-                        shadow.record_expected_error("complex block error");
-                    }
+            Ok(decode_result) => match decode_result {
+                Ok(_headers) => {
+                    shadow.record_operation_success();
                 }
-            }
+                Err(_err) => {
+                    shadow.record_expected_error("complex block error");
+                }
+            },
             Err(_panic) => {
-                shadow.record_violation(format!(
-                    "Complex header block caused panic"
-                ));
+                shadow.record_violation(format!("Complex header block caused panic"));
                 return Err("Complex header block panicked".to_string());
             }
         }
@@ -661,7 +697,9 @@ fn create_complex_header_block(instructions: &[HpackInstruction]) -> Vec<u8> {
                 data.push(value.len() as u8);
                 data.extend_from_slice(value);
             }
-            HpackInstruction::MalformedBytes { data: malformed_data } => {
+            HpackInstruction::MalformedBytes {
+                data: malformed_data,
+            } => {
                 data.extend_from_slice(malformed_data);
             }
         }
@@ -679,7 +717,11 @@ fn encode_string_data(output: &mut Vec<u8>, string_data: &LiteralStringData) {
     };
 
     // Huffman flag + length
-    let huffman_flag = if string_data.huffman_encoded { 0x80 } else { 0x00 };
+    let huffman_flag = if string_data.huffman_encoded {
+        0x80
+    } else {
+        0x00
+    };
 
     if length < 127 {
         output.push(huffman_flag | (length as u8));
@@ -706,20 +748,31 @@ fn execute_hpack_operations(input: &HpackDecoderFuzzInput) -> Result<(), String>
     let shadow = HpackDecoderShadowModel::new();
 
     // Execute operation sequence with bounds checking
-    let max_ops = input.config.max_operations.min(input.operations.len() as u16);
+    let max_ops = input
+        .config
+        .max_operations
+        .min(input.operations.len() as u16);
     for (i, operation) in input.operations.iter().enumerate() {
         if i >= max_ops as usize {
             break;
         }
 
         let result = match operation {
-            HpackOperation::DecodeHeaderBlock { .. } => test_decode_header_block(operation, &shadow),
+            HpackOperation::DecodeHeaderBlock { .. } => {
+                test_decode_header_block(operation, &shadow)
+            }
             HpackOperation::TableSizeUpdate { .. } => test_table_size_updates(operation, &shadow),
-            HpackOperation::IndexedHeaderField { .. } => test_indexed_header_fields(operation, &shadow),
-            HpackOperation::LiteralHeaderField { .. } => test_literal_header_fields(operation, &shadow),
+            HpackOperation::IndexedHeaderField { .. } => {
+                test_indexed_header_fields(operation, &shadow)
+            }
+            HpackOperation::LiteralHeaderField { .. } => {
+                test_literal_header_fields(operation, &shadow)
+            }
             HpackOperation::HuffmanStringTest { .. } => test_huffman_strings(operation, &shadow),
             HpackOperation::IntegerOverflowTest { .. } => test_integer_overflow(operation, &shadow),
-            HpackOperation::ComplexHeaderBlock { .. } => test_complex_header_blocks(operation, &shadow),
+            HpackOperation::ComplexHeaderBlock { .. } => {
+                test_complex_header_blocks(operation, &shadow)
+            }
         };
 
         if let Err(e) = result {

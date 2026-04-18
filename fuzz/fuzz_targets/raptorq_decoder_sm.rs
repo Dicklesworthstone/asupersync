@@ -46,20 +46,13 @@ const MAX_SYMBOLS: usize = 512;
 #[derive(Arbitrary, Debug, Clone)]
 enum DecoderOperation {
     /// Reset decoder with new parameters
-    Reset {
-        k: u16,
-        symbol_size: u16,
-        seed: u64,
-    },
+    Reset { k: u16, symbol_size: u16, seed: u64 },
     /// Add a batch of symbols
     AddSymbols(Vec<FuzzSymbol>),
     /// Attempt decode with current symbols
     AttemptDecode,
     /// Add duplicate symbols (for idempotency testing)
-    AddDuplicates {
-        symbol_indices: Vec<u8>,
-        count: u8,
-    },
+    AddDuplicates { symbol_indices: Vec<u8>, count: u8 },
     /// Simulate memory pressure check
     CheckMemoryBounds,
 }
@@ -80,13 +73,17 @@ struct FuzzSymbol {
 impl FuzzSymbol {
     fn to_received_symbol(&self, l: usize, symbol_size: usize) -> ReceivedSymbol {
         // Map column indices to valid range [0, L)
-        let columns: Vec<usize> = self.columns.iter()
+        let columns: Vec<usize> = self
+            .columns
+            .iter()
             .take(16) // Limit degree to prevent explosion
             .map(|&col| (col as usize) % l.max(1))
             .collect();
 
         // Ensure coefficients match columns length
-        let mut coefficients: Vec<Gf256> = self.coefficients.iter()
+        let mut coefficients: Vec<Gf256> = self
+            .coefficients
+            .iter()
             .take(columns.len())
             .map(|&c| Gf256(c))
             .collect();
@@ -166,7 +163,10 @@ impl DecoderStateTracker {
             }
         } else {
             // No decoder initialized
-            Err(DecodeError::InsufficientSymbols { received: 0, required: 1 })
+            Err(DecodeError::InsufficientSymbols {
+                received: 0,
+                required: 1,
+            })
         }
     }
 
@@ -178,7 +178,12 @@ impl DecoderStateTracker {
         symbol.esi.hash(&mut hasher);
         symbol.is_source.hash(&mut hasher);
         symbol.columns.hash(&mut hasher);
-        symbol.coefficients.iter().map(|c| c.raw()).collect::<Vec<_>>().hash(&mut hasher);
+        symbol
+            .coefficients
+            .iter()
+            .map(|c| c.raw())
+            .collect::<Vec<_>>()
+            .hash(&mut hasher);
         symbol.data.hash(&mut hasher);
         hasher.finish()
     }
@@ -186,9 +191,11 @@ impl DecoderStateTracker {
     fn estimate_memory_usage(&self) -> usize {
         let symbol_count = self.accumulated_symbols.len();
         let avg_symbol_size = if symbol_count > 0 {
-            self.accumulated_symbols.iter()
+            self.accumulated_symbols
+                .iter()
                 .map(|s| s.data.len() + s.columns.len() * 16) // Rough estimate
-                .sum::<usize>() / symbol_count
+                .sum::<usize>()
+                / symbol_count
         } else {
             0
         };
@@ -218,7 +225,10 @@ fn normalize_input(input: &mut DecoderStateMachineInput) {
             DecoderOperation::AddSymbols(symbols) => {
                 symbols.truncate(MAX_SYMBOLS / 4);
             }
-            DecoderOperation::AddDuplicates { symbol_indices, count } => {
+            DecoderOperation::AddDuplicates {
+                symbol_indices,
+                count,
+            } => {
                 symbol_indices.truncate(10);
                 *count = (*count).min(5);
             }
@@ -232,14 +242,19 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
 
     for op in &input.operations {
         match op {
-            DecoderOperation::Reset { k, symbol_size, seed } => {
+            DecoderOperation::Reset {
+                k,
+                symbol_size,
+                seed,
+            } => {
                 state.reset_decoder(*k as usize, *symbol_size as usize, *seed);
             }
 
             DecoderOperation::AddSymbols(fuzz_symbols) => {
                 if let Some((k, symbol_size, _)) = state.current_params {
                     let l = k + (k / 4) + 8; // Approximate L value
-                    let symbols: Vec<_> = fuzz_symbols.iter()
+                    let symbols: Vec<_> = fuzz_symbols
+                        .iter()
                         .map(|fs| fs.to_received_symbol(l, symbol_size))
                         .collect();
 
@@ -247,8 +262,11 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
                     state.add_symbols(&symbols);
 
                     // Assertion 5: Memory bounded by max-block-size
-                    assert!(state.check_memory_bounds(),
-                        "Memory usage exceeded bounds: {} bytes", state.max_memory_observed);
+                    assert!(
+                        state.check_memory_bounds(),
+                        "Memory usage exceeded bounds: {} bytes",
+                        state.max_memory_observed
+                    );
                 }
             }
 
@@ -258,21 +276,28 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
 
                     // Assertion 3: Decoder gives up cleanly when K' insufficient
                     if let Err(DecodeError::InsufficientSymbols { received, required }) = result {
-                        assert!(received < required,
-                            "Insufficient symbols error should have received < required");
+                        assert!(
+                            received < required,
+                            "Insufficient symbols error should have received < required"
+                        );
                     }
 
                     // Assertion 2: Partial decode preserves state for resume
                     // After failed decode, accumulated symbols should still be present
                     if result.is_err() {
                         let symbols_before = state.accumulated_symbols.len();
-                        assert!(symbols_before > 0 || state.decode_attempts > 0,
-                            "Failed decode should preserve accumulated symbols");
+                        assert!(
+                            symbols_before > 0 || state.decode_attempts > 0,
+                            "Failed decode should preserve accumulated symbols"
+                        );
                     }
                 }
             }
 
-            DecoderOperation::AddDuplicates { symbol_indices, count } => {
+            DecoderOperation::AddDuplicates {
+                symbol_indices,
+                count,
+            } => {
                 // Assertion 1: Decoder rejects duplicate symbols idempotently
                 if let Some((k, symbol_size, _)) = state.current_params {
                     let l = k + (k / 4) + 8;
@@ -303,14 +328,20 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
 
                             // Results should be identical (both success or both same error type)
                             match (result1, result2) {
-                                (Ok(_), Ok(_)) => {}, // Both succeeded
+                                (Ok(_), Ok(_)) => {} // Both succeeded
                                 (Err(e1), Err(e2)) => {
                                     // Should be same error type
-                                    assert!(std::mem::discriminant(&e1) == std::mem::discriminant(&e2),
-                                        "Duplicate symbols caused different error types: {:?} vs {:?}", e1, e2);
+                                    assert!(
+                                        std::mem::discriminant(&e1) == std::mem::discriminant(&e2),
+                                        "Duplicate symbols caused different error types: {:?} vs {:?}",
+                                        e1,
+                                        e2
+                                    );
                                 }
                                 _ => {
-                                    panic!("Duplicate symbols caused non-idempotent decode results");
+                                    panic!(
+                                        "Duplicate symbols caused non-idempotent decode results"
+                                    );
                                 }
                             }
                         }
@@ -320,8 +351,11 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
 
             DecoderOperation::CheckMemoryBounds => {
                 // Assertion 5: Verify memory bounds
-                assert!(state.check_memory_bounds(),
-                    "Memory bounds check failed: {} bytes observed", state.max_memory_observed);
+                assert!(
+                    state.check_memory_bounds(),
+                    "Memory bounds check failed: {} bytes observed",
+                    state.max_memory_observed
+                );
             }
         }
     }
@@ -329,12 +363,17 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
     // Final invariant checks
     if let Some((k, symbol_size, _)) = state.current_params {
         // Memory should still be bounded after all operations
-        assert!(state.check_memory_bounds(),
-            "Final memory bounds check failed");
+        assert!(
+            state.check_memory_bounds(),
+            "Final memory bounds check failed"
+        );
 
         // Symbol accumulation should be consistent
-        assert!(state.accumulated_symbols.len() <= MAX_SYMBOLS,
-            "Accumulated too many symbols: {}", state.accumulated_symbols.len());
+        assert!(
+            state.accumulated_symbols.len() <= MAX_SYMBOLS,
+            "Accumulated too many symbols: {}",
+            state.accumulated_symbols.len()
+        );
     }
 }
 
@@ -372,7 +411,13 @@ mod tests {
             columns: vec![0],
             coefficients: vec![Gf256::ONE],
             data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16;
-                       4].into_iter().flatten().collect::<Vec<_>>().into_iter().take(64).collect(),
+                       4]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .take(64)
+            .collect(),
         };
 
         // Add symbol once
@@ -396,13 +441,15 @@ mod tests {
         state.reset_decoder(10, 256, 0);
 
         // Add too few symbols
-        let symbols: Vec<_> = (0..5).map(|i| ReceivedSymbol {
-            esi: i,
-            is_source: true,
-            columns: vec![i as usize],
-            coefficients: vec![Gf256::ONE],
-            data: vec![0u8; 256],
-        }).collect();
+        let symbols: Vec<_> = (0..5)
+            .map(|i| ReceivedSymbol {
+                esi: i,
+                is_source: true,
+                columns: vec![i as usize],
+                coefficients: vec![Gf256::ONE],
+                data: vec![0u8; 256],
+            })
+            .collect();
 
         state.add_symbols(&symbols);
 
@@ -432,13 +479,15 @@ mod tests {
         state.reset_decoder(8, 128, 0);
 
         // Add some symbols
-        let symbols: Vec<_> = (0..5).map(|i| ReceivedSymbol {
-            esi: i,
-            is_source: true,
-            columns: vec![i as usize],
-            coefficients: vec![Gf256::ONE],
-            data: vec![i as u8; 128],
-        }).collect();
+        let symbols: Vec<_> = (0..5)
+            .map(|i| ReceivedSymbol {
+                esi: i,
+                is_source: true,
+                columns: vec![i as usize],
+                coefficients: vec![Gf256::ONE],
+                data: vec![i as u8; 128],
+            })
+            .collect();
 
         state.add_symbols(&symbols);
         let symbols_before = state.accumulated_symbols.len();

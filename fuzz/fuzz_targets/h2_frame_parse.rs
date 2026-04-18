@@ -25,13 +25,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{BytesMut, BufMut};
-use asupersync::http::h2::frame::{
-    FrameHeader, parse_frame,
-    data_flags, headers_flags, settings_flags, ping_flags, continuation_flags,
-    FRAME_HEADER_SIZE, MAX_FRAME_SIZE,
-};
+use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{
+    FRAME_HEADER_SIZE, FrameHeader, MAX_FRAME_SIZE, continuation_flags, data_flags, headers_flags,
+    parse_frame, ping_flags, settings_flags,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts (16KB)
@@ -115,32 +114,42 @@ impl PaddedFrameType {
 }
 
 /// Construct a frame header manually
-fn construct_frame_header(length: u32, frame_type: u8, flags: u8, stream_id: u32) -> [u8; FRAME_HEADER_SIZE] {
+fn construct_frame_header(
+    length: u32,
+    frame_type: u8,
+    flags: u8,
+    stream_id: u32,
+) -> [u8; FRAME_HEADER_SIZE] {
     [
-        (length >> 16) as u8,                    // Length high byte
-        (length >> 8) as u8,                     // Length middle byte
-        length as u8,                            // Length low byte
-        frame_type,                              // Type
-        flags,                                   // Flags
-        ((stream_id >> 24) & 0x7f) as u8,       // Stream ID high byte (R bit cleared)
-        (stream_id >> 16) as u8,                 // Stream ID byte 2
-        (stream_id >> 8) as u8,                  // Stream ID byte 3
-        stream_id as u8,                         // Stream ID low byte
+        (length >> 16) as u8,             // Length high byte
+        (length >> 8) as u8,              // Length middle byte
+        length as u8,                     // Length low byte
+        frame_type,                       // Type
+        flags,                            // Flags
+        ((stream_id >> 24) & 0x7f) as u8, // Stream ID high byte (R bit cleared)
+        (stream_id >> 16) as u8,          // Stream ID byte 2
+        (stream_id >> 8) as u8,           // Stream ID byte 3
+        stream_id as u8,                  // Stream ID low byte
     ]
 }
 
 /// Construct a frame with potential R bit set in raw stream ID
-fn construct_frame_header_raw_stream_id(length: u32, frame_type: u8, flags: u8, stream_id_raw: u32) -> [u8; FRAME_HEADER_SIZE] {
+fn construct_frame_header_raw_stream_id(
+    length: u32,
+    frame_type: u8,
+    flags: u8,
+    stream_id_raw: u32,
+) -> [u8; FRAME_HEADER_SIZE] {
     [
-        (length >> 16) as u8,                    // Length high byte
-        (length >> 8) as u8,                     // Length middle byte
-        length as u8,                            // Length low byte
-        frame_type,                              // Type
-        flags,                                   // Flags
-        (stream_id_raw >> 24) as u8,             // Stream ID high byte (may have R bit set)
-        (stream_id_raw >> 16) as u8,             // Stream ID byte 2
-        (stream_id_raw >> 8) as u8,              // Stream ID byte 3
-        stream_id_raw as u8,                     // Stream ID low byte
+        (length >> 16) as u8,        // Length high byte
+        (length >> 8) as u8,         // Length middle byte
+        length as u8,                // Length low byte
+        frame_type,                  // Type
+        flags,                       // Flags
+        (stream_id_raw >> 24) as u8, // Stream ID high byte (may have R bit set)
+        (stream_id_raw >> 16) as u8, // Stream ID byte 2
+        (stream_id_raw >> 8) as u8,  // Stream ID byte 3
+        stream_id_raw as u8,         // Stream ID low byte
     ]
 }
 
@@ -183,7 +192,13 @@ fuzz_target!(|input: FrameParseInput| {
 });
 
 /// Test frame header parsing with focus on RFC 9113 Section 4.1 requirements
-fn fuzz_header_parsing(length: u32, frame_type: u8, flags: u8, stream_id_raw: u32, payload: Vec<u8>) {
+fn fuzz_header_parsing(
+    length: u32,
+    frame_type: u8,
+    flags: u8,
+    stream_id_raw: u32,
+    payload: Vec<u8>,
+) {
     // Limit length to prevent excessive memory allocation
     let length = length & 0x00FFFFFF; // 24-bit max
     if length > MAX_FRAME_SIZE {
@@ -191,7 +206,8 @@ fn fuzz_header_parsing(length: u32, frame_type: u8, flags: u8, stream_id_raw: u3
     }
 
     // Construct frame with potentially invalid R bit in stream ID
-    let header_bytes = construct_frame_header_raw_stream_id(length, frame_type, flags, stream_id_raw);
+    let header_bytes =
+        construct_frame_header_raw_stream_id(length, frame_type, flags, stream_id_raw);
 
     // Prepare frame data: header + payload
     let mut frame_data = BytesMut::new();
@@ -220,16 +236,20 @@ fn fuzz_header_parsing(length: u32, frame_type: u8, flags: u8, stream_id_raw: u3
             // Header parsing succeeded
 
             // Assertion 2: Payload length matches length field
-            assert_eq!(parsed_header.length, length,
+            assert_eq!(
+                parsed_header.length, length,
                 "Parsed header length {} should match declared length {}",
-                parsed_header.length, length);
+                parsed_header.length, length
+            );
 
             // Assertion 3: Reserved R bit of Stream ID cleared on decode
             // The R bit (bit 31) should be cleared in the parsed stream_id
             let expected_stream_id = stream_id_raw & 0x7FFFFFFF; // Clear R bit
-            assert_eq!(parsed_header.stream_id, expected_stream_id,
+            assert_eq!(
+                parsed_header.stream_id, expected_stream_id,
                 "Stream ID R bit should be cleared: raw=0x{:08X}, parsed=0x{:08X}",
-                stream_id_raw, parsed_header.stream_id);
+                stream_id_raw, parsed_header.stream_id
+            );
 
             // Verify frame type and flags are preserved
             assert_eq!(parsed_header.frame_type, frame_type);
@@ -239,7 +259,6 @@ fn fuzz_header_parsing(length: u32, frame_type: u8, flags: u8, stream_id_raw: u3
             let remaining_payload = header_buf.freeze();
             let _ = parse_frame(&parsed_header, remaining_payload);
             // Note: parse_frame may fail for invalid frame content, which is expected
-
         }
         Err(_) => {
             // Header parsing failed - this is acceptable for malformed input
@@ -253,7 +272,12 @@ fn fuzz_header_parsing(length: u32, frame_type: u8, flags: u8, stream_id_raw: u3
 }
 
 /// Test padding validation for frames with PADDED flag
-fn fuzz_padding_validation(frame_type: PaddedFrameType, pad_length: u8, payload_size: u16, stream_id: u32) {
+fn fuzz_padding_validation(
+    frame_type: PaddedFrameType,
+    pad_length: u8,
+    payload_size: u16,
+    stream_id: u32,
+) {
     let type_byte = frame_type.to_type_byte();
     let padded_flag = frame_type.padded_flag();
     let stream_id = stream_id & 0x7FFFFFFF; // Clear R bit
@@ -264,7 +288,8 @@ fn fuzz_padding_validation(frame_type: PaddedFrameType, pad_length: u8, payload_
         return; // Skip if too large
     }
 
-    let header_bytes = construct_frame_header(total_payload_size as u32, type_byte, padded_flag, stream_id);
+    let header_bytes =
+        construct_frame_header(total_payload_size as u32, type_byte, padded_flag, stream_id);
 
     let mut frame_data = BytesMut::new();
     frame_data.extend_from_slice(&header_bytes);
@@ -370,8 +395,10 @@ fn fuzz_flag_validation(frame_type: u8, flags: u8, stream_id: u32, payload: Vec<
             }
             0x1 => {
                 // HEADERS frame: END_STREAM (0x1), END_HEADERS (0x4), PADDED (0x8), PRIORITY (0x20)
-                let valid_flags = headers_flags::END_STREAM | headers_flags::END_HEADERS
-                    | headers_flags::PADDED | headers_flags::PRIORITY;
+                let valid_flags = headers_flags::END_STREAM
+                    | headers_flags::END_HEADERS
+                    | headers_flags::PADDED
+                    | headers_flags::PRIORITY;
                 let invalid_flags = flags & !valid_flags;
                 if invalid_flags != 0 && parse_result.is_ok() {
                     // Implementation should handle invalid flags appropriately

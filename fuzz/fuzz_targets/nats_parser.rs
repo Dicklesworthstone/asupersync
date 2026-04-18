@@ -63,10 +63,7 @@ enum NatsCommand {
         sid: u64,
     },
     /// UNSUB command for unsubscribing
-    Unsub {
-        sid: u64,
-        max_msgs: Option<u64>,
-    },
+    Unsub { sid: u64, max_msgs: Option<u64> },
     /// MSG command from server to client
     Msg {
         subject: String,
@@ -91,9 +88,7 @@ enum NatsCommand {
     /// +OK acknowledgment
     Ok,
     /// -ERR error response
-    Err {
-        message: String,
-    },
+    Err { message: String },
 }
 
 impl NatsCommand {
@@ -305,7 +300,12 @@ impl FuzzInput {
             CorruptionStrategy::OversizedPayload { claimed_size } => {
                 // Create a message with mismatched payload size
                 match &self.command {
-                    NatsCommand::Pub { subject, reply_to, payload, .. } => {
+                    NatsCommand::Pub {
+                        subject,
+                        reply_to,
+                        payload,
+                        ..
+                    } => {
                         let mut cmd = format!("PUB {}", subject);
                         if let Some(reply) = reply_to {
                             cmd.push_str(&format!(" {}", reply));
@@ -313,7 +313,13 @@ impl FuzzInput {
                         cmd.push_str(&format!(" {}", claimed_size)); // Wrong size
                         format!("{}\r\n{}\r\n", cmd, String::from_utf8_lossy(payload))
                     }
-                    NatsCommand::Msg { subject, sid, reply_to, payload, .. } => {
+                    NatsCommand::Msg {
+                        subject,
+                        sid,
+                        reply_to,
+                        payload,
+                        ..
+                    } => {
                         let mut cmd = format!("MSG {} {}", subject, sid);
                         if let Some(reply) = reply_to {
                             cmd.push_str(&format!(" {}", reply));
@@ -324,10 +330,15 @@ impl FuzzInput {
                     _ => self.command.to_protocol_string(false),
                 }
             }
-            CorruptionStrategy::InvalidWhitespace { field: _field, value } => {
+            CorruptionStrategy::InvalidWhitespace {
+                field: _field,
+                value,
+            } => {
                 // Inject whitespace into subjects/fields
                 match &self.command {
-                    NatsCommand::Sub { queue_group, sid, .. } => {
+                    NatsCommand::Sub {
+                        queue_group, sid, ..
+                    } => {
                         let subject_with_ws = value; // Subject with whitespace
                         let mut cmd = format!("SUB {}", subject_with_ws);
                         if let Some(queue) = queue_group {
@@ -342,7 +353,12 @@ impl FuzzInput {
             CorruptionStrategy::CommandInjection { injection_payload } => {
                 // Attempt command injection through subjects
                 match &self.command {
-                    NatsCommand::Pub { reply_to, payload_size, payload, .. } => {
+                    NatsCommand::Pub {
+                        reply_to,
+                        payload_size,
+                        payload,
+                        ..
+                    } => {
                         let malicious_subject = injection_payload; // Potentially malicious
                         let mut cmd = format!("PUB {}", malicious_subject);
                         if let Some(reply) = reply_to {
@@ -416,7 +432,9 @@ impl MockNatsParser {
 
         // **ASSERTION 1: CRLF-terminated commands**
         if !line_str.ends_with("\r\n") && !line_str.is_empty() {
-            return Err(NatsError::Protocol("Command not CRLF-terminated".to_string()));
+            return Err(NatsError::Protocol(
+                "Command not CRLF-terminated".to_string(),
+            ));
         }
 
         let line_str = line_str.trim_end_matches("\r\n");
@@ -442,14 +460,18 @@ impl MockNatsParser {
         } else if line_str.starts_with("-ERR ") {
             // Valid ERR response
         } else if !line_str.is_empty() {
-            return Err(NatsError::Protocol(format!("Unknown command: {}", line_str)));
+            return Err(NatsError::Protocol(format!(
+                "Unknown command: {}",
+                line_str
+            )));
         }
 
         Ok(())
     }
 
     fn parse_connect(&self, line: &str) -> Result<(), NatsError> {
-        let json_part = line.strip_prefix("CONNECT ")
+        let json_part = line
+            .strip_prefix("CONNECT ")
             .ok_or_else(|| NatsError::Protocol("Invalid CONNECT".to_string()))?;
 
         // Basic JSON validation (simplified)
@@ -470,7 +492,9 @@ impl MockNatsParser {
 
         // **ASSERTION 3: Subject whitespace validation**
         if subject.chars().any(|c| c.is_whitespace()) {
-            return Err(NatsError::Protocol("Subject contains whitespace".to_string()));
+            return Err(NatsError::Protocol(
+                "Subject contains whitespace".to_string(),
+            ));
         }
 
         // Parse payload size
@@ -492,8 +516,7 @@ impl MockNatsParser {
         if payload_size > effective_max {
             return Err(NatsError::Protocol(format!(
                 "Payload size {} exceeds maximum {}",
-                payload_size,
-                effective_max
+                payload_size, effective_max
             )));
         }
 
@@ -501,7 +524,9 @@ impl MockNatsParser {
         if parts.len() == 4 {
             let reply_to = parts[2];
             if reply_to.chars().any(|c| c.is_whitespace()) {
-                return Err(NatsError::Protocol("Reply-to contains whitespace".to_string()));
+                return Err(NatsError::Protocol(
+                    "Reply-to contains whitespace".to_string(),
+                ));
             }
         }
 
@@ -518,7 +543,9 @@ impl MockNatsParser {
 
         // **ASSERTION 3: Subject whitespace validation**
         if subject.chars().any(|c| c.is_whitespace()) {
-            return Err(NatsError::Protocol("Subject contains whitespace".to_string()));
+            return Err(NatsError::Protocol(
+                "Subject contains whitespace".to_string(),
+            ));
         }
 
         let sid_str = parts.last().unwrap();
@@ -560,7 +587,9 @@ impl MockNatsParser {
 
         // **ASSERTION 3: Subject whitespace validation**
         if subject.chars().any(|c| c.is_whitespace()) {
-            return Err(NatsError::Protocol("Subject contains whitespace".to_string()));
+            return Err(NatsError::Protocol(
+                "Subject contains whitespace".to_string(),
+            ));
         }
 
         let sid: u64 = parts[2]
@@ -579,8 +608,7 @@ impl MockNatsParser {
         if payload_size > effective_max {
             return Err(NatsError::Protocol(format!(
                 "MSG payload size {} exceeds maximum {}",
-                payload_size,
-                effective_max
+                payload_size, effective_max
             )));
         }
 
@@ -588,7 +616,9 @@ impl MockNatsParser {
         if parts.len() == 5 {
             let reply_to = parts[3];
             if reply_to.chars().any(|c| c.is_whitespace()) {
-                return Err(NatsError::Protocol("Reply-to contains whitespace".to_string()));
+                return Err(NatsError::Protocol(
+                    "Reply-to contains whitespace".to_string(),
+                ));
             }
         }
 
@@ -596,7 +626,8 @@ impl MockNatsParser {
     }
 
     fn parse_info(&mut self, line: &str) -> Result<(), NatsError> {
-        let json_part = line.strip_prefix("INFO ")
+        let json_part = line
+            .strip_prefix("INFO ")
             .ok_or_else(|| NatsError::Protocol("Invalid INFO".to_string()))?;
 
         // Extract max_payload from server INFO
@@ -633,9 +664,8 @@ fuzz_target!(|input: FuzzInput| {
     // **ASSERTION 6: Max-payload setting honored**
 
     // Parse should not panic on any input
-    let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parser.parse_line(&message)
-    }));
+    let parse_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.parse_line(&message)));
 
     match parse_result {
         Ok(result) => {
@@ -646,7 +676,10 @@ fuzz_target!(|input: FuzzInput| {
                     if let Ok(line_str) = std::str::from_utf8(&message) {
                         // Validate CRLF termination for successful parses
                         if !line_str.trim().is_empty() && !line_str.contains("\r\n") {
-                            panic!("Parser accepted non-CRLF terminated command: {:?}", line_str);
+                            panic!(
+                                "Parser accepted non-CRLF terminated command: {:?}",
+                                line_str
+                            );
                         }
                     }
                 }
@@ -665,7 +698,10 @@ fuzz_target!(|input: FuzzInput| {
         }
         Err(_) => {
             // Parser panicked - this is a bug
-            panic!("NATS parser panicked on input: {:?}", String::from_utf8_lossy(&message[..message.len().min(100)]));
+            panic!(
+                "NATS parser panicked on input: {:?}",
+                String::from_utf8_lossy(&message[..message.len().min(100)])
+            );
         }
     }
 

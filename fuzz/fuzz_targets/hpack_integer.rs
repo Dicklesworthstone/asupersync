@@ -44,7 +44,7 @@ enum IntegerTestCase {
     /// Test valid encoding for specific prefix bits
     ValidEncoding {
         prefix_bits: PrefixBits,
-        value: u32, // Bounded to prevent excessive resource usage
+        value: u32,     // Bounded to prevent excessive resource usage
         add_prefix: u8, // Additional bits in the prefix byte
     },
     /// Test boundary value 2^N-1 which triggers multi-byte encoding
@@ -145,35 +145,49 @@ fuzz_target!(|input: HpackIntegerFuzzInput| {
 /// Process a single integer test case
 fn process_integer_test_case(test_case: &IntegerTestCase) -> Result<(), H2Error> {
     match test_case {
-        IntegerTestCase::ValidEncoding { prefix_bits, value, add_prefix } => {
-            test_valid_encoding(*prefix_bits, *value as usize, *add_prefix)
-        }
-        IntegerTestCase::BoundaryValue { prefix_bits, add_prefix } => {
-            test_boundary_value(*prefix_bits, *add_prefix)
-        }
-        IntegerTestCase::ContinuationSequence { prefix_bits, continuation_bytes, add_prefix } => {
-            test_continuation_sequence(*prefix_bits, continuation_bytes, *add_prefix)
-        }
-        IntegerTestCase::TruncatedInput { prefix_bits, partial_bytes, add_prefix } => {
-            test_truncated_input(*prefix_bits, partial_bytes, *add_prefix)
-        }
-        IntegerTestCase::OverflowAttempt { prefix_bits, large_continuation, add_prefix } => {
-            test_overflow_attempt(*prefix_bits, large_continuation, *add_prefix)
-        }
+        IntegerTestCase::ValidEncoding {
+            prefix_bits,
+            value,
+            add_prefix,
+        } => test_valid_encoding(*prefix_bits, *value as usize, *add_prefix),
+        IntegerTestCase::BoundaryValue {
+            prefix_bits,
+            add_prefix,
+        } => test_boundary_value(*prefix_bits, *add_prefix),
+        IntegerTestCase::ContinuationSequence {
+            prefix_bits,
+            continuation_bytes,
+            add_prefix,
+        } => test_continuation_sequence(*prefix_bits, continuation_bytes, *add_prefix),
+        IntegerTestCase::TruncatedInput {
+            prefix_bits,
+            partial_bytes,
+            add_prefix,
+        } => test_truncated_input(*prefix_bits, partial_bytes, *add_prefix),
+        IntegerTestCase::OverflowAttempt {
+            prefix_bits,
+            large_continuation,
+            add_prefix,
+        } => test_overflow_attempt(*prefix_bits, large_continuation, *add_prefix),
     }
 }
 
 /// Test valid encoding for various values and prefix bit counts
-fn test_valid_encoding(prefix_bits: PrefixBits, value: usize, add_prefix: u8) -> Result<(), H2Error> {
+fn test_valid_encoding(
+    prefix_bits: PrefixBits,
+    value: usize,
+    add_prefix: u8,
+) -> Result<(), H2Error> {
     // **ASSERTION 4**: All 8 prefix-bit variants (N=1..8) correctly decoded
 
     let prefix_mask = prefix_bits.prefix_mask();
     let non_prefix_mask = !prefix_mask;
-    let prefix_byte = (add_prefix & non_prefix_mask) | if value < prefix_bits.max_prefix_value() {
-        value as u8
-    } else {
-        prefix_mask
-    };
+    let prefix_byte = (add_prefix & non_prefix_mask)
+        | if value < prefix_bits.max_prefix_value() {
+            value as u8
+        } else {
+            prefix_mask
+        };
 
     let mut data = vec![prefix_byte];
 
@@ -193,8 +207,13 @@ fn test_valid_encoding(prefix_bits: PrefixBits, value: usize, add_prefix: u8) ->
 
     // Verify round-trip correctness for valid inputs
     if value <= usize::MAX / 2 {
-        assert_eq!(decoded, value,
-            "Round-trip mismatch for value {} with {}-bit prefix", value, prefix_bits.as_u8());
+        assert_eq!(
+            decoded,
+            value,
+            "Round-trip mismatch for value {} with {}-bit prefix",
+            value,
+            prefix_bits.as_u8()
+        );
     }
 
     Ok(())
@@ -217,9 +236,12 @@ fn test_boundary_value(prefix_bits: PrefixBits, add_prefix: u8) -> Result<(), H2
     let mut bytes = Bytes::from(data);
     let decoded = decode_integer_test(&mut bytes, prefix_bits.as_u8())?;
 
-    assert_eq!(decoded, boundary_value,
+    assert_eq!(
+        decoded,
+        boundary_value,
         "Boundary value {boundary_value} incorrectly decoded with {}-bit prefix",
-        prefix_bits.as_u8());
+        prefix_bits.as_u8()
+    );
 
     Ok(())
 }
@@ -228,7 +250,7 @@ fn test_boundary_value(prefix_bits: PrefixBits, add_prefix: u8) -> Result<(), H2
 fn test_continuation_sequence(
     prefix_bits: PrefixBits,
     continuation_bytes: &[u8],
-    add_prefix: u8
+    add_prefix: u8,
 ) -> Result<(), H2Error> {
     // **ASSERTION 5**: High-bit-set continuation bytes terminated correctly
 
@@ -256,7 +278,7 @@ fn test_continuation_sequence(
 fn test_truncated_input(
     prefix_bits: PrefixBits,
     partial_bytes: &[u8],
-    add_prefix: u8
+    add_prefix: u8,
 ) -> Result<(), H2Error> {
     // **ASSERTION 3**: Truncated continuation returns error not panic
 
@@ -296,7 +318,7 @@ fn test_truncated_input(
 fn test_overflow_attempt(
     prefix_bits: PrefixBits,
     strategy: &LargeValueStrategy,
-    add_prefix: u8
+    add_prefix: u8,
 ) -> Result<(), H2Error> {
     // **ASSERTION 2**: Overflow on u64::MAX boundary rejected
 

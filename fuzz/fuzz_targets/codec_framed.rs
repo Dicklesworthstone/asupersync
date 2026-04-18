@@ -24,9 +24,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::framed::Framed;
-use asupersync::codec::{Encoder, Decoder};
+use asupersync::codec::{Decoder, Encoder};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::stream::Stream;
 use libfuzzer_sys::fuzz_target;
@@ -69,7 +69,10 @@ impl Encoder<Bytes> for TestCodec {
 
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
         if self.inject_encode_error && item.len() % 13 == 0 {
-            return Err(io::Error::new(ErrorKind::InvalidData, "injected encode error"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "injected encode error",
+            ));
         }
 
         // Simple length-delimited encoding: [length:u32][data]
@@ -86,7 +89,10 @@ impl Decoder for TestCodec {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if self.inject_decode_error && src.len() % 17 == 0 {
-            return Err(io::Error::new(ErrorKind::InvalidData, "injected decode error"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "injected decode error",
+            ));
         }
 
         // Length-delimited decoding: [length:u32][data]
@@ -129,7 +135,12 @@ struct MockTransport {
 }
 
 impl MockTransport {
-    fn new(data: Vec<u8>, partial_read_size: usize, inject_read_error: bool, inject_write_error: bool) -> Self {
+    fn new(
+        data: Vec<u8>,
+        partial_read_size: usize,
+        inject_read_error: bool,
+        inject_write_error: bool,
+    ) -> Self {
         Self {
             read_data: data,
             read_pos: 0,
@@ -179,17 +190,26 @@ impl AsyncWrite for MockTransport {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if self.is_closed {
-            return Poll::Ready(Err(io::Error::new(ErrorKind::BrokenPipe, "transport closed")));
+            return Poll::Ready(Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "transport closed",
+            )));
         }
 
         if self.inject_write_error && buf.len() % 11 == 0 {
-            return Poll::Ready(Err(io::Error::new(ErrorKind::Other, "injected write error")));
+            return Poll::Ready(Err(io::Error::new(
+                ErrorKind::Other,
+                "injected write error",
+            )));
         }
 
         // **ASSERTION 5: BytesMut grows within configured bounds**
         // Simulate write buffer bounds
         if self.write_buffer.len() + buf.len() > DEFAULT_CAPACITY * 2 {
-            return Poll::Ready(Err(io::Error::new(ErrorKind::WriteZero, "write buffer full")));
+            return Poll::Ready(Err(io::Error::new(
+                ErrorKind::WriteZero,
+                "write buffer full",
+            )));
         }
 
         self.write_buffer.extend_from_slice(buf);
@@ -198,7 +218,10 @@ impl AsyncWrite for MockTransport {
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.is_closed {
-            return Poll::Ready(Err(io::Error::new(ErrorKind::BrokenPipe, "transport closed")));
+            return Poll::Ready(Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "transport closed",
+            )));
         }
         // **ASSERTION 3: Flush releases all buffered state**
         Poll::Ready(Ok(()))
@@ -263,7 +286,8 @@ fuzz_target!(|input: FuzzInput| {
         }
         Err(_) => {
             // Panic detected - this is a bug in the framed implementation
-            panic!("Framed codec panicked during operation sequence: operations={:?}, inject_errors=[decode:{}, encode:{}, read:{}, write:{}]",
+            panic!(
+                "Framed codec panicked during operation sequence: operations={:?}, inject_errors=[decode:{}, encode:{}, read:{}, write:{}]",
                 input.operations.len(),
                 input.inject_decode_error,
                 input.inject_encode_error,
@@ -281,7 +305,10 @@ fn noop_clone(_: *const ()) -> std::task::RawWaker {
 fn noop(_: *const ()) {}
 fn noop_raw_waker() -> std::task::RawWaker {
     use std::task::RawWakerVTable;
-    std::task::RawWaker::new(std::ptr::null(), &RawWakerVTable::new(noop_clone, noop, noop, noop))
+    std::task::RawWaker::new(
+        std::ptr::null(),
+        &RawWakerVTable::new(noop_clone, noop, noop, noop),
+    )
 }
 
 /// Execute the framed operations test
@@ -322,7 +349,10 @@ fn test_framed_operations(input: &FuzzInput) -> Result<(), Box<dyn std::error::E
                         // Successfully read a frame
                         // **ASSERTION 4: Encoder::encode and Decoder::decode roundtrip**
                         // Verify the frame is valid (non-empty and within bounds)
-                        assert!(frame.len() <= MAX_FUZZ_INPUT_SIZE, "Decoded frame exceeds bounds");
+                        assert!(
+                            frame.len() <= MAX_FUZZ_INPUT_SIZE,
+                            "Decoded frame exceeds bounds"
+                        );
                     }
                     Poll::Ready(Some(Err(_err))) => {
                         // **ASSERTION 2: Decoder errors propagated via Stream::next()**

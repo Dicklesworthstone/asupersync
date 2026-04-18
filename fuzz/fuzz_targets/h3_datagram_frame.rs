@@ -59,7 +59,10 @@ enum DatagramEdgeCase {
         fill_byte: u8,
     },
     /// Invalid varint encoding for quarter_stream_id
-    InvalidVarint { malformed_varint: Vec<u8>, payload: Vec<u8> },
+    InvalidVarint {
+        malformed_varint: Vec<u8>,
+        payload: Vec<u8>,
+    },
     /// Single byte frame
     SingleByte { byte: u8 },
     /// Frame with only type and length (no payload)
@@ -136,7 +139,10 @@ enum DatagramMetamorphic {
     /// Concatenating frames should preserve individual frame parsing
     ConcatenationPreservation { frames: Vec<DatagramFrame> },
     /// Encoding order should not matter for identical frames
-    EncodingOrderInvariance { frame1: DatagramFrame, frame2: DatagramFrame },
+    EncodingOrderInvariance {
+        frame1: DatagramFrame,
+        frame2: DatagramFrame,
+    },
     /// Payload byte order changes should be detectable
     PayloadOrderSensitivity { original: DatagramFrame },
 }
@@ -196,7 +202,11 @@ fn test_datagram_operation(operation: DatagramOperation) {
                     assert!(consumed <= data.len(), "Consumed more bytes than available");
 
                     // If this is a DATAGRAM frame, verify its consistency
-                    if let H3Frame::Datagram { quarter_stream_id, payload } = frame {
+                    if let H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload,
+                    } = frame
+                    {
                         verify_datagram_frame_consistency(quarter_stream_id, &payload);
 
                         // Test re-encoding if decode succeeded
@@ -210,7 +220,10 @@ fn test_datagram_operation(operation: DatagramOperation) {
             }
         }
 
-        DatagramOperation::ParseStructured { quarter_stream_id, mut payload } => {
+        DatagramOperation::ParseStructured {
+            quarter_stream_id,
+            mut payload,
+        } => {
             // Limit payload size and quarter_stream_id value
             if payload.len() > MAX_PAYLOAD_SIZE {
                 payload.truncate(MAX_PAYLOAD_SIZE);
@@ -222,7 +235,13 @@ fn test_datagram_operation(operation: DatagramOperation) {
             let result = H3Frame::decode(&frame_bytes);
 
             match result {
-                Ok((H3Frame::Datagram { quarter_stream_id: parsed_qsid, payload: parsed_payload }, consumed)) => {
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id: parsed_qsid,
+                        payload: parsed_payload,
+                    },
+                    consumed,
+                )) => {
                     // Verify parse results match input
                     assert_eq!(parsed_qsid, clamped_qsid, "Quarter stream ID mismatch");
                     assert_eq!(parsed_payload, payload, "Payload mismatch");
@@ -262,7 +281,11 @@ fn test_datagram_operation(operation: DatagramOperation) {
             while offset < combined_data.len() && parsed_count < limited_frames.len() {
                 match H3Frame::decode(&combined_data[offset..]) {
                     Ok((frame, consumed)) => {
-                        if let H3Frame::Datagram { quarter_stream_id, payload } = frame {
+                        if let H3Frame::Datagram {
+                            quarter_stream_id,
+                            payload,
+                        } = frame
+                        {
                             verify_datagram_frame_consistency(quarter_stream_id, &payload);
                             offset += consumed;
                             parsed_count += 1;
@@ -279,7 +302,10 @@ fn test_datagram_operation(operation: DatagramOperation) {
             }
         }
 
-        DatagramOperation::ParseTruncated { complete_frame, truncate_at } => {
+        DatagramOperation::ParseTruncated {
+            complete_frame,
+            truncate_at,
+        } => {
             let clamped_qsid = complete_frame.quarter_stream_id.min(MAX_QUARTER_STREAM_ID);
             let limited_payload = if complete_frame.payload.len() > MAX_PAYLOAD_SIZE {
                 &complete_frame.payload[..MAX_PAYLOAD_SIZE]
@@ -297,7 +323,11 @@ fn test_datagram_operation(operation: DatagramOperation) {
                 Ok((frame, consumed)) => {
                     // If parsing succeeded, the frame must be complete within truncated data
                     assert!(consumed <= truncated.len(), "Consumed more than available");
-                    if let H3Frame::Datagram { quarter_stream_id, payload } = frame {
+                    if let H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload,
+                    } = frame
+                    {
                         verify_datagram_frame_consistency(quarter_stream_id, &payload);
                     }
                 }
@@ -320,7 +350,13 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
 
             let result = H3Frame::decode(&frame_bytes);
             match result {
-                Ok((H3Frame::Datagram { quarter_stream_id: parsed_qsid, payload }, _)) => {
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id: parsed_qsid,
+                        payload,
+                    },
+                    _,
+                )) => {
                     assert_eq!(parsed_qsid, clamped_qsid);
                     assert!(payload.is_empty(), "Empty payload should remain empty");
                 }
@@ -345,7 +381,13 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
 
             let result = H3Frame::decode(&frame_bytes);
             match result {
-                Ok((H3Frame::Datagram { quarter_stream_id, payload: parsed_payload }, _)) => {
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload: parsed_payload,
+                    },
+                    _,
+                )) => {
                     assert_eq!(quarter_stream_id, max_qsid);
                     assert_eq!(parsed_payload, payload);
                 }
@@ -358,7 +400,11 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             }
         }
 
-        DatagramEdgeCase::LargePayload { quarter_stream_id, size, fill_byte } => {
+        DatagramEdgeCase::LargePayload {
+            quarter_stream_id,
+            size,
+            fill_byte,
+        } => {
             let clamped_qsid = quarter_stream_id.min(MAX_QUARTER_STREAM_ID);
             let payload_size = (size as usize).min(MAX_PAYLOAD_SIZE);
             let payload = vec![fill_byte; payload_size];
@@ -367,10 +413,19 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             let result = H3Frame::decode(&frame_bytes);
 
             match result {
-                Ok((H3Frame::Datagram { quarter_stream_id: parsed_qsid, payload: parsed_payload }, _)) => {
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id: parsed_qsid,
+                        payload: parsed_payload,
+                    },
+                    _,
+                )) => {
                     assert_eq!(parsed_qsid, clamped_qsid);
                     assert_eq!(parsed_payload.len(), payload_size);
-                    assert!(parsed_payload.iter().all(|&b| b == fill_byte), "Payload pattern should be preserved");
+                    assert!(
+                        parsed_payload.iter().all(|&b| b == fill_byte),
+                        "Payload pattern should be preserved"
+                    );
                 }
                 Ok(other) => {
                     panic!("Expected DATAGRAM frame, got: {:?}", other);
@@ -382,7 +437,10 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             }
         }
 
-        DatagramEdgeCase::InvalidVarint { mut malformed_varint, mut payload } => {
+        DatagramEdgeCase::InvalidVarint {
+            mut malformed_varint,
+            mut payload,
+        } => {
             if malformed_varint.len() > 16 {
                 malformed_varint.truncate(16);
             }
@@ -411,7 +469,11 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             match result {
                 Ok((frame, _)) => {
                     // If it somehow parsed, verify it's reasonable
-                    if let H3Frame::Datagram { quarter_stream_id, payload: parsed_payload } = frame {
+                    if let H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload: parsed_payload,
+                    } = frame
+                    {
                         verify_datagram_frame_consistency(quarter_stream_id, &parsed_payload);
                     }
                 }
@@ -462,7 +524,11 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             }
         }
 
-        DatagramEdgeCase::OversizedLength { quarter_stream_id, claimed_length, mut actual_payload } => {
+        DatagramEdgeCase::OversizedLength {
+            quarter_stream_id,
+            claimed_length,
+            mut actual_payload,
+        } => {
             let clamped_qsid = quarter_stream_id.min(MAX_QUARTER_STREAM_ID);
             if actual_payload.len() > MAX_PAYLOAD_SIZE {
                 actual_payload.truncate(MAX_PAYLOAD_SIZE);
@@ -518,15 +584,31 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
 
             // Decode frame
             match H3Frame::decode(&encoded) {
-                Ok((H3Frame::Datagram { quarter_stream_id, payload }, consumed)) => {
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload,
+                    },
+                    consumed,
+                )) => {
                     // Verify round-trip consistency
-                    assert_eq!(quarter_stream_id, clamped_qsid, "Quarter stream ID round-trip failed");
+                    assert_eq!(
+                        quarter_stream_id, clamped_qsid,
+                        "Quarter stream ID round-trip failed"
+                    );
                     assert_eq!(payload, limited_payload, "Payload round-trip failed");
-                    assert_eq!(consumed, encoded.len(), "Should consume entire encoded frame");
+                    assert_eq!(
+                        consumed,
+                        encoded.len(),
+                        "Should consume entire encoded frame"
+                    );
 
                     // Verify re-encoding produces same result
                     let re_encoded = construct_datagram_frame(quarter_stream_id, &payload);
-                    assert_eq!(re_encoded, encoded, "Re-encoding should produce identical bytes");
+                    assert_eq!(
+                        re_encoded, encoded,
+                        "Re-encoding should produce identical bytes"
+                    );
                 }
                 Ok(other) => {
                     panic!("Expected DATAGRAM frame, got: {:?}", other);
@@ -544,7 +626,9 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
                     let exp = exponent.min(62); // Limit to valid range
                     (1u64 << exp, "power of two quarter_stream_id")
                 }
-                BoundaryCase::MaxValidQuic => (MAX_QUARTER_STREAM_ID, "maximum valid QUIC stream ID"),
+                BoundaryCase::MaxValidQuic => {
+                    (MAX_QUARTER_STREAM_ID, "maximum valid QUIC stream ID")
+                }
                 BoundaryCase::VarintBoundary { boundary_type } => {
                     let value = match boundary_type {
                         VarintBoundaryType::SixBit => 63,
@@ -552,7 +636,10 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
                         VarintBoundaryType::ThirtyBit => 1073741823,
                         VarintBoundaryType::SixtyTwoBit => 4611686018427387903,
                     };
-                    (value.min(MAX_QUARTER_STREAM_ID), "varint boundary quarter_stream_id")
+                    (
+                        value.min(MAX_QUARTER_STREAM_ID),
+                        "varint boundary quarter_stream_id",
+                    )
                 }
             };
 
@@ -561,12 +648,29 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
             let encoded = construct_datagram_frame(qsid, &payload);
 
             match H3Frame::decode(&encoded) {
-                Ok((H3Frame::Datagram { quarter_stream_id, payload: parsed_payload }, _)) => {
-                    assert_eq!(quarter_stream_id, qsid, "Boundary case {} failed", description);
-                    assert_eq!(parsed_payload, payload, "Payload should be preserved for {}", description);
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload: parsed_payload,
+                    },
+                    _,
+                )) => {
+                    assert_eq!(
+                        quarter_stream_id, qsid,
+                        "Boundary case {} failed",
+                        description
+                    );
+                    assert_eq!(
+                        parsed_payload, payload,
+                        "Payload should be preserved for {}",
+                        description
+                    );
                 }
                 Ok(other) => {
-                    panic!("Expected DATAGRAM frame for {}, got: {:?}", description, other);
+                    panic!(
+                        "Expected DATAGRAM frame for {}, got: {:?}",
+                        description, other
+                    );
                 }
                 Err(err) => {
                     panic!("Round-trip failed for {}: {:?}", description, err);
@@ -586,7 +690,9 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
                 }
                 PayloadPattern::Alternating { length } => {
                     let len = (length as usize).min(MAX_PAYLOAD_SIZE);
-                    let payload: Vec<u8> = (0..len).map(|i| if i % 2 == 0 { 0xAA } else { 0x55 }).collect();
+                    let payload: Vec<u8> = (0..len)
+                        .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
+                        .collect();
                     (payload, "alternating pattern")
                 }
                 PayloadPattern::Sequential { length } => {
@@ -598,10 +704,12 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
                     let len = (length as usize).min(MAX_PAYLOAD_SIZE);
                     // Simple PRNG for reproducible "random" pattern
                     let mut val = seed as u32;
-                    let payload: Vec<u8> = (0..len).map(|_| {
-                        val = val.wrapping_mul(1103515245).wrapping_add(12345);
-                        (val >> 16) as u8
-                    }).collect();
+                    let payload: Vec<u8> = (0..len)
+                        .map(|_| {
+                            val = val.wrapping_mul(1103515245).wrapping_add(12345);
+                            (val >> 16) as u8
+                        })
+                        .collect();
                     (payload, "random pattern")
                 }
                 PayloadPattern::Utf8Text { text } => {
@@ -611,7 +719,10 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
                     }
                     (bytes, "UTF-8 text pattern")
                 }
-                PayloadPattern::FrameLike { fake_type, fake_length } => {
+                PayloadPattern::FrameLike {
+                    fake_type,
+                    fake_length,
+                } => {
                     let mut payload = Vec::new();
                     payload.push(fake_type);
                     payload.push(fake_length);
@@ -626,12 +737,29 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
             let encoded = construct_datagram_frame(qsid, &payload);
 
             match H3Frame::decode(&encoded) {
-                Ok((H3Frame::Datagram { quarter_stream_id, payload: parsed_payload }, _)) => {
-                    assert_eq!(quarter_stream_id, qsid, "Quarter stream ID should be preserved for {}", description);
-                    assert_eq!(parsed_payload, payload, "Payload pattern {} should be preserved exactly", description);
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload: parsed_payload,
+                    },
+                    _,
+                )) => {
+                    assert_eq!(
+                        quarter_stream_id, qsid,
+                        "Quarter stream ID should be preserved for {}",
+                        description
+                    );
+                    assert_eq!(
+                        parsed_payload, payload,
+                        "Payload pattern {} should be preserved exactly",
+                        description
+                    );
                 }
                 Ok(other) => {
-                    panic!("Expected DATAGRAM frame for {}, got: {:?}", description, other);
+                    panic!(
+                        "Expected DATAGRAM frame for {}, got: {:?}",
+                        description, other
+                    );
                 }
                 Err(err) => {
                     panic!("Round-trip failed for {}: {:?}", description, err);
@@ -651,7 +779,13 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
             let result = H3Frame::decode(&empty_frame);
 
             match result {
-                Ok((H3Frame::Datagram { quarter_stream_id, payload }, _)) => {
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload,
+                    },
+                    _,
+                )) => {
                     assert_eq!(quarter_stream_id, clamped_qsid);
                     assert!(payload.is_empty(), "Empty payload invariance violated");
                 }
@@ -686,7 +820,11 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
 
                 // Parse individual frame
                 if let Ok((frame_parsed, _)) = H3Frame::decode(&frame_bytes) {
-                    if let H3Frame::Datagram { quarter_stream_id, payload } = frame_parsed {
+                    if let H3Frame::Datagram {
+                        quarter_stream_id,
+                        payload,
+                    } = frame_parsed
+                    {
                         individual_results.push((quarter_stream_id, payload));
                     }
                 }
@@ -698,9 +836,17 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
             let mut offset = 0;
             let mut concatenated_results = Vec::new();
 
-            while offset < concatenated_data.len() && concatenated_results.len() < individual_results.len() {
+            while offset < concatenated_data.len()
+                && concatenated_results.len() < individual_results.len()
+            {
                 match H3Frame::decode(&concatenated_data[offset..]) {
-                    Ok((H3Frame::Datagram { quarter_stream_id, payload }, consumed)) => {
+                    Ok((
+                        H3Frame::Datagram {
+                            quarter_stream_id,
+                            payload,
+                        },
+                        consumed,
+                    )) => {
                         concatenated_results.push((quarter_stream_id, payload));
                         offset += consumed;
                     }
@@ -709,12 +855,22 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
             }
 
             // Verify concatenation preserves individual parsing results
-            assert_eq!(concatenated_results.len(), individual_results.len(),
-                "Concatenation should preserve number of frames");
+            assert_eq!(
+                concatenated_results.len(),
+                individual_results.len(),
+                "Concatenation should preserve number of frames"
+            );
 
-            for (i, (individual, concatenated)) in individual_results.iter().zip(concatenated_results.iter()).enumerate() {
-                assert_eq!(individual, concatenated,
-                    "Frame {} should parse identically when concatenated", i);
+            for (i, (individual, concatenated)) in individual_results
+                .iter()
+                .zip(concatenated_results.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    individual, concatenated,
+                    "Frame {} should parse identically when concatenated",
+                    i
+                );
             }
         }
 
@@ -739,14 +895,30 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
 
             // If frames are identical, encodings should be identical
             if clamped_qsid1 == clamped_qsid2 && limited_payload1 == limited_payload2 {
-                assert_eq!(encoded1, encoded2, "Identical frames should encode identically");
+                assert_eq!(
+                    encoded1, encoded2,
+                    "Identical frames should encode identically"
+                );
             }
 
             // Decode both and verify consistency
-            if let (Ok((H3Frame::Datagram { quarter_stream_id: qsid1, payload: payload1 }, _)),
-                    Ok((H3Frame::Datagram { quarter_stream_id: qsid2, payload: payload2 }, _))) =
-                   (H3Frame::decode(&encoded1), H3Frame::decode(&encoded2)) {
-
+            if let (
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id: qsid1,
+                        payload: payload1,
+                    },
+                    _,
+                )),
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id: qsid2,
+                        payload: payload2,
+                    },
+                    _,
+                )),
+            ) = (H3Frame::decode(&encoded1), H3Frame::decode(&encoded2))
+            {
                 // Verify round-trip consistency
                 assert_eq!(qsid1, clamped_qsid1);
                 assert_eq!(payload1, limited_payload1);
@@ -775,17 +947,41 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
             let reversed_encoded = construct_datagram_frame(clamped_qsid, &reversed_payload);
 
             // Parse both frames
-            if let (Ok((H3Frame::Datagram { quarter_stream_id: orig_qsid, payload: orig_payload }, _)),
-                    Ok((H3Frame::Datagram { quarter_stream_id: rev_qsid, payload: rev_payload }, _))) =
-                   (H3Frame::decode(&original_encoded), H3Frame::decode(&reversed_encoded)) {
-
+            if let (
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id: orig_qsid,
+                        payload: orig_payload,
+                    },
+                    _,
+                )),
+                Ok((
+                    H3Frame::Datagram {
+                        quarter_stream_id: rev_qsid,
+                        payload: rev_payload,
+                    },
+                    _,
+                )),
+            ) = (
+                H3Frame::decode(&original_encoded),
+                H3Frame::decode(&reversed_encoded),
+            ) {
                 // Quarter stream IDs should be identical
-                assert_eq!(orig_qsid, rev_qsid, "Quarter stream ID should not be affected by payload order");
+                assert_eq!(
+                    orig_qsid, rev_qsid,
+                    "Quarter stream ID should not be affected by payload order"
+                );
 
                 // Payloads should be different (unless palindromic)
                 if orig_payload != rev_payload {
-                    assert_eq!(orig_payload, limited_payload, "Original payload should be preserved");
-                    assert_eq!(rev_payload, reversed_payload, "Reversed payload should be preserved");
+                    assert_eq!(
+                        orig_payload, limited_payload,
+                        "Original payload should be preserved"
+                    );
+                    assert_eq!(
+                        rev_payload, reversed_payload,
+                        "Reversed payload should be preserved"
+                    );
                 }
             }
         }
@@ -815,12 +1011,20 @@ fn construct_datagram_frame(quarter_stream_id: u64, payload: &[u8]) -> Vec<u8> {
 
 fn verify_datagram_frame_consistency(quarter_stream_id: u64, payload: &[u8]) {
     // Verify quarter_stream_id is within valid range
-    assert!(quarter_stream_id <= MAX_QUARTER_STREAM_ID,
-        "Quarter stream ID {} exceeds maximum {}", quarter_stream_id, MAX_QUARTER_STREAM_ID);
+    assert!(
+        quarter_stream_id <= MAX_QUARTER_STREAM_ID,
+        "Quarter stream ID {} exceeds maximum {}",
+        quarter_stream_id,
+        MAX_QUARTER_STREAM_ID
+    );
 
     // Verify payload size is reasonable
-    assert!(payload.len() <= MAX_PAYLOAD_SIZE,
-        "Payload size {} exceeds maximum {}", payload.len(), MAX_PAYLOAD_SIZE);
+    assert!(
+        payload.len() <= MAX_PAYLOAD_SIZE,
+        "Payload size {} exceeds maximum {}",
+        payload.len(),
+        MAX_PAYLOAD_SIZE
+    );
 
     // Additional RFC 9297 compliance checks could go here
 }
@@ -835,7 +1039,10 @@ fn verify_datagram_error_consistency(err: &H3NativeError, data: &[u8]) {
             assert!(!msg.is_empty(), "Error message should not be empty");
         }
         H3NativeError::ControlProtocol(msg) => {
-            assert!(!msg.is_empty(), "Control protocol error should have message");
+            assert!(
+                !msg.is_empty(),
+                "Control protocol error should have message"
+            );
         }
         H3NativeError::StreamProtocol(msg) => {
             assert!(!msg.is_empty(), "Stream protocol error should have message");
@@ -857,8 +1064,17 @@ fn test_datagram_frame_reencode(quarter_stream_id: u64, payload: &[u8]) {
 
     // Re-parse the re-encoded frame
     match H3Frame::decode(&re_encoded) {
-        Ok((H3Frame::Datagram { quarter_stream_id: re_qsid, payload: re_payload }, _)) => {
-            assert_eq!(re_qsid, quarter_stream_id, "Re-encoding should preserve quarter_stream_id");
+        Ok((
+            H3Frame::Datagram {
+                quarter_stream_id: re_qsid,
+                payload: re_payload,
+            },
+            _,
+        )) => {
+            assert_eq!(
+                re_qsid, quarter_stream_id,
+                "Re-encoding should preserve quarter_stream_id"
+            );
             assert_eq!(re_payload, payload, "Re-encoding should preserve payload");
         }
         Ok(other) => {

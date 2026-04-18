@@ -16,8 +16,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use asupersync::observability::task_inspector::{
-    TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire, TaskRegionCountWire, TaskStateInfo,
-    TASK_CONSOLE_WIRE_SCHEMA_V1,
+    TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskRegionCountWire,
+    TaskStateInfo, TaskSummaryWire,
 };
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 
@@ -152,19 +152,27 @@ impl DiagnosticAttackPattern {
     /// Convert attack pattern to JSON bytes for fuzzing
     fn to_json_bytes(&self) -> Vec<u8> {
         match self {
-            DiagnosticAttackPattern::UnknownFieldsInjection { base_snapshot, unknown_fields } => {
+            DiagnosticAttackPattern::UnknownFieldsInjection {
+                base_snapshot,
+                unknown_fields,
+            } => {
                 let mut json_obj = base_snapshot.to_json_value();
 
                 // Inject unknown fields at various levels
                 for (key, value) in unknown_fields {
-                    json_obj.as_object_mut()
+                    json_obj
+                        .as_object_mut()
                         .unwrap()
                         .insert(key.clone(), serde_json::Value::String(value.clone()));
                 }
 
                 serde_json::to_vec(&json_obj).unwrap_or_default()
             }
-            DiagnosticAttackPattern::TimestampOrdering { base_timestamp, task_deltas, inject_decreasing } => {
+            DiagnosticAttackPattern::TimestampOrdering {
+                base_timestamp,
+                task_deltas,
+                inject_decreasing,
+            } => {
                 let mut snapshot = DiagnosticSnapshotFuzz {
                     schema_version: TASK_CONSOLE_WIRE_SCHEMA_V1.to_string(),
                     generated_at_nanos: *base_timestamp,
@@ -208,7 +216,11 @@ impl DiagnosticAttackPattern {
 
                 serde_json::to_vec(&snapshot.to_json_value()).unwrap_or_default()
             }
-            DiagnosticAttackPattern::CorrelationIdMalform { base_snapshot, malformed_task_ids, malformed_region_ids } => {
+            DiagnosticAttackPattern::CorrelationIdMalform {
+                base_snapshot,
+                malformed_task_ids,
+                malformed_region_ids,
+            } => {
                 let mut snapshot = base_snapshot.clone();
 
                 // Inject malformed IDs (invalid ArenaIndex patterns)
@@ -226,7 +238,10 @@ impl DiagnosticAttackPattern {
 
                 serde_json::to_vec(&snapshot.to_json_value()).unwrap_or_default()
             }
-            DiagnosticAttackPattern::CompressedSnapshot { json_data, corruption } => {
+            DiagnosticAttackPattern::CompressedSnapshot {
+                json_data,
+                corruption,
+            } => {
                 // Simulate compression (basic gzip-like pattern)
                 let mut compressed = json_data.as_bytes().to_vec();
 
@@ -255,7 +270,10 @@ impl DiagnosticAttackPattern {
 
                 compressed
             }
-            DiagnosticAttackPattern::OversizedSnapshot { size_multiplier, amplification_pattern } => {
+            DiagnosticAttackPattern::OversizedSnapshot {
+                size_multiplier,
+                amplification_pattern,
+            } => {
                 let multiplier = (*size_multiplier as usize).min(1000); // Limit for test safety
 
                 match amplification_pattern {
@@ -264,7 +282,9 @@ impl DiagnosticAttackPattern {
                         let mut result = Vec::new();
                         result.push(b'[');
                         for i in 0..(*repeat_count as usize).min(multiplier) {
-                            if i > 0 { result.push(b','); }
+                            if i > 0 {
+                                result.push(b',');
+                            }
                             result.extend_from_slice(base_json.as_bytes());
                         }
                         result.push(b']');
@@ -307,10 +327,14 @@ impl DiagnosticAttackPattern {
                         let mut current = &mut json;
                         for _ in 0..(*depth as usize).min(multiplier.min(1000)) {
                             let mut nested = serde_json::Map::new();
-                            nested.insert("nested".to_string(), serde_json::Value::Object(serde_json::Map::new()));
+                            nested.insert(
+                                "nested".to_string(),
+                                serde_json::Value::Object(serde_json::Map::new()),
+                            );
                             if let serde_json::Value::Object(obj) = current {
                                 obj.insert("child".to_string(), serde_json::Value::Object(nested));
-                                if let Some(serde_json::Value::Object(child)) = obj.get_mut("child") {
+                                if let Some(serde_json::Value::Object(child)) = obj.get_mut("child")
+                                {
                                     if let Some(nested_obj) = child.get_mut("nested") {
                                         current = nested_obj;
                                     }
@@ -361,29 +385,38 @@ impl DiagnosticAttackPattern {
 impl DiagnosticSnapshotFuzz {
     /// Convert to JSON Value for manipulation
     fn to_json_value(&self) -> Value {
-        let tasks: Vec<Value> = self.tasks.iter().map(|task| {
-            serde_json::json!({
-                "id": task.task_id_raw,
-                "region_id": task.region_id_raw,
-                "state": task.state.to_json_value(),
-                "phase": task.phase,
-                "poll_count": task.poll_count,
-                "polls_remaining": task.polls_remaining,
-                "created_at": task.created_at_nanos,
-                "age_nanos": task.age_nanos,
-                "time_since_last_poll_nanos": task.time_since_last_poll_nanos,
-                "wake_pending": task.wake_pending,
-                "obligations": task.obligations,
-                "waiters": task.waiters
+        let tasks: Vec<Value> = self
+            .tasks
+            .iter()
+            .map(|task| {
+                serde_json::json!({
+                    "id": task.task_id_raw,
+                    "region_id": task.region_id_raw,
+                    "state": task.state.to_json_value(),
+                    "phase": task.phase,
+                    "poll_count": task.poll_count,
+                    "polls_remaining": task.polls_remaining,
+                    "created_at": task.created_at_nanos,
+                    "age_nanos": task.age_nanos,
+                    "time_since_last_poll_nanos": task.time_since_last_poll_nanos,
+                    "wake_pending": task.wake_pending,
+                    "obligations": task.obligations,
+                    "waiters": task.waiters
+                })
             })
-        }).collect();
+            .collect();
 
-        let by_region: Vec<Value> = self.summary.by_region.iter().map(|region| {
-            serde_json::json!({
-                "region_id": region.region_id_raw,
-                "task_count": region.task_count
+        let by_region: Vec<Value> = self
+            .summary
+            .by_region
+            .iter()
+            .map(|region| {
+                serde_json::json!({
+                    "region_id": region.region_id_raw,
+                    "task_count": region.task_count
+                })
             })
-        }).collect();
+            .collect();
 
         serde_json::json!({
             "schema_version": self.schema_version,
@@ -470,15 +503,20 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
 
     // ASSERTION 1: JSON schema validation rejects unknown fields by default
     // The parser should handle unknown fields gracefully, either rejecting or ignoring
-    if matches!(input.pattern, DiagnosticAttackPattern::UnknownFieldsInjection { .. }) {
+    if matches!(
+        input.pattern,
+        DiagnosticAttackPattern::UnknownFieldsInjection { .. }
+    ) {
         let json_str = String::from_utf8_lossy(&raw_data);
         let parse_result = TaskConsoleWireSnapshot::from_json(&json_str);
 
         match parse_result {
             Ok(snapshot) => {
                 // If parsing succeeds with unknown fields, schema should still be valid
-                assert!(snapshot.has_expected_schema() || snapshot.schema_version.is_empty(),
-                    "Unknown fields injection: schema validation should be consistent");
+                assert!(
+                    snapshot.has_expected_schema() || snapshot.schema_version.is_empty(),
+                    "Unknown fields injection: schema validation should be consistent"
+                );
             }
             Err(_) => {
                 // Error is acceptable for unknown field rejection - this is good behavior
@@ -488,7 +526,13 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
 
     // ASSERTION 2: Timestamp ordering monotonic validation
     // Snapshots with non-monotonic timestamps should either be rejected or handled gracefully
-    if matches!(input.pattern, DiagnosticAttackPattern::TimestampOrdering { inject_decreasing: true, .. }) {
+    if matches!(
+        input.pattern,
+        DiagnosticAttackPattern::TimestampOrdering {
+            inject_decreasing: true,
+            ..
+        }
+    ) {
         let json_str = String::from_utf8_lossy(&raw_data);
         let parse_result = TaskConsoleWireSnapshot::from_json(&json_str);
 
@@ -507,9 +551,12 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
                 }
 
                 // Allow some timestamp violations but not excessive ones (indicates corruption)
-                assert!(violations <= snapshot.tasks.len() / 2,
+                assert!(
+                    violations <= snapshot.tasks.len() / 2,
                     "Excessive timestamp ordering violations: {} out of {}",
-                    violations, snapshot.tasks.len());
+                    violations,
+                    snapshot.tasks.len()
+                );
             }
             Err(_) => {
                 // Rejection is acceptable for malformed timestamps
@@ -519,7 +566,10 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
 
     // ASSERTION 3: Correlation IDs parsed as valid ID variants
     // Task and Region IDs should be valid ArenaIndex patterns or rejected gracefully
-    if matches!(input.pattern, DiagnosticAttackPattern::CorrelationIdMalform { .. }) {
+    if matches!(
+        input.pattern,
+        DiagnosticAttackPattern::CorrelationIdMalform { .. }
+    ) {
         let json_str = String::from_utf8_lossy(&raw_data);
         let parse_result = TaskConsoleWireSnapshot::from_json(&json_str);
 
@@ -529,10 +579,16 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
                 for task in &snapshot.tasks {
                     // Task ID and Region ID should not overflow reasonable bounds
                     // ArenaIndex uses generation + index pattern - very high values are suspicious
-                    assert!(task.id.as_u64() < (1u64 << 48),
-                        "Correlation ID malform: task ID {} exceeds reasonable bounds", task.id.as_u64());
-                    assert!(task.region_id.as_u64() < (1u64 << 48),
-                        "Correlation ID malform: region ID {} exceeds reasonable bounds", task.region_id.as_u64());
+                    assert!(
+                        task.id.as_u64() < (1u64 << 48),
+                        "Correlation ID malform: task ID {} exceeds reasonable bounds",
+                        task.id.as_u64()
+                    );
+                    assert!(
+                        task.region_id.as_u64() < (1u64 << 48),
+                        "Correlation ID malform: region ID {} exceeds reasonable bounds",
+                        task.region_id.as_u64()
+                    );
                 }
             }
             Err(_) => {
@@ -543,22 +599,32 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
 
     // ASSERTION 4: Compressed snapshots decoded correctly
     // Corrupted compression should be detected and rejected
-    if matches!(input.pattern, DiagnosticAttackPattern::CompressedSnapshot { .. }) {
+    if matches!(
+        input.pattern,
+        DiagnosticAttackPattern::CompressedSnapshot { .. }
+    ) {
         let json_str = String::from_utf8_lossy(&raw_data);
         let parse_result = TaskConsoleWireSnapshot::from_json(&json_str);
 
         match parse_result {
             Ok(snapshot) => {
                 // If decompression succeeded, snapshot should be valid
-                assert!(snapshot.schema_version.len() <= 100,
-                    "Compressed snapshot: schema version too long after decompression");
-                assert!(snapshot.tasks.len() <= 10000,
-                    "Compressed snapshot: too many tasks after decompression");
+                assert!(
+                    snapshot.schema_version.len() <= 100,
+                    "Compressed snapshot: schema version too long after decompression"
+                );
+                assert!(
+                    snapshot.tasks.len() <= 10000,
+                    "Compressed snapshot: too many tasks after decompression"
+                );
 
                 // Verify round-trip consistency if parsing succeeded
                 if let Ok(reencoded) = snapshot.to_json() {
-                    assert!(reencoded.len() <= MAX_SNAPSHOT_SIZE,
-                        "Compressed snapshot: re-encoded size {} exceeds limit", reencoded.len());
+                    assert!(
+                        reencoded.len() <= MAX_SNAPSHOT_SIZE,
+                        "Compressed snapshot: re-encoded size {} exceeds limit",
+                        reencoded.len()
+                    );
                 }
             }
             Err(_) => {
@@ -569,21 +635,31 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
 
     // ASSERTION 5: Oversized snapshot rejection for security
     // Very large snapshots should be rejected or handled with limits
-    if matches!(input.pattern, DiagnosticAttackPattern::OversizedSnapshot { .. }) {
-        if raw_data.len() > MAX_SNAPSHOT_SIZE / 2 { // Large but not maximum
+    if matches!(
+        input.pattern,
+        DiagnosticAttackPattern::OversizedSnapshot { .. }
+    ) {
+        if raw_data.len() > MAX_SNAPSHOT_SIZE / 2 {
+            // Large but not maximum
             let json_str = String::from_utf8_lossy(&raw_data);
             let parse_result = TaskConsoleWireSnapshot::from_json(&json_str);
 
             match parse_result {
                 Ok(snapshot) => {
                     // If oversized parsing succeeds, should have reasonable limits
-                    assert!(snapshot.tasks.len() <= 50000,
-                        "Oversized snapshot security: too many tasks {} allowed", snapshot.tasks.len());
+                    assert!(
+                        snapshot.tasks.len() <= 50000,
+                        "Oversized snapshot security: too many tasks {} allowed",
+                        snapshot.tasks.len()
+                    );
 
                     // Memory usage should be reasonable
                     let estimated_memory = snapshot.tasks.len() * 1000; // Rough estimate
-                    assert!(estimated_memory <= 50_000_000, // 50MB limit
-                        "Oversized snapshot security: estimated memory {} bytes too high", estimated_memory);
+                    assert!(
+                        estimated_memory <= 50_000_000, // 50MB limit
+                        "Oversized snapshot security: estimated memory {} bytes too high",
+                        estimated_memory
+                    );
                 }
                 Err(_) => {
                     // Rejection is good security behavior for oversized inputs
@@ -605,12 +681,18 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
                     // Round-trip test
                     if let Ok(reencoded) = snapshot.to_json() {
                         if let Ok(reparsed) = TaskConsoleWireSnapshot::from_json(&reencoded) {
-                            assert_eq!(snapshot.schema_version, reparsed.schema_version,
-                                "Round-trip consistency: schema version mismatch");
-                            assert_eq!(snapshot.generated_at, reparsed.generated_at,
-                                "Round-trip consistency: timestamp mismatch");
-                            assert_eq!(snapshot.summary.total_tasks, reparsed.summary.total_tasks,
-                                "Round-trip consistency: task count mismatch");
+                            assert_eq!(
+                                snapshot.schema_version, reparsed.schema_version,
+                                "Round-trip consistency: schema version mismatch"
+                            );
+                            assert_eq!(
+                                snapshot.generated_at, reparsed.generated_at,
+                                "Round-trip consistency: timestamp mismatch"
+                            );
+                            assert_eq!(
+                                snapshot.summary.total_tasks, reparsed.summary.total_tasks,
+                                "Round-trip consistency: task count mismatch"
+                            );
                         }
                     }
                 }
@@ -641,9 +723,12 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
             match result {
                 Ok(snapshot) => {
                     // If parsing succeeds with extreme values, should be handled safely
-                    assert!(snapshot.summary.total_tasks >= snapshot.summary.created,
+                    assert!(
+                        snapshot.summary.total_tasks >= snapshot.summary.created,
                         "Numeric overflow: total_tasks {} < created {}",
-                        snapshot.summary.total_tasks, snapshot.summary.created);
+                        snapshot.summary.total_tasks,
+                        snapshot.summary.created
+                    );
                 }
                 Err(_) => {
                     // Error is acceptable for numeric overflow

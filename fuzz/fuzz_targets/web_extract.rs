@@ -37,13 +37,13 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::Bytes;
 use asupersync::web::extract::{
-    ExtractionError, FromRequest, FromRequestParts, Json, Query, Path, Form,
-    Request, BodyLimits, Extensions
+    BodyLimits, Extensions, ExtractionError, Form, FromRequest, FromRequestParts, Json, Path,
+    Query, Request,
 };
 use asupersync::web::response::StatusCode;
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_INPUT_SIZE: usize = 32_000;
@@ -156,13 +156,9 @@ enum WebExtractEdgeCase {
         param_value: String,
     },
     /// Query parameter edge cases
-    QueryEdgeCases {
-        params: Vec<(String, String)>,
-    },
+    QueryEdgeCases { params: Vec<(String, String)> },
     /// Multi-extractor scenarios
-    MultiExtractor {
-        extractors: Vec<ExtractorType>,
-    },
+    MultiExtractor { extractors: Vec<ExtractorType> },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -242,16 +238,22 @@ fn test_individual_extractors(request: &Request) -> Result<(), String> {
     match Path::<TestPath>::from_request_parts(request) {
         Ok(Path(path_data)) => {
             // Valid path data should be within reasonable bounds
-            assert!(path_data.user_id < u64::MAX / 2, "Path user_id should be reasonable");
+            assert!(
+                path_data.user_id < u64::MAX / 2,
+                "Path user_id should be reasonable"
+            );
             if let Some(post_id) = path_data.post_id {
                 assert!(post_id < u32::MAX / 2, "Path post_id should be reasonable");
             }
-        },
+        }
         Err(err) => {
             // Invariant 2: Required fields return 400 when missing
             if err.message.contains("no path parameters") {
-                assert_eq!(err.status, StatusCode::BAD_REQUEST,
-                    "Missing path parameters should return 400 Bad Request");
+                assert_eq!(
+                    err.status,
+                    StatusCode::BAD_REQUEST,
+                    "Missing path parameters should return 400 Bad Request"
+                );
             }
         }
     }
@@ -266,53 +268,85 @@ fn test_individual_extractors(request: &Request) -> Result<(), String> {
             if let Some(limit) = query_data.limit {
                 assert!(limit <= 10_000, "Query limit should be reasonable");
             }
-        },
+        }
         Err(err) => {
             // Query parsing errors should be descriptive
-            assert!(!err.message.is_empty(), "Query error should have descriptive message");
+            assert!(
+                !err.message.is_empty(),
+                "Query error should have descriptive message"
+            );
         }
     }
 
     // Test Json extractor (if body appears to be JSON)
-    if request.header("content-type").map_or(false, |ct| ct.contains("json")) {
+    if request
+        .header("content-type")
+        .map_or(false, |ct| ct.contains("json"))
+    {
         match Json::<TestUser>::from_request(request.clone()) {
             Ok(Json(user_data)) => {
                 // Invariant 1: Valid JSON should decode to proper structures
-                assert!(user_data.name.len() <= MAX_DECODED_OUTPUT_SIZE,
-                    "Decoded JSON field should not exceed maximum size");
-                assert!(user_data.name.is_ascii() || user_data.name.chars().all(|c| !c.is_control()),
-                    "Decoded name should not contain control characters");
-            },
+                assert!(
+                    user_data.name.len() <= MAX_DECODED_OUTPUT_SIZE,
+                    "Decoded JSON field should not exceed maximum size"
+                );
+                assert!(
+                    user_data.name.is_ascii() || user_data.name.chars().all(|c| !c.is_control()),
+                    "Decoded name should not contain control characters"
+                );
+            }
             Err(err) => {
                 // Invariant 5: Content-Type mismatch returns 415
                 if err.message.contains("expected application/json") {
-                    assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                        "JSON Content-Type mismatch should return 415");
+                    assert_eq!(
+                        err.status,
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "JSON Content-Type mismatch should return 415"
+                    );
                 }
                 // JSON parsing errors should be descriptive
-                assert!(!err.message.is_empty(), "JSON error should have descriptive message");
+                assert!(
+                    !err.message.is_empty(),
+                    "JSON error should have descriptive message"
+                );
             }
         }
     }
 
     // Test Form extractor (if body appears to be form data)
-    if request.header("content-type").map_or(false, |ct| ct.contains("form")) {
+    if request
+        .header("content-type")
+        .map_or(false, |ct| ct.contains("form"))
+    {
         match Form::<TestForm>::from_request(request.clone()) {
             Ok(Form(form_data)) => {
                 // Invariant 1: Valid form should decode to proper structures
-                assert!(form_data.username.len() <= MAX_DECODED_OUTPUT_SIZE,
-                    "Decoded form field should not exceed maximum size");
-                assert!(form_data.password.len() <= MAX_DECODED_OUTPUT_SIZE,
-                    "Decoded form field should not exceed maximum size");
-            },
+                assert!(
+                    form_data.username.len() <= MAX_DECODED_OUTPUT_SIZE,
+                    "Decoded form field should not exceed maximum size"
+                );
+                assert!(
+                    form_data.password.len() <= MAX_DECODED_OUTPUT_SIZE,
+                    "Decoded form field should not exceed maximum size"
+                );
+            }
             Err(err) => {
                 // Invariant 5: Content-Type mismatch returns 415
-                if err.message.contains("expected application/x-www-form-urlencoded") {
-                    assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                        "Form Content-Type mismatch should return 415");
+                if err
+                    .message
+                    .contains("expected application/x-www-form-urlencoded")
+                {
+                    assert_eq!(
+                        err.status,
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "Form Content-Type mismatch should return 415"
+                    );
                 }
                 // Form parsing errors should be descriptive
-                assert!(!err.message.is_empty(), "Form error should have descriptive message");
+                assert!(
+                    !err.message.is_empty(),
+                    "Form error should have descriptive message"
+                );
             }
         }
     }
@@ -334,12 +368,17 @@ fn test_body_size_limits(request: &mut Request) -> Result<(), String> {
     match Json::<TestUser>::from_request(large_request) {
         Ok(_) => {
             return Err("Oversized JSON body should have been rejected".to_string());
-        },
+        }
         Err(err) => {
-            assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE,
-                "Oversized JSON should return 413 Payload Too Large");
-            assert!(err.message.contains("JSON body too large"),
-                "Error message should indicate JSON size limit exceeded");
+            assert_eq!(
+                err.status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Oversized JSON should return 413 Payload Too Large"
+            );
+            assert!(
+                err.message.contains("JSON body too large"),
+                "Error message should indicate JSON size limit exceeded"
+            );
         }
     }
 
@@ -353,12 +392,17 @@ fn test_body_size_limits(request: &mut Request) -> Result<(), String> {
     match Form::<TestForm>::from_request(large_form_request) {
         Ok(_) => {
             return Err("Oversized form body should have been rejected".to_string());
-        },
+        }
         Err(err) => {
-            assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE,
-                "Oversized form should return 413 Payload Too Large");
-            assert!(err.message.contains("form body too large"),
-                "Error message should indicate form size limit exceeded");
+            assert_eq!(
+                err.status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Oversized form should return 413 Payload Too Large"
+            );
+            assert!(
+                err.message.contains("form body too large"),
+                "Error message should indicate form size limit exceeded"
+            );
         }
     }
 
@@ -366,8 +410,8 @@ fn test_body_size_limits(request: &mut Request) -> Result<(), String> {
     let mut custom_request = request.clone();
     let mut extensions = Extensions::new();
     let custom_limits = BodyLimits::new()
-        .max_json_body_size(1024)  // 1KB limit
-        .max_form_body_size(512);  // 512B limit
+        .max_json_body_size(1024) // 1KB limit
+        .max_form_body_size(512); // 512B limit
     extensions.insert_typed(custom_limits);
     custom_request.extensions = extensions;
 
@@ -379,10 +423,13 @@ fn test_body_size_limits(request: &mut Request) -> Result<(), String> {
     match Json::<TestUser>::from_request(custom_request) {
         Ok(_) => {
             return Err("Body exceeding custom limit should have been rejected".to_string());
-        },
+        }
         Err(err) => {
-            assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE,
-                "Body exceeding custom limit should return 413");
+            assert_eq!(
+                err.status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Body exceeding custom limit should return 413"
+            );
         }
     }
 
@@ -403,12 +450,17 @@ fn test_content_type_mismatches(request: &mut Request) -> Result<(), String> {
     match Json::<TestUser>::from_request(json_request) {
         Ok(_) => {
             return Err("JSON extractor should reject non-JSON Content-Type".to_string());
-        },
+        }
         Err(err) => {
-            assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Wrong Content-Type for JSON should return 415");
-            assert!(err.message.contains("expected application/json"),
-                "Error should mention expected Content-Type");
+            assert_eq!(
+                err.status,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Wrong Content-Type for JSON should return 415"
+            );
+            assert!(
+                err.message.contains("expected application/json"),
+                "Error should mention expected Content-Type"
+            );
         }
     }
 
@@ -422,12 +474,18 @@ fn test_content_type_mismatches(request: &mut Request) -> Result<(), String> {
     match Form::<TestForm>::from_request(form_request) {
         Ok(_) => {
             return Err("Form extractor should reject non-form Content-Type".to_string());
-        },
+        }
         Err(err) => {
-            assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Wrong Content-Type for form should return 415");
-            assert!(err.message.contains("expected application/x-www-form-urlencoded"),
-                "Error should mention expected Content-Type");
+            assert_eq!(
+                err.status,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Wrong Content-Type for form should return 415"
+            );
+            assert!(
+                err.message
+                    .contains("expected application/x-www-form-urlencoded"),
+                "Error should mention expected Content-Type"
+            );
         }
     }
 
@@ -447,17 +505,26 @@ fn test_multi_extractor_composition(request: &Request) -> Result<(), String> {
     match (path_result, query_result, headers_result) {
         (Ok(_), Ok(_), Ok(_)) => {
             // All extractors succeeded - composition works correctly
-        },
+        }
         (path_res, query_res, headers_res) => {
             // At least one failed - verify failures are legitimate
             if let Err(path_err) = path_res {
-                assert!(!path_err.message.is_empty(), "Path error should be descriptive");
+                assert!(
+                    !path_err.message.is_empty(),
+                    "Path error should be descriptive"
+                );
             }
             if let Err(query_err) = query_res {
-                assert!(!query_err.message.is_empty(), "Query error should be descriptive");
+                assert!(
+                    !query_err.message.is_empty(),
+                    "Query error should be descriptive"
+                );
             }
             if let Err(headers_err) = headers_res {
-                assert!(!headers_err.message.is_empty(), "Headers error should be descriptive");
+                assert!(
+                    !headers_err.message.is_empty(),
+                    "Headers error should be descriptive"
+                );
             }
         }
     }
@@ -471,17 +538,22 @@ fn test_multi_extractor_composition(request: &Request) -> Result<(), String> {
         // Both might fail due to Content-Type, but if one succeeds, verify it's reasonable
         match (json_result, form_result) {
             (Ok(Json(json_val)), _) => {
-                assert!(json_val.is_object() || json_val.is_array() || json_val.is_string() || json_val.is_number(),
-                    "Successful JSON extraction should produce valid JSON value");
-            },
+                assert!(
+                    json_val.is_object()
+                        || json_val.is_array()
+                        || json_val.is_string()
+                        || json_val.is_number(),
+                    "Successful JSON extraction should produce valid JSON value"
+                );
+            }
             (_, Ok(Form(form_map))) => {
                 // Form data should not be unreasonably large
-                let total_size: usize = form_map.iter()
-                    .map(|(k, v)| k.len() + v.len())
-                    .sum();
-                assert!(total_size <= MAX_DECODED_OUTPUT_SIZE,
-                    "Successful form extraction should not exceed size limits");
-            },
+                let total_size: usize = form_map.iter().map(|(k, v)| k.len() + v.len()).sum();
+                assert!(
+                    total_size <= MAX_DECODED_OUTPUT_SIZE,
+                    "Successful form extraction should not exceed size limits"
+                );
+            }
             (Err(_), Err(_)) => {
                 // Both failed - acceptable if input is invalid or has wrong Content-Type
             }
@@ -494,19 +566,17 @@ fn test_multi_extractor_composition(request: &Request) -> Result<(), String> {
 /// Generate specific edge case inputs for targeted testing.
 fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInput {
     match edge_case {
-        WebExtractEdgeCase::EmptyRequest => {
-            WebExtractFuzzInput {
-                method: HttpMethod::Get,
-                path: "/".to_string(),
-                query_string: None,
-                headers: vec![],
-                body: vec![],
-                path_params: HashMap::new(),
-                test_edge_cases: true,
-                test_oversized_bodies: false,
-                test_content_type_mismatch: false,
-                test_composition: false,
-            }
+        WebExtractEdgeCase::EmptyRequest => WebExtractFuzzInput {
+            method: HttpMethod::Get,
+            path: "/".to_string(),
+            query_string: None,
+            headers: vec![],
+            body: vec![],
+            path_params: HashMap::new(),
+            test_edge_cases: true,
+            test_oversized_bodies: false,
+            test_content_type_mismatch: false,
+            test_composition: false,
         },
 
         WebExtractEdgeCase::OversizedJson { size_multiplier } => {
@@ -525,7 +595,7 @@ fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInp
                 test_content_type_mismatch: false,
                 test_composition: false,
             }
-        },
+        }
 
         WebExtractEdgeCase::OversizedForm { size_multiplier } => {
             let size = ((*size_multiplier as usize + 1) * 512 * 1024).min(MAX_FUZZ_INPUT_SIZE);
@@ -535,7 +605,10 @@ fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInp
                 method: HttpMethod::Post,
                 path: "/form".to_string(),
                 query_string: None,
-                headers: vec![("content-type".to_string(), "application/x-www-form-urlencoded".to_string())],
+                headers: vec![(
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                )],
                 body: form_data.into_bytes(),
                 path_params: HashMap::new(),
                 test_edge_cases: true,
@@ -543,24 +616,25 @@ fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInp
                 test_content_type_mismatch: false,
                 test_composition: false,
             }
+        }
+
+        WebExtractEdgeCase::InvalidJson { data } => WebExtractFuzzInput {
+            method: HttpMethod::Post,
+            path: "/api/json".to_string(),
+            query_string: None,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: data.clone(),
+            path_params: HashMap::new(),
+            test_edge_cases: true,
+            test_oversized_bodies: false,
+            test_content_type_mismatch: false,
+            test_composition: false,
         },
 
-        WebExtractEdgeCase::InvalidJson { data } => {
-            WebExtractFuzzInput {
-                method: HttpMethod::Post,
-                path: "/api/json".to_string(),
-                query_string: None,
-                headers: vec![("content-type".to_string(), "application/json".to_string())],
-                body: data.clone(),
-                path_params: HashMap::new(),
-                test_edge_cases: true,
-                test_oversized_bodies: false,
-                test_content_type_mismatch: false,
-                test_composition: false,
-            }
-        },
-
-        WebExtractEdgeCase::ContentTypeMismatch { actual_content_type, body_type } => {
+        WebExtractEdgeCase::ContentTypeMismatch {
+            actual_content_type,
+            body_type,
+        } => {
             let body_data = match body_type {
                 BodyType::Json => r#"{"test": "value"}"#.as_bytes().to_vec(),
                 BodyType::Form => "key=value&other=data".as_bytes().to_vec(),
@@ -579,7 +653,7 @@ fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInp
                 test_content_type_mismatch: true,
                 test_composition: false,
             }
-        },
+        }
 
         _ => {
             // Default case for other edge cases
@@ -607,7 +681,11 @@ fuzz_target!(|fuzz_input: WebExtractFuzzInput| {
 
     // Skip if path or query is unreasonably large
     if fuzz_input.path.len() > 1000
-        || fuzz_input.query_string.as_ref().map_or(false, |q| q.len() > 10000) {
+        || fuzz_input
+            .query_string
+            .as_ref()
+            .map_or(false, |q| q.len() > 10000)
+    {
         return;
     }
 
@@ -618,7 +696,7 @@ fuzz_target!(|fuzz_input: WebExtractFuzzInput| {
     match result {
         Ok(_) => {
             // Success case - extractors processed without crashes
-        },
+        }
         Err(err) => {
             // Failure case - should be graceful with descriptive errors
             assert!(!err.is_empty(), "Error messages should be descriptive");
@@ -631,7 +709,9 @@ fuzz_target!(|fuzz_input: WebExtractFuzzInput| {
             WebExtractEdgeCase::EmptyRequest,
             WebExtractEdgeCase::OversizedJson { size_multiplier: 1 },
             WebExtractEdgeCase::OversizedForm { size_multiplier: 1 },
-            WebExtractEdgeCase::InvalidJson { data: b"invalid{json}".to_vec() },
+            WebExtractEdgeCase::InvalidJson {
+                data: b"invalid{json}".to_vec(),
+            },
             WebExtractEdgeCase::ContentTypeMismatch {
                 actual_content_type: "text/plain".to_string(),
                 body_type: BodyType::Json,

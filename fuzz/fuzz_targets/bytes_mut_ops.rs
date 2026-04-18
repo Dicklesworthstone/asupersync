@@ -16,8 +16,8 @@ use std::cmp;
 
 /// Maximum size limits for fuzzing to prevent OOM
 const MAX_CAPACITY: usize = 1024 * 1024; // 1MB
-const MAX_DATA_LEN: usize = 64 * 1024;   // 64KB per operation
-const MAX_OPERATIONS: usize = 100;       // Max operations per test
+const MAX_DATA_LEN: usize = 64 * 1024; // 64KB per operation
+const MAX_OPERATIONS: usize = 100; // Max operations per test
 
 /// BytesMut operations for fuzzing
 #[derive(Arbitrary, Debug, Clone)]
@@ -183,11 +183,7 @@ fuzz_target!(|input: BytesMutFuzzInput| {
                 buf.put_u8(byte);
 
                 // Assert: length increased by 1
-                assert_eq!(
-                    buf.len(),
-                    pre_len + 1,
-                    "put_u8 didn't increase length by 1"
-                );
+                assert_eq!(buf.len(), pre_len + 1, "put_u8 didn't increase length by 1");
 
                 // Assert 1: len never exceeds capacity
                 assert!(
@@ -258,11 +254,7 @@ fuzz_target!(|input: BytesMutFuzzInput| {
                     // Verify data integrity
                     let mut reconstructed = buf.as_ref().to_vec();
                     reconstructed.extend_from_slice(split_off_buf.as_ref());
-                    assert_eq!(
-                        reconstructed,
-                        pre_data,
-                        "split_off corrupted data"
-                    );
+                    assert_eq!(reconstructed, pre_data, "split_off corrupted data");
 
                     split_buffers.push(split_off_buf);
                     state.split_count += 1;
@@ -294,11 +286,7 @@ fuzz_target!(|input: BytesMutFuzzInput| {
                     // Verify data integrity
                     let mut reconstructed = split_to_buf.as_ref().to_vec();
                     reconstructed.extend_from_slice(buf.as_ref());
-                    assert_eq!(
-                        reconstructed,
-                        pre_data,
-                        "split_to corrupted data"
-                    );
+                    assert_eq!(reconstructed, pre_data, "split_to corrupted data");
 
                     split_buffers.push(split_to_buf);
                     state.split_count += 1;
@@ -378,8 +366,7 @@ fuzz_target!(|input: BytesMutFuzzInput| {
                     );
                     for i in pre_data.len()..bounded_new_len {
                         assert_eq!(
-                            buf[i],
-                            value,
+                            buf[i], value,
                             "resize didn't fill new bytes with correct value"
                         );
                     }
@@ -424,11 +411,7 @@ fuzz_target!(|input: BytesMutFuzzInput| {
                         "set_len corrupted existing data when growing"
                     );
                     for i in pre_data.len()..bounded_len {
-                        assert_eq!(
-                            buf[i],
-                            0,
-                            "set_len didn't zero-fill new bytes"
-                        );
+                        assert_eq!(buf[i], 0, "set_len didn't zero-fill new bytes");
                     }
                 }
 
@@ -527,11 +510,7 @@ mod focused_tests {
         reconstructed.extend_from_slice(buf.as_ref());
         reconstructed.extend_from_slice(split.as_ref());
 
-        assert_eq!(
-            reconstructed,
-            original_data,
-            "split_off corrupted data"
-        );
+        assert_eq!(reconstructed, original_data, "split_off corrupted data");
     }
 
     /// Test freeze preserves data exactly
@@ -543,7 +522,11 @@ mod focused_tests {
         let frozen = buf.freeze();
 
         assert_eq!(frozen.len(), original_len, "freeze changed length");
-        assert_eq!(frozen.as_ref(), original_data.as_slice(), "freeze changed data");
+        assert_eq!(
+            frozen.as_ref(),
+            original_data.as_slice(),
+            "freeze changed data"
+        );
     }
 
     /// Test capacity growth patterns

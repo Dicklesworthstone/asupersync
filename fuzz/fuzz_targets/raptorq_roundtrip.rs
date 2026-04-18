@@ -29,11 +29,11 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::config::EncodingConfig;
 use asupersync::decoding::{DecodingConfig, DecodingPipeline};
-use asupersync::encoding::{EncodingPipeline, EncodingError};
+use asupersync::encoding::{EncodingError, EncodingPipeline};
 use asupersync::security::SecurityContext;
+use asupersync::security::{AuthenticatedSymbol, tag::AuthenticationTag};
 use asupersync::types::resource::SymbolPool;
 use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
-use asupersync::security::{AuthenticatedSymbol, tag::AuthenticationTag};
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -158,7 +158,10 @@ fn execute_roundtrip(input: &RaptorQRoundtripInput) -> Result<RoundtripResult, S
             symbols_encoded: 0,
             symbols_available: 0,
             symbols_used: 0,
-            error: Some(format!("K parameter {} out of range [1, {}]", k, MAX_SOURCE_SYMBOLS)),
+            error: Some(format!(
+                "K parameter {} out of range [1, {}]",
+                k, MAX_SOURCE_SYMBOLS
+            )),
         });
     }
 
@@ -230,10 +233,8 @@ fn execute_roundtrip(input: &RaptorQRoundtripInput) -> Result<RoundtripResult, S
     // Feed received symbols to decoder
     let mut symbols_used = 0;
     for symbol in &received_symbols {
-        let authenticated_symbol = AuthenticatedSymbol::new_verified(
-            symbol.clone(),
-            AuthenticationTag::zero(),
-        );
+        let authenticated_symbol =
+            AuthenticatedSymbol::new_verified(symbol.clone(), AuthenticationTag::zero());
 
         match decoder.add_symbol(&authenticated_symbol) {
             Ok(_) => symbols_used += 1,
@@ -259,7 +260,11 @@ fn execute_roundtrip(input: &RaptorQRoundtripInput) -> Result<RoundtripResult, S
                     symbols_encoded: encoded_symbols.len(),
                     symbols_available: received_symbols.len(),
                     symbols_used,
-                    error: Some(format!("Decoding failed with high loss rate {:.1}%: {:?}", loss_rate * 100.0, e)),
+                    error: Some(format!(
+                        "Decoding failed with high loss rate {:.1}%: {:?}",
+                        loss_rate * 100.0,
+                        e
+                    )),
                 });
             } else {
                 return Err(format!("Decoding failed unexpectedly: {:?}", e));
@@ -328,21 +333,26 @@ fuzz_target!(|mut input: RaptorQRoundtripInput| {
         TestScenario::BasicRoundtrip => {
             // Should succeed with no loss
             if result.encoding_success && result.decoding_success {
-                assert!(result.data_matches,
-                       "Basic roundtrip failed: decoded data doesn't match original");
+                assert!(
+                    result.data_matches,
+                    "Basic roundtrip failed: decoded data doesn't match original"
+                );
             }
         }
 
         TestScenario::PacketLoss => {
             // Should handle expected packet loss gracefully
-            let loss_rate = 1.0 - (result.symbols_available as f64 / result.symbols_encoded.max(1) as f64);
+            let loss_rate =
+                1.0 - (result.symbols_available as f64 / result.symbols_encoded.max(1) as f64);
             let expected_loss = input.simulation.loss_rate as f64 / 100.0;
 
             if loss_rate <= expected_loss && result.encoding_success {
                 // Low loss rate should still decode successfully
                 if result.decoding_success {
-                    assert!(result.data_matches,
-                           "Packet loss test failed: low loss rate should preserve data integrity");
+                    assert!(
+                        result.data_matches,
+                        "Packet loss test failed: low loss rate should preserve data integrity"
+                    );
                 }
             }
         }
@@ -350,24 +360,30 @@ fuzz_target!(|mut input: RaptorQRoundtripInput| {
         TestScenario::SymbolReordering => {
             // Reordering should not affect correctness
             if result.encoding_success && result.decoding_success {
-                assert!(result.data_matches,
-                       "Symbol reordering test failed: order should not affect correctness");
+                assert!(
+                    result.data_matches,
+                    "Symbol reordering test failed: order should not affect correctness"
+                );
             }
         }
 
         TestScenario::MinimalOverhead | TestScenario::MaximalOverhead => {
             // Test different repair overhead scenarios
             if result.encoding_success && result.decoding_success {
-                assert!(result.data_matches,
-                       "Overhead test failed: repair overhead should not affect correctness");
+                assert!(
+                    result.data_matches,
+                    "Overhead test failed: repair overhead should not affect correctness"
+                );
             }
         }
 
         TestScenario::BoundaryConditions => {
             // Test edge cases - may fail in expected ways
             if result.encoding_success && result.decoding_success {
-                assert!(result.data_matches,
-                       "Boundary test failed: edge cases should preserve correctness when they succeed");
+                assert!(
+                    result.data_matches,
+                    "Boundary test failed: edge cases should preserve correctness when they succeed"
+                );
             }
         }
     }
@@ -375,17 +391,24 @@ fuzz_target!(|mut input: RaptorQRoundtripInput| {
     // Additional global invariants
     if result.encoding_success && result.decoding_success {
         // If both encoding and decoding succeeded, data must match
-        assert!(result.data_matches,
-               "Global invariant violation: successful encode-decode cycle must preserve data");
+        assert!(
+            result.data_matches,
+            "Global invariant violation: successful encode-decode cycle must preserve data"
+        );
 
         // Number of symbols used should not exceed symbols available
-        assert!(result.symbols_used <= result.symbols_available,
-               "Used more symbols than available: {} > {}",
-               result.symbols_used, result.symbols_available);
+        assert!(
+            result.symbols_used <= result.symbols_available,
+            "Used more symbols than available: {} > {}",
+            result.symbols_used,
+            result.symbols_available
+        );
 
         // Should have used some symbols for successful decoding
-        assert!(result.symbols_used > 0,
-               "Successful decoding should use at least one symbol");
+        assert!(
+            result.symbols_used > 0,
+            "Successful decoding should use at least one symbol"
+        );
     }
 });
 
@@ -408,7 +431,10 @@ mod tests {
         };
 
         let result = execute_roundtrip(&input).unwrap();
-        assert!(!result.encoding_success, "Zero-length data should be rejected");
+        assert!(
+            !result.encoding_success,
+            "Zero-length data should be rejected"
+        );
     }
 
     #[test]
@@ -446,10 +472,14 @@ mod tests {
             scenario: TestScenario::BoundaryConditions,
         };
 
-        let k = (input.source_data.len() + input.symbol_size as usize - 1) / input.symbol_size as usize;
+        let k =
+            (input.source_data.len() + input.symbol_size as usize - 1) / input.symbol_size as usize;
         if k == 0 || k > MAX_SOURCE_SYMBOLS {
             let result = execute_roundtrip(&input).unwrap();
-            assert!(!result.encoding_success, "Out-of-range K parameter should be rejected");
+            assert!(
+                !result.encoding_success,
+                "Out-of-range K parameter should be rejected"
+            );
         }
     }
 
@@ -469,7 +499,10 @@ mod tests {
 
         let result = execute_roundtrip(&input).unwrap();
         if result.encoding_success && result.decoding_success {
-            assert!(result.data_matches, "Symbol reordering should preserve correctness");
+            assert!(
+                result.data_matches,
+                "Symbol reordering should preserve correctness"
+            );
         }
     }
 
@@ -491,7 +524,10 @@ mod tests {
         if result.encoding_success {
             // With 30% overhead and 20% loss, decoding should still succeed
             if result.decoding_success {
-                assert!(result.data_matches, "Moderate packet loss should still allow recovery");
+                assert!(
+                    result.data_matches,
+                    "Moderate packet loss should still allow recovery"
+                );
             }
         }
     }

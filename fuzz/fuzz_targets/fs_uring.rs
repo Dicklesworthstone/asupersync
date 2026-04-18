@@ -22,7 +22,7 @@ use std::{
     os::fd::{AsRawFd, RawFd},
     path::Path,
 };
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 // SQE operation types for fuzzing
 #[derive(Debug, Clone, Copy, Arbitrary)]
@@ -40,39 +40,39 @@ enum FuzzOpType {
 // Buffer configuration for testing offset overflow
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzBuffer {
-    size: u16,           // 0-65535 buffer size
-    offset_base: u64,    // Base offset for reads/writes
-    offset_delta: i64,   // Delta to add (can overflow)
-    pattern: u8,         // Fill pattern for write buffers
+    size: u16,         // 0-65535 buffer size
+    offset_base: u64,  // Base offset for reads/writes
+    offset_delta: i64, // Delta to add (can overflow)
+    pattern: u8,       // Fill pattern for write buffers
 }
 
 // File descriptor management for validation testing
 #[derive(Debug, Clone, Copy, Arbitrary)]
 enum FuzzFdState {
-    Valid,      // Use valid open file descriptor
-    Closed,     // Use closed file descriptor
-    Invalid,    // Use obviously invalid FD (-1)
-    Corrupted,  // Use random FD value
+    Valid,     // Use valid open file descriptor
+    Closed,    // Use closed file descriptor
+    Invalid,   // Use obviously invalid FD (-1)
+    Corrupted, // Use random FD value
 }
 
 // Operation flags and linking for SQE testing
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzOpFlags {
-    link_next: bool,        // IOSQE_IO_LINK flag
-    drain_prior: bool,      // IOSQE_IO_DRAIN flag
-    force_async: bool,      // IOSQE_ASYNC flag
-    fixed_file: bool,       // IOSQE_FIXED_FILE flag
-    user_data: u64,         // User data for CQE correlation
+    link_next: bool,   // IOSQE_IO_LINK flag
+    drain_prior: bool, // IOSQE_IO_DRAIN flag
+    force_async: bool, // IOSQE_ASYNC flag
+    fixed_file: bool,  // IOSQE_FIXED_FILE flag
+    user_data: u64,    // User data for CQE correlation
 }
 
 // Main fuzz input structure
 #[derive(Debug, Clone, Arbitrary)]
 struct UringFuzzInput {
     operations: Vec<FuzzOperation>,
-    temp_file_size: u32,        // Initial file size (0-1MB)
-    chaos_seed: u64,           // For deterministic randomness
-    enable_linking: bool,       // Test linked operations
-    force_fd_errors: bool,     // Force FD-related error conditions
+    temp_file_size: u32,   // Initial file size (0-1MB)
+    chaos_seed: u64,       // For deterministic randomness
+    enable_linking: bool,  // Test linked operations
+    force_fd_errors: bool, // Force FD-related error conditions
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -81,7 +81,7 @@ struct FuzzOperation {
     buffer: FuzzBuffer,
     fd_state: FuzzFdState,
     flags: FuzzOpFlags,
-    delay_after: u8,           // 0-255ms delay after operation
+    delay_after: u8, // 0-255ms delay after operation
 }
 
 // Test harness for io_uring file operations
@@ -119,7 +119,7 @@ impl UringFuzzHarness {
                     self.valid_file = Some(IoUringFile::open_with_flags(
                         &self.file_path,
                         libc::O_RDWR,
-                        0o644
+                        0o644,
                     )?);
                 }
                 // Clone the file handle (Arc-based sharing)
@@ -148,7 +148,9 @@ impl UringFuzzHarness {
 
     fn get_valid_file_clone(&self) -> IoUringFile {
         // SAFETY: We know valid_file exists when this is called
-        let valid_file = self.valid_file.as_ref()
+        let valid_file = self
+            .valid_file
+            .as_ref()
             .expect("Valid file should be initialized");
 
         // Create a new file handle from the same path (io_uring allows multiple handles)
@@ -210,9 +212,11 @@ impl UringFuzzHarness {
                     }
                     Err(e) => {
                         // Check that error is reasonable (not a segfault/panic)
-                        assert!(e.raw_os_error().is_some() ||
-                               e.kind() != io::ErrorKind::Other,
-                               "Unexpected error type for read operation: {:?}", e);
+                        assert!(
+                            e.raw_os_error().is_some() || e.kind() != io::ErrorKind::Other,
+                            "Unexpected error type for read operation: {:?}",
+                            e
+                        );
                     }
                 }
             }
@@ -233,10 +237,13 @@ impl UringFuzzHarness {
                     }
                     Err(e) => {
                         // Verify error is reasonable
-                        assert!(e.raw_os_error().is_some() ||
-                               e.kind() == io::ErrorKind::WriteZero ||
-                               e.kind() == io::ErrorKind::NoSpaceLeft,
-                               "Unexpected write error: {:?}", e);
+                        assert!(
+                            e.raw_os_error().is_some()
+                                || e.kind() == io::ErrorKind::WriteZero
+                                || e.kind() == io::ErrorKind::NoSpaceLeft,
+                            "Unexpected write error: {:?}",
+                            e
+                        );
                     }
                 }
             }
@@ -248,8 +255,7 @@ impl UringFuzzHarness {
                     }
                     Err(e) => {
                         // Verify sync error is reasonable
-                        assert!(e.raw_os_error().is_some(),
-                               "Unexpected sync error: {:?}", e);
+                        assert!(e.raw_os_error().is_some(), "Unexpected sync error: {:?}", e);
                     }
                 }
             }
@@ -260,8 +266,11 @@ impl UringFuzzHarness {
                         // Data sync should succeed for valid files
                     }
                     Err(e) => {
-                        assert!(e.raw_os_error().is_some(),
-                               "Unexpected sync_data error: {:?}", e);
+                        assert!(
+                            e.raw_os_error().is_some(),
+                            "Unexpected sync_data error: {:?}",
+                            e
+                        );
                     }
                 }
             }
@@ -274,9 +283,11 @@ impl UringFuzzHarness {
                     }
                     Err(e) => {
                         // Invalid seek should fail gracefully
-                        assert!(e.kind() == io::ErrorKind::InvalidInput ||
-                               e.raw_os_error().is_some(),
-                               "Unexpected seek error: {:?}", e);
+                        assert!(
+                            e.kind() == io::ErrorKind::InvalidInput || e.raw_os_error().is_some(),
+                            "Unexpected seek error: {:?}",
+                            e
+                        );
                     }
                 }
             }
@@ -288,9 +299,11 @@ impl UringFuzzHarness {
                         // Set length should succeed for valid sizes
                     }
                     Err(e) => {
-                        assert!(e.raw_os_error().is_some() ||
-                               e.kind() == io::ErrorKind::InvalidInput,
-                               "Unexpected set_len error: {:?}", e);
+                        assert!(
+                            e.raw_os_error().is_some() || e.kind() == io::ErrorKind::InvalidInput,
+                            "Unexpected set_len error: {:?}",
+                            e
+                        );
                     }
                 }
             }
@@ -302,7 +315,9 @@ impl UringFuzzHarness {
     // Test assertion 2: Buffer offset overflow protection
     fn calculate_safe_offset(&self, buffer: &FuzzBuffer) -> u64 {
         // Try to create offset that might overflow when added to buffer size
-        let offset = buffer.offset_base.saturating_add_signed(buffer.offset_delta);
+        let offset = buffer
+            .offset_base
+            .saturating_add_signed(buffer.offset_delta);
 
         // Cap offset to reasonable range to avoid excessive file operations
         offset.min(1024 * 1024) // 1MB max
@@ -339,16 +354,15 @@ impl UringFuzzHarness {
         let file = self.get_file(FuzzFdState::Valid)?;
         let mut expected_user_data = Vec::new();
 
-        for (i, op) in operations.iter().take(8).enumerate() { // Limit to avoid excessive operations
+        for (i, op) in operations.iter().take(8).enumerate() {
+            // Limit to avoid excessive operations
             let unique_user_data = op.flags.user_data.wrapping_add(i as u64);
             expected_user_data.push(unique_user_data);
 
             // Execute operation and verify it completes with correct user_data
             let mut buf = vec![0u8; 256];
             let result = match op.op_type {
-                FuzzOpType::Read => {
-                    file.read(&mut buf).await
-                }
+                FuzzOpType::Read => file.read(&mut buf).await,
                 FuzzOpType::ReadAt => {
                     let offset = self.calculate_safe_offset(&op.buffer);
                     file.read_at(&mut buf, offset).await
@@ -362,12 +376,8 @@ impl UringFuzzHarness {
                     let offset = self.calculate_safe_offset(&op.buffer);
                     file.write_at(&write_buf, offset).await
                 }
-                FuzzOpType::Fsync => {
-                    file.sync_all().await.map(|_| 0)
-                }
-                FuzzOpType::Fdatasync => {
-                    file.sync_data().await.map(|_| 0)
-                }
+                FuzzOpType::Fsync => file.sync_all().await.map(|_| 0),
+                FuzzOpType::Fdatasync => file.sync_data().await.map(|_| 0),
                 _ => Ok(0), // Skip seek/setlen for CQE testing
             };
 
@@ -378,9 +388,11 @@ impl UringFuzzHarness {
                 }
                 Err(e) => {
                     // Operation failed - ensure error is reasonable
-                    assert!(e.raw_os_error().is_some() ||
-                           e.kind() != io::ErrorKind::Other,
-                           "Unexpected operation error: {:?}", e);
+                    assert!(
+                        e.raw_os_error().is_some() || e.kind() != io::ErrorKind::Other,
+                        "Unexpected operation error: {:?}",
+                        e
+                    );
                 }
             }
         }
@@ -428,13 +440,18 @@ impl UringFuzzHarness {
 
             if i == link_chain.len() / 2 {
                 // The error operation should fail
-                assert!(result.is_err(), "Expected error operation to fail in linked chain");
+                assert!(
+                    result.is_err(),
+                    "Expected error operation to fail in linked chain"
+                );
             } else {
                 // Other operations should either succeed or fail gracefully
                 if let Err(e) = result {
-                    assert!(e.raw_os_error().is_some() ||
-                           e.kind() == io::ErrorKind::InvalidInput,
-                           "Unexpected error in linked operation: {:?}", e);
+                    assert!(
+                        e.raw_os_error().is_some() || e.kind() == io::ErrorKind::InvalidInput,
+                        "Unexpected error in linked operation: {:?}",
+                        e
+                    );
                 }
             }
         }

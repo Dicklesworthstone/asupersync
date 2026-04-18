@@ -31,8 +31,8 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-use asupersync::tls::types::Certificate;
 use asupersync::tls::error::TlsError;
+use asupersync::tls::types::Certificate;
 
 /// Maximum input size to prevent memory exhaustion during fuzzing
 const MAX_INPUT_SIZE: usize = 256 * 1024; // 256KB
@@ -124,9 +124,7 @@ enum RdnCorruption {
     /// Invalid UTF-8 in string attributes
     InvalidUtf8,
     /// Oversized attribute values
-    OversizedValues {
-        target_size: u16,
-    },
+    OversizedValues { target_size: u16 },
     /// Invalid ASN.1 SET OF structure
     InvalidSetStructure,
     /// Missing mandatory attributes
@@ -184,9 +182,7 @@ enum SanCorruption {
     /// Valid SAN entries
     Valid,
     /// Oversized DNS names
-    OversizedDnsName {
-        name_length: u16,
-    },
+    OversizedDnsName { name_length: u16 },
     /// Invalid characters in DNS names
     InvalidDnsChars,
     /// IP address format violations
@@ -196,9 +192,7 @@ enum SanCorruption {
     /// URI with control characters
     UriControlChars,
     /// Too many SAN entries
-    TooManySanEntries {
-        count: u8,
-    },
+    TooManySanEntries { count: u8 },
     /// Invalid ASN.1 GeneralName structure
     InvalidGeneralName,
 }
@@ -209,19 +203,13 @@ enum OidCorruption {
     /// Valid OIDs
     Valid,
     /// Oversized arc values (integer overflow test)
-    OversizedArcs {
-        arc_values: Vec<u64>,
-    },
+    OversizedArcs { arc_values: Vec<u64> },
     /// Invalid encoding of arc values
     InvalidArcEncoding,
     /// Too many arcs
-    TooManyArcs {
-        count: u8,
-    },
+    TooManyArcs { count: u8 },
     /// Invalid first arc (must be 0, 1, or 2)
-    InvalidFirstArc {
-        first_arc: u8,
-    },
+    InvalidFirstArc { first_arc: u8 },
     /// Malformed DER integer encoding
     MalformedDerInteger,
 }
@@ -287,7 +275,8 @@ impl X509FuzzConfig {
         // Signature AlgorithmIdentifier
         cert.extend_from_slice(&[
             0x30, 0x0D, // SEQUENCE
-            0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B, // SHA256WithRSA OID
+            0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01,
+            0x0B, // SHA256WithRSA OID
             0x05, 0x00, // NULL parameters
         ]);
 
@@ -375,27 +364,39 @@ impl X509FuzzConfig {
     fn apply_structure_corruption(&self, mut cert_data: Vec<u8>) -> Vec<u8> {
         match &self.cert_structure {
             CertificateStructure::Valid => cert_data,
-            CertificateStructure::DeepNested { depth, corruption_type } => {
-                self.inject_deep_nesting(cert_data, *depth as usize, corruption_type)
-            }
-            CertificateStructure::InvalidDer { corruption_offset, corruption_value } => {
+            CertificateStructure::DeepNested {
+                depth,
+                corruption_type,
+            } => self.inject_deep_nesting(cert_data, *depth as usize, corruption_type),
+            CertificateStructure::InvalidDer {
+                corruption_offset,
+                corruption_value,
+            } => {
                 let offset = (*corruption_offset as usize) % cert_data.len();
                 cert_data[offset] = *corruption_value;
                 cert_data
             }
-            CertificateStructure::Truncated { truncate_at_percent } => {
+            CertificateStructure::Truncated {
+                truncate_at_percent,
+            } => {
                 let truncate_at = (cert_data.len() * (*truncate_at_percent as usize)) / 100;
                 cert_data.truncate(truncate_at.max(1));
                 cert_data
             }
-            CertificateStructure::OversizedLength { field_type, multiplier } => {
-                self.inject_oversized_length(cert_data, field_type, *multiplier)
-            }
+            CertificateStructure::OversizedLength {
+                field_type,
+                multiplier,
+            } => self.inject_oversized_length(cert_data, field_type, *multiplier),
         }
     }
 
     /// Inject deep ASN.1 nesting to test depth bounds
-    fn inject_deep_nesting(&self, mut cert_data: Vec<u8>, depth: usize, corruption_type: &NestingCorruption) -> Vec<u8> {
+    fn inject_deep_nesting(
+        &self,
+        mut cert_data: Vec<u8>,
+        depth: usize,
+        corruption_type: &NestingCorruption,
+    ) -> Vec<u8> {
         let effective_depth = depth.min(MAX_ASN1_DEPTH);
         let mut nested_structure = Vec::new();
 
@@ -432,7 +433,12 @@ impl X509FuzzConfig {
     }
 
     /// Inject oversized length fields
-    fn inject_oversized_length(&self, mut cert_data: Vec<u8>, field_type: &LengthField, multiplier: u16) -> Vec<u8> {
+    fn inject_oversized_length(
+        &self,
+        mut cert_data: Vec<u8>,
+        field_type: &LengthField,
+        multiplier: u16,
+    ) -> Vec<u8> {
         // Find length field and multiply it (this will create invalid certificates)
         match field_type {
             LengthField::CertificateLength => {
@@ -469,21 +475,13 @@ impl X509FuzzConfig {
                 // Scramble RDN attribute order (violates X.501)
                 self.scramble_rdn_order(cert_data)
             }
-            RdnCorruption::DuplicateAttributes => {
-                self.inject_duplicate_attributes(cert_data)
-            }
-            RdnCorruption::InvalidUtf8 => {
-                self.inject_invalid_utf8(cert_data)
-            }
+            RdnCorruption::DuplicateAttributes => self.inject_duplicate_attributes(cert_data),
+            RdnCorruption::InvalidUtf8 => self.inject_invalid_utf8(cert_data),
             RdnCorruption::OversizedValues { target_size } => {
                 self.inject_oversized_attribute_values(cert_data, *target_size)
             }
-            RdnCorruption::InvalidSetStructure => {
-                self.corrupt_rdn_set_structure(cert_data)
-            }
-            RdnCorruption::MissingMandatory => {
-                self.remove_mandatory_attributes(cert_data)
-            }
+            RdnCorruption::InvalidSetStructure => self.corrupt_rdn_set_structure(cert_data),
+            RdnCorruption::MissingMandatory => self.remove_mandatory_attributes(cert_data),
         }
     }
 
@@ -509,7 +507,11 @@ impl X509FuzzConfig {
         cert_data
     }
 
-    fn inject_oversized_attribute_values(&self, mut cert_data: Vec<u8>, target_size: u16) -> Vec<u8> {
+    fn inject_oversized_attribute_values(
+        &self,
+        mut cert_data: Vec<u8>,
+        target_size: u16,
+    ) -> Vec<u8> {
         // Append oversized attribute value
         let oversized_attr = vec![0x42; target_size.min(1024) as usize]; // Limit to prevent memory issues
         cert_data.extend_from_slice(&oversized_attr);
@@ -736,7 +738,10 @@ impl MockX509Parser {
     fn check_der_depth_bounds(&self, der_data: &[u8]) -> Result<(), String> {
         let depth = self.calculate_asn1_depth(der_data);
         if depth > self.max_depth {
-            return Err(format!("DER depth {} exceeds limit {}", depth, self.max_depth));
+            return Err(format!(
+                "DER depth {} exceeds limit {}",
+                depth, self.max_depth
+            ));
         }
         Ok(())
     }
@@ -747,7 +752,8 @@ impl MockX509Parser {
         let mut current_depth = 0;
 
         for &byte in data {
-            if byte == 0x30 || byte == 0x31 { // SEQUENCE or SET
+            if byte == 0x30 || byte == 0x31 {
+                // SEQUENCE or SET
                 current_depth += 1;
                 max_depth = max_depth.max(current_depth);
             } else if current_depth > 0 && byte == 0x00 {
@@ -774,7 +780,10 @@ impl MockX509Parser {
         // SAN validation
         // Check for control characters, oversized fields, injection attempts
         for window in der_data.windows(4) {
-            if window.iter().any(|&b| b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D) {
+            if window
+                .iter()
+                .any(|&b| b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D)
+            {
                 return Err("SAN contains control characters".to_string());
             }
         }
@@ -786,7 +795,8 @@ impl MockX509Parser {
         // Check for integer overflow in arc values
         let mut i = 0;
         while i < der_data.len() {
-            if der_data[i] == 0x06 && i + 1 < der_data.len() { // OID tag
+            if der_data[i] == 0x06 && i + 1 < der_data.len() {
+                // OID tag
                 let length = der_data[i + 1] as usize;
                 if i + 2 + length <= der_data.len() {
                     let oid_data = &der_data[i + 2..i + 2 + length];
@@ -819,7 +829,8 @@ impl MockX509Parser {
             let mut shift = 0;
 
             loop {
-                if shift >= 56 { // Prevent overflow
+                if shift >= 56 {
+                    // Prevent overflow
                     return Err("OID arc value too large".to_string());
                 }
 
@@ -902,7 +913,9 @@ fuzz_target!(|data: &[u8]| {
             let mut chain_cert = cert_data.clone();
 
             // Modify certificate for chain testing
-            if config.chain_tests.corrupt_chain_member && i == config.chain_tests.corrupt_index as usize {
+            if config.chain_tests.corrupt_chain_member
+                && i == config.chain_tests.corrupt_index as usize
+            {
                 // Corrupt this specific chain member
                 if !chain_cert.is_empty() {
                     chain_cert[chain_cert.len() / 2] ^= 0xFF;
@@ -919,7 +932,11 @@ fuzz_target!(|data: &[u8]| {
         // Create a mock PEM wrapper for additional testing
         let mut pem_data = Vec::new();
         pem_data.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
-        pem_data.extend_from_slice(&base64::engine::general_purpose::STANDARD.encode(&cert_data).as_bytes());
+        pem_data.extend_from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .encode(&cert_data)
+                .as_bytes(),
+        );
         pem_data.extend_from_slice(b"\n-----END CERTIFICATE-----\n");
 
         // Test PEM parsing (this may fail, which is expected for malformed data)

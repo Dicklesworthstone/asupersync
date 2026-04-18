@@ -149,9 +149,16 @@ impl Decoder for TestDecoder {
         if self.calls_count >= self.error_after {
             return Err(match self.error_type {
                 CustomErrorType::MaxLengthExceeded => TestDecoderError::MaxFrameLengthExceeded,
-                CustomErrorType::InvalidData => TestDecoderError::InvalidData("malformed frame".to_string()),
-                CustomErrorType::CustomProtocolError => TestDecoderError::CustomProtocolError(0xDEAD),
-                CustomErrorType::IoError => TestDecoderError::Io(io::Error::new(io::ErrorKind::InvalidData, "test io error")),
+                CustomErrorType::InvalidData => {
+                    TestDecoderError::InvalidData("malformed frame".to_string())
+                }
+                CustomErrorType::CustomProtocolError => {
+                    TestDecoderError::CustomProtocolError(0xDEAD)
+                }
+                CustomErrorType::IoError => TestDecoderError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "test io error",
+                )),
             });
         }
 
@@ -287,7 +294,11 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
     let initial_capacity = input.initial_capacity.clamp(16, 2048) as usize;
 
     let reader = TestAsyncReader::new(data_stream, input.reader_pattern);
-    let decoder = TestDecoder::new(max_frame_length, input.decoder_error_after, input.custom_error_type);
+    let decoder = TestDecoder::new(
+        max_frame_length,
+        input.decoder_error_after,
+        input.custom_error_type,
+    );
 
     let mut framed = FramedRead::with_capacity(reader, decoder, initial_capacity);
 
@@ -320,7 +331,8 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
                         if frame.len() > max_frame_length as usize {
                             return Err(format!(
                                 "Frame length {} exceeds max_frame_length {}",
-                                frame.len(), max_frame_length
+                                frame.len(),
+                                max_frame_length
                             ));
                         }
                     }
@@ -426,7 +438,10 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
     }
 
     // INVARIANT 4: Errors should be properly propagated if expected
-    if input.decoder_error_after > 0 && input.decoder_error_after <= poll_count && errors_received == 0 {
+    if input.decoder_error_after > 0
+        && input.decoder_error_after <= poll_count
+        && errors_received == 0
+    {
         return Err("Expected decoder error was not propagated".to_string());
     }
 

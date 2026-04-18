@@ -94,9 +94,9 @@ impl MultipartContentType {
 /// Different spacing patterns for boundary parameter.
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum BoundarySpacing {
-    Standard,     // "; boundary=value"
-    NoSpaces,     // ";boundary=value"
-    ExtraSpaces,  // ";  boundary = value"
+    Standard,      // "; boundary=value"
+    NoSpaces,      // ";boundary=value"
+    ExtraSpaces,   // ";  boundary = value"
     TabsAndSpaces, // ";\t boundary\t=\tvalue"
 }
 
@@ -188,12 +188,12 @@ impl ContentDisposition {
 /// Disposition type variations.
 #[derive(Arbitrary, Debug, Clone)]
 enum DispositionType {
-    Standard,           // "form-data"
-    Attachment,         // "attachment"
-    Inline,             // "inline"
-    Invalid(String),    // Invalid disposition type
-    Empty,              // Empty disposition type
-    Mixed(String),      // Mixed case variations
+    Standard,        // "form-data"
+    Attachment,      // "attachment"
+    Inline,          // "inline"
+    Invalid(String), // Invalid disposition type
+    Empty,           // Empty disposition type
+    Mixed(String),   // Mixed case variations
 }
 
 impl DispositionType {
@@ -208,7 +208,13 @@ impl DispositionType {
                 // Create mixed case variations
                 base.chars()
                     .enumerate()
-                    .map(|(i, c)| if i % 2 == 0 { c.to_uppercase().collect::<String>() } else { c.to_lowercase().collect::<String>() })
+                    .map(|(i, c)| {
+                        if i % 2 == 0 {
+                            c.to_uppercase().collect::<String>()
+                        } else {
+                            c.to_lowercase().collect::<String>()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("")
             }
@@ -282,12 +288,10 @@ impl PartBody {
             Self::Oversized(size) => vec![b'A'; *size],
             Self::Nested(nested) => nested.to_bytes(),
             Self::Empty => Vec::new(),
-            Self::MixedLineEndings(content) => {
-                content
-                    .replace("\n", "\r\n")
-                    .replace("\r\r\n", "\n")
-                    .into_bytes()
-            }
+            Self::MixedLineEndings(content) => content
+                .replace("\n", "\r\n")
+                .replace("\r\r\n", "\n")
+                .into_bytes(),
         }
     }
 }
@@ -359,7 +363,11 @@ impl FuzzMultipartPayload {
 
             // Add Content-Disposition header
             result.extend_from_slice(
-                format!("Content-Disposition: {}", part.content_disposition.to_header_value()).as_bytes()
+                format!(
+                    "Content-Disposition: {}",
+                    part.content_disposition.to_header_value()
+                )
+                .as_bytes(),
             );
             result.extend_from_slice(part.line_ending.as_bytes());
 
@@ -438,17 +446,16 @@ impl MultipartFuzzOracle {
         let parse_result = Multipart::from_request(request);
 
         match parse_result {
-            Ok(multipart) => {
-                Self::validate_parsed_multipart(payload, multipart)
-            }
-            Err(extraction_error) => {
-                Self::validate_error_handling(payload, extraction_error)
-            }
+            Ok(multipart) => Self::validate_parsed_multipart(payload, multipart),
+            Err(extraction_error) => Self::validate_error_handling(payload, extraction_error),
         }
     }
 
     /// Validate properties when parsing succeeds.
-    fn validate_parsed_multipart(payload: &FuzzMultipartPayload, multipart: Multipart) -> FuzzResult {
+    fn validate_parsed_multipart(
+        payload: &FuzzMultipartPayload,
+        multipart: Multipart,
+    ) -> FuzzResult {
         let mut result = FuzzResult::default();
 
         // Property 1: Boundary delimiter correctly parsed
@@ -483,7 +490,10 @@ impl MultipartFuzzOracle {
     }
 
     /// Validate properties when parsing fails (expected for malformed input).
-    fn validate_error_handling(payload: &FuzzMultipartPayload, error: asupersync::web::extract::ExtractionError) -> FuzzResult {
+    fn validate_error_handling(
+        payload: &FuzzMultipartPayload,
+        error: asupersync::web::extract::ExtractionError,
+    ) -> FuzzResult {
         let mut result = FuzzResult::default();
 
         // Analyze error to understand what was rejected
@@ -506,7 +516,10 @@ impl MultipartFuzzOracle {
         }
 
         // Property 4: Malformed boundary rejection
-        if error_msg.contains("boundary") || error_msg.contains("invalid") || error_msg.contains("malformed") {
+        if error_msg.contains("boundary")
+            || error_msg.contains("invalid")
+            || error_msg.contains("malformed")
+        {
             result.malformed_boundary_handling = true; // Properly rejected malformed input
         } else {
             // Other error is also acceptable
@@ -514,7 +527,10 @@ impl MultipartFuzzOracle {
         }
 
         // Property 5: Size limit enforcement
-        if error_msg.contains("too large") || error_msg.contains("size") || error_msg.contains("limit") {
+        if error_msg.contains("too large")
+            || error_msg.contains("size")
+            || error_msg.contains("limit")
+        {
             result.size_limits_enforced = true; // Properly enforced size limits
         } else if payload.has_oversized_content() {
             // If payload has oversized content but wasn't rejected for size,
@@ -548,23 +564,35 @@ struct FuzzResult {
 impl FuzzResult {
     /// Check if all critical properties passed.
     fn all_properties_satisfied(&self) -> bool {
-        self.boundary_parsed_correctly &&
-        self.content_disposition_parsed &&
-        self.filename_parameter_parsed &&
-        self.nested_boundary_bounded &&
-        self.malformed_boundary_handling &&
-        self.size_limits_enforced
+        self.boundary_parsed_correctly
+            && self.content_disposition_parsed
+            && self.filename_parameter_parsed
+            && self.nested_boundary_bounded
+            && self.malformed_boundary_handling
+            && self.size_limits_enforced
     }
 
     /// Get a summary of failed properties for debugging.
     fn failed_properties(&self) -> Vec<&'static str> {
         let mut failed = Vec::new();
-        if !self.boundary_parsed_correctly { failed.push("boundary_parsing"); }
-        if !self.content_disposition_parsed { failed.push("content_disposition"); }
-        if !self.filename_parameter_parsed { failed.push("filename_parameter"); }
-        if !self.nested_boundary_bounded { failed.push("nested_boundary_bounded"); }
-        if !self.malformed_boundary_handling { failed.push("malformed_boundary_handling"); }
-        if !self.size_limits_enforced { failed.push("size_limits_enforced"); }
+        if !self.boundary_parsed_correctly {
+            failed.push("boundary_parsing");
+        }
+        if !self.content_disposition_parsed {
+            failed.push("content_disposition");
+        }
+        if !self.filename_parameter_parsed {
+            failed.push("filename_parameter");
+        }
+        if !self.nested_boundary_bounded {
+            failed.push("nested_boundary_bounded");
+        }
+        if !self.malformed_boundary_handling {
+            failed.push("malformed_boundary_handling");
+        }
+        if !self.size_limits_enforced {
+            failed.push("size_limits_enforced");
+        }
         failed
     }
 }
@@ -574,7 +602,8 @@ impl FuzzMultipartPayload {
     fn has_oversized_content(&self) -> bool {
         // Check total payload size
         let body_bytes = self.to_bytes();
-        if body_bytes.len() > 16 * 1024 * 1024 { // DEFAULT_MAX_MULTIPART_SIZE
+        if body_bytes.len() > 16 * 1024 * 1024 {
+            // DEFAULT_MAX_MULTIPART_SIZE
             return true;
         }
 
@@ -582,7 +611,8 @@ impl FuzzMultipartPayload {
         for part in &self.parts {
             match &part.body {
                 PartBody::Oversized(size) => {
-                    if *size > 8 * 1024 * 1024 { // DEFAULT_MAX_PART_BODY_SIZE
+                    if *size > 8 * 1024 * 1024 {
+                        // DEFAULT_MAX_PART_BODY_SIZE
                         return true;
                     }
                 }
@@ -640,9 +670,21 @@ fuzz_target!(|data: &[u8]| {
                 "Determinism violation: different field counts"
             );
             for (f1, f2) in mp1.fields().iter().zip(mp2.fields()) {
-                assert_eq!(f1.name(), f2.name(), "Determinism violation: field names differ");
-                assert_eq!(f1.filename(), f2.filename(), "Determinism violation: filenames differ");
-                assert_eq!(f1.body().as_ref(), f2.body().as_ref(), "Determinism violation: bodies differ");
+                assert_eq!(
+                    f1.name(),
+                    f2.name(),
+                    "Determinism violation: field names differ"
+                );
+                assert_eq!(
+                    f1.filename(),
+                    f2.filename(),
+                    "Determinism violation: filenames differ"
+                );
+                assert_eq!(
+                    f1.body().as_ref(),
+                    f2.body().as_ref(),
+                    "Determinism violation: bodies differ"
+                );
             }
         }
         (Err(e1), Err(e2)) => {

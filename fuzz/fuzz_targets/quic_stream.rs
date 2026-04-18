@@ -14,7 +14,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::net::quic_core::{decode_varint, encode_varint, QuicCoreError, QUIC_VARINT_MAX};
+use asupersync::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint, encode_varint};
 use asupersync::net::quic_native::streams::{
     FlowControlError, QuicStream, QuicStreamError, StreamDirection, StreamId, StreamRole,
     StreamTable, StreamTableError,
@@ -70,7 +70,7 @@ enum QuicStreamOperation {
         error_code: u64,
     },
     TestStreamIdEncoding {
-        role: bool, // true = client, false = server
+        role: bool,      // true = client, false = server
         direction: bool, // true = bidi, false = uni
         sequence: u64,
     },
@@ -134,10 +134,10 @@ impl QuicStreamShadowModel {
         for i in 0..4 {
             let table = StreamTable::new_with_connection_limits(
                 role,
-                100, // max_local_bidi
-                100, // max_local_uni
-                MAX_FUZZ_WINDOW, // send_window
-                MAX_FUZZ_WINDOW, // recv_window
+                100,                 // max_local_bidi
+                100,                 // max_local_uni
+                MAX_FUZZ_WINDOW,     // send_window
+                MAX_FUZZ_WINDOW,     // recv_window
                 MAX_FUZZ_WINDOW * 2, // connection_send_limit
                 MAX_FUZZ_WINDOW * 2, // connection_recv_limit
             );
@@ -158,7 +158,11 @@ impl QuicStreamShadowModel {
     }
 
     fn validate_stream_id_encoding(&mut self, role_bit: bool, direction_bit: bool, sequence: u64) {
-        let role = if role_bit { StreamRole::Client } else { StreamRole::Server };
+        let role = if role_bit {
+            StreamRole::Client
+        } else {
+            StreamRole::Server
+        };
         let direction = if direction_bit {
             StreamDirection::Bidirectional
         } else {
@@ -166,9 +170,8 @@ impl QuicStreamShadowModel {
         };
 
         if sequence >= (1u64 << 62) {
-            self.stream_id_encoding_violations.push(
-                format!("Stream sequence {} exceeds 62-bit limit", sequence)
-            );
+            self.stream_id_encoding_violations
+                .push(format!("Stream sequence {} exceeds 62-bit limit", sequence));
             return;
         }
 
@@ -179,36 +182,37 @@ impl QuicStreamShadowModel {
         let actual_low_bits = stream_id.0 & 0x3;
 
         if actual_low_bits != expected_low_bits {
-            self.stream_id_encoding_violations.push(
-                format!(
-                    "Stream ID encoding mismatch: expected low bits {}, got {}",
-                    expected_low_bits, actual_low_bits
-                )
-            );
+            self.stream_id_encoding_violations.push(format!(
+                "Stream ID encoding mismatch: expected low bits {}, got {}",
+                expected_low_bits, actual_low_bits
+            ));
         }
 
         // Verify direction extraction
         let extracted_direction = stream_id.direction();
         if extracted_direction != direction {
-            self.stream_id_encoding_violations.push(
-                format!("Direction extraction failed: expected {:?}, got {:?}", direction, extracted_direction)
-            );
+            self.stream_id_encoding_violations.push(format!(
+                "Direction extraction failed: expected {:?}, got {:?}",
+                direction, extracted_direction
+            ));
         }
 
         // Verify locality check
         let is_local_for_role = stream_id.is_local_for(role);
         if !is_local_for_role {
-            self.stream_id_encoding_violations.push(
-                format!("Local stream ID not recognized as local for role {:?}", role)
-            );
+            self.stream_id_encoding_violations.push(format!(
+                "Local stream ID not recognized as local for role {:?}",
+                role
+            ));
         }
 
         // Verify sequence extraction
         let extracted_sequence = stream_id.0 >> 2;
         if extracted_sequence != sequence {
-            self.stream_id_encoding_violations.push(
-                format!("Sequence extraction failed: expected {}, got {}", sequence, extracted_sequence)
-            );
+            self.stream_id_encoding_violations.push(format!(
+                "Sequence extraction failed: expected {}, got {}",
+                sequence, extracted_sequence
+            ));
         }
     }
 
@@ -264,7 +268,8 @@ impl QuicStreamShadowModel {
         match table.receive_stream_segment(stream_id, offset, payload.len() as u64, fin) {
             Ok(()) => {
                 // Update expected state
-                let state = self.expected_stream_states
+                let state = self
+                    .expected_stream_states
                     .entry(stream_id.0)
                     .or_insert_with(|| ExpectedStreamState {
                         id: stream_id,
@@ -294,10 +299,13 @@ impl QuicStreamShadowModel {
                     }
                 }
             }
-            Err(StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted { .. }))) => {
-                self.flow_control_violations.push(
-                    format!("Flow control violated for stream {} at offset {}", stream_id.0, offset)
-                );
+            Err(StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted {
+                ..
+            }))) => {
+                self.flow_control_violations.push(format!(
+                    "Flow control violated for stream {} at offset {}",
+                    stream_id.0, offset
+                ));
             }
             Err(_) => {
                 // Other errors are expected in fuzzing
@@ -305,7 +313,13 @@ impl QuicStreamShadowModel {
         }
     }
 
-    fn process_reset_stream(&mut self, stream_id: u64, error_code: u64, final_size: u64, table_id: u8) {
+    fn process_reset_stream(
+        &mut self,
+        stream_id: u64,
+        error_code: u64,
+        final_size: u64,
+        table_id: u8,
+    ) {
         let stream_id = StreamId(stream_id);
         let table = match self.stream_tables.get_mut(&table_id) {
             Some(table) => table,
@@ -320,7 +334,8 @@ impl QuicStreamShadowModel {
         if let Ok(stream) = table.stream_mut(stream_id) {
             match stream.reset_send(error_code, final_size) {
                 Ok(()) => {
-                    let state = self.expected_stream_states
+                    let state = self
+                        .expected_stream_states
                         .entry(stream_id.0)
                         .or_insert_with(|| ExpectedStreamState {
                             id: stream_id,
@@ -351,13 +366,14 @@ impl QuicStreamShadowModel {
                     state.reset_error_code = Some(error_code);
                     state.final_size = Some(final_size);
                 }
-                Err(QuicStreamError::InconsistentReset { previous_final_size, new_final_size }) => {
-                    self.reset_transition_violations.push(
-                        format!(
-                            "Inconsistent RESET_STREAM final size: stream {}, previous {}, new {}",
-                            stream_id.0, previous_final_size, new_final_size
-                        )
-                    );
+                Err(QuicStreamError::InconsistentReset {
+                    previous_final_size,
+                    new_final_size,
+                }) => {
+                    self.reset_transition_violations.push(format!(
+                        "Inconsistent RESET_STREAM final size: stream {}, previous {}, new {}",
+                        stream_id.0, previous_final_size, new_final_size
+                    ));
                 }
                 Err(_) => {
                     // Other errors expected
@@ -384,9 +400,10 @@ impl QuicStreamShadowModel {
                     // Flow control window increased successfully
                 }
                 Err(FlowControlError::LimitRegression { .. }) => {
-                    self.flow_control_violations.push(
-                        format!("MAX_STREAM_DATA limit regression for stream {}", stream_id.0)
-                    );
+                    self.flow_control_violations.push(format!(
+                        "MAX_STREAM_DATA limit regression for stream {}",
+                        stream_id.0
+                    ));
                 }
                 Err(_) => {
                     // Other flow control errors
@@ -395,7 +412,13 @@ impl QuicStreamShadowModel {
         }
     }
 
-    fn test_fin_idempotency(&mut self, stream_id: u64, payload1: &[u8], payload2: &[u8], final_size: u64) {
+    fn test_fin_idempotency(
+        &mut self,
+        stream_id: u64,
+        payload1: &[u8],
+        payload2: &[u8],
+        final_size: u64,
+    ) {
         let stream_id = StreamId(stream_id);
         let table_id = 0;
 
@@ -409,23 +432,31 @@ impl QuicStreamShadowModel {
             let _ = table.receive_stream_segment(stream_id, 0, payload1.len() as u64, true);
 
             // Send second payload with FIN at same final size - should be idempotent
-            let result2 = table.receive_stream_segment(stream_id, payload1.len() as u64, payload2.len() as u64, true);
+            let result2 = table.receive_stream_segment(
+                stream_id,
+                payload1.len() as u64,
+                payload2.len() as u64,
+                true,
+            );
 
             let expected_final = payload1.len() as u64 + payload2.len() as u64;
             if expected_final != final_size {
                 if result2.is_ok() {
-                    self.fin_idempotency_violations.push(
-                        format!(
-                            "FIN idempotency violation: stream {}, expected final size {}, computed {}",
-                            stream_id.0, final_size, expected_final
-                        )
-                    );
+                    self.fin_idempotency_violations.push(format!(
+                        "FIN idempotency violation: stream {}, expected final size {}, computed {}",
+                        stream_id.0, final_size, expected_final
+                    ));
                 }
             }
         }
     }
 
-    fn test_flow_control_enforcement(&mut self, stream_id: u64, initial_window: u64, data_sequence: &[u64]) {
+    fn test_flow_control_enforcement(
+        &mut self,
+        stream_id: u64,
+        initial_window: u64,
+        data_sequence: &[u64],
+    ) {
         let stream_id = StreamId(stream_id);
         let table_id = 1;
 
@@ -437,7 +468,8 @@ impl QuicStreamShadowModel {
 
             if let Ok(stream) = table.stream_mut(stream_id) {
                 // Set limited receive window
-                stream.recv_credit = asupersync::net::quic_native::streams::FlowCredit::new(initial_window);
+                stream.recv_credit =
+                    asupersync::net::quic_native::streams::FlowCredit::new(initial_window);
             }
 
             let mut total_sent = 0u64;
@@ -468,12 +500,10 @@ impl QuicStreamShadowModel {
             }
 
             if violations > 0 {
-                self.flow_control_violations.push(
-                    format!(
-                        "Flow control enforcement failed: stream {}, window {}, violations {}",
-                        stream_id.0, initial_window, violations
-                    )
-                );
+                self.flow_control_violations.push(format!(
+                    "Flow control enforcement failed: stream {}, window {}, violations {}",
+                    stream_id.0, initial_window, violations
+                ));
             }
         }
     }
@@ -626,8 +656,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut unstructured = Unstructured::new(data);
-    let operations: Result<Vec<QuicStreamOperation>, _> =
-        (0..data.len().min(100)).map(|_| unstructured.arbitrary()).collect();
+    let operations: Result<Vec<QuicStreamOperation>, _> = (0..data.len().min(100))
+        .map(|_| unstructured.arbitrary())
+        .collect();
 
     let operations = match operations {
         Ok(ops) => ops,
@@ -652,7 +683,7 @@ fuzz_target!(|data: &[u8]| {
                 }
 
                 let frame_data = encode_stream_frame(
-                    stream_id % 1000,  // Limit stream ID space
+                    stream_id % 1000, // Limit stream ID space
                     offset % QUIC_VARINT_MAX,
                     &payload,
                     fin,
@@ -662,8 +693,8 @@ fuzz_target!(|data: &[u8]| {
 
                 // Test frame decoding
                 if let Ok((decoded_stream_id, decoded_offset, decoded_len, decoded_fin)) =
-                    decode_stream_frame(&frame_data) {
-
+                    decode_stream_frame(&frame_data)
+                {
                     // Assertion 1: Stream ID bit encoding correctly decoded
                     let stream_id_obj = StreamId(decoded_stream_id);
                     let direction = stream_id_obj.direction();
@@ -673,21 +704,37 @@ fuzz_target!(|data: &[u8]| {
                     let expected_unidirectional = (decoded_stream_id & 0x2) != 0;
                     match direction {
                         StreamDirection::Unidirectional => {
-                            assert!(expected_unidirectional, "Stream ID {} decoded as unidirectional but bit 1 is 0", decoded_stream_id);
+                            assert!(
+                                expected_unidirectional,
+                                "Stream ID {} decoded as unidirectional but bit 1 is 0",
+                                decoded_stream_id
+                            );
                         }
                         StreamDirection::Bidirectional => {
-                            assert!(!expected_unidirectional, "Stream ID {} decoded as bidirectional but bit 1 is 1", decoded_stream_id);
+                            assert!(
+                                !expected_unidirectional,
+                                "Stream ID {} decoded as bidirectional but bit 1 is 1",
+                                decoded_stream_id
+                            );
                         }
                     }
 
                     // Assertion 2: Varint offsets do not overflow
                     if decoded_offset > QUIC_VARINT_MAX || decoded_len > usize::MAX {
-                        panic!("Varint overflow detected: offset={}, len={}", decoded_offset, decoded_len);
+                        panic!(
+                            "Varint overflow detected: offset={}, len={}",
+                            decoded_offset, decoded_len
+                        );
                     }
 
                     if let Some(end_offset) = decoded_offset.checked_add(decoded_len as u64) {
-                        assert!(end_offset <= QUIC_VARINT_MAX, "Offset + length overflow: {}+{} > {}",
-                               decoded_offset, decoded_len, QUIC_VARINT_MAX);
+                        assert!(
+                            end_offset <= QUIC_VARINT_MAX,
+                            "Offset + length overflow: {}+{} > {}",
+                            decoded_offset,
+                            decoded_len,
+                            QUIC_VARINT_MAX
+                        );
                     }
 
                     shadow_model.process_stream_frame(
@@ -719,7 +766,10 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
 
-            QuicStreamOperation::SendMaxStreamDataFrame { stream_id, max_data } => {
+            QuicStreamOperation::SendMaxStreamDataFrame {
+                stream_id,
+                max_data,
+            } => {
                 // Assertion 5: MAX_STREAM_DATA flow control enforced
                 shadow_model.process_max_stream_data(
                     stream_id % 1000,
@@ -728,7 +778,10 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
 
-            QuicStreamOperation::SendStopSendingFrame { stream_id, error_code } => {
+            QuicStreamOperation::SendStopSendingFrame {
+                stream_id,
+                error_code,
+            } => {
                 let stream_id = StreamId(stream_id % 1000);
                 if let Some(table) = shadow_model.stream_tables.get_mut(&0) {
                     if table.stream(stream_id).is_err() {
@@ -740,12 +793,19 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
 
-            QuicStreamOperation::TestStreamIdEncoding { role, direction, sequence } => {
+            QuicStreamOperation::TestStreamIdEncoding {
+                role,
+                direction,
+                sequence,
+            } => {
                 // Assertion 1: Stream ID bit encoding correctly decoded
                 shadow_model.validate_stream_id_encoding(role, direction, sequence % (1u64 << 62));
             }
 
-            QuicStreamOperation::TestVarintOverflow { base_offset, length } => {
+            QuicStreamOperation::TestVarintOverflow {
+                base_offset,
+                length,
+            } => {
                 // Assertion 2: Varint offsets do not overflow
                 shadow_model.validate_varint_overflow(
                     base_offset % QUIC_VARINT_MAX,
@@ -812,7 +872,8 @@ fuzz_target!(|data: &[u8]| {
 
                         // Try second reset with potentially different final size
                         if let Some(second_final_size) = second_reset_final_size {
-                            let result = stream.reset_send(error_code, second_final_size % QUIC_VARINT_MAX);
+                            let result =
+                                stream.reset_send(error_code, second_final_size % QUIC_VARINT_MAX);
                             if let Err(QuicStreamError::InconsistentReset { .. }) = result {
                                 // This is expected behavior
                             }

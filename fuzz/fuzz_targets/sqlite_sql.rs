@@ -26,7 +26,7 @@
 use arbitrary::Arbitrary;
 use asupersync::{
     cx::Cx,
-    database::sqlite::{SqliteConnection, SqliteValue, SqliteError},
+    database::sqlite::{SqliteConnection, SqliteError, SqliteValue},
     types::{Outcome, RegionId, TaskId},
     util::ArenaIndex,
 };
@@ -46,10 +46,10 @@ const MAX_PARAM_COUNT: usize = 1000;
 /// SQL statement type classification
 #[derive(Debug, Clone, PartialEq)]
 enum SqlStatementType {
-    DDL,  // Data Definition Language (CREATE, DROP, ALTER)
-    DML,  // Data Manipulation Language (SELECT, INSERT, UPDATE, DELETE)
-    DCL,  // Data Control Language (GRANT, REVOKE)
-    TCL,  // Transaction Control Language (BEGIN, COMMIT, ROLLBACK, SAVEPOINT)
+    DDL,    // Data Definition Language (CREATE, DROP, ALTER)
+    DML,    // Data Manipulation Language (SELECT, INSERT, UPDATE, DELETE)
+    DCL,    // Data Control Language (GRANT, REVOKE)
+    TCL,    // Transaction Control Language (BEGIN, COMMIT, ROLLBACK, SAVEPOINT)
     Pragma, // PRAGMA statements
     Unknown,
 }
@@ -84,18 +84,11 @@ enum SqlStrategy {
         param_count: u8,
     },
     /// DDL CREATE TABLE statement
-    CreateTable {
-        table: String,
-        columns: Vec<String>,
-    },
+    CreateTable { table: String, columns: Vec<String> },
     /// DDL DROP TABLE statement
-    DropTable {
-        table: String,
-    },
+    DropTable { table: String },
     /// Transaction control (BEGIN, COMMIT, ROLLBACK)
-    Transaction {
-        operation: TransactionOp,
-    },
+    Transaction { operation: TransactionOp },
     /// Savepoint operations
     Savepoint {
         operation: SavepointOp,
@@ -107,10 +100,7 @@ enum SqlStrategy {
         pragma_value: Option<String>,
     },
     /// Malformed SQL for error testing
-    Malformed {
-        sql: String,
-        param_count: u8,
-    },
+    Malformed { sql: String, param_count: u8 },
     /// SQL injection patterns
     Injection {
         base_sql: String,
@@ -166,22 +156,37 @@ struct SqliteFuzzInput {
 enum CorruptionStrategy {
     None,
     /// Inject null bytes
-    NullBytes { position: u8 },
+    NullBytes {
+        position: u8,
+    },
     /// Inject very long identifiers
-    LongIdentifiers { length: u16 },
+    LongIdentifiers {
+        length: u16,
+    },
     /// Inject unicode characters
-    Unicode { chars: String },
+    Unicode {
+        chars: String,
+    },
     /// Truncate SQL at random position
-    Truncate { position: u8 },
+    Truncate {
+        position: u8,
+    },
     /// Repeat SQL statement multiple times
-    Repeat { count: u8 },
+    Repeat {
+        count: u8,
+    },
 }
 
 impl SqliteFuzzInput {
     /// Generate the SQL statement string
     fn generate_sql(&self) -> String {
         let base_sql = match &self.sql_strategy {
-            SqlStrategy::Select { columns, table, where_clause, .. } => {
+            SqlStrategy::Select {
+                columns,
+                table,
+                where_clause,
+                ..
+            } => {
                 let cols = if columns.is_empty() {
                     "*".to_string()
                 } else {
@@ -192,82 +197,105 @@ impl SqliteFuzzInput {
                     sql.push_str(&format!(" WHERE {}", where_part));
                 }
                 sql
-            },
+            }
             SqlStrategy::Insert { table, columns, .. } => {
                 if columns.is_empty() {
                     format!("INSERT INTO {} VALUES (?)", table)
                 } else {
-                    let placeholders = "?".repeat(columns.len())
+                    let placeholders = "?"
+                        .repeat(columns.len())
                         .chars()
                         .collect::<Vec<_>>()
                         .chunks(1)
                         .map(|c| c.iter().collect::<String>())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("INSERT INTO {} ({}) VALUES ({})",
-                           table, columns.join(", "), placeholders)
+                    format!(
+                        "INSERT INTO {} ({}) VALUES ({})",
+                        table,
+                        columns.join(", "),
+                        placeholders
+                    )
                 }
-            },
-            SqlStrategy::Update { table, set_clauses, where_clause, .. } => {
+            }
+            SqlStrategy::Update {
+                table,
+                set_clauses,
+                where_clause,
+                ..
+            } => {
                 let sets = if set_clauses.is_empty() {
                     "column1 = ?".to_string()
                 } else {
-                    set_clauses.iter().map(|c| format!("{} = ?", c)).collect::<Vec<_>>().join(", ")
+                    set_clauses
+                        .iter()
+                        .map(|c| format!("{} = ?", c))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 let mut sql = format!("UPDATE {} SET {}", table, sets);
                 if let Some(where_part) = where_clause {
                     sql.push_str(&format!(" WHERE {}", where_part));
                 }
                 sql
-            },
-            SqlStrategy::Delete { table, where_clause, .. } => {
+            }
+            SqlStrategy::Delete {
+                table,
+                where_clause,
+                ..
+            } => {
                 let mut sql = format!("DELETE FROM {}", table);
                 if let Some(where_part) = where_clause {
                     sql.push_str(&format!(" WHERE {}", where_part));
                 }
                 sql
-            },
+            }
             SqlStrategy::CreateTable { table, columns } => {
                 let cols = if columns.is_empty() {
                     "id INTEGER PRIMARY KEY".to_string()
                 } else {
-                    columns.iter().map(|c| format!("{} TEXT", c)).collect::<Vec<_>>().join(", ")
+                    columns
+                        .iter()
+                        .map(|c| format!("{} TEXT", c))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 format!("CREATE TABLE {} ({})", table, cols)
-            },
+            }
             SqlStrategy::DropTable { table } => {
                 format!("DROP TABLE {}", table)
+            }
+            SqlStrategy::Transaction { operation } => match operation {
+                TransactionOp::Begin => "BEGIN".to_string(),
+                TransactionOp::BeginDeferred => "BEGIN DEFERRED".to_string(),
+                TransactionOp::BeginImmediate => "BEGIN IMMEDIATE".to_string(),
+                TransactionOp::BeginExclusive => "BEGIN EXCLUSIVE".to_string(),
+                TransactionOp::Commit => "COMMIT".to_string(),
+                TransactionOp::Rollback => "ROLLBACK".to_string(),
             },
-            SqlStrategy::Transaction { operation } => {
-                match operation {
-                    TransactionOp::Begin => "BEGIN".to_string(),
-                    TransactionOp::BeginDeferred => "BEGIN DEFERRED".to_string(),
-                    TransactionOp::BeginImmediate => "BEGIN IMMEDIATE".to_string(),
-                    TransactionOp::BeginExclusive => "BEGIN EXCLUSIVE".to_string(),
-                    TransactionOp::Commit => "COMMIT".to_string(),
-                    TransactionOp::Rollback => "ROLLBACK".to_string(),
-                }
+            SqlStrategy::Savepoint { operation, name } => match operation {
+                SavepointOp::Create => format!("SAVEPOINT {}", name),
+                SavepointOp::Release => format!("RELEASE SAVEPOINT {}", name),
+                SavepointOp::Rollback => format!("ROLLBACK TO SAVEPOINT {}", name),
             },
-            SqlStrategy::Savepoint { operation, name } => {
-                match operation {
-                    SavepointOp::Create => format!("SAVEPOINT {}", name),
-                    SavepointOp::Release => format!("RELEASE SAVEPOINT {}", name),
-                    SavepointOp::Rollback => format!("ROLLBACK TO SAVEPOINT {}", name),
-                }
-            },
-            SqlStrategy::Pragma { pragma_name, pragma_value } => {
+            SqlStrategy::Pragma {
+                pragma_name,
+                pragma_value,
+            } => {
                 if let Some(value) = pragma_value {
                     format!("PRAGMA {} = {}", pragma_name, value)
                 } else {
                     format!("PRAGMA {}", pragma_name)
                 }
-            },
-            SqlStrategy::Malformed { sql, .. } => {
-                sql.clone()
-            },
-            SqlStrategy::Injection { base_sql, injection_payload, .. } => {
+            }
+            SqlStrategy::Malformed { sql, .. } => sql.clone(),
+            SqlStrategy::Injection {
+                base_sql,
+                injection_payload,
+                ..
+            } => {
                 format!("{} {}", base_sql, injection_payload)
-            },
+            }
         };
 
         self.apply_corruption(base_sql)
@@ -281,22 +309,23 @@ impl SqliteFuzzInput {
                 let pos = (*position as usize) % (sql.len() + 1);
                 sql.insert(pos, '\0');
                 sql
-            },
+            }
             CorruptionStrategy::LongIdentifiers { length } => {
                 let long_id = "x".repeat((*length as usize).min(10000));
                 sql.replace("table", &long_id)
-            },
+            }
             CorruptionStrategy::Unicode { chars } => {
                 format!("{} {}", sql, chars)
-            },
+            }
             CorruptionStrategy::Truncate { position } => {
                 let pos = (*position as usize) % (sql.len() + 1);
                 sql.truncate(pos);
                 sql
-            },
-            CorruptionStrategy::Repeat { count } => {
-                (0..*count as usize).map(|_| sql.clone()).collect::<Vec<_>>().join("; ")
-            },
+            }
+            CorruptionStrategy::Repeat { count } => (0..*count as usize)
+                .map(|_| sql.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
         }
     }
 
@@ -320,15 +349,23 @@ impl SqliteFuzzInput {
     fn classify_statement(&self, sql: &str) -> SqlStatementType {
         let sql_upper = sql.trim().to_uppercase();
 
-        if sql_upper.starts_with("SELECT") || sql_upper.starts_with("INSERT")
-           || sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE") {
+        if sql_upper.starts_with("SELECT")
+            || sql_upper.starts_with("INSERT")
+            || sql_upper.starts_with("UPDATE")
+            || sql_upper.starts_with("DELETE")
+        {
             SqlStatementType::DML
-        } else if sql_upper.starts_with("CREATE") || sql_upper.starts_with("DROP")
-                  || sql_upper.starts_with("ALTER") {
+        } else if sql_upper.starts_with("CREATE")
+            || sql_upper.starts_with("DROP")
+            || sql_upper.starts_with("ALTER")
+        {
             SqlStatementType::DDL
-        } else if sql_upper.starts_with("BEGIN") || sql_upper.starts_with("COMMIT")
-                  || sql_upper.starts_with("ROLLBACK") || sql_upper.starts_with("SAVEPOINT")
-                  || sql_upper.starts_with("RELEASE") {
+        } else if sql_upper.starts_with("BEGIN")
+            || sql_upper.starts_with("COMMIT")
+            || sql_upper.starts_with("ROLLBACK")
+            || sql_upper.starts_with("SAVEPOINT")
+            || sql_upper.starts_with("RELEASE")
+        {
             SqlStatementType::TCL
         } else if sql_upper.starts_with("PRAGMA") {
             SqlStatementType::Pragma
@@ -363,7 +400,7 @@ impl SqliteTestHarness {
             }),
             Outcome::Err(e) => Err(e),
             Outcome::Cancelled(_) => Err(SqliteError::Cancelled(
-                asupersync::types::CancelReason::user("setup cancelled")
+                asupersync::types::CancelReason::user("setup cancelled"),
             )),
         }
     }
@@ -388,15 +425,20 @@ impl SqliteTestHarness {
                 Outcome::Err(SqliteError::Sqlite(msg)) => {
                     // Should get a parameter count error
                     assert!(
-                        msg.contains("parameter") || msg.contains("bind") || msg.contains("mismatch"),
-                        "Expected parameter mismatch error, got: {}", msg
+                        msg.contains("parameter")
+                            || msg.contains("bind")
+                            || msg.contains("mismatch"),
+                        "Expected parameter mismatch error, got: {}",
+                        msg
                     );
                 }
                 Outcome::Ok(_) => {
                     // This should not succeed with mismatched parameters
                     if expected_param_count > 0 || actual_param_count > 0 {
-                        panic!("SQL execution should fail with mismatched parameter count: expected {}, got {}",
-                               expected_param_count, actual_param_count);
+                        panic!(
+                            "SQL execution should fail with mismatched parameter count: expected {}, got {}",
+                            expected_param_count, actual_param_count
+                        );
                     }
                 }
                 Outcome::Cancelled(_) => {
@@ -411,13 +453,13 @@ impl SqliteTestHarness {
             match self.conn.execute(&self.cx, &sql, &params).await {
                 Outcome::Ok(_) => {
                     // PRAGMA statements should either succeed or fail gracefully
-                },
+                }
                 Outcome::Err(SqliteError::Sqlite(_)) => {
                     // Errors are acceptable for invalid PRAGMA statements
-                },
+                }
                 Outcome::Cancelled(_) => {
                     // Cancellation is acceptable
-                },
+                }
             }
             return Ok(());
         }
@@ -430,35 +472,37 @@ impl SqliteTestHarness {
                 match self.conn.execute(&self.cx, &sql, &params).await {
                     Outcome::Ok(_) => {
                         // DDL succeeded
-                    },
+                    }
                     Outcome::Err(SqliteError::Sqlite(msg)) => {
                         // DDL errors are acceptable (table already exists, etc.)
                         assert!(
                             !msg.contains("parameter"),
-                            "DDL should not have parameter errors: {}", msg
+                            "DDL should not have parameter errors: {}",
+                            msg
                         );
-                    },
-                    Outcome::Cancelled(_) => {},
+                    }
+                    Outcome::Cancelled(_) => {}
                 }
-            },
+            }
             SqlStatementType::DML => {
                 // DML statements (SELECT, INSERT, UPDATE, DELETE) are the common case
                 match self.conn.execute(&self.cx, &sql, &params).await {
                     Outcome::Ok(_) => {
                         // DML succeeded
-                    },
+                    }
                     Outcome::Err(SqliteError::Sqlite(_)) => {
                         // DML errors are acceptable (syntax errors, constraints, etc.)
-                    },
-                    Outcome::Cancelled(_) => {},
+                    }
+                    Outcome::Cancelled(_) => {}
                 }
-            },
+            }
             SqlStatementType::TCL => {
                 // Test 4: Transaction nesting (SAVEPOINT) tracked
                 if sql.trim().to_uppercase().starts_with("BEGIN") {
                     self.transaction_depth += 1;
                 } else if sql.trim().to_uppercase().starts_with("COMMIT")
-                          || sql.trim().to_uppercase().starts_with("ROLLBACK") {
+                    || sql.trim().to_uppercase().starts_with("ROLLBACK")
+                {
                     self.transaction_depth = self.transaction_depth.saturating_sub(1);
                 } else if sql.trim().to_uppercase().starts_with("SAVEPOINT") {
                     if let Some(name) = sql.split_whitespace().nth(1) {
@@ -473,13 +517,13 @@ impl SqliteTestHarness {
                 }
 
                 match self.conn.execute(&self.cx, &sql, &params).await {
-                    Outcome::Ok(_) => {},
+                    Outcome::Ok(_) => {}
                     Outcome::Err(SqliteError::Sqlite(_)) => {
                         // Transaction control errors are acceptable
-                    },
-                    Outcome::Cancelled(_) => {},
+                    }
+                    Outcome::Cancelled(_) => {}
                 }
-            },
+            }
             _ => {
                 // Unknown statement types - just try to execute
                 let _ = self.conn.execute(&self.cx, &sql, &params).await;
@@ -524,7 +568,7 @@ fuzz_target!(|input: SqliteFuzzInput| {
         match result {
             Ok(_) => {
                 // Test completed normally
-            },
+            }
             Err(_) => {
                 // Panic occurred - this indicates a bug that fuzzing found
                 // The panic will be reported by libfuzzer

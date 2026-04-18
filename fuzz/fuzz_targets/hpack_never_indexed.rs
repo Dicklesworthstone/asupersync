@@ -48,19 +48,19 @@ const REGULAR_HEADERS: &[&str] = &[
 enum HeaderType {
     /// Sensitive header that should be Never-Indexed
     Sensitive {
-        name_index: u8,  // Index into SENSITIVE_HEADERS
+        name_index: u8, // Index into SENSITIVE_HEADERS
         value: String,
     },
     /// Regular header for mixed testing
     Regular {
-        name_index: u8,  // Index into REGULAR_HEADERS
+        name_index: u8, // Index into REGULAR_HEADERS
         value: String,
     },
     /// Custom header name
     Custom {
         name: String,
         value: String,
-        force_sensitive: bool,  // Force as sensitive even if name doesn't match
+        force_sensitive: bool, // Force as sensitive even if name doesn't match
     },
 }
 
@@ -75,9 +75,7 @@ impl HeaderType {
                 let name = REGULAR_HEADERS[(*name_index as usize) % REGULAR_HEADERS.len()];
                 Header::new(name.to_string(), value.clone())
             }
-            HeaderType::Custom { name, value, .. } => {
-                Header::new(name.clone(), value.clone())
-            }
+            HeaderType::Custom { name, value, .. } => Header::new(name.clone(), value.clone()),
         }
     }
 
@@ -85,8 +83,15 @@ impl HeaderType {
         match self {
             HeaderType::Sensitive { .. } => true,
             HeaderType::Regular { .. } => false,
-            HeaderType::Custom { name, force_sensitive, .. } => {
-                *force_sensitive || SENSITIVE_HEADERS.iter().any(|&s| s.eq_ignore_ascii_case(name))
+            HeaderType::Custom {
+                name,
+                force_sensitive,
+                ..
+            } => {
+                *force_sensitive
+                    || SENSITIVE_HEADERS
+                        .iter()
+                        .any(|&s| s.eq_ignore_ascii_case(name))
             }
         }
     }
@@ -107,7 +112,9 @@ struct HpackNeverIndexedFuzz {
 
 /// Check if a header name is considered sensitive
 fn is_sensitive_header(name: &str) -> bool {
-    SENSITIVE_HEADERS.iter().any(|&sensitive| sensitive.eq_ignore_ascii_case(name))
+    SENSITIVE_HEADERS
+        .iter()
+        .any(|&sensitive| sensitive.eq_ignore_ascii_case(name))
 }
 
 /// Extract Never-Indexed flag from encoded HPACK bytes
@@ -132,13 +139,15 @@ fn find_header_starts(encoded: &[u8]) -> Vec<usize> {
         if first_byte & 0x80 != 0 {
             // Indexed header field - single integer
             pos += count_integer_bytes(&encoded[pos..], 7);
-        } else if first_byte & 0x40 != 0 || (first_byte & 0x10 != 0) || (first_byte & 0xF0 == 0x00) {
+        } else if first_byte & 0x40 != 0 || (first_byte & 0x10 != 0) || (first_byte & 0xF0 == 0x00)
+        {
             // Literal header (with indexing, never indexed, or without indexing)
             let prefix_bits = if first_byte & 0x40 != 0 { 6 } else { 4 };
             pos += count_integer_bytes(&encoded[pos..], prefix_bits);
 
             // Skip name string if index was 0
-            let (index, index_bytes) = decode_integer_at(&encoded[positions.last().unwrap()..], prefix_bits);
+            let (index, index_bytes) =
+                decode_integer_at(&encoded[positions.last().unwrap()..], prefix_bits);
             if index == 0 {
                 pos += count_string_bytes(&encoded[pos..]);
             }
@@ -233,11 +242,13 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
 
     // Convert input headers to HPACK Header structs
     let headers: Vec<Header> = input.headers.iter().map(|h| h.to_header()).collect();
-    let sensitive_headers: Vec<Header> = headers.iter()
+    let sensitive_headers: Vec<Header> = headers
+        .iter()
         .filter(|h| is_sensitive_header(&h.name))
         .cloned()
         .collect();
-    let regular_headers: Vec<Header> = headers.iter()
+    let regular_headers: Vec<Header> = headers
+        .iter()
         .filter(|h| !is_sensitive_header(&h.name))
         .cloned()
         .collect();
@@ -378,14 +389,16 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
         assert!(
             sensitive_count > 0 && regular_count > 0,
             "Mixed-type test should include both sensitive ({}) and regular ({}) headers",
-            sensitive_count, regular_count
+            sensitive_count,
+            regular_count
         );
     }
 
     // ASSERTION 5: max_table_size does not affect Never-Indexed entries
     // Test with different table sizes
     for &test_table_size in &[0, 1024, 4096, 8192] {
-        if test_table_size <= table_size * 2 { // Avoid excessive sizes
+        if test_table_size <= table_size * 2 {
+            // Avoid excessive sizes
             let mut size_test_encoder = Encoder::new();
             size_test_encoder.set_huffman(input.use_huffman);
             size_test_encoder.set_max_table_size(test_table_size);
@@ -400,14 +413,16 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
                     assert!(
                         has_never_indexed_flag(&size_encoded, *start),
                         "Never-Indexed encoding affected by table size {} for header '{}'",
-                        test_table_size, sensitive_headers[i].name
+                        test_table_size,
+                        sensitive_headers[i].name
                     );
                 }
             }
 
             // Table size should remain 0 or minimal since nothing is indexed
             assert_eq!(
-                size_test_encoder.dynamic_table_size(), 0,
+                size_test_encoder.dynamic_table_size(),
+                0,
                 "Dynamic table should remain empty when only Never-Indexed headers are encoded"
             );
         }
@@ -418,13 +433,15 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
         let mut validator_decoder = Decoder::new();
         if let Ok(decoded) = validator_decoder.decode(encoded_sensitive.clone().freeze()) {
             assert_eq!(
-                decoded.len(), sensitive_headers.len(),
+                decoded.len(),
+                sensitive_headers.len(),
                 "Number of decoded headers doesn't match input"
             );
 
             for (original, decoded) in sensitive_headers.iter().zip(decoded.iter()) {
                 assert_eq!(
-                    original.name.to_lowercase(), decoded.name.to_lowercase(),
+                    original.name.to_lowercase(),
+                    decoded.name.to_lowercase(),
                     "Header name changed during encoding/decoding"
                 );
                 assert_eq!(

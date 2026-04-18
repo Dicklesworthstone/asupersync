@@ -93,23 +93,41 @@ enum HttpMethodInput {
 /// Expected response status classes
 #[derive(Arbitrary, Debug, Clone)]
 enum StatusClass {
-    Success,    // 2xx
-    Redirect,   // 3xx
+    Success,     // 2xx
+    Redirect,    // 3xx
     ClientError, // 4xx
     ServerError, // 5xx
-    Any,        // Accept any status
+    Any,         // Accept any status
 }
 
 /// Malformed frame types for injection
 #[derive(Arbitrary, Debug, Clone)]
 enum MalformedFrame {
-    InvalidFrameType { frame_type: u8, payload: Vec<u8> },
-    TruncatedFrame { expected_length: u32, actual_data: Vec<u8> },
-    OversizedFrame { payload: Vec<u8> }, // Exceeds reasonable limits
-    CorruptedHeaders { headers_data: Vec<u8> },
-    InvalidQpackEncoding { encoded_data: Vec<u8> },
-    DuplicateFrameType { frame_type: u8, payload1: Vec<u8>, payload2: Vec<u8> },
-    OutOfOrderFrames { frames: Vec<(u8, Vec<u8>)> },
+    InvalidFrameType {
+        frame_type: u8,
+        payload: Vec<u8>,
+    },
+    TruncatedFrame {
+        expected_length: u32,
+        actual_data: Vec<u8>,
+    },
+    OversizedFrame {
+        payload: Vec<u8>,
+    }, // Exceeds reasonable limits
+    CorruptedHeaders {
+        headers_data: Vec<u8>,
+    },
+    InvalidQpackEncoding {
+        encoded_data: Vec<u8>,
+    },
+    DuplicateFrameType {
+        frame_type: u8,
+        payload1: Vec<u8>,
+        payload2: Vec<u8>,
+    },
+    OutOfOrderFrames {
+        frames: Vec<(u8, Vec<u8>)>,
+    },
 }
 
 /// When to inject malformed frames
@@ -220,14 +238,17 @@ impl H3ClientShadowModel {
     fn record_operation_start(&self, request_id: u64, method: &str, path: &str) {
         self.total_operations.fetch_add(1, Ordering::SeqCst);
         let mut requests = self.active_requests.lock().unwrap();
-        requests.insert(request_id, RequestState {
-            method: method.to_string(),
-            path: path.to_string(),
-            headers_sent: false,
-            body_sent: false,
-            response_received: false,
-            completed: false,
-        });
+        requests.insert(
+            request_id,
+            RequestState {
+                method: method.to_string(),
+                path: path.to_string(),
+                headers_sent: false,
+                body_sent: false,
+                response_received: false,
+                completed: false,
+            },
+        );
     }
 
     fn record_operation_success(&self, request_id: u64) {
@@ -314,7 +335,12 @@ fn normalize_fuzz_input(input: &mut H3ClientFuzzInput) {
                     value.truncate(4096);
                 }
             }
-            H3ClientOperation::RequestWithBody { path, headers, body, .. } => {
+            H3ClientOperation::RequestWithBody {
+                path,
+                headers,
+                body,
+                ..
+            } => {
                 // Ensure path is reasonable
                 path.truncate(1024);
                 if path.is_empty() {
@@ -338,14 +364,23 @@ fn normalize_fuzz_input(input: &mut H3ClientFuzzInput) {
                 frame_sequence.truncate(10);
                 for frame in frame_sequence {
                     match frame {
-                        MalformedFrame::InvalidFrameType { payload, .. } |
-                        MalformedFrame::TruncatedFrame { actual_data: payload, .. } |
-                        MalformedFrame::OversizedFrame { payload } |
-                        MalformedFrame::CorruptedHeaders { headers_data: payload } |
-                        MalformedFrame::InvalidQpackEncoding { encoded_data: payload } => {
+                        MalformedFrame::InvalidFrameType { payload, .. }
+                        | MalformedFrame::TruncatedFrame {
+                            actual_data: payload,
+                            ..
+                        }
+                        | MalformedFrame::OversizedFrame { payload }
+                        | MalformedFrame::CorruptedHeaders {
+                            headers_data: payload,
+                        }
+                        | MalformedFrame::InvalidQpackEncoding {
+                            encoded_data: payload,
+                        } => {
                             payload.truncate(8192); // Limit payload size
                         }
-                        MalformedFrame::DuplicateFrameType { payload1, payload2, .. } => {
+                        MalformedFrame::DuplicateFrameType {
+                            payload1, payload2, ..
+                        } => {
                             payload1.truncate(4096);
                             payload2.truncate(4096);
                         }
@@ -358,7 +393,9 @@ fn normalize_fuzz_input(input: &mut H3ClientFuzzInput) {
                     }
                 }
             }
-            H3ClientOperation::SettingsTest { malformed_settings, .. } => {
+            H3ClientOperation::SettingsTest {
+                malformed_settings, ..
+            } => {
                 // Limit settings count
                 malformed_settings.truncate(10);
             }
@@ -368,11 +405,14 @@ fn normalize_fuzz_input(input: &mut H3ClientFuzzInput) {
 }
 
 /// Test simple request operations
-fn test_simple_request(
-    op: &H3ClientOperation,
-    shadow: &H3ClientShadowModel,
-) -> Result<(), String> {
-    if let H3ClientOperation::SimpleRequest { method, path, headers, expected_status_class } = op {
+fn test_simple_request(op: &H3ClientOperation, shadow: &H3ClientShadowModel) -> Result<(), String> {
+    if let H3ClientOperation::SimpleRequest {
+        method,
+        path,
+        headers,
+        expected_status_class,
+    } = op
+    {
         let request_id = shadow.total_operations.load(Ordering::SeqCst);
         let method_str = method_to_string(method);
 
@@ -399,14 +439,27 @@ fn test_request_with_body(
     op: &H3ClientOperation,
     shadow: &H3ClientShadowModel,
 ) -> Result<(), String> {
-    if let H3ClientOperation::RequestWithBody { method, path, headers, body, expected_status_class } = op {
+    if let H3ClientOperation::RequestWithBody {
+        method,
+        path,
+        headers,
+        body,
+        expected_status_class,
+    } = op
+    {
         let request_id = shadow.total_operations.load(Ordering::SeqCst);
         let method_str = method_to_string(method);
 
         shadow.record_operation_start(request_id, &method_str, path);
 
         // Simulate request with body processing
-        let result = simulate_h3_request(&method_str, path, headers, Some(body), expected_status_class);
+        let result = simulate_h3_request(
+            &method_str,
+            path,
+            headers,
+            Some(body),
+            expected_status_class,
+        );
 
         match result {
             Ok(_) => {
@@ -425,7 +478,11 @@ fn test_malformed_frames(
     op: &H3ClientOperation,
     shadow: &H3ClientShadowModel,
 ) -> Result<(), String> {
-    if let H3ClientOperation::InjectMalformedFrames { frame_sequence, timing } = op {
+    if let H3ClientOperation::InjectMalformedFrames {
+        frame_sequence,
+        timing,
+    } = op
+    {
         // Simulate frame injection at different points
         for frame in frame_sequence {
             let result = simulate_frame_injection(frame, timing);
@@ -453,7 +510,11 @@ fn test_connection_errors(
     op: &H3ClientOperation,
     shadow: &H3ClientShadowModel,
 ) -> Result<(), String> {
-    if let H3ClientOperation::ConnectionError { error_type, trigger_point } = op {
+    if let H3ClientOperation::ConnectionError {
+        error_type,
+        trigger_point,
+    } = op
+    {
         let result = simulate_connection_error(error_type, trigger_point);
 
         // Connection errors should be properly propagated, not cause panics
@@ -464,7 +525,10 @@ fn test_connection_errors(
             Err(err) => {
                 if err.contains("panic") || err.contains("abort") || err.contains("segfault") {
                     shadow.record_violation(format!("Connection error caused crash: {}", err));
-                    return Err(format!("Connection error caused unexpected failure: {}", err));
+                    return Err(format!(
+                        "Connection error caused unexpected failure: {}",
+                        err
+                    ));
                 }
                 // Expected error propagation
             }
@@ -474,11 +538,12 @@ fn test_connection_errors(
 }
 
 /// Test stream-level error scenarios
-fn test_stream_errors(
-    op: &H3ClientOperation,
-    shadow: &H3ClientShadowModel,
-) -> Result<(), String> {
-    if let H3ClientOperation::StreamError { error_type, target_stream } = op {
+fn test_stream_errors(op: &H3ClientOperation, shadow: &H3ClientShadowModel) -> Result<(), String> {
+    if let H3ClientOperation::StreamError {
+        error_type,
+        target_stream,
+    } = op
+    {
         let result = simulate_stream_error(error_type, *target_stream);
 
         // Stream errors should be contained to the affected stream
@@ -499,11 +564,12 @@ fn test_stream_errors(
 }
 
 /// Test cancellation scenarios
-fn test_cancellation(
-    op: &H3ClientOperation,
-    shadow: &H3ClientShadowModel,
-) -> Result<(), String> {
-    if let H3ClientOperation::CancellationTest { cancel_timing, request_in_progress } = op {
+fn test_cancellation(op: &H3ClientOperation, shadow: &H3ClientShadowModel) -> Result<(), String> {
+    if let H3ClientOperation::CancellationTest {
+        cancel_timing,
+        request_in_progress,
+    } = op
+    {
         let request_id = shadow.total_operations.load(Ordering::SeqCst);
 
         if *request_in_progress {
@@ -535,11 +601,12 @@ fn test_cancellation(
 }
 
 /// Test HTTP/3 settings edge cases
-fn test_settings(
-    op: &H3ClientOperation,
-    shadow: &H3ClientShadowModel,
-) -> Result<(), String> {
-    if let H3ClientOperation::SettingsTest { malformed_settings, send_multiple } = op {
+fn test_settings(op: &H3ClientOperation, shadow: &H3ClientShadowModel) -> Result<(), String> {
+    if let H3ClientOperation::SettingsTest {
+        malformed_settings,
+        send_multiple,
+    } = op
+    {
         for (setting_id, value) in malformed_settings {
             let result = simulate_settings_handling(*setting_id, *value, *send_multiple);
 
@@ -592,7 +659,8 @@ fn simulate_h3_request(
 
     // Body validation
     if let Some(body) = body {
-        if body.len() > 64 * 1024 * 1024 {  // 64MB limit
+        if body.len() > 64 * 1024 * 1024 {
+            // 64MB limit
             return Err("Body too large".to_string());
         }
     }
@@ -611,9 +679,15 @@ fn simulate_h3_request(
 }
 
 /// Simulate frame injection scenarios
-fn simulate_frame_injection(frame: &MalformedFrame, _timing: &FrameInjectionTiming) -> Result<(), String> {
+fn simulate_frame_injection(
+    frame: &MalformedFrame,
+    _timing: &FrameInjectionTiming,
+) -> Result<(), String> {
     match frame {
-        MalformedFrame::InvalidFrameType { frame_type, payload } => {
+        MalformedFrame::InvalidFrameType {
+            frame_type,
+            payload,
+        } => {
             // Unknown frame types should be ignored, not cause crashes
             if *frame_type > 0x80 && !payload.is_empty() {
                 // Simulate unknown frame processing
@@ -622,7 +696,10 @@ fn simulate_frame_injection(frame: &MalformedFrame, _timing: &FrameInjectionTimi
                 Err("Invalid frame rejected".to_string())
             }
         }
-        MalformedFrame::TruncatedFrame { expected_length, actual_data } => {
+        MalformedFrame::TruncatedFrame {
+            expected_length,
+            actual_data,
+        } => {
             if actual_data.len() < (*expected_length as usize / 2) {
                 Err("Frame truncation detected".to_string())
             } else {
@@ -630,7 +707,8 @@ fn simulate_frame_injection(frame: &MalformedFrame, _timing: &FrameInjectionTimi
             }
         }
         MalformedFrame::OversizedFrame { payload } => {
-            if payload.len() > 16 * 1024 * 1024 { // 16MB
+            if payload.len() > 16 * 1024 * 1024 {
+                // 16MB
                 Err("Frame too large".to_string())
             } else {
                 Ok(())
@@ -703,25 +781,35 @@ fn simulate_cancellation(timing: &CancelTiming, _request_active: bool) -> Result
 }
 
 /// Simulate HTTP/3 settings handling
-fn simulate_settings_handling(setting_id: u64, value: u64, _send_multiple: bool) -> Result<(), String> {
+fn simulate_settings_handling(
+    setting_id: u64,
+    value: u64,
+    _send_multiple: bool,
+) -> Result<(), String> {
     // Check for invalid settings
     match setting_id {
-        0x01 => { // QPACK_MAX_TABLE_CAPACITY
-            if value > 1024 * 1024 * 1024 { // 1GB limit
+        0x01 => {
+            // QPACK_MAX_TABLE_CAPACITY
+            if value > 1024 * 1024 * 1024 {
+                // 1GB limit
                 return Err("QPACK table too large".to_string());
             }
         }
-        0x07 => { // MAX_FIELD_SECTION_SIZE
-            if value > 64 * 1024 * 1024 { // 64MB limit
+        0x07 => {
+            // MAX_FIELD_SECTION_SIZE
+            if value > 64 * 1024 * 1024 {
+                // 64MB limit
                 return Err("Field section too large".to_string());
             }
         }
-        0x08 => { // H3_DATAGRAM
+        0x08 => {
+            // H3_DATAGRAM
             if value > 1 {
                 return Err("Invalid H3_DATAGRAM value".to_string());
             }
         }
-        0x09 => { // ENABLE_CONNECT_PROTOCOL
+        0x09 => {
+            // ENABLE_CONNECT_PROTOCOL
             if value > 1 {
                 return Err("Invalid ENABLE_CONNECT_PROTOCOL value".to_string());
             }
@@ -741,7 +829,10 @@ fn execute_h3_client_operations(input: &H3ClientFuzzInput) -> Result<(), String>
     let shadow = H3ClientShadowModel::new();
 
     // Execute operation sequence with bounds checking
-    let max_ops = input.config.max_operations.min(input.operations.len() as u16);
+    let max_ops = input
+        .config
+        .max_operations
+        .min(input.operations.len() as u16);
     for (i, operation) in input.operations.iter().enumerate() {
         if i >= max_ops as usize {
             break;
@@ -750,7 +841,9 @@ fn execute_h3_client_operations(input: &H3ClientFuzzInput) -> Result<(), String>
         let result = match operation {
             H3ClientOperation::SimpleRequest { .. } => test_simple_request(operation, &shadow),
             H3ClientOperation::RequestWithBody { .. } => test_request_with_body(operation, &shadow),
-            H3ClientOperation::InjectMalformedFrames { .. } => test_malformed_frames(operation, &shadow),
+            H3ClientOperation::InjectMalformedFrames { .. } => {
+                test_malformed_frames(operation, &shadow)
+            }
             H3ClientOperation::ConnectionError { .. } => test_connection_errors(operation, &shadow),
             H3ClientOperation::StreamError { .. } => test_stream_errors(operation, &shadow),
             H3ClientOperation::CancellationTest { .. } => test_cancellation(operation, &shadow),

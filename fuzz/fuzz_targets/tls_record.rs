@@ -206,9 +206,7 @@ fn parse_record(data: &[u8]) -> Result<(ContentType, ProtocolVersion, u16, Vec<u
 
     // Check if we have enough data
     if data.len() < 5 + length as usize {
-        return Err(TlsError::Protocol(
-            "Incomplete TLS record data".to_string(),
-        ));
+        return Err(TlsError::Protocol("Incomplete TLS record data".to_string()));
     }
 
     let fragment = data[5..5 + length as usize].to_vec();
@@ -268,7 +266,10 @@ fuzz_target!(|data: TlsRecordFuzz| {
                     Ok(()) => {
                         // Parsing succeeded - verify invariants
                         let content_type = ContentType::from_u8(record.content_type);
-                        assert!(content_type.is_valid(), "Invalid ContentType should be rejected");
+                        assert!(
+                            content_type.is_valid(),
+                            "Invalid ContentType should be rejected"
+                        );
                         assert!(
                             record.legacy_record_version.is_valid_legacy(),
                             "Invalid legacy version should be rejected"

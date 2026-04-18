@@ -63,9 +63,7 @@ enum H3BodyOperation {
         max_buffer_size: u32,
     },
     /// Inject invalid frame sequences
-    InjectInvalidSequence {
-        frame_sequence: Vec<InvalidFrame>,
-    },
+    InjectInvalidSequence { frame_sequence: Vec<InvalidFrame> },
 }
 
 /// HTTP/3 framing modes
@@ -87,7 +85,7 @@ enum InvalidFrame {
     /// Frame with mismatched length
     MismatchedLength {
         declared_length: u64,
-        actual_payload: Vec<u8>
+        actual_payload: Vec<u8>,
     },
     /// Truncated frame
     TruncatedFrame { payload: Vec<u8> },
@@ -253,9 +251,7 @@ fuzz_target!(|input: H3BodyFuzzInput| {
     normalize_h3_body_input(&mut input);
 
     // Execute H3 body operations
-    let result = std::panic::catch_unwind(|| {
-        execute_h3_body_operations(&input)
-    });
+    let result = std::panic::catch_unwind(|| execute_h3_body_operations(&input));
 
     match result {
         Ok(Ok(())) => {
@@ -291,10 +287,14 @@ fn normalize_h3_body_input(input: &mut H3BodyFuzzInput) {
             H3BodyOperation::SendMalformedDataFrame { actual_payload, .. } => {
                 actual_payload.truncate(MAX_PAYLOAD_SIZE);
             }
-            H3BodyOperation::SendTrailerHeaders { headers_payload, .. } => {
+            H3BodyOperation::SendTrailerHeaders {
+                headers_payload, ..
+            } => {
                 headers_payload.truncate(MAX_PAYLOAD_SIZE);
             }
-            H3BodyOperation::TestContentLength { actual_data_frames, .. } => {
+            H3BodyOperation::TestContentLength {
+                actual_data_frames, ..
+            } => {
                 actual_data_frames.truncate(20);
                 for frame_data in actual_data_frames {
                     frame_data.truncate(MAX_PAYLOAD_SIZE / 4);
@@ -306,7 +306,11 @@ fn normalize_h3_body_input(input: &mut H3BodyFuzzInput) {
                     chunk.truncate(MAX_PAYLOAD_SIZE / 4);
                 }
             }
-            H3BodyOperation::TestBufferCap { chunk_sizes, max_buffer_size, .. } => {
+            H3BodyOperation::TestBufferCap {
+                chunk_sizes,
+                max_buffer_size,
+                ..
+            } => {
                 chunk_sizes.truncate(50);
                 *max_buffer_size = (*max_buffer_size).min(MAX_FRAME_SIZE as u32);
             }
@@ -314,11 +318,14 @@ fn normalize_h3_body_input(input: &mut H3BodyFuzzInput) {
                 frame_sequence.truncate(10);
                 for frame in frame_sequence {
                     match frame {
-                        InvalidFrame::InvalidType { payload, .. } |
-                        InvalidFrame::MismatchedLength { actual_payload: payload, .. } |
-                        InvalidFrame::TruncatedFrame { payload } |
-                        InvalidFrame::OversizedFrame { payload } |
-                        InvalidFrame::DataOnControlStream { payload } => {
+                        InvalidFrame::InvalidType { payload, .. }
+                        | InvalidFrame::MismatchedLength {
+                            actual_payload: payload,
+                            ..
+                        }
+                        | InvalidFrame::TruncatedFrame { payload }
+                        | InvalidFrame::OversizedFrame { payload }
+                        | InvalidFrame::DataOnControlStream { payload } => {
                             payload.truncate(MAX_PAYLOAD_SIZE);
                         }
                         InvalidFrame::InvalidVarint { malformed_bytes } => {
@@ -336,31 +343,30 @@ fn execute_h3_body_operations(input: &H3BodyFuzzInput) -> Result<(), String> {
     let mut shadow = H3BodyShadowModel::new(max_buffer_capacity);
 
     // Execute operations with bounds checking
-    let max_ops = input.config.max_operations.min(input.operations.len() as u16);
+    let max_ops = input
+        .config
+        .max_operations
+        .min(input.operations.len() as u16);
     for (i, operation) in input.operations.iter().enumerate() {
         if i >= max_ops as usize {
             break;
         }
 
         let result = match operation {
-            H3BodyOperation::SendDataFrame { .. } => {
-                test_send_data_frame(operation, &mut shadow)
-            }
-            H3BodyOperation::SendMalformedDataFrame { .. } => {
-                test_malformed_data_frame(operation, &mut shadow, input.config.strict_rfc_compliance)
-            }
+            H3BodyOperation::SendDataFrame { .. } => test_send_data_frame(operation, &mut shadow),
+            H3BodyOperation::SendMalformedDataFrame { .. } => test_malformed_data_frame(
+                operation,
+                &mut shadow,
+                input.config.strict_rfc_compliance,
+            ),
             H3BodyOperation::SendTrailerHeaders { .. } => {
                 test_trailer_headers(operation, &mut shadow)
             }
             H3BodyOperation::TestContentLength { .. } => {
                 test_content_length_reconciliation(operation, &mut shadow)
             }
-            H3BodyOperation::TestFramingMode { .. } => {
-                test_framing_mode(operation, &mut shadow)
-            }
-            H3BodyOperation::TestBufferCap { .. } => {
-                test_buffer_capacity(operation, &mut shadow)
-            }
+            H3BodyOperation::TestFramingMode { .. } => test_framing_mode(operation, &mut shadow),
+            H3BodyOperation::TestBufferCap { .. } => test_buffer_capacity(operation, &mut shadow),
             H3BodyOperation::InjectInvalidSequence { .. } => {
                 test_invalid_frame_sequence(operation, &mut shadow)
             }
@@ -384,7 +390,11 @@ fn test_send_data_frame(
     operation: &H3BodyOperation,
     shadow: &mut H3BodyShadowModel,
 ) -> Result<(), String> {
-    if let H3BodyOperation::SendDataFrame { payload, use_correct_varint } = operation {
+    if let H3BodyOperation::SendDataFrame {
+        payload,
+        use_correct_varint,
+    } = operation
+    {
         // Test varint encoding/decoding for frame type and length
         let mut frame_bytes = BytesMut::new();
 
@@ -425,7 +435,9 @@ fn test_send_data_frame(
 
                     // Verify consumed bytes
                     if consumed > frame_data.len() {
-                        shadow.record_violation("Parser consumed more bytes than available".to_string());
+                        shadow.record_violation(
+                            "Parser consumed more bytes than available".to_string(),
+                        );
                         return Err("Parser overread input".to_string());
                     }
                 } else {
@@ -452,8 +464,9 @@ fn test_malformed_data_frame(
     if let H3BodyOperation::SendMalformedDataFrame {
         frame_type,
         frame_length,
-        actual_payload
-    } = operation {
+        actual_payload,
+    } = operation
+    {
         // Create frame with mismatched type/length
         let mut frame_bytes = BytesMut::new();
 
@@ -506,7 +519,11 @@ fn test_trailer_headers(
     operation: &H3BodyOperation,
     shadow: &mut H3BodyShadowModel,
 ) -> Result<(), String> {
-    if let H3BodyOperation::SendTrailerHeaders { headers_payload, use_correct_encoding } = operation {
+    if let H3BodyOperation::SendTrailerHeaders {
+        headers_payload,
+        use_correct_encoding,
+    } = operation
+    {
         // RFC 9114 Section 4.1: Trailer fields are sent in a HEADERS frame
         let mut frame_bytes = BytesMut::new();
 
@@ -561,7 +578,11 @@ fn test_content_length_reconciliation(
     operation: &H3BodyOperation,
     shadow: &mut H3BodyShadowModel,
 ) -> Result<(), String> {
-    if let H3BodyOperation::TestContentLength { declared_length, actual_data_frames } = operation {
+    if let H3BodyOperation::TestContentLength {
+        declared_length,
+        actual_data_frames,
+    } = operation
+    {
         // Set expected Content-Length
         shadow.expected_content_length = Some(*declared_length);
 
@@ -584,7 +605,11 @@ fn test_framing_mode(
     operation: &H3BodyOperation,
     shadow: &mut H3BodyShadowModel,
 ) -> Result<(), String> {
-    if let H3BodyOperation::TestFramingMode { framing_mode, body_chunks } = operation {
+    if let H3BodyOperation::TestFramingMode {
+        framing_mode,
+        body_chunks,
+    } = operation
+    {
         match framing_mode {
             FramingMode::ContentLength(length) => {
                 shadow.expected_content_length = Some(*length);
@@ -622,7 +647,12 @@ fn test_buffer_capacity(
     operation: &H3BodyOperation,
     shadow: &mut H3BodyShadowModel,
 ) -> Result<(), String> {
-    if let H3BodyOperation::TestBufferCap { total_body_size, chunk_sizes, max_buffer_size } = operation {
+    if let H3BodyOperation::TestBufferCap {
+        total_body_size,
+        chunk_sizes,
+        max_buffer_size,
+    } = operation
+    {
         let old_max = shadow.max_buffer_capacity;
         shadow.max_buffer_capacity = (*max_buffer_size as usize).min(MAX_FRAME_SIZE);
 
@@ -671,13 +701,17 @@ fn test_invalid_frame_sequence(
                     // Invalid frame was accepted - might be a problem
                     match invalid_frame {
                         InvalidFrame::DataOnControlStream { .. } => {
-                            shadow.record_violation("DATA frame on control stream was accepted".to_string());
+                            shadow.record_violation(
+                                "DATA frame on control stream was accepted".to_string(),
+                            );
                         }
                         InvalidFrame::InvalidType { .. } => {
                             // Unknown frame types should be ignored per RFC 9114
                         }
                         InvalidFrame::MismatchedLength { .. } => {
-                            shadow.record_violation("Frame with mismatched length was accepted".to_string());
+                            shadow.record_violation(
+                                "Frame with mismatched length was accepted".to_string(),
+                            );
                         }
                         _ => {}
                     }
@@ -694,20 +728,31 @@ fn test_invalid_frame_sequence(
 
 fn process_invalid_frame(invalid_frame: &InvalidFrame) -> Result<(), String> {
     match invalid_frame {
-        InvalidFrame::InvalidType { type_value, payload } => {
+        InvalidFrame::InvalidType {
+            type_value,
+            payload,
+        } => {
             let mut frame_bytes = BytesMut::new();
             let mut temp_vec = Vec::new();
-            encode_varint(*type_value, &mut temp_vec).map_err(|e| format!("Encode error: {:?}", e))?;
+            encode_varint(*type_value, &mut temp_vec)
+                .map_err(|e| format!("Encode error: {:?}", e))?;
             frame_bytes.extend_from_slice(&temp_vec);
 
             temp_vec.clear();
-            encode_varint(payload.len() as u64, &mut temp_vec).map_err(|e| format!("Encode error: {:?}", e))?;
+            encode_varint(payload.len() as u64, &mut temp_vec)
+                .map_err(|e| format!("Encode error: {:?}", e))?;
             frame_bytes.extend_from_slice(&temp_vec);
             frame_bytes.extend_from_slice(payload);
 
             let result = H3Frame::decode(&frame_bytes.freeze());
             match result {
-                Ok((H3Frame::Unknown { frame_type, payload: _ }, _)) => {
+                Ok((
+                    H3Frame::Unknown {
+                        frame_type,
+                        payload: _,
+                    },
+                    _,
+                )) => {
                     if frame_type == *type_value {
                         Ok(()) // Unknown frame types are preserved
                     } else {
@@ -719,14 +764,19 @@ fn process_invalid_frame(invalid_frame: &InvalidFrame) -> Result<(), String> {
             }
         }
 
-        InvalidFrame::MismatchedLength { declared_length, actual_payload } => {
+        InvalidFrame::MismatchedLength {
+            declared_length,
+            actual_payload,
+        } => {
             let mut frame_bytes = BytesMut::new();
             let mut temp_vec = Vec::new();
-            encode_varint(H3_FRAME_DATA, &mut temp_vec).map_err(|e| format!("Encode error: {:?}", e))?;
+            encode_varint(H3_FRAME_DATA, &mut temp_vec)
+                .map_err(|e| format!("Encode error: {:?}", e))?;
             frame_bytes.extend_from_slice(&temp_vec);
 
             temp_vec.clear();
-            encode_varint(*declared_length, &mut temp_vec).map_err(|e| format!("Encode error: {:?}", e))?;
+            encode_varint(*declared_length, &mut temp_vec)
+                .map_err(|e| format!("Encode error: {:?}", e))?;
             frame_bytes.extend_from_slice(&temp_vec);
             frame_bytes.extend_from_slice(actual_payload);
 
@@ -740,7 +790,7 @@ fn process_invalid_frame(invalid_frame: &InvalidFrame) -> Result<(), String> {
                     }
                 }
                 Err(H3NativeError::UnexpectedEof) => Ok(()), // Expected for truncated frames
-                Err(_) => Ok(()), // Other errors are expected
+                Err(_) => Ok(()),                            // Other errors are expected
             }
         }
 
@@ -752,11 +802,13 @@ fn process_invalid_frame(invalid_frame: &InvalidFrame) -> Result<(), String> {
 
             let mut frame_bytes = BytesMut::new();
             let mut temp_vec = Vec::new();
-            encode_varint(H3_FRAME_DATA, &mut temp_vec).map_err(|e| format!("Encode error: {:?}", e))?;
+            encode_varint(H3_FRAME_DATA, &mut temp_vec)
+                .map_err(|e| format!("Encode error: {:?}", e))?;
             frame_bytes.extend_from_slice(&temp_vec);
 
             temp_vec.clear();
-            encode_varint(payload.len() as u64, &mut temp_vec).map_err(|e| format!("Encode error: {:?}", e))?;
+            encode_varint(payload.len() as u64, &mut temp_vec)
+                .map_err(|e| format!("Encode error: {:?}", e))?;
             frame_bytes.extend_from_slice(&temp_vec);
             // Only include half the payload to create truncation
             frame_bytes.extend_from_slice(&payload[..payload.len() / 2]);

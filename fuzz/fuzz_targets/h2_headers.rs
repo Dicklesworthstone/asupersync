@@ -47,12 +47,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::connection::{Connection, ConnectionState};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
-    Frame, FrameHeader, HeadersFrame, PrioritySpec, FrameType,
-    headers_flags, parse_frame, FRAME_HEADER_SIZE,
+    FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, HeadersFrame, PrioritySpec, headers_flags,
+    parse_frame,
 };
 use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
@@ -201,7 +201,7 @@ fn build_headers_frame(input: &HeadersFrameFuzz) -> Result<Bytes, String> {
         } else {
             // Default priority info
             payload.put_u32(0); // No dependency
-            payload.put_u8(15);  // Default weight
+            payload.put_u8(15); // Default weight
         }
     }
 
@@ -276,15 +276,14 @@ fn test_concurrent_headers(stream_id: u32) -> Result<(), H2Error> {
     let frame2 = Frame::Headers(headers2);
 
     // This should trigger STREAM_ERROR for concurrent HEADERS
-    connection.process_frame(frame2)
-        .map_err(|e| {
-            // Verify it's the expected stream error
-            if e.code == ErrorCode::StreamError {
-                H2Error::stream(stream_id, ErrorCode::StreamError, "concurrent HEADERS")
-            } else {
-                e
-            }
-        })?;
+    connection.process_frame(frame2).map_err(|e| {
+        // Verify it's the expected stream error
+        if e.code == ErrorCode::StreamError {
+            H2Error::stream(stream_id, ErrorCode::StreamError, "concurrent HEADERS")
+        } else {
+            e
+        }
+    })?;
 
     Ok(())
 }
@@ -308,14 +307,20 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
                         if let Some(priority) = headers_frame.priority {
                             // Verify priority parsing correctness
                             if let Some(ref expected_priority) = input.priority_info {
-                                assert_eq!(priority.exclusive, expected_priority.exclusive,
-                                          "PRIORITY exclusive flag mismatch");
-                                assert_eq!(priority.weight, expected_priority.weight,
-                                          "PRIORITY weight mismatch");
+                                assert_eq!(
+                                    priority.exclusive, expected_priority.exclusive,
+                                    "PRIORITY exclusive flag mismatch"
+                                );
+                                assert_eq!(
+                                    priority.weight, expected_priority.weight,
+                                    "PRIORITY weight mismatch"
+                                );
 
                                 // Dependency should not be self-referencing
-                                assert_ne!(priority.dependency, input.stream_id,
-                                          "PRIORITY dependency cannot reference itself");
+                                assert_ne!(
+                                    priority.dependency, input.stream_id,
+                                    "PRIORITY dependency cannot reference itself"
+                                );
                             }
                         } else {
                             // PRIORITY flag was set but no priority info parsed
@@ -344,8 +349,10 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
 
                             // Padding length should not exceed available payload
                             if padding.enforce_boundary {
-                                assert!(padding.pad_length as usize <= min_payload_size,
-                                        "Padding length should be bounded by payload size");
+                                assert!(
+                                    padding.pad_length as usize <= min_payload_size,
+                                    "Padding length should be bounded by payload size"
+                                );
                             }
                         }
                     }
@@ -367,10 +374,14 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
             match test_headers_frame(&input) {
                 Ok(headers_frame) => {
                     // Verify flags are set correctly and independently
-                    assert_eq!(headers_frame.end_stream, input.flags.end_stream,
-                              "END_STREAM flag not preserved");
-                    assert_eq!(headers_frame.end_headers, input.flags.end_headers,
-                              "END_HEADERS flag not preserved");
+                    assert_eq!(
+                        headers_frame.end_stream, input.flags.end_stream,
+                        "END_STREAM flag not preserved"
+                    );
+                    assert_eq!(
+                        headers_frame.end_headers, input.flags.end_headers,
+                        "END_HEADERS flag not preserved"
+                    );
 
                     // Verify independence: each flag can be set without the other
                     // This is implicitly tested by the flag combinations in the fuzzer
@@ -386,15 +397,21 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
             if input.stream_id == 0 {
                 match test_headers_frame(&input) {
                     Ok(_) => {
-                        assert!(false, "HEADERS on stream ID 0 should trigger PROTOCOL_ERROR");
+                        assert!(
+                            false,
+                            "HEADERS on stream ID 0 should trigger PROTOCOL_ERROR"
+                        );
                     }
                     Err(e) => {
                         // Verify it's a protocol error for stream ID 0
                         let error_msg = format!("{:?}", e);
-                        assert!(error_msg.contains("stream ID 0") ||
-                               error_msg.contains("PROTOCOL_ERROR") ||
-                               e.code == ErrorCode::ProtocolError,
-                               "Expected PROTOCOL_ERROR for stream ID 0, got: {:?}", e);
+                        assert!(
+                            error_msg.contains("stream ID 0")
+                                || error_msg.contains("PROTOCOL_ERROR")
+                                || e.code == ErrorCode::ProtocolError,
+                            "Expected PROTOCOL_ERROR for stream ID 0, got: {:?}",
+                            e
+                        );
                     }
                 }
             } else {
@@ -405,7 +422,8 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
 
         TestScenario::ConcurrentHeaders => {
             // Assertion 5: concurrent HEADERS on same stream triggers STREAM_ERROR
-            if input.stream_id > 0 && input.stream_id % 2 == 1 { // Client-initiated stream
+            if input.stream_id > 0 && input.stream_id % 2 == 1 {
+                // Client-initiated stream
                 match test_concurrent_headers(input.stream_id) {
                     Ok(_) => {
                         // Concurrent HEADERS was accepted - this might be valid in some states
@@ -431,8 +449,10 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
 
                     // If PRIORITY flag was set, priority info should be present
                     if input.flags.priority {
-                        assert!(headers_frame.priority.is_some(),
-                               "PRIORITY flag set but priority info missing");
+                        assert!(
+                            headers_frame.priority.is_some(),
+                            "PRIORITY flag set but priority info missing"
+                        );
                     }
                 }
                 Err(_) => {
@@ -585,12 +605,7 @@ mod tests {
     #[test]
     fn test_flag_independence() {
         // Test that END_STREAM and END_HEADERS can be set independently
-        let test_cases = [
-            (false, false),
-            (false, true),
-            (true, false),
-            (true, true),
-        ];
+        let test_cases = [(false, false), (false, true), (true, false), (true, true)];
 
         for (end_stream, end_headers) in &test_cases {
             let input = HeadersFrameFuzz {

@@ -23,9 +23,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use asupersync::http::h1::codec::{Http1Codec, HttpError};
-use asupersync::codec::Decoder;
 use asupersync::bytes::BytesMut;
+use asupersync::codec::Decoder;
+use asupersync::http::h1::codec::{Http1Codec, HttpError};
 
 /// Simplified fuzz input for H1 codec testing
 #[derive(Arbitrary, Debug, Clone)]
@@ -349,12 +349,20 @@ fn normalize_fuzz_input(input: &mut H1CodecFuzzInput) {
                     trailer.value.truncate(4096);
                 }
             }
-            H1CodecOperation::UpgradeTest { upgrade_header, connection_header, .. } => {
+            H1CodecOperation::UpgradeTest {
+                upgrade_header,
+                connection_header,
+                ..
+            } => {
                 // Limit header values
                 upgrade_header.truncate(1024);
                 connection_header.truncate(1024);
             }
-            H1CodecOperation::RequestSmugglingTest { content_length, transfer_encoding, .. } => {
+            H1CodecOperation::RequestSmugglingTest {
+                content_length,
+                transfer_encoding,
+                ..
+            } => {
                 // Limit values to prevent OOM
                 *content_length = (*content_length).min(1024 * 1024 * 1024); // 1GB max
                 transfer_encoding.truncate(1024);
@@ -373,7 +381,13 @@ fn test_request_line_parsing(
     op: &H1CodecOperation,
     shadow: &H1CodecShadowModel,
 ) -> Result<(), String> {
-    if let H1CodecOperation::RequestLine { method, uri, version, malform_type } = op {
+    if let H1CodecOperation::RequestLine {
+        method,
+        uri,
+        version,
+        malform_type,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let http_data = create_request_line_data(method, uri, version, malform_type);
@@ -411,11 +425,12 @@ fn test_request_line_parsing(
 }
 
 /// Test header parsing and injection scenarios
-fn test_header_parsing(
-    op: &H1CodecOperation,
-    shadow: &H1CodecShadowModel,
-) -> Result<(), String> {
-    if let H1CodecOperation::HeaderTest { headers, injection_test } = op {
+fn test_header_parsing(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(), String> {
+    if let H1CodecOperation::HeaderTest {
+        headers,
+        injection_test,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let http_data = create_header_test_data(headers, injection_test);
@@ -433,8 +448,11 @@ fn test_header_parsing(
                         // Check for header injection vulnerabilities
                         if let Some(req) = req_opt {
                             for (name, value) in &req.headers {
-                                if name.contains('\r') || name.contains('\n') ||
-                                   value.contains('\r') || value.contains('\n') {
+                                if name.contains('\r')
+                                    || name.contains('\n')
+                                    || value.contains('\r')
+                                    || value.contains('\n')
+                                {
                                     shadow.record_security_violation(format!(
                                         "CRLF injection in header: {}:{}",
                                         name, value
@@ -452,9 +470,7 @@ fn test_header_parsing(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!(
-                    "Header parser panicked on input"
-                ));
+                shadow.record_security_violation(format!("Header parser panicked on input"));
                 return Err("Header parser panicked".to_string());
             }
         }
@@ -463,18 +479,20 @@ fn test_header_parsing(
 }
 
 /// Test Content-Length parsing and OOM protection
-fn test_content_length(
-    op: &H1CodecOperation,
-    shadow: &H1CodecShadowModel,
-) -> Result<(), String> {
-    if let H1CodecOperation::ContentLengthTest { content_length, expect_oom_protection } = op {
+fn test_content_length(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(), String> {
+    if let H1CodecOperation::ContentLengthTest {
+        content_length,
+        expect_oom_protection,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let http_data = create_content_length_test_data(content_length);
 
         // Check for large content length values
         if let ContentLengthInput::Valid(size) = content_length {
-            if *size > 100 * 1024 * 1024 { // 100MB
+            if *size > 100 * 1024 * 1024 {
+                // 100MB
                 shadow.record_large_content_length(*size);
             }
         }
@@ -517,9 +535,7 @@ fn test_content_length(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!(
-                    "Content-Length parser panicked"
-                ));
+                shadow.record_security_violation(format!("Content-Length parser panicked"));
                 return Err("Content-Length parser panicked".to_string());
             }
         }
@@ -528,11 +544,12 @@ fn test_content_length(
 }
 
 /// Test chunked body parsing
-fn test_chunked_bodies(
-    op: &H1CodecOperation,
-    shadow: &H1CodecShadowModel,
-) -> Result<(), String> {
-    if let H1CodecOperation::ChunkedBodyTest { chunks, malform_chunks } = op {
+fn test_chunked_bodies(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(), String> {
+    if let H1CodecOperation::ChunkedBodyTest {
+        chunks,
+        malform_chunks,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let http_data = create_chunked_body_data(chunks, *malform_chunks);
@@ -556,9 +573,7 @@ fn test_chunked_bodies(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!(
-                    "Chunked body parser panicked"
-                ));
+                shadow.record_security_violation(format!("Chunked body parser panicked"));
                 return Err("Chunked body parser panicked".to_string());
             }
         }
@@ -567,10 +582,7 @@ fn test_chunked_bodies(
 }
 
 /// Test trailer parsing
-fn test_trailers(
-    op: &H1CodecOperation,
-    shadow: &H1CodecShadowModel,
-) -> Result<(), String> {
+fn test_trailers(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(), String> {
     if let H1CodecOperation::TrailerTest { trailers, context } = op {
         let _op_id = shadow.record_operation_start();
 
@@ -595,9 +607,7 @@ fn test_trailers(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!(
-                    "Trailer parser panicked"
-                ));
+                shadow.record_security_violation(format!("Trailer parser panicked"));
                 return Err("Trailer parser panicked".to_string());
             }
         }
@@ -606,11 +616,13 @@ fn test_trailers(
 }
 
 /// Test connection upgrade scenarios
-fn test_upgrades(
-    op: &H1CodecOperation,
-    shadow: &H1CodecShadowModel,
-) -> Result<(), String> {
-    if let H1CodecOperation::UpgradeTest { upgrade_header, connection_header, expect_valid_upgrade } = op {
+fn test_upgrades(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(), String> {
+    if let H1CodecOperation::UpgradeTest {
+        upgrade_header,
+        connection_header,
+        expect_valid_upgrade,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let http_data = create_upgrade_test_data(upgrade_header, connection_header);
@@ -627,11 +639,14 @@ fn test_upgrades(
                     Ok(req_opt) => {
                         // Check upgrade semantics
                         if let Some(req) = req_opt {
-                            let has_upgrade = req.headers.iter().any(|(name, _)|
-                                name.eq_ignore_ascii_case("upgrade"));
-                            let has_connection_upgrade = req.headers.iter().any(|(name, value)|
-                                name.eq_ignore_ascii_case("connection") &&
-                                value.to_lowercase().contains("upgrade"));
+                            let has_upgrade = req
+                                .headers
+                                .iter()
+                                .any(|(name, _)| name.eq_ignore_ascii_case("upgrade"));
+                            let has_connection_upgrade = req.headers.iter().any(|(name, value)| {
+                                name.eq_ignore_ascii_case("connection")
+                                    && value.to_lowercase().contains("upgrade")
+                            });
 
                             if *expect_valid_upgrade && (!has_upgrade || !has_connection_upgrade) {
                                 shadow.record_security_violation(format!(
@@ -647,9 +662,7 @@ fn test_upgrades(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!(
-                    "Upgrade parser panicked"
-                ));
+                shadow.record_security_violation(format!("Upgrade parser panicked"));
                 return Err("Upgrade parser panicked".to_string());
             }
         }
@@ -663,12 +676,20 @@ fn test_request_smuggling(
     shadow: &H1CodecShadowModel,
 ) -> Result<(), String> {
     if let H1CodecOperation::RequestSmugglingTest {
-        has_content_length, content_length, has_transfer_encoding, transfer_encoding
-    } = op {
+        has_content_length,
+        content_length,
+        has_transfer_encoding,
+        transfer_encoding,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let http_data = create_request_smuggling_data(
-            *has_content_length, *content_length, *has_transfer_encoding, transfer_encoding);
+            *has_content_length,
+            *content_length,
+            *has_transfer_encoding,
+            transfer_encoding,
+        );
 
         let result = std::panic::catch_unwind(|| {
             let mut codec = Http1Codec::new();
@@ -704,9 +725,7 @@ fn test_request_smuggling(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!(
-                    "Request smuggling parser panicked"
-                ));
+                shadow.record_security_violation(format!("Request smuggling parser panicked"));
                 return Err("Request smuggling parser panicked".to_string());
             }
         }
@@ -719,7 +738,11 @@ fn test_malformed_messages(
     op: &H1CodecOperation,
     shadow: &H1CodecShadowModel,
 ) -> Result<(), String> {
-    if let H1CodecOperation::MalformedMessage { raw_http_data, expect_parse_error } = op {
+    if let H1CodecOperation::MalformedMessage {
+        raw_http_data,
+        expect_parse_error,
+    } = op
+    {
         let _op_id = shadow.record_operation_start();
 
         let result = std::panic::catch_unwind(|| {
@@ -729,26 +752,22 @@ fn test_malformed_messages(
         });
 
         match result {
-            Ok(decode_result) => {
-                match decode_result {
-                    Ok(_) => {
-                        if *expect_parse_error {
-                            shadow.record_security_violation(format!(
-                                "Expected parse error but malformed message succeeded"
-                            ));
-                        } else {
-                            shadow.record_operation_success();
-                        }
-                    }
-                    Err(_) => {
-                        shadow.record_expected_error("malformed message error");
+            Ok(decode_result) => match decode_result {
+                Ok(_) => {
+                    if *expect_parse_error {
+                        shadow.record_security_violation(format!(
+                            "Expected parse error but malformed message succeeded"
+                        ));
+                    } else {
+                        shadow.record_operation_success();
                     }
                 }
-            }
+                Err(_) => {
+                    shadow.record_expected_error("malformed message error");
+                }
+            },
             Err(_) => {
-                shadow.record_security_violation(format!(
-                    "Malformed message parser panicked"
-                ));
+                shadow.record_security_violation(format!("Malformed message parser panicked"));
                 return Err("Malformed message parser panicked".to_string());
             }
         }
@@ -769,9 +788,15 @@ fn create_request_line_data(
     let request_line = match malform_type {
         RequestLineMalformType::None => format!("{} {} {}", method_str, uri, version_str),
         RequestLineMalformType::MissingSpaces => format!("{}{}{}", method_str, uri, version_str),
-        RequestLineMalformType::ExtraSpaces => format!("{}   {}   {}", method_str, uri, version_str),
-        RequestLineMalformType::InvalidChars => format!("{}\x00 {} {}", method_str, uri, version_str),
-        RequestLineMalformType::TooLong => format!("{} /{} {}", method_str, "a".repeat(10000), version_str),
+        RequestLineMalformType::ExtraSpaces => {
+            format!("{}   {}   {}", method_str, uri, version_str)
+        }
+        RequestLineMalformType::InvalidChars => {
+            format!("{}\x00 {} {}", method_str, uri, version_str)
+        }
+        RequestLineMalformType::TooLong => {
+            format!("{} /{} {}", method_str, "a".repeat(10000), version_str)
+        }
         RequestLineMalformType::EmptyMethod => format!(" {} {}", uri, version_str),
         RequestLineMalformType::EmptyUri => format!("{} {} {}", method_str, "", version_str),
         RequestLineMalformType::EmptyVersion => format!("{} {} ", method_str, uri),
@@ -783,7 +808,10 @@ fn create_request_line_data(
 }
 
 /// Create HTTP data for header testing
-fn create_header_test_data(headers: &[HeaderInput], injection_test: &HeaderInjectionType) -> Vec<u8> {
+fn create_header_test_data(
+    headers: &[HeaderInput],
+    injection_test: &HeaderInjectionType,
+) -> Vec<u8> {
     let mut data = b"GET / HTTP/1.1\r\n".to_vec();
 
     for header in headers {
@@ -791,20 +819,34 @@ fn create_header_test_data(headers: &[HeaderInput], injection_test: &HeaderInjec
             HeaderMalformType::None => format!("{}: {}", header.name, header.value),
             HeaderMalformType::MissingColon => format!("{} {}", header.name, header.value),
             HeaderMalformType::InvalidNameChars => format!("{}\x00: {}", header.name, header.value),
-            HeaderMalformType::InvalidValueChars => format!("{}: {}\x00", header.name, header.value),
+            HeaderMalformType::InvalidValueChars => {
+                format!("{}: {}\x00", header.name, header.value)
+            }
             HeaderMalformType::TooLong => format!("{}: {}", header.name, "x".repeat(100000)),
             HeaderMalformType::EmptyName => format!(": {}", header.value),
-            HeaderMalformType::CrlfInjection => format!("{}: {}\r\nInjected: malicious", header.name, header.value),
+            HeaderMalformType::CrlfInjection => {
+                format!("{}: {}\r\nInjected: malicious", header.name, header.value)
+            }
         };
 
         // Apply injection test
         let final_header = match injection_test {
             HeaderInjectionType::None => header_line,
-            HeaderInjectionType::CrlfInName => format!("{}\r\nInjected: {}", header.name, header.value),
-            HeaderInjectionType::CrlfInValue => format!("{}: {}\r\nInjected: malicious", header.name, header.value),
-            HeaderInjectionType::DoubleEncoded => format!("{}%0d%0a: {}", header.name, header.value),
-            HeaderInjectionType::UnicodeNormalization => format!("{}ᅟ: {}", header.name, header.value), // Unicode space
-            HeaderInjectionType::ControlChars => format!("{}\x08: {}\x09", header.name, header.value),
+            HeaderInjectionType::CrlfInName => {
+                format!("{}\r\nInjected: {}", header.name, header.value)
+            }
+            HeaderInjectionType::CrlfInValue => {
+                format!("{}: {}\r\nInjected: malicious", header.name, header.value)
+            }
+            HeaderInjectionType::DoubleEncoded => {
+                format!("{}%0d%0a: {}", header.name, header.value)
+            }
+            HeaderInjectionType::UnicodeNormalization => {
+                format!("{}ᅟ: {}", header.name, header.value)
+            } // Unicode space
+            HeaderInjectionType::ControlChars => {
+                format!("{}\x08: {}\x09", header.name, header.value)
+            }
         };
 
         data.extend_from_slice(final_header.as_bytes());
@@ -889,9 +931,7 @@ fn create_trailer_test_data(trailers: &[HeaderInput], context: &TrailerContext) 
         TrailerContext::RegularBody => {
             b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello".to_vec()
         }
-        TrailerContext::NoBody => {
-            b"GET / HTTP/1.1\r\n\r\n".to_vec()
-        }
+        TrailerContext::NoBody => b"GET / HTTP/1.1\r\n\r\n".to_vec(),
     };
 
     // Add trailers
@@ -955,7 +995,10 @@ fn execute_h1_codec_operations(input: &H1CodecFuzzInput) -> Result<(), String> {
     let shadow = H1CodecShadowModel::new();
 
     // Execute operation sequence with bounds checking
-    let max_ops = input.config.max_operations.min(input.operations.len() as u16);
+    let max_ops = input
+        .config
+        .max_operations
+        .min(input.operations.len() as u16);
     for (i, operation) in input.operations.iter().enumerate() {
         if i >= max_ops as usize {
             break;
@@ -968,8 +1011,12 @@ fn execute_h1_codec_operations(input: &H1CodecFuzzInput) -> Result<(), String> {
             H1CodecOperation::ChunkedBodyTest { .. } => test_chunked_bodies(operation, &shadow),
             H1CodecOperation::TrailerTest { .. } => test_trailers(operation, &shadow),
             H1CodecOperation::UpgradeTest { .. } => test_upgrades(operation, &shadow),
-            H1CodecOperation::RequestSmugglingTest { .. } => test_request_smuggling(operation, &shadow),
-            H1CodecOperation::MalformedMessage { .. } => test_malformed_messages(operation, &shadow),
+            H1CodecOperation::RequestSmugglingTest { .. } => {
+                test_request_smuggling(operation, &shadow)
+            }
+            H1CodecOperation::MalformedMessage { .. } => {
+                test_malformed_messages(operation, &shadow)
+            }
         };
 
         if let Err(e) = result {

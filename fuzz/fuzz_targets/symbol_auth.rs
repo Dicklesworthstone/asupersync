@@ -28,7 +28,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::security::{
-    AuthKey, AuthenticationTag, AuthenticatedSymbol, SecurityContext, AuthMode, AuthError, AuthErrorKind,
+    AuthError, AuthErrorKind, AuthKey, AuthMode, AuthenticatedSymbol, AuthenticationTag,
+    SecurityContext,
 };
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
@@ -204,11 +205,7 @@ impl AuthFuzzState {
     }
 
     fn create_symbol(&self, data: &SymbolData) -> Symbol {
-        let id = SymbolId::new_for_test(
-            data.object_id as u64,
-            data.sbn as u32,
-            data.esi,
-        );
+        let id = SymbolId::new_for_test(data.object_id as u64, data.sbn as u32, data.esi);
         Symbol::new(id, data.payload.clone(), data.kind.clone().into())
     }
 
@@ -260,26 +257,41 @@ fn fuzz_symbol_authentication(input: SymbolAuthFuzzInput) {
 /// Test valid authentication baseline
 fn test_valid_auth(operation: &AuthOperation, state: &mut AuthFuzzState) {
     match operation {
-        AuthOperation::SignSymbol { key_index, symbol_data } => {
+        AuthOperation::SignSymbol {
+            key_index,
+            symbol_data,
+        } => {
             let context = state.get_context(*key_index);
             let symbol = state.create_symbol(symbol_data);
 
             let authenticated = context.sign_symbol(&symbol);
-            assert!(authenticated.is_verified(), "Newly signed symbol should be verified");
+            assert!(
+                authenticated.is_verified(),
+                "Newly signed symbol should be verified"
+            );
 
             state.signed_symbols.push(authenticated);
         }
-        AuthOperation::VerifySymbol { key_index, symbol_data, expected_valid, .. } => {
+        AuthOperation::VerifySymbol {
+            key_index,
+            symbol_data,
+            expected_valid,
+            ..
+        } => {
             let context = state.get_context(*key_index);
             let symbol = state.create_symbol(symbol_data);
-            let tag = AuthenticationTag::compute(&AuthKey::from_seed(*key_index as u64 + 1), &symbol);
+            let tag =
+                AuthenticationTag::compute(&AuthKey::from_seed(*key_index as u64 + 1), &symbol);
 
             let mut authenticated = AuthenticatedSymbol::from_parts(symbol, tag);
             let result = context.verify_authenticated_symbol(&mut authenticated);
 
             if *expected_valid {
                 assert!(result.is_ok(), "Expected valid authentication failed");
-                assert!(authenticated.is_verified(), "Valid symbol should be verified");
+                assert!(
+                    authenticated.is_verified(),
+                    "Valid symbol should be verified"
+                );
             }
         }
         _ => {} // Handle in specific strategy functions
@@ -288,7 +300,13 @@ fn test_valid_auth(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
 /// Test tag forgery attempts
 fn test_tag_forgery(operation: &AuthOperation, state: &mut AuthFuzzState) {
-    if let AuthOperation::VerifySymbol { key_index, symbol_data, tag_data, .. } = operation {
+    if let AuthOperation::VerifySymbol {
+        key_index,
+        symbol_data,
+        tag_data,
+        ..
+    } = operation
+    {
         state.log_attack_attempt();
 
         let context = state.get_context(*key_index);
@@ -319,7 +337,12 @@ fn test_tag_forgery(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
 /// Test key rotation scenarios
 fn test_key_rotation(operation: &AuthOperation, state: &mut AuthFuzzState) {
-    if let AuthOperation::RotateKeys { old_key_index, new_key_index, symbol_data } = operation {
+    if let AuthOperation::RotateKeys {
+        old_key_index,
+        new_key_index,
+        symbol_data,
+    } = operation
+    {
         let old_context = state.get_context(*old_key_index);
         let new_context = state.get_context(*new_key_index);
         let symbol = state.create_symbol(symbol_data);
@@ -333,7 +356,10 @@ fn test_key_rotation(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
         if *old_key_index == *new_key_index {
             // Same key should verify
-            assert!(result.is_ok() && test_auth.is_verified(), "Same key should verify");
+            assert!(
+                result.is_ok() && test_auth.is_verified(),
+                "Same key should verify"
+            );
         } else {
             // Property 2: Key rotation should be honored - different keys should not verify
             assert!(
@@ -346,7 +372,11 @@ fn test_key_rotation(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
 /// Test field tampering attacks
 fn test_field_tampering(operation: &AuthOperation, state: &mut AuthFuzzState) {
-    if let AuthOperation::TamperSymbol { original_symbol, tampering } = operation {
+    if let AuthOperation::TamperSymbol {
+        original_symbol,
+        tampering,
+    } = operation
+    {
         state.log_attack_attempt();
 
         let context = state.get_context(0);
@@ -386,13 +416,15 @@ fn test_field_tampering(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
         // Property 5: Context field binding should prevent substitution attacks
         // Unless the tampering resulted in identical symbol, verification should fail
-        let is_identical = original_symbol.object_id == tampered_data.object_id &&
-                          original_symbol.sbn == tampered_data.sbn &&
-                          original_symbol.esi == tampered_data.esi &&
-                          matches!((original_symbol.kind.clone(), tampered_data.kind.clone()),
-                                  (SymbolKindFuzz::Source, SymbolKindFuzz::Source) |
-                                  (SymbolKindFuzz::Repair, SymbolKindFuzz::Repair)) &&
-                          original_symbol.payload == tampered_data.payload;
+        let is_identical = original_symbol.object_id == tampered_data.object_id
+            && original_symbol.sbn == tampered_data.sbn
+            && original_symbol.esi == tampered_data.esi
+            && matches!(
+                (original_symbol.kind.clone(), tampered_data.kind.clone()),
+                (SymbolKindFuzz::Source, SymbolKindFuzz::Source)
+                    | (SymbolKindFuzz::Repair, SymbolKindFuzz::Repair)
+            )
+            && original_symbol.payload == tampered_data.payload;
 
         if !is_identical {
             assert!(
@@ -405,7 +437,12 @@ fn test_field_tampering(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
 /// Test replay attack scenarios
 fn test_replay_attack(operation: &AuthOperation, state: &mut AuthFuzzState) {
-    if let AuthOperation::ReplayTest { symbol_data, timestamp_offset, expected_valid } = operation {
+    if let AuthOperation::ReplayTest {
+        symbol_data,
+        timestamp_offset,
+        expected_valid,
+    } = operation
+    {
         state.log_attack_attempt();
 
         let context = state.get_context(0);
@@ -439,7 +476,8 @@ fn test_replay_attack(operation: &AuthOperation, state: &mut AuthFuzzState) {
             assert!(
                 !*expected_valid || age <= replay_window,
                 "Expired token should be rejected (age: {}s, window: {}s)",
-                age, replay_window
+                age,
+                replay_window
             );
         }
     }
@@ -447,7 +485,12 @@ fn test_replay_attack(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
 /// Test cross-context substitution attacks
 fn test_cross_context(operation: &AuthOperation, state: &mut AuthFuzzState) {
-    if let AuthOperation::CrossContextTest { source_context, target_context, symbol_data } = operation {
+    if let AuthOperation::CrossContextTest {
+        source_context,
+        target_context,
+        symbol_data,
+    } = operation
+    {
         if source_context == target_context {
             return; // No cross-context attack possible
         }
@@ -478,7 +521,13 @@ fn test_cross_context(operation: &AuthOperation, state: &mut AuthFuzzState) {
 
 /// Test timing attack resistance
 fn test_timing_attack(operation: &AuthOperation, state: &mut AuthFuzzState) {
-    if let AuthOperation::VerifySymbol { key_index, symbol_data, tag_data, .. } = operation {
+    if let AuthOperation::VerifySymbol {
+        key_index,
+        symbol_data,
+        tag_data,
+        ..
+    } = operation
+    {
         let context = state.get_context(*key_index);
         let symbol = state.create_symbol(symbol_data);
         let tag = AuthenticationTag::from_bytes(*tag_data);
@@ -495,7 +544,8 @@ fn test_timing_attack(operation: &AuthOperation, state: &mut AuthFuzzState) {
         // Property 1: Timing should be roughly constant regardless of tag validity
         // This is a weak test, but we check for extreme timing variations
         if state.timing_measurements.len() > 10 {
-            let times: Vec<u128> = state.timing_measurements
+            let times: Vec<u128> = state
+                .timing_measurements
                 .iter()
                 .map(|d| d.as_nanos())
                 .collect();

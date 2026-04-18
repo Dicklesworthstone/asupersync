@@ -9,26 +9,26 @@
 //! 4. SymbolDispatcher unicast/multicast/broadcast/quorum distinct paths (4 separate dispatch strategies)
 //! 5. Unknown endpoint dispatched to default route fallback
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::{
     Cx,
     security::authenticated::AuthenticatedSymbol,
     security::tag::AuthenticationTag,
+    sync::Mutex,
     transport::router::{
-        Endpoint, EndpointId, EndpointState, LoadBalanceStrategy, LoadBalancer,
-        RoutingTable, RouteKey, RoutingEntry, SymbolRouter, SymbolDispatcher,
-        DispatchConfig, DispatchStrategy, DispatchError
+        DispatchConfig, DispatchError, DispatchStrategy, Endpoint, EndpointId, EndpointState,
+        LoadBalanceStrategy, LoadBalancer, RouteKey, RoutingEntry, RoutingTable, SymbolDispatcher,
+        SymbolRouter,
     },
     transport::sink::SymbolSink,
     types::{ObjectId, RegionId, Symbol, SymbolId, SymbolKind, Time},
-    sync::Mutex,
 };
-use std::sync::Arc;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// Structured input for controlled transport router fuzzing scenarios.
 #[derive(Arbitrary, Debug)]
@@ -108,11 +108,11 @@ impl From<DispatchStrategyWrapper> for DispatchStrategy {
         match strategy {
             DispatchStrategyWrapper::Unicast => Self::Unicast,
             DispatchStrategyWrapper::Multicast { count } => Self::Multicast {
-                count: (count as usize).max(1).min(10)
+                count: (count as usize).max(1).min(10),
             },
             DispatchStrategyWrapper::Broadcast => Self::Broadcast,
             DispatchStrategyWrapper::QuorumCast { required } => Self::QuorumCast {
-                required: (required as usize).max(1).min(10)
+                required: (required as usize).max(1).min(10),
             },
         }
     }
@@ -125,7 +125,7 @@ struct EndpointConfig {
     weight: u16,        // 1-1000
     state: EndpointStateWrapper,
     active_connections: u8, // 0-255
-    region: Option<u64>, // Optional region ID
+    region: Option<u64>,    // Optional region ID
 }
 
 #[derive(Arbitrary, Debug)]
@@ -273,15 +273,24 @@ impl SymbolSink for MockSymbolSink {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), asupersync::transport::error::SinkError>> {
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), asupersync::transport::error::SinkError>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), asupersync::transport::error::SinkError>> {
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), asupersync::transport::error::SinkError>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), asupersync::transport::error::SinkError>> {
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), asupersync::transport::error::SinkError>> {
         Poll::Ready(Ok(()))
     }
 }
@@ -299,19 +308,37 @@ fn fuzz_transport_router(input: TransportFuzzInput) {
             fuzz_endpoint_id_parsing(id);
         }
 
-        TransportFuzzInput::LoadBalancerTest { strategy, endpoints, object_id, multi_select_count } => {
+        TransportFuzzInput::LoadBalancerTest {
+            strategy,
+            endpoints,
+            object_id,
+            multi_select_count,
+        } => {
             fuzz_load_balancer_strategies(strategy, endpoints, object_id, multi_select_count);
         }
 
-        TransportFuzzInput::RoutingTableTest { routes, current_time_offset_nanos, prune_expired } => {
+        TransportFuzzInput::RoutingTableTest {
+            routes,
+            current_time_offset_nanos,
+            prune_expired,
+        } => {
             fuzz_routing_table_ttl(routes, current_time_offset_nanos, prune_expired);
         }
 
-        TransportFuzzInput::DispatchTest { strategy, endpoints, symbol_config, fail_endpoints } => {
+        TransportFuzzInput::DispatchTest {
+            strategy,
+            endpoints,
+            symbol_config,
+            fail_endpoints,
+        } => {
             fuzz_symbol_dispatcher(strategy, endpoints, symbol_config, fail_endpoints);
         }
 
-        TransportFuzzInput::FallbackRoutingTest { symbol_config, has_default_route, specific_routes } => {
+        TransportFuzzInput::FallbackRoutingTest {
+            symbol_config,
+            has_default_route,
+            specific_routes,
+        } => {
             fuzz_fallback_routing(symbol_config, has_default_route, specific_routes);
         }
 
@@ -329,13 +356,19 @@ fn fuzz_endpoint_id_parsing(id: u64) {
     assert_eq!(endpoint_id.0, id, "EndpointId should preserve u64 value");
 
     let display_str = format!("{}", endpoint_id);
-    assert!(display_str.contains(&id.to_string()),
-        "EndpointId display should contain the ID: {}", display_str);
+    assert!(
+        display_str.contains(&id.to_string()),
+        "EndpointId display should contain the ID: {}",
+        display_str
+    );
 
     // Verify ordering properties for routing consistency
     let id2 = EndpointId::new(id.wrapping_add(1));
     if id < u64::MAX {
-        assert!(endpoint_id < id2, "EndpointId ordering should follow u64 ordering");
+        assert!(
+            endpoint_id < id2,
+            "EndpointId ordering should follow u64 ordering"
+        );
     }
 
     // Verify hash consistency for hash-based routing
@@ -346,8 +379,11 @@ fn fuzz_endpoint_id_parsing(id: u64) {
     let mut hasher2 = DefaultHasher::new();
     endpoint_id.hash(&mut hasher1);
     endpoint_id.hash(&mut hasher2);
-    assert_eq!(hasher1.finish(), hasher2.finish(),
-        "EndpointId hash should be deterministic");
+    assert_eq!(
+        hasher1.finish(),
+        hasher2.finish(),
+        "EndpointId hash should be deterministic"
+    );
 }
 
 /// ASSERTION 2: 7 LoadBalancer strategies dispatch correctly
@@ -381,7 +417,10 @@ fn fuzz_load_balancer_strategies(
             }
 
             // Set connection count for least-connections testing
-            endpoint.active_connections.store(config.active_connections as u32, std::sync::atomic::Ordering::Relaxed);
+            endpoint.active_connections.store(
+                config.active_connections as u32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
 
             Arc::new(endpoint)
         })
@@ -397,12 +436,16 @@ fn fuzz_load_balancer_strategies(
     let selected = lb.select(&endpoints, object_id);
     if let Some(endpoint) = selected {
         // ASSERTION: Selected endpoint should be reachable
-        assert!(endpoint.state().can_receive() || endpoints.iter().all(|e| !e.state().can_receive()),
-            "LoadBalancer should select reachable endpoint or none available");
+        assert!(
+            endpoint.state().can_receive() || endpoints.iter().all(|e| !e.state().can_receive()),
+            "LoadBalancer should select reachable endpoint or none available"
+        );
 
         // ASSERTION: Selected endpoint should be from our list
-        assert!(endpoints.iter().any(|e| e.id == endpoint.id),
-            "Selected endpoint should be from the provided list");
+        assert!(
+            endpoints.iter().any(|e| e.id == endpoint.id),
+            "Selected endpoint should be from the provided list"
+        );
     }
 
     // Test multiple selection if requested
@@ -411,25 +454,33 @@ fn fuzz_load_balancer_strategies(
         let selected_multi = lb.select_n(&endpoints, count, object_id);
 
         // ASSERTION: Should not select more than requested or available
-        assert!(selected_multi.len() <= count,
-            "select_n should not return more than requested count");
-        assert!(selected_multi.len() <= endpoints.iter().filter(|e| e.state().can_receive()).count(),
-            "select_n should not return more healthy endpoints than available");
+        assert!(
+            selected_multi.len() <= count,
+            "select_n should not return more than requested count"
+        );
+        assert!(
+            selected_multi.len() <= endpoints.iter().filter(|e| e.state().can_receive()).count(),
+            "select_n should not return more healthy endpoints than available"
+        );
 
         // ASSERTION: Should not select duplicates
         use std::collections::HashSet;
         let mut seen_ids = HashSet::new();
         for endpoint in &selected_multi {
-            assert!(seen_ids.insert(endpoint.id),
-                "select_n should not return duplicate endpoints");
+            assert!(
+                seen_ids.insert(endpoint.id),
+                "select_n should not return duplicate endpoints"
+            );
         }
 
         // ASSERTION: All selected endpoints should be healthy (unless none available)
         let healthy_count = endpoints.iter().filter(|e| e.state().can_receive()).count();
         if healthy_count > 0 {
             for endpoint in &selected_multi {
-                assert!(endpoint.state().can_receive(),
-                    "select_n should only return healthy endpoints when available");
+                assert!(
+                    endpoint.state().can_receive(),
+                    "select_n should only return healthy endpoints when available"
+                );
             }
         }
     }
@@ -438,13 +489,16 @@ fn fuzz_load_balancer_strategies(
     match strategy {
         asupersync::transport::router::LoadBalanceStrategy::LeastConnections => {
             if let Some(endpoint) = selected {
-                let min_connections = endpoints.iter()
+                let min_connections = endpoints
+                    .iter()
                     .filter(|e| e.state().can_receive())
                     .map(|e| e.connection_count())
                     .min();
                 if let Some(min) = min_connections {
-                    assert!(endpoint.connection_count() <= min + 1, // Allow for race conditions
-                        "LeastConnections should select endpoint with minimal connections");
+                    assert!(
+                        endpoint.connection_count() <= min + 1, // Allow for race conditions
+                        "LeastConnections should select endpoint with minimal connections"
+                    );
                 }
             }
         }
@@ -454,8 +508,10 @@ fn fuzz_load_balancer_strategies(
                 // Should select the first healthy endpoint
                 let first_healthy = endpoints.iter().find(|e| e.state().can_receive());
                 if let Some(first) = first_healthy {
-                    assert_eq!(endpoint.id, first.id,
-                        "FirstAvailable should select the first healthy endpoint");
+                    assert_eq!(
+                        endpoint.id, first.id,
+                        "FirstAvailable should select the first healthy endpoint"
+                    );
                 }
             }
         }
@@ -463,12 +519,16 @@ fn fuzz_load_balancer_strategies(
         asupersync::transport::router::LoadBalanceStrategy::WeightedLeastConnections => {
             if let Some(endpoint) = selected {
                 // Verify weighted calculation: connections / weight should be minimal
-                let selected_ratio = endpoint.connection_count() as f64 / (endpoint.weight.max(1) as f64);
+                let selected_ratio =
+                    endpoint.connection_count() as f64 / (endpoint.weight.max(1) as f64);
                 for other in &endpoints {
                     if other.state().can_receive() && other.id != endpoint.id {
-                        let other_ratio = other.connection_count() as f64 / (other.weight.max(1) as f64);
-                        assert!(selected_ratio <= other_ratio + 0.1, // Allow small floating point differences
-                            "WeightedLeastConnections should select endpoint with minimal weighted load");
+                        let other_ratio =
+                            other.connection_count() as f64 / (other.weight.max(1) as f64);
+                        assert!(
+                            selected_ratio <= other_ratio + 0.1, // Allow small floating point differences
+                            "WeightedLeastConnections should select endpoint with minimal weighted load"
+                        );
                     }
                 }
             }
@@ -500,14 +560,17 @@ fn fuzz_routing_table_ttl(
         }
 
         // Create endpoints for this route
-        let endpoints: Vec<Arc<Endpoint>> = route_config.endpoints
+        let endpoints: Vec<Arc<Endpoint>> = route_config
+            .endpoints
             .into_iter()
             .take(10) // Limit to prevent excessive memory usage
             .enumerate()
-            .map(|(i, _)| Arc::new(Endpoint::new(
-                EndpointId::new(i as u64),
-                format!("node-{}:8080", i),
-            )))
+            .map(|(i, _)| {
+                Arc::new(Endpoint::new(
+                    EndpointId::new(i as u64),
+                    format!("node-{}:8080", i),
+                ))
+            })
             .collect();
 
         if endpoints.is_empty() {
@@ -536,8 +599,10 @@ fn fuzz_routing_table_ttl(
             let ttl = Time::from_secs(ttl_secs.min(3600) as u64);
             let expiry_time = creation_time.saturating_add_nanos(ttl.as_nanos());
             let expected_expired = current_time >= expiry_time;
-            assert_eq!(should_be_expired, expected_expired,
-                "TTL expiry check should match manual calculation");
+            assert_eq!(
+                should_be_expired, expected_expired,
+                "TTL expiry check should match manual calculation"
+            );
         } else {
             assert!(!should_be_expired, "Permanent routes should never expire");
         }
@@ -553,8 +618,11 @@ fn fuzz_routing_table_ttl(
         let routes_after_prune = table.route_count();
 
         // ASSERTION: Pruned count should match expired routes
-        assert_eq!(routes_before_prune, routes_after_prune + pruned_count,
-            "Pruned count should match the difference in route counts");
+        assert_eq!(
+            routes_before_prune,
+            routes_after_prune + pruned_count,
+            "Pruned count should match the difference in route counts"
+        );
 
         // ASSERTION: No expired routes should remain
         // (We can't easily verify this without accessing internal state,
@@ -582,10 +650,10 @@ fn fuzz_symbol_dispatcher(
         .enumerate()
         .take(10) // Limit endpoints to prevent memory issues
         .map(|(i, config)| {
-            Arc::new(Endpoint::new(
-                EndpointId::new(i as u64),
-                format!("node-{}:8080", i),
-            ).with_state(config.state.into()))
+            Arc::new(
+                Endpoint::new(EndpointId::new(i as u64), format!("node-{}:8080", i))
+                    .with_state(config.state.into()),
+            )
         })
         .collect();
 
@@ -632,7 +700,9 @@ fn fuzz_symbol_dispatcher(
 
     // Block on the async dispatch (in a real fuzz test, we'd use a simple executor)
     let result = futures_lite::future::block_on(async {
-        dispatcher.dispatch_with_strategy(&cx, auth_symbol, strategy).await
+        dispatcher
+            .dispatch_with_strategy(&cx, auth_symbol, strategy)
+            .await
     });
 
     match strategy {
@@ -640,10 +710,14 @@ fn fuzz_symbol_dispatcher(
             // ASSERTION: Unicast should target exactly one endpoint
             match result {
                 Ok(dispatch_result) => {
-                    assert!(dispatch_result.successes <= 1 && dispatch_result.failures <= 1,
-                        "Unicast should target at most one endpoint");
-                    assert!(dispatch_result.sent_to.len() <= 1,
-                        "Unicast should send to at most one endpoint");
+                    assert!(
+                        dispatch_result.successes <= 1 && dispatch_result.failures <= 1,
+                        "Unicast should target at most one endpoint"
+                    );
+                    assert!(
+                        dispatch_result.sent_to.len() <= 1,
+                        "Unicast should send to at most one endpoint"
+                    );
                 }
                 Err(_) => {
                     // Errors are acceptable (no healthy endpoints, routing failure, etc.)
@@ -656,15 +730,22 @@ fn fuzz_symbol_dispatcher(
             match result {
                 Ok(dispatch_result) => {
                     let total_attempts = dispatch_result.successes + dispatch_result.failures;
-                    assert!(total_attempts <= count,
-                        "Multicast should not exceed requested count");
-                    assert!(dispatch_result.sent_to.len() <= count,
-                        "Multicast should send to at most count endpoints");
+                    assert!(
+                        total_attempts <= count,
+                        "Multicast should not exceed requested count"
+                    );
+                    assert!(
+                        dispatch_result.sent_to.len() <= count,
+                        "Multicast should send to at most count endpoints"
+                    );
 
                     // ASSERTION: Should not target more endpoints than available
-                    let healthy_count = endpoints.iter().filter(|e| e.state().can_receive()).count();
-                    assert!(total_attempts <= healthy_count,
-                        "Multicast should not target more endpoints than available");
+                    let healthy_count =
+                        endpoints.iter().filter(|e| e.state().can_receive()).count();
+                    assert!(
+                        total_attempts <= healthy_count,
+                        "Multicast should not target more endpoints than available"
+                    );
                 }
                 Err(_) => {
                     // Errors are acceptable
@@ -676,15 +757,22 @@ fn fuzz_symbol_dispatcher(
             // ASSERTION: Broadcast should target all healthy endpoints
             match result {
                 Ok(dispatch_result) => {
-                    let healthy_count = endpoints.iter().filter(|e| e.state().can_receive()).count();
+                    let healthy_count =
+                        endpoints.iter().filter(|e| e.state().can_receive()).count();
                     let total_attempts = dispatch_result.successes + dispatch_result.failures;
-                    assert!(total_attempts <= healthy_count,
-                        "Broadcast should target at most all healthy endpoints");
+                    assert!(
+                        total_attempts <= healthy_count,
+                        "Broadcast should target at most all healthy endpoints"
+                    );
                 }
                 Err(DispatchError::NoEndpoints) => {
                     // Expected when no healthy endpoints
-                    let healthy_count = endpoints.iter().filter(|e| e.state().can_receive()).count();
-                    assert_eq!(healthy_count, 0, "NoEndpoints error should only occur with no healthy endpoints");
+                    let healthy_count =
+                        endpoints.iter().filter(|e| e.state().can_receive()).count();
+                    assert_eq!(
+                        healthy_count, 0,
+                        "NoEndpoints error should only occur with no healthy endpoints"
+                    );
                 }
                 Err(_) => {
                     // Other errors are acceptable
@@ -696,22 +784,45 @@ fn fuzz_symbol_dispatcher(
             // ASSERTION: QuorumCast should continue until quorum reached or all endpoints exhausted
             match result {
                 Ok(dispatch_result) => {
-                    assert!(dispatch_result.successes >= required,
-                        "QuorumCast success should have reached required quorum");
+                    assert!(
+                        dispatch_result.successes >= required,
+                        "QuorumCast success should have reached required quorum"
+                    );
                 }
-                Err(DispatchError::QuorumNotReached { achieved, required: req_in_error }) => {
-                    assert_eq!(req_in_error, required, "Error should report correct required count");
-                    assert!(achieved < required, "QuorumNotReached should have achieved < required");
+                Err(DispatchError::QuorumNotReached {
+                    achieved,
+                    required: req_in_error,
+                }) => {
+                    assert_eq!(
+                        req_in_error, required,
+                        "Error should report correct required count"
+                    );
+                    assert!(
+                        achieved < required,
+                        "QuorumNotReached should have achieved < required"
+                    );
 
                     // Should have tried all available endpoints
-                    let healthy_count = endpoints.iter().filter(|e| e.state().can_receive()).count();
+                    let healthy_count =
+                        endpoints.iter().filter(|e| e.state().can_receive()).count();
                     let total_possible = healthy_count.min(10); // Limit for safety
-                    assert!(achieved <= total_possible,
-                        "QuorumCast should not achieve more than possible");
+                    assert!(
+                        achieved <= total_possible,
+                        "QuorumCast should not achieve more than possible"
+                    );
                 }
-                Err(DispatchError::InsufficientEndpoints { available, required: req_in_error }) => {
-                    assert_eq!(req_in_error, required, "Error should report correct required count");
-                    assert!(available < required, "InsufficientEndpoints should have available < required");
+                Err(DispatchError::InsufficientEndpoints {
+                    available,
+                    required: req_in_error,
+                }) => {
+                    assert_eq!(
+                        req_in_error, required,
+                        "Error should report correct required count"
+                    );
+                    assert!(
+                        available < required,
+                        "InsufficientEndpoints should have available < required"
+                    );
                 }
                 Err(_) => {
                     // Other errors are acceptable
@@ -732,7 +843,12 @@ fn fuzz_fallback_routing(
 
     // Create test endpoints
     let default_endpoints: Vec<Arc<Endpoint>> = (0..3)
-        .map(|i| Arc::new(Endpoint::new(EndpointId::new(i), format!("default-{}:8080", i))))
+        .map(|i| {
+            Arc::new(Endpoint::new(
+                EndpointId::new(i),
+                format!("default-{}:8080", i),
+            ))
+        })
         .collect();
 
     // Add specific routes (but not for our test object)
@@ -741,14 +857,17 @@ fn fuzz_fallback_routing(
             continue;
         }
 
-        let endpoints: Vec<Arc<Endpoint>> = route_config.endpoints
+        let endpoints: Vec<Arc<Endpoint>> = route_config
+            .endpoints
             .into_iter()
             .take(5)
             .enumerate()
-            .map(|(i, _)| Arc::new(Endpoint::new(
-                EndpointId::new(100 + i as u64), // Different ID range
-                format!("specific-{}:8080", i),
-            )))
+            .map(|(i, _)| {
+                Arc::new(Endpoint::new(
+                    EndpointId::new(100 + i as u64), // Different ID range
+                    format!("specific-{}:8080", i),
+                ))
+            })
             .collect();
 
         if !endpoints.is_empty() {
@@ -765,7 +884,8 @@ fn fuzz_fallback_routing(
 
     // Create symbol that won't match specific routes
     let unknown_object_id: ObjectId = symbol_config.object_id.into();
-    let symbol_id = SymbolId::new_for_test(unknown_object_id.as_u128() as u64, 0, symbol_config.esi);
+    let symbol_id =
+        SymbolId::new_for_test(unknown_object_id.as_u128() as u64, 0, symbol_config.esi);
     let symbol = Symbol::new(symbol_id, vec![42u8; 10], symbol_config.kind.into());
 
     // Test routing
@@ -775,12 +895,23 @@ fn fuzz_fallback_routing(
         // ASSERTION: Should successfully route to default
         match route_result {
             Ok(route_result) => {
-                assert!(route_result.is_fallback, "Should be marked as fallback route");
-                assert_eq!(route_result.matched_key, RouteKey::Default, "Should match default route key");
+                assert!(
+                    route_result.is_fallback,
+                    "Should be marked as fallback route"
+                );
+                assert_eq!(
+                    route_result.matched_key,
+                    RouteKey::Default,
+                    "Should match default route key"
+                );
 
                 // ASSERTION: Selected endpoint should be from default route
-                assert!(default_endpoints.iter().any(|e| e.id == route_result.endpoint.id),
-                    "Should select endpoint from default route");
+                assert!(
+                    default_endpoints
+                        .iter()
+                        .any(|e| e.id == route_result.endpoint.id),
+                    "Should select endpoint from default route"
+                );
             }
             Err(asupersync::transport::router::RoutingError::NoHealthyEndpoints { .. }) => {
                 // Acceptable if default endpoints are unhealthy
@@ -813,56 +944,98 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
 
             // ASSERTION: Should handle empty endpoint list gracefully
             let result = lb.select(&empty_endpoints, None);
-            assert!(result.is_none(), "Should return None for empty endpoint list");
+            assert!(
+                result.is_none(),
+                "Should return None for empty endpoint list"
+            );
 
             let multi_result = lb.select_n(&empty_endpoints, 5, None);
-            assert!(multi_result.is_empty(), "Should return empty for select_n on empty list");
+            assert!(
+                multi_result.is_empty(),
+                "Should return empty for select_n on empty list"
+            );
         }
 
         EdgeCaseScenario::AllUnhealthyEndpoints(strategy) => {
             let lb = LoadBalancer::new(strategy.into());
             let unhealthy_endpoints: Vec<Arc<Endpoint>> = (0..3)
-                .map(|i| Arc::new(Endpoint::new(EndpointId::new(i), format!("unhealthy-{}:8080", i))
-                    .with_state(EndpointState::Unhealthy)))
+                .map(|i| {
+                    Arc::new(
+                        Endpoint::new(EndpointId::new(i), format!("unhealthy-{}:8080", i))
+                            .with_state(EndpointState::Unhealthy),
+                    )
+                })
                 .collect();
 
             // ASSERTION: Should handle all unhealthy endpoints gracefully
             let result = lb.select(&unhealthy_endpoints, None);
-            assert!(result.is_none(), "Should return None when all endpoints unhealthy");
+            assert!(
+                result.is_none(),
+                "Should return None when all endpoints unhealthy"
+            );
 
             let multi_result = lb.select_n(&unhealthy_endpoints, 2, None);
-            assert!(multi_result.is_empty(), "Should return empty when all endpoints unhealthy");
+            assert!(
+                multi_result.is_empty(),
+                "Should return empty when all endpoints unhealthy"
+            );
         }
 
         EdgeCaseScenario::SingleMaxLoadEndpoint => {
-            let lb = LoadBalancer::new(asupersync::transport::router::LoadBalanceStrategy::LeastConnections);
+            let lb = LoadBalancer::new(
+                asupersync::transport::router::LoadBalanceStrategy::LeastConnections,
+            );
             let endpoint = Arc::new(Endpoint::new(EndpointId::new(1), "loaded:8080".to_string()));
-            endpoint.active_connections.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
+            endpoint
+                .active_connections
+                .store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
 
             let endpoints = vec![endpoint.clone()];
 
             // ASSERTION: Should handle maximum load gracefully
             let result = lb.select(&endpoints, None);
-            assert!(result.is_some(), "Should still select endpoint even with max load");
-            assert_eq!(result.unwrap().id, endpoint.id, "Should select the only available endpoint");
+            assert!(
+                result.is_some(),
+                "Should still select endpoint even with max load"
+            );
+            assert_eq!(
+                result.unwrap().id,
+                endpoint.id,
+                "Should select the only available endpoint"
+            );
         }
 
         EdgeCaseScenario::ZeroWeightRoundRobin => {
-            let lb = LoadBalancer::new(asupersync::transport::router::LoadBalanceStrategy::WeightedRoundRobin);
+            let lb = LoadBalancer::new(
+                asupersync::transport::router::LoadBalanceStrategy::WeightedRoundRobin,
+            );
             let endpoints: Vec<Arc<Endpoint>> = (0..3)
-                .map(|i| Arc::new(Endpoint::new(EndpointId::new(i), format!("zero-weight-{}:8080", i))
-                    .with_weight(0)))
+                .map(|i| {
+                    Arc::new(
+                        Endpoint::new(EndpointId::new(i), format!("zero-weight-{}:8080", i))
+                            .with_weight(0),
+                    )
+                })
                 .collect();
 
             // ASSERTION: Should handle zero weights gracefully
             let result = lb.select(&endpoints, None);
-            assert!(result.is_some(), "Should select endpoint even with zero weights");
+            assert!(
+                result.is_some(),
+                "Should select endpoint even with zero weights"
+            );
         }
 
         EdgeCaseScenario::HashConsistency(object_id) => {
-            let lb = LoadBalancer::new(asupersync::transport::router::LoadBalanceStrategy::HashBased);
+            let lb =
+                LoadBalancer::new(asupersync::transport::router::LoadBalanceStrategy::HashBased);
             let endpoints: Vec<Arc<Endpoint>> = (0..5)
-                .map(|i| Arc::new(Endpoint::new(EndpointId::new(i), format!("hash-{}:8080", i))))
+                .map(|i| {
+                    Arc::new(Endpoint::new(
+                        EndpointId::new(i),
+                        format!("hash-{}:8080", i),
+                    ))
+                })
                 .collect();
 
             let oid: ObjectId = object_id.into();
@@ -893,14 +1066,20 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
                 base_time.saturating_add_nanos(offset as u64)
             };
 
-            let endpoint = Arc::new(Endpoint::new(EndpointId::new(1), "ttl-test:8080".to_string()));
+            let endpoint = Arc::new(Endpoint::new(
+                EndpointId::new(1),
+                "ttl-test:8080".to_string(),
+            ));
             let ttl = Time::from_secs(10);
             let entry = RoutingEntry::new(vec![endpoint], base_time).with_ttl(ttl);
 
             // ASSERTION: TTL boundary calculations should be correct
             let is_expired = entry.is_expired(test_time);
             let expected_expired = test_time >= base_time.saturating_add_nanos(ttl.as_nanos());
-            assert_eq!(is_expired, expected_expired, "TTL boundary check should be accurate");
+            assert_eq!(
+                is_expired, expected_expired,
+                "TTL boundary check should be accurate"
+            );
         }
 
         _ => {
@@ -927,7 +1106,12 @@ mod tests {
         ] {
             let lb = LoadBalancer::new(strategy);
             let endpoints: Vec<Arc<Endpoint>> = (0..3)
-                .map(|i| Arc::new(Endpoint::new(EndpointId::new(i), format!("test-{}:8080", i))))
+                .map(|i| {
+                    Arc::new(Endpoint::new(
+                        EndpointId::new(i),
+                        format!("test-{}:8080", i),
+                    ))
+                })
                 .collect();
 
             // Should not panic and should return a valid selection
@@ -949,16 +1133,20 @@ mod tests {
             // Verify distinct strategy behavior patterns exist
             match strategy {
                 DispatchStrategy::Unicast => assert!(true, "Unicast strategy available"),
-                DispatchStrategy::Multicast { count } => assert!(count > 0, "Multicast has positive count"),
+                DispatchStrategy::Multicast { count } => {
+                    assert!(count > 0, "Multicast has positive count")
+                }
                 DispatchStrategy::Broadcast => assert!(true, "Broadcast strategy available"),
-                DispatchStrategy::QuorumCast { required } => assert!(required > 0, "QuorumCast has positive required"),
+                DispatchStrategy::QuorumCast { required } => {
+                    assert!(required > 0, "QuorumCast has positive required")
+                }
             }
         }
     }
 
     #[test]
     fn test_endpoint_id_properties() {
-        for id in [0u64, 1, u64::MAX/2, u64::MAX-1, u64::MAX] {
+        for id in [0u64, 1, u64::MAX / 2, u64::MAX - 1, u64::MAX] {
             fuzz_endpoint_id_parsing(id);
         }
     }

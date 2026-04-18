@@ -234,7 +234,12 @@ fn build_client_hello(input: &QuicTlsHelloFuzzInput) -> Vec<u8> {
     // Cipher suites
     let cipher_suites_len = std::cmp::min(input.client_hello.cipher_suites.len() * 2, 65534);
     buf.extend_from_slice(&(cipher_suites_len as u16).to_be_bytes());
-    for &cipher in input.client_hello.cipher_suites.iter().take(cipher_suites_len / 2) {
+    for &cipher in input
+        .client_hello
+        .cipher_suites
+        .iter()
+        .take(cipher_suites_len / 2)
+    {
         buf.extend_from_slice(&cipher.to_be_bytes());
     }
 
@@ -260,7 +265,9 @@ fn build_client_hello(input: &QuicTlsHelloFuzzInput) -> Vec<u8> {
     // Add test-specific extensions based on configuration
     if input.extension_config.include_supported_versions {
         extensions_data.extend_from_slice(&EXT_SUPPORTED_VERSIONS.to_be_bytes());
-        let versions_data: Vec<u8> = input.extension_config.supported_versions
+        let versions_data: Vec<u8> = input
+            .extension_config
+            .supported_versions
             .iter()
             .flat_map(|&v| v.to_be_bytes())
             .collect();
@@ -285,7 +292,8 @@ fn build_client_hello(input: &QuicTlsHelloFuzzInput) -> Vec<u8> {
 
     if input.extension_config.include_quic_transport_params {
         extensions_data.extend_from_slice(&EXT_QUIC_TRANSPORT_PARAMS.to_be_bytes());
-        let params_data = build_quic_transport_params(&input.extension_config.quic_transport_params);
+        let params_data =
+            build_quic_transport_params(&input.extension_config.quic_transport_params);
         let data_len = std::cmp::min(params_data.len(), 65535);
         extensions_data.extend_from_slice(&(data_len as u16).to_be_bytes());
         extensions_data.extend_from_slice(&params_data[..data_len]);
@@ -293,7 +301,8 @@ fn build_client_hello(input: &QuicTlsHelloFuzzInput) -> Vec<u8> {
 
     // Write extensions length
     let extensions_len = std::cmp::min(extensions_data.len(), 65535);
-    buf[extensions_start..extensions_start + 2].copy_from_slice(&(extensions_len as u16).to_be_bytes());
+    buf[extensions_start..extensions_start + 2]
+        .copy_from_slice(&(extensions_len as u16).to_be_bytes());
     buf.extend_from_slice(&extensions_data[..extensions_len]);
 
     // Write message length
@@ -426,13 +435,13 @@ fn validate_quic_tls_security(input: &QuicTlsHelloFuzzInput, client_hello_data: 
     // ASSERTION 2: Early Data max_early_data MUST NOT exceed 0xffffffff
     if let Some(early_data) = extensions.get(&EXT_EARLY_DATA) {
         if early_data.len() >= 4 {
-            let early_data_limit = u32::from_be_bytes([
-                early_data[0], early_data[1], early_data[2], early_data[3]
-            ]);
+            let early_data_limit =
+                u32::from_be_bytes([early_data[0], early_data[1], early_data[2], early_data[3]]);
             assert!(
                 early_data_limit <= EARLY_DATA_MAX_LIMIT,
                 "Early data limit exceeds maximum: {} > {}",
-                early_data_limit, EARLY_DATA_MAX_LIMIT
+                early_data_limit,
+                EARLY_DATA_MAX_LIMIT
             );
         }
     }
@@ -451,7 +460,10 @@ fn validate_quic_tls_security(input: &QuicTlsHelloFuzzInput, client_hello_data: 
                         break;
                     }
                 }
-                assert!(has_tls13, "supported_versions must include TLS 1.3 for QUIC");
+                assert!(
+                    has_tls13,
+                    "supported_versions must include TLS 1.3 for QUIC"
+                );
             }
         }
     }
@@ -459,7 +471,10 @@ fn validate_quic_tls_security(input: &QuicTlsHelloFuzzInput, client_hello_data: 
     // ASSERTION 4: key_share MUST be present (no PSK-only connections)
     let has_key_share = extensions.contains_key(&EXT_KEY_SHARE);
     if input.extension_config.include_key_share {
-        assert!(has_key_share, "key_share extension required for QUIC connections");
+        assert!(
+            has_key_share,
+            "key_share extension required for QUIC connections"
+        );
     }
 
     // ASSERTION 5: retry_token size MUST be bounded
@@ -469,7 +484,8 @@ fn validate_quic_tls_security(input: &QuicTlsHelloFuzzInput, client_hello_data: 
                 assert!(
                     retry_token.len() <= MAX_RETRY_TOKEN_SIZE,
                     "Retry token size exceeds limit: {} > {}",
-                    retry_token.len(), MAX_RETRY_TOKEN_SIZE
+                    retry_token.len(),
+                    MAX_RETRY_TOKEN_SIZE
                 );
             }
         }
@@ -479,7 +495,8 @@ fn validate_quic_tls_security(input: &QuicTlsHelloFuzzInput, client_hello_data: 
 fuzz_target!(|input: QuicTlsHelloFuzzInput| {
     // Bound input size to prevent excessive memory usage
     if input.client_hello.extensions.len() > 50
-        || input.extension_config.quic_transport_params.len() > 50 {
+        || input.extension_config.quic_transport_params.len() > 50
+    {
         return;
     }
 

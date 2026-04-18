@@ -122,9 +122,7 @@ fn verify_oti_checksum(oti: &ObjectTransmissionInfo) -> bool {
 }
 
 /// Test symbol_size and sub_blocks/K' relationships per RFC 6330 Section 4.3
-fn test_symbol_size_sub_block_relationships(
-    oti: &ObjectTransmissionInfo,
-) -> Result<(), String> {
+fn test_symbol_size_sub_block_relationships(oti: &ObjectTransmissionInfo) -> Result<(), String> {
     let k = oti.source_symbols as usize;
     let symbol_size = oti.symbol_size as usize;
 
@@ -133,7 +131,10 @@ fn test_symbol_size_sub_block_relationships(
 
     // RFC 6330 Section 4.3: K' >= K relationship
     if params.k_prime < params.k {
-        return Err(format!("Invalid K' < K: K'={}, K={}", params.k_prime, params.k));
+        return Err(format!(
+            "Invalid K' < K: K'={}, K={}",
+            params.k_prime, params.k
+        ));
     }
 
     // Symbol size must align with sub-blocking parameters
@@ -153,8 +154,7 @@ fn test_symbol_size_sub_block_relationships(
     if symbol_size % z != 0 {
         return Err(format!(
             "Symbol size {} not divisible by sub-blocks {}",
-            symbol_size,
-            z
+            symbol_size, z
         ));
     }
 
@@ -195,8 +195,7 @@ fn test_invalid_k_prime_rejection(
         if params.k_prime < params.k {
             return Err(format!(
                 "SystematicParams incorrectly derived K'={} < K={}",
-                params.k_prime,
-                params.k
+                params.k_prime, params.k
             ));
         }
 
@@ -351,8 +350,7 @@ fn test_transfer_length_encoding(oti: &ObjectTransmissionInfo) -> Result<(), Str
     if oti.transfer_length > max_40_bit {
         return Err(format!(
             "Transfer length {} exceeds 40-bit maximum {}",
-            oti.transfer_length,
-            max_40_bit
+            oti.transfer_length, max_40_bit
         ));
     }
 
@@ -375,8 +373,7 @@ fn test_transfer_length_encoding(oti: &ObjectTransmissionInfo) -> Result<(), Str
     if decoded != oti.transfer_length {
         return Err(format!(
             "Transfer length encoding/decoding mismatch: {} != {}",
-            oti.transfer_length,
-            decoded
+            oti.transfer_length, decoded
         ));
     }
 

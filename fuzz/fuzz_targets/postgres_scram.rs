@@ -25,8 +25,8 @@
 use arbitrary::Arbitrary;
 use asupersync::cx::Cx;
 use asupersync::database::postgres::PgError;
-use libfuzzer_sys::fuzz_target;
 use base64::Engine;
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts
 const MAX_FUZZ_INPUT_SIZE: usize = 10_000;
@@ -40,7 +40,7 @@ const MAX_NONCE_SIZE: usize = 512;
 /// Channel binding types for testing
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum ChannelBindingType {
-    None,           // "n,,"
+    None,              // "n,,"
     TlsServerEndPoint, // "p=tls-server-end-point,,"
 }
 
@@ -125,10 +125,18 @@ impl MalformedServerFirst {
     /// Construct the malformed server-first message string
     fn to_message_string(&self, client_nonce: &str) -> String {
         match self {
-            Self::InvalidNonce { server_nonce, salt_b64, iterations } => {
+            Self::InvalidNonce {
+                server_nonce,
+                salt_b64,
+                iterations,
+            } => {
                 format!("r={},s={},i={}", server_nonce, salt_b64, iterations)
             }
-            Self::InvalidSalt { server_nonce, salt_b64, iterations } => {
+            Self::InvalidSalt {
+                server_nonce,
+                salt_b64,
+                iterations,
+            } => {
                 // Ensure server nonce starts with client nonce to pass that validation
                 let full_nonce = if server_nonce.starts_with(client_nonce) {
                     server_nonce.clone()
@@ -137,7 +145,11 @@ impl MalformedServerFirst {
                 };
                 format!("r={},s={},i={}", full_nonce, salt_b64, iterations)
             }
-            Self::InvalidIterations { server_nonce, salt_b64, iterations } => {
+            Self::InvalidIterations {
+                server_nonce,
+                salt_b64,
+                iterations,
+            } => {
                 // Ensure server nonce starts with client nonce
                 let full_nonce = if server_nonce.starts_with(client_nonce) {
                     server_nonce.clone()
@@ -147,7 +159,12 @@ impl MalformedServerFirst {
                 format!("r={},s={},i={}", full_nonce, salt_b64, iterations)
             }
             Self::MalformedStructure { raw_message } => raw_message.clone(),
-            Self::MissingFields { include_nonce, include_salt, include_iterations, filler } => {
+            Self::MissingFields {
+                include_nonce,
+                include_salt,
+                include_iterations,
+                filler,
+            } => {
                 let mut parts = Vec::new();
                 if *include_nonce {
                     let full_nonce = format!("{}{}", client_nonce, filler);
@@ -158,7 +175,7 @@ impl MalformedServerFirst {
                     let salt_bytes: Vec<u8> = filler.bytes().take(16).collect();
                     let salt_b64 = base64::Engine::encode(
                         &base64::engine::general_purpose::STANDARD,
-                        &salt_bytes
+                        &salt_bytes,
                     );
                     parts.push(format!("s={}", salt_b64));
                 }
@@ -167,7 +184,11 @@ impl MalformedServerFirst {
                 }
                 parts.join(",")
             }
-            Self::BoundaryConditions { nonce_size, salt_size, iterations } => {
+            Self::BoundaryConditions {
+                nonce_size,
+                salt_size,
+                iterations,
+            } => {
                 // Generate boundary-sized nonce and salt
                 let nonce_len = (*nonce_size as usize).min(MAX_NONCE_SIZE);
                 let salt_len = (*salt_size as usize).min(MAX_SALT_SIZE);
@@ -176,10 +197,8 @@ impl MalformedServerFirst {
                 server_nonce.push_str(&"x".repeat(nonce_len));
 
                 let salt_bytes = vec![0xAA; salt_len];
-                let salt_b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &salt_bytes
-                );
+                let salt_b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &salt_bytes);
 
                 format!("r={},s={},i={}", server_nonce, salt_b64, iterations)
             }
@@ -228,16 +247,17 @@ impl MalformedServerFinal {
             }
             Self::MissingSignature { filler } => filler.clone(),
             Self::MalformedStructure { raw_message } => raw_message.clone(),
-            Self::WrongPrefix { prefix, signature_data } => {
+            Self::WrongPrefix {
+                prefix,
+                signature_data,
+            } => {
                 format!("{}={}", prefix, signature_data)
             }
             Self::BoundaryConditions { signature_size } => {
                 let sig_len = (*signature_size as usize).min(256);
                 let sig_bytes = vec![0x42; sig_len];
-                let sig_b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &sig_bytes
-                );
+                let sig_b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sig_bytes);
                 format!("v={}", sig_b64)
             }
         }
@@ -298,10 +318,8 @@ impl MockScramAuth {
         hasher.update(username.as_bytes());
         hasher.update(password.as_bytes());
         let hash = hasher.finalize();
-        let client_nonce = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &hash[..12]
-        );
+        let client_nonce =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &hash[..12]);
 
         let client_first_bare = format!("n={},r={}", username, client_nonce);
 
@@ -372,10 +390,8 @@ impl MockScramAuth {
         self.iterations = Some(iterations);
 
         // Generate client-final message (simplified for fuzzing)
-        let channel_binding = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            b"n,,"
-        );
+        let channel_binding =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"n,,");
         let client_final_without_proof = format!("c={channel_binding},r={full_nonce}");
 
         // Store auth message for verification
@@ -400,12 +416,11 @@ impl MockScramAuth {
             .strip_prefix("v=")
             .ok_or_else(|| PgError::AuthenticationFailed("invalid server-final".to_string()))?;
 
-        let server_sig = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            server_sig_b64
-        ).map_err(|e| {
-            PgError::AuthenticationFailed(format!("invalid server signature: {e}"))
-        })?;
+        let server_sig =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, server_sig_b64)
+                .map_err(|e| {
+                    PgError::AuthenticationFailed(format!("invalid server signature: {e}"))
+                })?;
 
         // Compute expected server signature (mock implementation)
         let expected_sig = vec![0x12, 0x34, 0x56, 0x78]; // Mock signature for testing
@@ -457,20 +472,31 @@ fuzz_target!(|input: FuzzInput| {
                 }
                 MalformedServerFirst::InvalidSalt { salt_b64, .. } => {
                     // Should handle base64 decode errors gracefully
-                    if base64::Engine::decode(&base64::engine::general_purpose::STANDARD, salt_b64).is_err() {
+                    if base64::Engine::decode(&base64::engine::general_purpose::STANDARD, salt_b64)
+                        .is_err()
+                    {
                         assert!(result.is_err(), "Should reject invalid base64 salt");
                     }
                 }
                 MalformedServerFirst::InvalidIterations { iterations, .. } => {
                     // Should enforce iteration count bounds
                     if *iterations < 4096 || *iterations > 600_000 {
-                        assert!(result.is_err(), "Should reject out-of-bounds iteration count: {}", iterations);
+                        assert!(
+                            result.is_err(),
+                            "Should reject out-of-bounds iteration count: {}",
+                            iterations
+                        );
                     }
                 }
                 MalformedServerFirst::MalformedStructure { .. } => {
                     // Should handle malformed structure gracefully (no panic)
                 }
-                MalformedServerFirst::MissingFields { include_nonce, include_salt, include_iterations, .. } => {
+                MalformedServerFirst::MissingFields {
+                    include_nonce,
+                    include_salt,
+                    include_iterations,
+                    ..
+                } => {
                     // Should require all fields
                     if !include_nonce || !include_salt || !include_iterations {
                         assert!(result.is_err(), "Should reject missing required fields");
@@ -485,15 +511,19 @@ fuzz_target!(|input: FuzzInput| {
             }
         }
 
-        FuzzOperation::ServerFinalMessage { setup_nonce_suffix, setup_salt, setup_iterations, malformed_final } => {
+        FuzzOperation::ServerFinalMessage {
+            setup_nonce_suffix,
+            setup_salt,
+            setup_iterations,
+            malformed_final,
+        } => {
             // Setup valid server-first for testing server-final
             if *setup_iterations >= 4096 && *setup_iterations <= 600_000 && !setup_salt.is_empty() {
-                let salt_b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    setup_salt
-                );
+                let salt_b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, setup_salt);
                 let full_nonce = format!("{}{}", scram.client_nonce, setup_nonce_suffix);
-                let server_first = format!("r={},s={},i={}", full_nonce, salt_b64, setup_iterations);
+                let server_first =
+                    format!("r={},s={},i={}", full_nonce, salt_b64, setup_iterations);
 
                 // Process valid server-first
                 if scram.process_server_first(&server_first).is_ok() {
@@ -505,7 +535,12 @@ fuzz_target!(|input: FuzzInput| {
                     match malformed_final {
                         MalformedServerFinal::InvalidSignature { signature_b64 } => {
                             // Should handle invalid base64 signatures
-                            if base64::Engine::decode(&base64::engine::general_purpose::STANDARD, signature_b64).is_err() {
+                            if base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                signature_b64,
+                            )
+                            .is_err()
+                            {
                                 assert!(result.is_err(), "Should reject invalid base64 signature");
                             }
                         }
@@ -525,7 +560,10 @@ fuzz_target!(|input: FuzzInput| {
             }
         }
 
-        FuzzOperation::CombinedSequence { first_message, final_message } => {
+        FuzzOperation::CombinedSequence {
+            first_message,
+            final_message,
+        } => {
             // Test combined sequence
             let server_first_msg = first_message.to_message_string(&scram.client_nonce);
             let first_result = scram.process_server_first(&server_first_msg);

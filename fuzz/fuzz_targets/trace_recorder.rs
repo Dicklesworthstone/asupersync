@@ -29,9 +29,9 @@ use std::collections::HashMap;
 
 use asupersync::trace::{
     recorder::TraceRecorder,
-    replay::{ReplayEvent, ReplayTrace, TraceMetadata, CompactTaskId},
+    replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata},
 };
-use asupersync::types::{TaskId, Time, Severity};
+use asupersync::types::{Severity, TaskId, Time};
 
 /// Maximum fuzz input size to prevent timeouts (16KB)
 const MAX_FUZZ_INPUT_SIZE: usize = 16_384;
@@ -156,31 +156,44 @@ impl FuzzReplayEvent {
             },
             Self::RngValue { value } => ReplayEvent::RngValue { value: *value },
             Self::RngSeed { seed } => ReplayEvent::RngSeed { seed: *seed },
-            Self::ChaosInjection { severity, description } => ReplayEvent::ChaosInjection {
+            Self::ChaosInjection {
+                severity,
+                description,
+            } => ReplayEvent::ChaosInjection {
                 kind: *severity,
                 task: None,
                 data: 0,
             },
-            Self::IoReady { descriptor, result_size } => ReplayEvent::IoReady {
+            Self::IoReady {
+                descriptor,
+                result_size,
+            } => ReplayEvent::IoReady {
                 token: *descriptor,
                 readiness: (*result_size) as u8,
             },
-            Self::IoError { descriptor, error_code } => ReplayEvent::IoError {
+            Self::IoError {
+                descriptor,
+                error_code,
+            } => ReplayEvent::IoError {
                 token: *descriptor,
                 kind: (*error_code) as u8,
             },
             Self::WakerNotify { waker_id } => {
                 // WakerNotify variant doesn't exist in current ReplayEvent, use RngValue instead
                 ReplayEvent::RngValue { value: *waker_id }
-            },
+            }
             Self::RegionCreated { region_id } => {
                 // RegionCreated variant may not exist, use RngValue instead
-                ReplayEvent::RngValue { value: *region_id as u64 }
-            },
+                ReplayEvent::RngValue {
+                    value: *region_id as u64,
+                }
+            }
             Self::RegionClosed { region_id } => {
                 // RegionClosed variant may not exist, use RngValue instead
-                ReplayEvent::RngValue { value: *region_id as u64 }
-            },
+                ReplayEvent::RngValue {
+                    value: *region_id as u64,
+                }
+            }
         }
     }
 
@@ -239,12 +252,14 @@ impl TraceRecorderTestHarness {
     }
 
     /// Record a sequence of events and return the trace
-    fn record_events(&mut self, events: &[FuzzReplayEvent], seed: u64) -> Result<ReplayTrace, String> {
+    fn record_events(
+        &mut self,
+        events: &[FuzzReplayEvent],
+        seed: u64,
+    ) -> Result<ReplayTrace, String> {
         // Build trace manually
         let metadata = TraceMetadata::new(seed);
-        let replay_events: Vec<ReplayEvent> = events.iter()
-            .map(|e| e.to_replay_event())
-            .collect();
+        let replay_events: Vec<ReplayEvent> = events.iter().map(|e| e.to_replay_event()).collect();
 
         let trace = ReplayTrace {
             metadata,
@@ -265,10 +280,12 @@ impl TraceRecorderTestHarness {
             // Simulate event processing
             match self.process_replay_event(event, &mut state) {
                 Ok(_) => continue,
-                Err(e) => return Err(ReplayError::ProcessingError {
-                    event_index: idx,
-                    cause: e
-                }),
+                Err(e) => {
+                    return Err(ReplayError::ProcessingError {
+                        event_index: idx,
+                        cause: e,
+                    });
+                }
             }
         }
 
@@ -276,7 +293,11 @@ impl TraceRecorderTestHarness {
     }
 
     /// Simulate truncated replay (Assertion 2)
-    fn replay_truncated(&self, trace: &ReplayTrace, truncation_point: usize) -> Result<ReplayState, ReplayError> {
+    fn replay_truncated(
+        &self,
+        trace: &ReplayTrace,
+        truncation_point: usize,
+    ) -> Result<ReplayState, ReplayError> {
         if truncation_point >= trace.events.len() {
             return self.replay_trace(trace);
         }
@@ -298,21 +319,28 @@ impl TraceRecorderTestHarness {
         }
     }
 
-    fn process_replay_event(&self, event: &ReplayEvent, state: &mut ReplayState) -> Result<(), String> {
+    fn process_replay_event(
+        &self,
+        event: &ReplayEvent,
+        state: &mut ReplayState,
+    ) -> Result<(), String> {
         // Mock event processing
         match event {
             ReplayEvent::TaskScheduled { task, at_tick } => {
                 state.scheduled_tasks.insert(task.0, *at_tick);
-            },
+            }
             ReplayEvent::TaskCompleted { task, outcome } => {
                 state.completed_tasks.insert(task.0, 0); // Use dummy timestamp
-            },
-            ReplayEvent::TimeAdvanced { from_nanos, to_nanos } => {
+            }
+            ReplayEvent::TimeAdvanced {
+                from_nanos,
+                to_nanos,
+            } => {
                 state.current_time = Time::from_nanos(*to_nanos);
-            },
+            }
             ReplayEvent::RngValue { value } => {
                 state.rng_values.push(*value);
-            },
+            }
             _ => {
                 // Handle other event types
             }
@@ -343,18 +371,26 @@ impl ReplayState {
 
     /// Compare two replay states for equality (used in idempotency testing)
     fn is_equivalent(&self, other: &ReplayState) -> bool {
-        self.scheduled_tasks == other.scheduled_tasks &&
-        self.completed_tasks == other.completed_tasks &&
-        self.current_time == other.current_time &&
-        self.rng_values == other.rng_values
+        self.scheduled_tasks == other.scheduled_tasks
+            && self.completed_tasks == other.completed_tasks
+            && self.current_time == other.current_time
+            && self.rng_values == other.rng_values
     }
 }
 
 #[derive(Debug)]
 enum ReplayError {
-    ProcessingError { event_index: usize, cause: String },
-    Incomplete { expected_events: usize, actual_events: usize },
-    CorruptedTrace { details: String },
+    ProcessingError {
+        event_index: usize,
+        cause: String,
+    },
+    Incomplete {
+        expected_events: usize,
+        actual_events: usize,
+    },
+    CorruptedTrace {
+        details: String,
+    },
 }
 
 impl From<ReplayError> for String {
@@ -368,7 +404,11 @@ impl From<ReplayError> for String {
 // =============================================================================
 
 /// **Assertion 1**: Replay idempotency for valid recorded streams
-fn test_replay_idempotency(events: &[FuzzReplayEvent], replay_count: u8, seed: u64) -> Result<(), String> {
+fn test_replay_idempotency(
+    events: &[FuzzReplayEvent],
+    replay_count: u8,
+    seed: u64,
+) -> Result<(), String> {
     let mut harness = TraceRecorderTestHarness::new(FuzzRecorderConfig::default());
 
     // Record the events
@@ -388,7 +428,10 @@ fn test_replay_idempotency(events: &[FuzzReplayEvent], replay_count: u8, seed: u
     let baseline = &replay_states[0];
     for (i, state) in replay_states.iter().skip(1).enumerate() {
         if !baseline.is_equivalent(state) {
-            return Err(format!("Replay idempotency failed: replay {} differs from baseline", i + 1));
+            return Err(format!(
+                "Replay idempotency failed: replay {} differs from baseline",
+                i + 1
+            ));
         }
     }
 
@@ -396,7 +439,11 @@ fn test_replay_idempotency(events: &[FuzzReplayEvent], replay_count: u8, seed: u
 }
 
 /// **Assertion 2**: Truncated replays return Incomplete not panic
-fn test_truncated_replay_safety(events: &[FuzzReplayEvent], truncation_points: &[u16], seed: u64) -> Result<(), String> {
+fn test_truncated_replay_safety(
+    events: &[FuzzReplayEvent],
+    truncation_points: &[u16],
+    seed: u64,
+) -> Result<(), String> {
     let mut harness = TraceRecorderTestHarness::new(FuzzRecorderConfig::default());
 
     // Record the events
@@ -415,21 +462,27 @@ fn test_truncated_replay_safety(events: &[FuzzReplayEvent], truncation_points: &
 }
 
 /// **Assertion 3**: Event ordering preserved under DPOR minimization
-fn test_dpor_ordering_preservation(events: &[FuzzReplayEvent], passes: u8, seed: u64) -> Result<(), String> {
+fn test_dpor_ordering_preservation(
+    events: &[FuzzReplayEvent],
+    passes: u8,
+    seed: u64,
+) -> Result<(), String> {
     let mut harness = TraceRecorderTestHarness::new(FuzzRecorderConfig::default());
 
     // Record the events
     let trace = harness.record_events(events, seed)?;
 
     // Get baseline ordering
-    let baseline_state = harness.replay_trace(&trace)
+    let baseline_state = harness
+        .replay_trace(&trace)
         .map_err(|e| format!("Baseline replay failed: {:?}", e))?;
 
     // Simulate DPOR minimization passes
     for pass in 0..passes {
         let minimized_trace = simulate_dpor_minimization(&trace, pass)?;
 
-        let minimized_state = harness.replay_trace(&minimized_trace)
+        let minimized_state = harness
+            .replay_trace(&minimized_trace)
             .map_err(|e| format!("Minimized replay failed: {:?}", e))?;
 
         // Essential ordering should be preserved
@@ -445,7 +498,11 @@ fn test_dpor_ordering_preservation(events: &[FuzzReplayEvent], passes: u8, seed:
 }
 
 /// **Assertion 4**: Compressed trace roundtrips via LZ4
-fn test_compression_roundtrip(events: &[FuzzReplayEvent], _compression_level: u8, seed: u64) -> Result<(), String> {
+fn test_compression_roundtrip(
+    events: &[FuzzReplayEvent],
+    _compression_level: u8,
+    seed: u64,
+) -> Result<(), String> {
     let mut harness = TraceRecorderTestHarness::new(FuzzRecorderConfig::default());
 
     // Record the events
@@ -475,7 +532,11 @@ fn test_compression_roundtrip(events: &[FuzzReplayEvent], _compression_level: u8
 }
 
 /// **Assertion 5**: Event ID overflow handled gracefully
-fn test_event_id_overflow(base_id: u64, increments: &[u32], overflow_point: u64) -> Result<(), String> {
+fn test_event_id_overflow(
+    base_id: u64,
+    increments: &[u32],
+    overflow_point: u64,
+) -> Result<(), String> {
     let mut harness = TraceRecorderTestHarness::new(FuzzRecorderConfig::default());
 
     let mut current_id = base_id;
@@ -520,10 +581,11 @@ fn simulate_dpor_minimization(trace: &ReplayTrace, pass: u8) -> Result<ReplayTra
     let skip_pattern = (pass % 3) + 1; // Skip every 2nd, 3rd, or 4th non-essential event
 
     for (i, event) in trace.events.iter().enumerate() {
-        let is_essential = matches!(event,
-            ReplayEvent::TaskScheduled { .. } |
-            ReplayEvent::TaskCompleted { .. } |
-            ReplayEvent::TimeAdvanced { .. }
+        let is_essential = matches!(
+            event,
+            ReplayEvent::TaskScheduled { .. }
+                | ReplayEvent::TaskCompleted { .. }
+                | ReplayEvent::TimeAdvanced { .. }
         );
 
         if is_essential || (i % skip_pattern as usize) == 0 {
@@ -546,8 +608,10 @@ fn states_have_consistent_ordering(baseline: &ReplayState, minimized: &ReplaySta
         for (&task_b, &completed_b) in &baseline.completed_tasks {
             if task_a != task_b && completed_a < completed_b {
                 // A completed before B in baseline
-                if let (Some(&min_completed_a), Some(&min_completed_b)) =
-                   (minimized.completed_tasks.get(&task_a), minimized.completed_tasks.get(&task_b)) {
+                if let (Some(&min_completed_a), Some(&min_completed_b)) = (
+                    minimized.completed_tasks.get(&task_a),
+                    minimized.completed_tasks.get(&task_b),
+                ) {
                     if min_completed_a >= min_completed_b {
                         return false; // Ordering violated
                     }
@@ -644,61 +708,86 @@ fuzz_target!(|input: TraceRecorderFuzz| {
 
     // Run the appropriate test based on scenario
     let result = match &input.scenario {
-        RecorderTestScenario::ReplayIdempotency { events, replay_count } => {
+        RecorderTestScenario::ReplayIdempotency {
+            events,
+            replay_count,
+        } => {
             if events.len() > MAX_EVENT_COUNT {
                 return;
             }
             test_replay_idempotency(events, *replay_count, input.seed)
-        },
+        }
 
-        RecorderTestScenario::TruncatedReplay { events, truncation_points } => {
+        RecorderTestScenario::TruncatedReplay {
+            events,
+            truncation_points,
+        } => {
             if events.len() > MAX_EVENT_COUNT || truncation_points.len() > 50 {
                 return;
             }
             test_truncated_replay_safety(events, truncation_points, input.seed)
-        },
+        }
 
-        RecorderTestScenario::DporOrdering { events, minimization_passes } => {
+        RecorderTestScenario::DporOrdering {
+            events,
+            minimization_passes,
+        } => {
             if events.len() > MAX_EVENT_COUNT {
                 return;
             }
             test_dpor_ordering_preservation(events, *minimization_passes, input.seed)
-        },
+        }
 
-        RecorderTestScenario::CompressionRoundtrip { events, compression_level } => {
+        RecorderTestScenario::CompressionRoundtrip {
+            events,
+            compression_level,
+        } => {
             if events.len() > MAX_EVENT_COUNT {
                 return;
             }
             test_compression_roundtrip(events, *compression_level, input.seed)
-        },
+        }
 
-        RecorderTestScenario::EventIdOverflow { base_id, id_increments, overflow_point } => {
+        RecorderTestScenario::EventIdOverflow {
+            base_id,
+            id_increments,
+            overflow_point,
+        } => {
             if id_increments.len() > 1000 {
                 return;
             }
             test_event_id_overflow(*base_id, id_increments, *overflow_point)
-        },
+        }
 
-        RecorderTestScenario::CombinedStress { events, operations: _ } => {
+        RecorderTestScenario::CombinedStress {
+            events,
+            operations: _,
+        } => {
             if events.len() > MAX_EVENT_COUNT {
                 return;
             }
             // Run multiple assertions in sequence
             test_replay_idempotency(events, 3, input.seed)
-                .and_then(|_| test_truncated_replay_safety(events, &[
-                    (events.len() / 4) as u16,
-                    (events.len() / 2) as u16,
-                    (events.len() * 3 / 4) as u16
-                ], input.seed))
+                .and_then(|_| {
+                    test_truncated_replay_safety(
+                        events,
+                        &[
+                            (events.len() / 4) as u16,
+                            (events.len() / 2) as u16,
+                            (events.len() * 3 / 4) as u16,
+                        ],
+                        input.seed,
+                    )
+                })
                 .and_then(|_| test_compression_roundtrip(events, 6, input.seed))
-        },
+        }
     };
 
     // Assert that critical invariants hold
     match result {
         Ok(()) => {
             // Test passed - all assertions satisfied
-        },
+        }
         Err(msg) => {
             // For debugging: we could log the failure, but in fuzzing we typically
             // want to continue and let the fuzzer find more issues

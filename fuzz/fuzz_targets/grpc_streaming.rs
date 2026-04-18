@@ -26,13 +26,13 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 use asupersync::grpc::{
     client::{Channel, GrpcClient, RequestSink, ResponseStream},
+    status::{Code, Status},
     streaming::{Metadata, Request, Response},
-    status::{Status, Code},
 };
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
@@ -290,7 +290,10 @@ async fn simulate_streaming(
     // Execute operations
     for operation in &scenario.operations {
         match operation {
-            StreamOperation::ClientSend { message, should_succeed } => {
+            StreamOperation::ClientSend {
+                message,
+                should_succeed,
+            } => {
                 let result = request_sink.send(message.clone()).await;
                 if *should_succeed {
                     if result.is_ok() {
@@ -304,21 +307,24 @@ async fn simulate_streaming(
                             match status.code() {
                                 Code::ResourceExhausted => {
                                     state.backpressure_triggered = true;
-                                },
+                                }
                                 Code::DeadlineExceeded => {
                                     state.deadline_exceeded = true;
-                                },
+                                }
                                 Code::Cancelled => {
                                     state.client_cancelled = true;
-                                },
+                                }
                                 _ => {}
                             }
                         }
                     }
                 }
-            },
+            }
 
-            StreamOperation::ServerSend { message, should_succeed } => {
+            StreamOperation::ServerSend {
+                message,
+                should_succeed,
+            } => {
                 // In a real implementation, we'd have a server-side equivalent
                 // For fuzzing, we simulate by adding to server_sent queue
                 if *should_succeed {
@@ -326,33 +332,36 @@ async fn simulate_streaming(
                     // Simulate server message appearing in client's response stream
                     // In practice, this would happen through the actual streaming mechanism
                 }
-            },
+            }
 
             StreamOperation::ClientHalfClose => {
                 let result = request_sink.close().await;
                 if result.is_ok() {
                     state.client_closed = true;
                 }
-            },
+            }
 
             StreamOperation::ServerHalfClose => {
                 // Simulate server-side half-close
                 state.server_closed = true;
-            },
+            }
 
             StreamOperation::ClientCancel { status } => {
                 // Simulate client cancellation
                 state.client_cancelled = true;
                 // In a real implementation, this would propagate the status
-            },
+            }
 
             StreamOperation::ServerCancel { status } => {
                 // Simulate server cancellation
                 state.server_cancelled = true;
                 // In a real implementation, this would propagate the status
-            },
+            }
 
-            StreamOperation::TestDeadline { timeout, should_trigger } => {
+            StreamOperation::TestDeadline {
+                timeout,
+                should_trigger,
+            } => {
                 // Create a new client with the specific timeout
                 let channel = create_test_channel(Some(*timeout)).await?;
                 let mut deadline_client = GrpcClient::new(channel);
@@ -369,9 +378,12 @@ async fn simulate_streaming(
                         }
                     }
                 }
-            },
+            }
 
-            StreamOperation::TestFlowControl { direction, burst_size } => {
+            StreamOperation::TestFlowControl {
+                direction,
+                burst_size,
+            } => {
                 // Test flow control by sending a burst of messages
                 let capped_size = (*burst_size).min(MAX_STREAM_MESSAGES);
 
@@ -391,18 +403,21 @@ async fn simulate_streaming(
                                 state.client_sent.push_back(msg);
                             }
                         }
-                    },
+                    }
                     StreamDirection::ServerToClient => {
                         // Simulate server burst (in practice would be actual server operations)
                         for i in 0..capped_size {
                             let msg = TestMessage::new_simple(i as u32);
                             state.server_sent.push_back(msg);
                         }
-                    },
+                    }
                 }
-            },
+            }
 
-            StreamOperation::ReceiveMessages { direction, expected_count } => {
+            StreamOperation::ReceiveMessages {
+                direction,
+                expected_count,
+            } => {
                 // Simulate receiving messages
                 let capped_count = (*expected_count).min(MAX_STREAM_MESSAGES);
 
@@ -415,7 +430,7 @@ async fn simulate_streaming(
                                 state.server_received.push_back(msg);
                             }
                         }
-                    },
+                    }
                     StreamDirection::ServerToClient => {
                         // Client receives from server
                         let available = state.server_sent.len().min(capped_count);
@@ -424,9 +439,9 @@ async fn simulate_streaming(
                                 state.client_received.push_back(msg);
                             }
                         }
-                    },
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -444,9 +459,7 @@ fuzz_target!(|scenario: StreamingScenario| {
         .iter()
         .filter_map(|op| match op {
             StreamOperation::ClientSend { message, .. }
-            | StreamOperation::ServerSend { message, .. } => {
-                Some(message.payload.len())
-            },
+            | StreamOperation::ServerSend { message, .. } => Some(message.payload.len()),
             _ => None,
         })
         .sum();
@@ -468,40 +481,52 @@ fuzz_target!(|scenario: StreamingScenario| {
         match result {
             Ok(()) => {
                 // Verify all invariants hold on successful completion
-                assert!(state.check_message_order_invariant(),
-                    "Message order invariant violated");
-                assert!(state.check_half_close_invariant(),
-                    "Half-close invariant violated");
-                assert!(state.check_cancel_drain_invariant(),
-                    "Cancel drain invariant violated");
-                assert!(state.check_deadline_propagation_invariant(),
-                    "Deadline propagation invariant violated");
-                assert!(state.check_flow_control_invariant(),
-                    "Flow control invariant violated");
-            },
+                assert!(
+                    state.check_message_order_invariant(),
+                    "Message order invariant violated"
+                );
+                assert!(
+                    state.check_half_close_invariant(),
+                    "Half-close invariant violated"
+                );
+                assert!(
+                    state.check_cancel_drain_invariant(),
+                    "Cancel drain invariant violated"
+                );
+                assert!(
+                    state.check_deadline_propagation_invariant(),
+                    "Deadline propagation invariant violated"
+                );
+                assert!(
+                    state.check_flow_control_invariant(),
+                    "Flow control invariant violated"
+                );
+            }
             Err(status) => {
                 // Verify error codes are appropriate
                 match status.code() {
                     Code::ResourceExhausted => {
                         // Expected for flow control testing
                         assert!(state.backpressure_triggered || scenario.test_backpressure);
-                    },
+                    }
                     Code::DeadlineExceeded => {
                         // Expected for timeout testing
                         assert!(state.deadline_exceeded);
-                    },
+                    }
                     Code::Cancelled => {
                         // Expected for cancellation testing
                         assert!(state.client_cancelled || state.server_cancelled);
-                    },
+                    }
                     Code::FailedPrecondition => {
                         // Expected when operating on closed streams
                         assert!(state.client_closed || state.server_closed);
-                    },
+                    }
                     _ => {
                         // Other error codes should have proper context
-                        assert!(!status.message().is_empty(),
-                            "Error status should include descriptive message");
+                        assert!(
+                            !status.message().is_empty(),
+                            "Error status should include descriptive message"
+                        );
                     }
                 }
             }

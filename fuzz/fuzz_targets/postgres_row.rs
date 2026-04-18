@@ -12,7 +12,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::database::postgres::{oid, PgColumn, PgError};
+use asupersync::database::postgres::{PgColumn, PgError, oid};
 use std::collections::BTreeMap;
 
 /// Maximum fuzz input size to prevent timeouts.
@@ -52,13 +52,13 @@ struct PostgresColumnSpec {
 /// Common PostgreSQL type OIDs for testing.
 #[derive(Arbitrary, Debug, Clone)]
 enum PostgresTypeOid {
-    Int4,      // 23
-    Varchar,   // 1043
-    Bytea,     // 17
-    Text,      // 25
-    Bool,      // 16
-    Int8,      // 20
-    Float4,    // 700
+    Int4,    // 23
+    Varchar, // 1043
+    Bytea,   // 17
+    Text,    // 25
+    Bool,    // 16
+    Int8,    // 20
+    Float4,  // 700
 }
 
 impl PostgresTypeOid {
@@ -115,7 +115,10 @@ enum MalformedType {
     /// Truncated DataRow (insufficient bytes).
     TruncatedData { truncate_at: u16 },
     /// Field length exceeds available data.
-    FieldLengthMismatch { claimed_length: u32, actual_length: u16 },
+    FieldLengthMismatch {
+        claimed_length: u32,
+        actual_length: u16,
+    },
     /// Negative field count.
     NegativeFieldCount { count: i16 },
     /// Field count mismatch with RowDescription.
@@ -226,7 +229,10 @@ fn build_data_row(row_data: &PostgresRowData, malformed: Option<&MalformedType>)
     for (i, value) in row_data.values.iter().enumerate() {
         // Apply malformed type modifications for specific fields.
         let (field_length, field_data) = match malformed {
-            Some(MalformedType::FieldLengthMismatch { claimed_length, actual_length }) if i == 0 => {
+            Some(MalformedType::FieldLengthMismatch {
+                claimed_length,
+                actual_length,
+            }) if i == 0 => {
                 let mut truncated_data = value.data.clone();
                 truncated_data.truncate(*actual_length as usize);
                 (*claimed_length as i32, truncated_data)
@@ -366,8 +372,7 @@ fn test_postgres_row_assertions(input: PostgresRowFuzzInput) -> Result<(), Strin
                     if col.format_code != 0 && col.format_code != 1 {
                         return Err(format!(
                             "ASSERTION 5 FAILED: Invalid format code {} at column {}",
-                            col.format_code,
-                            i
+                            col.format_code, i
                         ));
                     }
                 }
@@ -380,7 +385,10 @@ fn test_postgres_row_assertions(input: PostgresRowFuzzInput) -> Result<(), Strin
                     // ASSERTION 4: Oversized field rejected
                     if *field_size > MAX_FIELD_SIZE {
                         // Expected error for oversized field
-                        if !err.contains("too large") && !err.contains("oversized") && !err.contains("exceeds") {
+                        if !err.contains("too large")
+                            && !err.contains("oversized")
+                            && !err.contains("exceeds")
+                        {
                             return Err(format!(
                                 "ASSERTION 4 FAILED: Oversized field not rejected with proper error: {}",
                                 err
@@ -437,7 +445,10 @@ impl TestPgValue {
 }
 
 /// Simplified DataRow parser for testing (based on the actual implementation).
-fn parse_data_row_simplified(data: &[u8], columns: &[PgColumn]) -> Result<Vec<TestPgValue>, String> {
+fn parse_data_row_simplified(
+    data: &[u8],
+    columns: &[PgColumn],
+) -> Result<Vec<TestPgValue>, String> {
     if data.len() < 2 {
         return Err("DataRow too short for field count".to_string());
     }

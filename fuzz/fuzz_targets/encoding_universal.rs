@@ -9,12 +9,12 @@
 //! 4. Incomplete frame returns Incomplete not panic (graceful error handling)
 //! 5. Multi-frame streams correctly delimited (boundary detection)
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::encoding::{EncodingPipeline, EncodingError, EncodedSymbol};
 use asupersync::config::EncodingConfig;
-use asupersync::types::resource::{PoolConfig, SymbolPool};
+use asupersync::encoding::{EncodedSymbol, EncodingError, EncodingPipeline};
 use asupersync::types::ObjectId;
+use asupersync::types::resource::{PoolConfig, SymbolPool};
+use libfuzzer_sys::fuzz_target;
 use std::io::{self, ErrorKind};
 
 /// Maximum frame size to prevent memory exhaustion during fuzzing
@@ -79,10 +79,7 @@ enum EdgeCaseFrame {
     TruncatedHeader(Vec<u8>),
 
     /// Truncated frame (incomplete payload)
-    TruncatedPayload {
-        header_size: u8,
-        payload_size: u8,
-    },
+    TruncatedPayload { header_size: u8, payload_size: u8 },
 
     /// Frame with zero uncompressed length but non-empty payload
     ZeroLengthWithData(Vec<u8>),
@@ -153,8 +150,11 @@ fn fuzz_raw_encoding(bytes: &[u8]) {
         }
     });
 
-    assert!(result.is_ok(), "Raw encoding should not panic on input: {:?}",
-        &bytes[..bytes.len().min(64)]);
+    assert!(
+        result.is_ok(),
+        "Raw encoding should not panic on input: {:?}",
+        &bytes[..bytes.len().min(64)]
+    );
 }
 
 fn fuzz_structured_frame(frame: FrameData) {
@@ -165,14 +165,19 @@ fn fuzz_structured_frame(frame: FrameData) {
         let result = parse_frame(&serialized);
         match result {
             Err(ParseError::InvalidCompressor(kind)) => {
-                assert_eq!(kind, frame.compressor_kind,
-                    "Invalid compressor kind should be reported correctly");
+                assert_eq!(
+                    kind, frame.compressor_kind,
+                    "Invalid compressor kind should be reported correctly"
+                );
             }
             Err(_) => {
                 // Other errors are acceptable for invalid compressor
             }
             Ok(_) => {
-                panic!("Invalid compressor kind {} should be rejected", frame.compressor_kind);
+                panic!(
+                    "Invalid compressor kind {} should be rejected",
+                    frame.compressor_kind
+                );
             }
         }
         return;
@@ -184,14 +189,19 @@ fn fuzz_structured_frame(frame: FrameData) {
         let result = parse_frame(&serialized);
         match result {
             Err(ParseError::LengthTooLarge(length)) => {
-                assert_eq!(length, frame.uncompressed_length,
-                    "Length bound violation should report correct length");
+                assert_eq!(
+                    length, frame.uncompressed_length,
+                    "Length bound violation should report correct length"
+                );
             }
             Err(_) => {
                 // Other errors are acceptable for oversized length
             }
             Ok(_) => {
-                panic!("Oversized length {} should be rejected", frame.uncompressed_length);
+                panic!(
+                    "Oversized length {} should be rejected",
+                    frame.uncompressed_length
+                );
             }
         }
         return;
@@ -212,8 +222,10 @@ fn fuzz_structured_frame(frame: FrameData) {
                     // Other errors are acceptable for checksum mismatch
                 }
                 Ok(_) => {
-                    panic!("Checksum mismatch should be detected: expected {}, got {}",
-                        expected_checksum, frame.checksum);
+                    panic!(
+                        "Checksum mismatch should be detected: expected {}, got {}",
+                        expected_checksum, frame.checksum
+                    );
                 }
             }
             return;
@@ -249,10 +261,11 @@ fn fuzz_multi_frame_stream(frames: Vec<FrameData>) {
 
     for frame in frames {
         // Only include valid frames in expected output
-        if frame.compressor_kind <= 3 &&
-           frame.uncompressed_length as usize <= MAX_FRAME_SIZE &&
-           (frame.checksum_type == 0 ||
-            frame.checksum == compute_checksum(frame.checksum_type, &frame.payload)) {
+        if frame.compressor_kind <= 3
+            && frame.uncompressed_length as usize <= MAX_FRAME_SIZE
+            && (frame.checksum_type == 0
+                || frame.checksum == compute_checksum(frame.checksum_type, &frame.payload))
+        {
             let serialized = serialize_frame(&frame);
             stream_bytes.extend_from_slice(&serialized);
             expected_frames.push(frame);
@@ -263,8 +276,11 @@ fn fuzz_multi_frame_stream(frames: Vec<FrameData>) {
     let result = parse_multi_frame_stream(&stream_bytes);
     match result {
         Ok(parsed_frames) => {
-            assert_eq!(parsed_frames.len(), expected_frames.len(),
-                "Multi-frame stream should parse correct number of frames");
+            assert_eq!(
+                parsed_frames.len(),
+                expected_frames.len(),
+                "Multi-frame stream should parse correct number of frames"
+            );
 
             for (parsed, expected) in parsed_frames.iter().zip(expected_frames.iter()) {
                 assert_eq!(parsed.compressor_kind, expected.compressor_kind);
@@ -293,8 +309,11 @@ fn fuzz_edge_case(edge: EdgeCaseFrame) {
                 // Empty payload with non-zero length should be rejected
                 let serialized = serialize_frame(&frame);
                 let result = parse_frame(&serialized);
-                assert!(matches!(result, Err(ParseError::PayloadLengthMismatch { .. })),
-                    "Empty payload with length {} should be rejected", length);
+                assert!(
+                    matches!(result, Err(ParseError::PayloadLengthMismatch { .. })),
+                    "Empty payload with length {} should be rejected",
+                    length
+                );
             }
         }
 
@@ -309,8 +328,10 @@ fn fuzz_edge_case(edge: EdgeCaseFrame) {
 
             let serialized = serialize_frame(&frame);
             let result = parse_frame(&serialized);
-            assert!(matches!(result, Err(ParseError::LengthTooLarge(_))),
-                "Oversized length should be rejected");
+            assert!(
+                matches!(result, Err(ParseError::LengthTooLarge(_))),
+                "Oversized length should be rejected"
+            );
         }
 
         EdgeCaseFrame::TruncatedHeader(bytes) => {
@@ -320,12 +341,17 @@ fn fuzz_edge_case(edge: EdgeCaseFrame) {
                 assert!(result.is_ok(), "Truncated header should not panic");
 
                 let parse_result = parse_frame(&bytes);
-                assert!(matches!(parse_result, Err(ParseError::Incomplete)),
-                    "Truncated header should return Incomplete");
+                assert!(
+                    matches!(parse_result, Err(ParseError::Incomplete)),
+                    "Truncated header should return Incomplete"
+                );
             }
         }
 
-        EdgeCaseFrame::TruncatedPayload { header_size, payload_size } => {
+        EdgeCaseFrame::TruncatedPayload {
+            header_size,
+            payload_size,
+        } => {
             let claimed_size = (header_size as usize * 8).min(MAX_FRAME_SIZE);
             let actual_size = (payload_size as usize * 4).min(claimed_size);
 
@@ -347,8 +373,13 @@ fn fuzz_edge_case(edge: EdgeCaseFrame) {
             assert!(result.is_ok(), "Truncated payload should not panic");
 
             let parse_result = parse_frame(&serialized);
-            assert!(matches!(parse_result, Err(ParseError::Incomplete) | Err(ParseError::PayloadLengthMismatch { .. })),
-                "Truncated payload should return appropriate error");
+            assert!(
+                matches!(
+                    parse_result,
+                    Err(ParseError::Incomplete) | Err(ParseError::PayloadLengthMismatch { .. })
+                ),
+                "Truncated payload should return appropriate error"
+            );
         }
 
         EdgeCaseFrame::ZeroLengthWithData(data) => {
@@ -363,8 +394,10 @@ fn fuzz_edge_case(edge: EdgeCaseFrame) {
 
                 let serialized = serialize_frame(&frame);
                 let result = parse_frame(&serialized);
-                assert!(matches!(result, Err(ParseError::PayloadLengthMismatch { .. })),
-                    "Zero length with non-empty payload should be rejected");
+                assert!(
+                    matches!(result, Err(ParseError::PayloadLengthMismatch { .. })),
+                    "Zero length with non-empty payload should be rejected"
+                );
             }
         }
 
@@ -525,7 +558,10 @@ fn validate_encoding_error(error: &EncodingError) {
             assert!(*size > *limit, "DataTooLarge should have size > limit");
         }
         EncodingError::InvalidConfig { reason } => {
-            assert!(!reason.is_empty(), "Invalid config should have non-empty reason");
+            assert!(
+                !reason.is_empty(),
+                "Invalid config should have non-empty reason"
+            );
         }
         _ => {
             // Other errors are acceptable
@@ -539,10 +575,16 @@ fn validate_parse_error(error: &ParseError, _frame: &FrameData) {
             assert!(*kind > 3, "Invalid compressor should be > 3");
         }
         ParseError::LengthTooLarge(length) => {
-            assert!(*length as usize > MAX_FRAME_SIZE, "Length should exceed limit");
+            assert!(
+                *length as usize > MAX_FRAME_SIZE,
+                "Length should exceed limit"
+            );
         }
         ParseError::ChecksumMismatch { expected, actual } => {
-            assert_ne!(expected, actual, "Checksum mismatch should have different values");
+            assert_ne!(
+                expected, actual,
+                "Checksum mismatch should have different values"
+            );
         }
         _ => {
             // Other errors are acceptable

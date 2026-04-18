@@ -89,7 +89,9 @@ fn build_goaway_payload(input: &GoAwayFuzzInput) -> Vec<u8> {
                 }
 
                 let full_payload = build_normal_payload(input);
-                payload.extend_from_slice(&full_payload[..(*truncate_at as usize).min(full_payload.len())]);
+                payload.extend_from_slice(
+                    &full_payload[..(*truncate_at as usize).min(full_payload.len())],
+                );
                 return payload;
             }
             MalformedLength::LengthMismatch { actual, .. } => {
@@ -126,11 +128,12 @@ fn test_goaway_frame_assertions(input: GoAwayFuzzInput) -> Result<(), String> {
     let payload_bytes = build_goaway_payload(&input);
 
     // Determine advertised length.
-    let advertised_length = if let Some(MalformedLength::LengthMismatch { advertised, .. }) = &input.malformed_length {
-        *advertised as u32
-    } else {
-        payload_bytes.len() as u32
-    };
+    let advertised_length =
+        if let Some(MalformedLength::LengthMismatch { advertised, .. }) = &input.malformed_length {
+            *advertised as u32
+        } else {
+            payload_bytes.len() as u32
+        };
 
     // Build frame header.
     let frame_header = FrameHeader {
@@ -180,7 +183,8 @@ fn test_goaway_frame_assertions(input: GoAwayFuzzInput) -> Result<(), String> {
             if goaway_frame.debug_data.as_ref() != input.debug_data.as_slice() {
                 return Err(format!(
                     "ASSERTION 3 FAILED: debug data not preserved. Expected {} bytes, got {} bytes",
-                    input.debug_data.len(), goaway_frame.debug_data.len()
+                    input.debug_data.len(),
+                    goaway_frame.debug_data.len()
                 ));
             }
 
@@ -299,7 +303,7 @@ fn test_goaway_edge_cases(input: &GoAwayFuzzInput) -> Result<(), String> {
     // Test maximum last_stream_id value.
     let max_stream_payload = {
         let mut payload = Vec::new();
-        payload.extend_from_slice(&0x7FFFFFFFu32.to_be_bytes());  // Max valid stream ID
+        payload.extend_from_slice(&0x7FFFFFFFu32.to_be_bytes()); // Max valid stream ID
         payload.extend_from_slice(&(ErrorCode::NoError as u32).to_be_bytes());
         payload.extend_from_slice(b"max_stream_test");
         payload
@@ -322,7 +326,7 @@ fn test_goaway_edge_cases(input: &GoAwayFuzzInput) -> Result<(), String> {
     // Test R bit set in last_stream_id.
     let r_bit_payload = {
         let mut payload = Vec::new();
-        payload.extend_from_slice(&0x80000001u32.to_be_bytes());  // R bit set
+        payload.extend_from_slice(&0x80000001u32.to_be_bytes()); // R bit set
         payload.extend_from_slice(&(ErrorCode::NoError as u32).to_be_bytes());
         payload.extend_from_slice(b"r_bit_test");
         payload

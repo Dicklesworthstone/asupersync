@@ -35,15 +35,15 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::connection::{Connection, ConnectionState};
-use asupersync::http::h2::settings::Settings;
-use asupersync::http::h2::frame::{
-    DataFrame, Frame, FrameHeader, FrameType, data_flags,
-    DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE, HeadersFrame
-};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
-use asupersync::http::h2::stream::{StreamState};
+use asupersync::http::h2::frame::{
+    DEFAULT_MAX_FRAME_SIZE, DataFrame, Frame, FrameHeader, FrameType, HeadersFrame, MAX_FRAME_SIZE,
+    data_flags,
+};
+use asupersync::http::h2::settings::Settings;
+use asupersync::http::h2::stream::StreamState;
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_INPUT_SIZE: usize = 64_000;
@@ -124,9 +124,7 @@ enum TestStreamState {
 /// Test the HTTP/2 DATA frame parser through comprehensive invariant checking.
 fn test_h2_data_frame_invariants(fuzz_input: &H2DataFuzzInput) -> Result<String, String> {
     // Skip oversized inputs to prevent memory exhaustion
-    let total_payload_size: usize = fuzz_input.frame_payloads.iter()
-        .map(|p| p.len())
-        .sum();
+    let total_payload_size: usize = fuzz_input.frame_payloads.iter().map(|p| p.len()).sum();
     if total_payload_size > MAX_FUZZ_INPUT_SIZE {
         return Err("Input too large for fuzzing".to_string());
     }
@@ -173,9 +171,8 @@ fn create_test_connection() -> Connection {
     // Ensure connection is in open state
     if matches!(connection.state(), ConnectionState::Handshaking) {
         // Process a settings frame to move to open state
-        let settings_frame = Frame::Settings(
-            asupersync::http::h2::frame::SettingsFrame::new(vec![])
-        );
+        let settings_frame =
+            Frame::Settings(asupersync::http::h2::frame::SettingsFrame::new(vec![]));
         let _ = connection.process_frame(settings_frame);
     }
 
@@ -183,8 +180,15 @@ fn create_test_connection() -> Connection {
 }
 
 /// Test individual DATA frames for proper validation.
-fn test_individual_data_frames(connection: &mut Connection, fuzz_input: &H2DataFuzzInput) -> Result<(), String> {
-    for (header_data, payload) in fuzz_input.frame_headers.iter().zip(fuzz_input.frame_payloads.iter()) {
+fn test_individual_data_frames(
+    connection: &mut Connection,
+    fuzz_input: &H2DataFuzzInput,
+) -> Result<(), String> {
+    for (header_data, payload) in fuzz_input
+        .frame_headers
+        .iter()
+        .zip(fuzz_input.frame_payloads.iter())
+    {
         if payload.len() > MAX_REASONABLE_PAYLOAD_SIZE {
             continue; // Skip unreasonably large payloads
         }
@@ -211,8 +215,10 @@ fn test_individual_data_frames(connection: &mut Connection, fuzz_input: &H2DataF
                 // Invariant 1: PADDED flag with pad-length <= payload length
                 if header_data.flags & data_flags::PADDED != 0 {
                     // If PADDED flag is set, parsing succeeded, so padding was valid
-                    assert!(data_frame.data.len() <= payload.len(),
-                        "PADDED frame data should not exceed original payload");
+                    assert!(
+                        data_frame.data.len() <= payload.len(),
+                        "PADDED frame data should not exceed original payload"
+                    );
                 }
 
                 // Invariant 3: DATA on Stream ID 0 should have triggered PROTOCOL_ERROR
@@ -224,7 +230,7 @@ fn test_individual_data_frames(connection: &mut Connection, fuzz_input: &H2DataF
                 if header_data.stream_id > 0 && header_data.stream_id < 1000 {
                     test_connection_processing(connection, Frame::Data(data_frame))?;
                 }
-            },
+            }
             Err(err) => {
                 // Verify error codes are appropriate
                 match err.code {
@@ -238,16 +244,20 @@ fn test_individual_data_frames(connection: &mut Connection, fuzz_input: &H2DataF
                         } else if header_data.flags & data_flags::PADDED != 0 {
                             // Invariant 1: Likely padding validation failure ✓
                         }
-                    },
+                    }
                     ErrorCode::FrameSizeError => {
                         // Invariant 4: Oversized DATA > SETTINGS_MAX_FRAME_SIZE rejected
-                        assert!(frame_length > DEFAULT_MAX_FRAME_SIZE,
-                            "Frame size error should only occur for oversized frames");
-                    },
+                        assert!(
+                            frame_length > DEFAULT_MAX_FRAME_SIZE,
+                            "Frame size error should only occur for oversized frames"
+                        );
+                    }
                     _ => {
                         // Other error codes should be justified
-                        assert!(!err.to_string().is_empty(),
-                            "Error should have descriptive message");
+                        assert!(
+                            !err.to_string().is_empty(),
+                            "Error should have descriptive message"
+                        );
                     }
                 }
             }
@@ -285,12 +295,16 @@ fn test_connection_processing(connection: &mut Connection, frame: Frame) -> Resu
 
                 // Invariant 5: Flow-control credit consumed atomically
                 if payload_size > 0 {
-                    assert!(window_after <= window_before,
-                        "Connection window should decrease after DATA frame processing");
+                    assert!(
+                        window_after <= window_before,
+                        "Connection window should decrease after DATA frame processing"
+                    );
                     let expected_decrease = payload_size;
                     let actual_decrease = window_before - window_after;
-                    assert!(actual_decrease >= expected_decrease,
-                        "Connection window decrease should at least match payload size");
+                    assert!(
+                        actual_decrease >= expected_decrease,
+                        "Connection window decrease should at least match payload size"
+                    );
                 }
 
                 // Invariant 2: END_STREAM on stream in OPEN moves to HALF_CLOSED
@@ -298,28 +312,33 @@ fn test_connection_processing(connection: &mut Connection, frame: Frame) -> Resu
                     if let Some(stream) = connection.stream(data_frame.stream_id) {
                         let state = stream.state();
                         // Stream should be half-closed or closed after END_STREAM
-                        assert!(matches!(state, StreamState::HalfClosedRemote | StreamState::Closed),
-                            "END_STREAM should transition stream to half-closed or closed state, got {:?}", state);
+                        assert!(
+                            matches!(state, StreamState::HalfClosedRemote | StreamState::Closed),
+                            "END_STREAM should transition stream to half-closed or closed state, got {:?}",
+                            state
+                        );
                     }
                 }
             }
-        },
+        }
         Err(err) => {
             // Processing failed - verify error is appropriate
             match err.code {
                 ErrorCode::ProtocolError => {
                     // Expected for various protocol violations
-                },
+                }
                 ErrorCode::StreamClosed => {
                     // Expected if trying to send DATA on closed stream
-                },
+                }
                 ErrorCode::FlowControlError => {
                     // Expected if flow control windows are exceeded
-                },
+                }
                 _ => {
                     // Other errors should be justified
-                    assert!(!err.to_string().is_empty(),
-                        "Error should have descriptive message");
+                    assert!(
+                        !err.to_string().is_empty(),
+                        "Error should have descriptive message"
+                    );
                 }
             }
         }
@@ -339,15 +358,11 @@ fn test_data_frame_edge_cases(connection: &mut Connection) -> Result<(), String>
             payload_size: 10,
             pad_length: 20,
         },
-        H2DataEdgeCase::PaddedEmptyPayload {
-            pad_length: 1,
-        },
+        H2DataEdgeCase::PaddedEmptyPayload { pad_length: 1 },
         H2DataEdgeCase::EmptyPayload {
             flags: data_flags::END_STREAM,
         },
-        H2DataEdgeCase::MaxValidPadding {
-            data_size: 5,
-        },
+        H2DataEdgeCase::MaxValidPadding { data_size: 5 },
     ];
 
     for edge_case in &edge_cases {
@@ -358,7 +373,10 @@ fn test_data_frame_edge_cases(connection: &mut Connection) -> Result<(), String>
 }
 
 /// Test a single edge case scenario.
-fn test_single_edge_case(connection: &mut Connection, edge_case: &H2DataEdgeCase) -> Result<(), String> {
+fn test_single_edge_case(
+    connection: &mut Connection,
+    edge_case: &H2DataEdgeCase,
+) -> Result<(), String> {
     match edge_case {
         H2DataEdgeCase::StreamIdZero { payload, flags } => {
             let header = FrameHeader {
@@ -373,16 +391,24 @@ fn test_single_edge_case(connection: &mut Connection, edge_case: &H2DataEdgeCase
             match DataFrame::parse(&header, payload_bytes) {
                 Ok(_) => {
                     return Err("DATA frame with stream ID 0 should have been rejected".to_string());
-                },
+                }
                 Err(err) => {
-                    assert_eq!(err.code, ErrorCode::ProtocolError,
-                        "DATA on stream ID 0 should return PROTOCOL_ERROR");
+                    assert_eq!(
+                        err.code,
+                        ErrorCode::ProtocolError,
+                        "DATA on stream ID 0 should return PROTOCOL_ERROR"
+                    );
                 }
             }
-        },
+        }
 
-        H2DataEdgeCase::ExcessivePadding { payload_size, pad_length } => {
-            if *payload_size > MAX_REASONABLE_PAYLOAD_SIZE || *pad_length as usize > *payload_size + 10 {
+        H2DataEdgeCase::ExcessivePadding {
+            payload_size,
+            pad_length,
+        } => {
+            if *payload_size > MAX_REASONABLE_PAYLOAD_SIZE
+                || *pad_length as usize > *payload_size + 10
+            {
                 return Ok(()); // Skip unreasonable test cases
             }
 
@@ -402,16 +428,19 @@ fn test_single_edge_case(connection: &mut Connection, edge_case: &H2DataEdgeCase
                     if *pad_length as usize > *payload_size {
                         return Err("Excessive padding should have been rejected".to_string());
                     }
-                },
+                }
                 Err(err) => {
                     if *pad_length as usize <= *payload_size {
                         // Valid padding was rejected - check if there's another issue
-                        assert_eq!(err.code, ErrorCode::ProtocolError,
-                            "Valid padding rejection should be protocol error");
+                        assert_eq!(
+                            err.code,
+                            ErrorCode::ProtocolError,
+                            "Valid padding rejection should be protocol error"
+                        );
                     }
                 }
             }
-        },
+        }
 
         H2DataEdgeCase::PaddedEmptyPayload { pad_length: _ } => {
             let payload = vec![]; // Empty payload with PADDED flag
@@ -426,14 +455,19 @@ fn test_single_edge_case(connection: &mut Connection, edge_case: &H2DataEdgeCase
             // Should be rejected because PADDED requires at least 1 byte for pad length
             match DataFrame::parse(&header, Bytes::copy_from_slice(&payload)) {
                 Ok(_) => {
-                    return Err("PADDED frame with empty payload should have been rejected".to_string());
-                },
+                    return Err(
+                        "PADDED frame with empty payload should have been rejected".to_string()
+                    );
+                }
                 Err(err) => {
-                    assert_eq!(err.code, ErrorCode::ProtocolError,
-                        "PADDED empty payload should return PROTOCOL_ERROR");
+                    assert_eq!(
+                        err.code,
+                        ErrorCode::ProtocolError,
+                        "PADDED empty payload should return PROTOCOL_ERROR"
+                    );
                 }
             }
-        },
+        }
 
         H2DataEdgeCase::EmptyPayload { flags } => {
             let payload = vec![];
@@ -449,18 +483,22 @@ fn test_single_edge_case(connection: &mut Connection, edge_case: &H2DataEdgeCase
             if *flags & data_flags::PADDED == 0 {
                 match DataFrame::parse(&header, Bytes::copy_from_slice(&payload)) {
                     Ok(data_frame) => {
-                        assert!(data_frame.data.is_empty(),
-                            "Empty payload should result in empty data");
-                    },
+                        assert!(
+                            data_frame.data.is_empty(),
+                            "Empty payload should result in empty data"
+                        );
+                    }
                     Err(_) => {
                         return Err("Valid empty payload should not be rejected".to_string());
                     }
                 }
             }
-        },
+        }
 
         H2DataEdgeCase::MaxValidPadding { data_size } => {
-            if *data_size > 100 { return Ok(()); } // Skip large test cases
+            if *data_size > 100 {
+                return Ok(());
+            } // Skip large test cases
 
             // Create payload: [pad_length, ...data..., ...padding...]
             let pad_length = (*data_size + 1) as u8;
@@ -478,14 +516,17 @@ fn test_single_edge_case(connection: &mut Connection, edge_case: &H2DataEdgeCase
             // This should be valid - pad_length equals remaining data length
             match DataFrame::parse(&header, Bytes::copy_from_slice(&payload)) {
                 Ok(data_frame) => {
-                    assert_eq!(data_frame.data.len(), *data_size as usize,
-                        "Data should contain only the non-padded portion");
-                },
+                    assert_eq!(
+                        data_frame.data.len(),
+                        *data_size as usize,
+                        "Data should contain only the non-padded portion"
+                    );
+                }
                 Err(_) => {
                     return Err("Valid maximum padding should not be rejected".to_string());
                 }
             }
-        },
+        }
 
         _ => {
             // Handle other edge cases
@@ -515,9 +556,12 @@ fn test_oversized_data_frames(_connection: &mut Connection) -> Result<(), String
     match result {
         Ok(data_frame) => {
             // Large frame parsed successfully at DataFrame level
-            assert_eq!(data_frame.data.len(), oversized_payload.len(),
-                "Large frame should preserve payload size");
-        },
+            assert_eq!(
+                data_frame.data.len(),
+                oversized_payload.len(),
+                "Large frame should preserve payload size"
+            );
+        }
         Err(_) => {
             // Some other validation failed
         }
@@ -533,26 +577,26 @@ fn test_flow_control_invariants(connection: &mut Connection) -> Result<(), Strin
     let payload = vec![0x42u8; 1000];
 
     // Create a stream first
-    let headers_frame = Frame::Headers(HeadersFrame::new(
-        1, Bytes::new(), false, true
-    ));
+    let headers_frame = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
     let _ = connection.process_frame(headers_frame);
 
     // Send DATA frame
-    let data_frame = Frame::Data(DataFrame::new(
-        1, Bytes::copy_from_slice(&payload), false
-    ));
+    let data_frame = Frame::Data(DataFrame::new(1, Bytes::copy_from_slice(&payload), false));
 
     match connection.process_frame(data_frame) {
         Ok(_) => {
             let final_window = connection.recv_window();
             // Invariant 5: Flow-control credit consumed atomically
-            assert!(final_window <= initial_window,
-                "Flow control window should decrease");
+            assert!(
+                final_window <= initial_window,
+                "Flow control window should decrease"
+            );
             let decrease = initial_window - final_window;
-            assert!(decrease >= payload.len() as i32,
-                "Window decrease should be at least payload size");
-        },
+            assert!(
+                decrease >= payload.len() as i32,
+                "Window decrease should be at least payload size"
+            );
+        }
         Err(_) => {
             // Frame might be rejected for other reasons (e.g., closed stream)
         }
@@ -565,20 +609,22 @@ fn test_flow_control_invariants(connection: &mut Connection) -> Result<(), Strin
 fn test_stream_state_transitions(connection: &mut Connection) -> Result<(), String> {
     // Open a new stream
     let stream_id = 3;
-    let headers_frame = Frame::Headers(HeadersFrame::new(
-        stream_id, Bytes::new(), false, true
-    ));
+    let headers_frame = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
     let _ = connection.process_frame(headers_frame);
 
     // Verify stream is open
     if let Some(stream) = connection.stream(stream_id) {
-        assert!(matches!(stream.state(), StreamState::Open),
-            "Stream should be open after HEADERS");
+        assert!(
+            matches!(stream.state(), StreamState::Open),
+            "Stream should be open after HEADERS"
+        );
     }
 
     // Send DATA frame with END_STREAM
     let data_frame = Frame::Data(DataFrame::new(
-        stream_id, Bytes::from_static(b"hello"), true
+        stream_id,
+        Bytes::from_static(b"hello"),
+        true,
     ));
 
     match connection.process_frame(data_frame) {
@@ -586,10 +632,13 @@ fn test_stream_state_transitions(connection: &mut Connection) -> Result<(), Stri
             // Invariant 2: END_STREAM on stream in OPEN moves to HALF_CLOSED
             if let Some(stream) = connection.stream(stream_id) {
                 let state = stream.state();
-                assert!(matches!(state, StreamState::HalfClosedRemote | StreamState::Closed),
-                    "END_STREAM should transition to half-closed or closed, got {:?}", state);
+                assert!(
+                    matches!(state, StreamState::HalfClosedRemote | StreamState::Closed),
+                    "END_STREAM should transition to half-closed or closed, got {:?}",
+                    state
+                );
             }
-        },
+        }
         Err(_) => {
             // Frame processing failed for some reason
         }
@@ -622,7 +671,7 @@ fuzz_target!(|fuzz_input: H2DataFuzzInput| {
     match result {
         Ok(_) => {
             // Success case - DATA frames processed without crashes
-        },
+        }
         Err(err) => {
             // Failure case - should be graceful with descriptive errors
             assert!(!err.is_empty(), "Error messages should be descriptive");

@@ -14,11 +14,11 @@
 //! 5. Leak detection and invariant checking
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 use asupersync::obligation::ledger::{ObligationLedger, ObligationToken};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Simplified fuzz input for obligation ledger operations
@@ -38,19 +38,19 @@ enum ObligationOperation {
     /// Acquire a new obligation
     Acquire {
         kind: ObligationKindInput,
-        holder_idx: u8,     // Index into holders array
-        region_idx: u8,     // Index into regions array
-        time_offset: u64,   // Offset from base time
+        holder_idx: u8,   // Index into holders array
+        region_idx: u8,   // Index into regions array
+        time_offset: u64, // Offset from base time
     },
     /// Commit an obligation by token index
     Commit {
-        token_idx: u16,     // Index into tokens array
-        time_offset: u64,   // Offset from base time
+        token_idx: u16,   // Index into tokens array
+        time_offset: u64, // Offset from base time
     },
     /// Abort an obligation by token index
     Abort {
-        token_idx: u16,     // Index into tokens array
-        time_offset: u64,   // Offset from base time
+        token_idx: u16,   // Index into tokens array
+        time_offset: u64, // Offset from base time
         reason: AbortReasonInput,
     },
     /// Abort an obligation by ID (simulates external cancellation)
@@ -66,7 +66,7 @@ enum ObligationOperation {
     },
     /// Check region cleanliness
     CheckRegionClean {
-        region_idx: u8,      // Index into regions array
+        region_idx: u8, // Index into regions array
     },
     /// Perform global leak check
     CheckLeaks,
@@ -169,7 +169,8 @@ impl ObligationLedgerShadowModel {
     fn record_acquire(&mut self, id: ObligationId) {
         self.expected_acquired += 1;
         self.expected_pending += 1;
-        self.tracked_obligations.insert(id, ObligationState::Reserved);
+        self.tracked_obligations
+            .insert(id, ObligationState::Reserved);
     }
 
     fn record_commit(&mut self, id: ObligationId) -> bool {
@@ -274,15 +275,20 @@ fn normalize_fuzz_input(input: &mut ObligationLedgerFuzzInput) {
     // Normalize individual operations
     for op in &mut input.operations {
         match op {
-            ObligationOperation::Acquire { holder_idx, region_idx, time_offset, .. } => {
+            ObligationOperation::Acquire {
+                holder_idx,
+                region_idx,
+                time_offset,
+                ..
+            } => {
                 *holder_idx = (*holder_idx) % input.config.holder_count.max(1);
                 *region_idx = (*region_idx) % input.config.region_count.max(1);
                 *time_offset = (*time_offset).clamp(0, 1_000_000_000); // Max 1 second offset
             }
-            ObligationOperation::Commit { time_offset, .. } |
-            ObligationOperation::Abort { time_offset, .. } |
-            ObligationOperation::AbortById { time_offset, .. } |
-            ObligationOperation::MarkLeaked { time_offset, .. } => {
+            ObligationOperation::Commit { time_offset, .. }
+            | ObligationOperation::Abort { time_offset, .. }
+            | ObligationOperation::AbortById { time_offset, .. }
+            | ObligationOperation::MarkLeaked { time_offset, .. } => {
                 *time_offset = (*time_offset).clamp(0, 1_000_000_000);
             }
             ObligationOperation::CheckRegionClean { region_idx } => {
@@ -294,9 +300,7 @@ fn normalize_fuzz_input(input: &mut ObligationLedgerFuzzInput) {
 }
 
 /// Execute obligation operations and verify invariants
-fn execute_obligation_operations(
-    input: &ObligationLedgerFuzzInput,
-) -> Result<(), String> {
+fn execute_obligation_operations(input: &ObligationLedgerFuzzInput) -> Result<(), String> {
     let mut ledger = ObligationLedger::new();
     let mut shadow = ObligationLedgerShadowModel::new();
     let mut tokens: Vec<ObligationToken> = Vec::new();
@@ -320,7 +324,12 @@ fn execute_obligation_operations(
         }
 
         match operation {
-            ObligationOperation::Acquire { kind, holder_idx, region_idx, time_offset } => {
+            ObligationOperation::Acquire {
+                kind,
+                holder_idx,
+                region_idx,
+                time_offset,
+            } => {
                 let holder = holders[*holder_idx as usize % holders.len()];
                 let region = regions[*region_idx as usize % regions.len()];
                 let time = Time::from_nanos(base_time.as_nanos() + time_offset);
@@ -333,7 +342,10 @@ fn execute_obligation_operations(
                 tokens.push(token);
             }
 
-            ObligationOperation::Commit { token_idx, time_offset } => {
+            ObligationOperation::Commit {
+                token_idx,
+                time_offset,
+            } => {
                 if !tokens.is_empty() {
                     let idx = (*token_idx as usize) % tokens.len();
                     if idx < tokens.len() {
@@ -344,13 +356,20 @@ fn execute_obligation_operations(
                         let _duration = ledger.commit(token, time);
 
                         if !shadow.record_commit(id) {
-                            return Err(format!("Attempted to commit non-reserved obligation {}", id));
+                            return Err(format!(
+                                "Attempted to commit non-reserved obligation {}",
+                                id
+                            ));
                         }
                     }
                 }
             }
 
-            ObligationOperation::Abort { token_idx, time_offset, reason } => {
+            ObligationOperation::Abort {
+                token_idx,
+                time_offset,
+                reason,
+            } => {
                 if !tokens.is_empty() {
                     let idx = (*token_idx as usize) % tokens.len();
                     if idx < tokens.len() {
@@ -361,13 +380,20 @@ fn execute_obligation_operations(
                         let _duration = ledger.abort(token, time, (*reason).into());
 
                         if !shadow.record_abort(id) {
-                            return Err(format!("Attempted to abort non-reserved obligation {}", id));
+                            return Err(format!(
+                                "Attempted to abort non-reserved obligation {}",
+                                id
+                            ));
                         }
                     }
                 }
             }
 
-            ObligationOperation::AbortById { obligation_idx, time_offset, reason } => {
+            ObligationOperation::AbortById {
+                obligation_idx,
+                time_offset,
+                reason,
+            } => {
                 let reserved_ids = shadow.get_reserved_obligations();
                 if !reserved_ids.is_empty() {
                     let idx = (*obligation_idx as usize) % reserved_ids.len();
@@ -380,12 +406,18 @@ fn execute_obligation_operations(
                     let _duration = ledger.abort_by_id(id, time, (*reason).into());
 
                     if !shadow.record_abort(id) {
-                        return Err(format!("Attempted to abort_by_id non-reserved obligation {}", id));
+                        return Err(format!(
+                            "Attempted to abort_by_id non-reserved obligation {}",
+                            id
+                        ));
                     }
                 }
             }
 
-            ObligationOperation::MarkLeaked { obligation_idx, time_offset } => {
+            ObligationOperation::MarkLeaked {
+                obligation_idx,
+                time_offset,
+            } => {
                 let reserved_ids = shadow.get_reserved_obligations();
                 if !reserved_ids.is_empty() {
                     let idx = (*obligation_idx as usize) % reserved_ids.len();
@@ -398,7 +430,10 @@ fn execute_obligation_operations(
                     let _duration = ledger.mark_leaked(id, time);
 
                     if !shadow.record_leaked(id) {
-                        return Err(format!("Attempted to mark_leaked non-reserved obligation {}", id));
+                        return Err(format!(
+                            "Attempted to mark_leaked non-reserved obligation {}",
+                            id
+                        ));
                     }
                 }
             }
@@ -413,7 +448,10 @@ fn execute_obligation_operations(
                 let leak_result = ledger.check_leaks();
 
                 if input.config.strict_leak_checking && !leak_result.is_clean() {
-                    return Err(format!("Leak check found {} leaked obligations", leak_result.leaked.len()));
+                    return Err(format!(
+                        "Leak check found {} leaked obligations",
+                        leak_result.leaked.len()
+                    ));
                 }
             }
 
@@ -422,10 +460,19 @@ fn execute_obligation_operations(
                 let stats = ledger.stats();
 
                 // Verify accounting invariants
-                if stats.total_acquired != stats.total_committed + stats.total_aborted + stats.total_leaked + stats.pending {
+                if stats.total_acquired
+                    != stats.total_committed
+                        + stats.total_aborted
+                        + stats.total_leaked
+                        + stats.pending
+                {
                     return Err(format!(
                         "Accounting invariant violation: acquired({}) != committed({}) + aborted({}) + leaked({}) + pending({})",
-                        stats.total_acquired, stats.total_committed, stats.total_aborted, stats.total_leaked, stats.pending
+                        stats.total_acquired,
+                        stats.total_committed,
+                        stats.total_aborted,
+                        stats.total_leaked,
+                        stats.pending
                     ));
                 }
             }
@@ -457,7 +504,8 @@ fn execute_obligation_operations(
     if remaining_token_ids != pending_set {
         return Err(format!(
             "Token-obligation mismatch: tokens={} pending={}",
-            remaining_token_ids.len(), pending_set.len()
+            remaining_token_ids.len(),
+            pending_set.len()
         ));
     }
 

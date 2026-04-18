@@ -9,9 +9,9 @@
 //! 4. Continuation bit pattern respected (length prefix encoding)
 //! 5. Boundary values handled correctly (since QUIC varints are unsigned, no zigzag)
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::net::quic_core::{decode_varint, encode_varint, QuicCoreError, QUIC_VARINT_MAX};
+use asupersync::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint, encode_varint};
+use libfuzzer_sys::fuzz_target;
 
 /// Structured input for controlled varint fuzzing scenarios.
 #[derive(Arbitrary, Debug)]
@@ -99,14 +99,22 @@ fn fuzz_raw_bytes(bytes: &[u8]) {
         // For inputs > 8 bytes, decoder should only consume up to 8 bytes
         let result = decode_varint(bytes);
         if let Ok((_, consumed)) = result {
-            assert!(consumed <= 8, "Varint consumed {} bytes, max is 8", consumed);
+            assert!(
+                consumed <= 8,
+                "Varint consumed {} bytes, max is 8",
+                consumed
+            );
         }
         return;
     }
 
     // ASSERTION 2: Truncated varints return Incomplete (UnexpectedEof) not panic
     let result = std::panic::catch_unwind(|| decode_varint(bytes));
-    assert!(result.is_ok(), "decode_varint panicked on input: {:?}", bytes);
+    assert!(
+        result.is_ok(),
+        "decode_varint panicked on input: {:?}",
+        bytes
+    );
 
     let decode_result = decode_varint(bytes);
 
@@ -114,29 +122,45 @@ fn fuzz_raw_bytes(bytes: &[u8]) {
     match decode_result {
         Ok((value, consumed)) => {
             // ASSERTION 3: Varint overflow rejected (value should be <= QUIC_VARINT_MAX)
-            assert!(value <= QUIC_VARINT_MAX,
-                "Decoded value {} exceeds QUIC_VARINT_MAX {}", value, QUIC_VARINT_MAX);
+            assert!(
+                value <= QUIC_VARINT_MAX,
+                "Decoded value {} exceeds QUIC_VARINT_MAX {}",
+                value,
+                QUIC_VARINT_MAX
+            );
 
             // ASSERTION 4: Continuation bit pattern respected
             // Consumed bytes should match the length indicated by first byte
             if !bytes.is_empty() {
                 let expected_len = 1usize << (bytes[0] >> 6);
-                assert_eq!(consumed, expected_len.min(bytes.len()),
-                    "Consumed {} bytes but first byte indicates {} bytes", consumed, expected_len);
+                assert_eq!(
+                    consumed,
+                    expected_len.min(bytes.len()),
+                    "Consumed {} bytes but first byte indicates {} bytes",
+                    consumed,
+                    expected_len
+                );
             }
 
             // Additional invariant: consumed should not exceed input length
-            assert!(consumed <= bytes.len(),
-                "Consumed {} bytes from {}-byte input", consumed, bytes.len());
+            assert!(
+                consumed <= bytes.len(),
+                "Consumed {} bytes from {}-byte input",
+                consumed,
+                bytes.len()
+            );
         }
 
         Err(QuicCoreError::UnexpectedEof) => {
             // This is expected for truncated inputs - verify it's actually truncated
             if !bytes.is_empty() {
                 let expected_len = 1usize << (bytes[0] >> 6);
-                assert!(bytes.len() < expected_len,
+                assert!(
+                    bytes.len() < expected_len,
                     "Got UnexpectedEof but input length {} >= expected length {}",
-                    bytes.len(), expected_len);
+                    bytes.len(),
+                    expected_len
+                );
             }
         }
 
@@ -152,8 +176,11 @@ fn fuzz_roundtrip(value: u64) {
         // ASSERTION 3: Encoding should reject overflow
         let mut buf = Vec::new();
         let encode_result = encode_varint(value, &mut buf);
-        assert!(matches!(encode_result, Err(QuicCoreError::VarIntOutOfRange(_))),
-            "encode_varint should reject value {} > QUIC_VARINT_MAX", value);
+        assert!(
+            matches!(encode_result, Err(QuicCoreError::VarIntOutOfRange(_))),
+            "encode_varint should reject value {} > QUIC_VARINT_MAX",
+            value
+        );
         return;
     }
 
@@ -162,19 +189,33 @@ fn fuzz_roundtrip(value: u64) {
     encode_varint(value, &mut encoded).expect("encode should succeed for valid value");
 
     let (decoded, consumed) = decode_varint(&encoded).expect("decode should succeed");
-    assert_eq!(decoded, value, "Roundtrip mismatch: {} -> {:?} -> {}", value, encoded, decoded);
-    assert_eq!(consumed, encoded.len(), "Decode should consume entire encoded buffer");
+    assert_eq!(
+        decoded, value,
+        "Roundtrip mismatch: {} -> {:?} -> {}",
+        value, encoded, decoded
+    );
+    assert_eq!(
+        consumed,
+        encoded.len(),
+        "Decode should consume entire encoded buffer"
+    );
 
     // ASSERTION 1: Encoded length should be reasonable
-    assert!(encoded.len() <= 8, "Encoded varint length {} exceeds 8 bytes", encoded.len());
+    assert!(
+        encoded.len() <= 8,
+        "Encoded varint length {} exceeds 8 bytes",
+        encoded.len()
+    );
 }
 
 fn fuzz_edge_case(edge: EdgeCaseVarint) {
     match edge {
         EdgeCaseVarint::Empty => {
             let result = decode_varint(&[]);
-            assert!(matches!(result, Err(QuicCoreError::UnexpectedEof)),
-                "Empty input should return UnexpectedEof");
+            assert!(
+                matches!(result, Err(QuicCoreError::UnexpectedEof)),
+                "Empty input should return UnexpectedEof"
+            );
         }
 
         EdgeCaseVarint::MaxValid => {
@@ -189,8 +230,10 @@ fn fuzz_edge_case(edge: EdgeCaseVarint) {
             // First byte indicates 2-byte varint (01xxxxxx) but only 1 byte provided
             let truncated = vec![0x40]; // 01000000 = 2-byte varint prefix
             let result = decode_varint(&truncated);
-            assert!(matches!(result, Err(QuicCoreError::UnexpectedEof)),
-                "Truncated 2-byte varint should return UnexpectedEof");
+            assert!(
+                matches!(result, Err(QuicCoreError::UnexpectedEof)),
+                "Truncated 2-byte varint should return UnexpectedEof"
+            );
         }
 
         EdgeCaseVarint::Truncated4Byte(extra_bytes) => {
@@ -202,8 +245,10 @@ fn fuzz_edge_case(edge: EdgeCaseVarint) {
             }
             if truncated.len() < 4 {
                 let result = decode_varint(&truncated);
-                assert!(matches!(result, Err(QuicCoreError::UnexpectedEof)),
-                    "Truncated 4-byte varint should return UnexpectedEof");
+                assert!(
+                    matches!(result, Err(QuicCoreError::UnexpectedEof)),
+                    "Truncated 4-byte varint should return UnexpectedEof"
+                );
             }
         }
 
@@ -216,16 +261,36 @@ fn fuzz_edge_case(edge: EdgeCaseVarint) {
             }
             if truncated.len() < 8 {
                 let result = decode_varint(&truncated);
-                assert!(matches!(result, Err(QuicCoreError::UnexpectedEof)),
-                    "Truncated 8-byte varint should return UnexpectedEof");
+                assert!(
+                    matches!(result, Err(QuicCoreError::UnexpectedEof)),
+                    "Truncated 8-byte varint should return UnexpectedEof"
+                );
             }
         }
 
         EdgeCaseVarint::Boundary(boundary) => {
             let value = match boundary {
-                BoundaryValue::SixBit(is_max) => if is_max { 63 } else { 64 },
-                BoundaryValue::FourteenBit(is_max) => if is_max { 16383 } else { 16384 },
-                BoundaryValue::ThirtyBit(is_max) => if is_max { 1073741823 } else { 1073741824 },
+                BoundaryValue::SixBit(is_max) => {
+                    if is_max {
+                        63
+                    } else {
+                        64
+                    }
+                }
+                BoundaryValue::FourteenBit(is_max) => {
+                    if is_max {
+                        16383
+                    } else {
+                        16384
+                    }
+                }
+                BoundaryValue::ThirtyBit(is_max) => {
+                    if is_max {
+                        1073741823
+                    } else {
+                        1073741824
+                    }
+                }
                 BoundaryValue::SixtyTwoBit => QUIC_VARINT_MAX,
             };
             fuzz_roundtrip(value);
@@ -257,7 +322,16 @@ mod tests {
 
     #[test]
     fn test_boundary_values() {
-        let boundaries = [0u64, 63, 64, 16383, 16384, 1073741823, 1073741824, QUIC_VARINT_MAX];
+        let boundaries = [
+            0u64,
+            63,
+            64,
+            16383,
+            16384,
+            1073741823,
+            1073741824,
+            QUIC_VARINT_MAX,
+        ];
         for &value in &boundaries {
             fuzz_roundtrip(value);
         }

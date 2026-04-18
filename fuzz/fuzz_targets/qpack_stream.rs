@@ -25,7 +25,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h3_native::{H3NativeError, H3QpackMode};
 use asupersync::net::quic_core::{decode_varint, encode_varint};
 
@@ -67,7 +67,7 @@ enum QpackDecoderInstruction {
 struct QpackTableEntry {
     name: String,
     value: String,
-    size: usize,  // RFC 9204: name_len + value_len + 32
+    size: usize, // RFC 9204: name_len + value_len + 32
 }
 
 impl QpackTableEntry {
@@ -110,7 +110,10 @@ impl QpackDynamicTable {
     /// Set dynamic table capacity (may trigger evictions)
     fn set_capacity(&mut self, new_capacity: usize) -> Result<(), String> {
         if new_capacity > MAX_DYNAMIC_TABLE_CAPACITY {
-            return Err(format!("Capacity {} exceeds maximum {}", new_capacity, MAX_DYNAMIC_TABLE_CAPACITY));
+            return Err(format!(
+                "Capacity {} exceeds maximum {}",
+                new_capacity, MAX_DYNAMIC_TABLE_CAPACITY
+            ));
         }
 
         self.capacity = new_capacity;
@@ -128,12 +131,17 @@ impl QpackDynamicTable {
             // Dynamic table reference: absolute_index = insert_count + name_index - 99
             let dynamic_index = name_index.saturating_sub(99);
             if dynamic_index >= self.entries.len() as u64 {
-                return Err(format!("Dynamic name index {} out of bounds (table size {})",
-                    dynamic_index, self.entries.len()));
+                return Err(format!(
+                    "Dynamic name index {} out of bounds (table size {})",
+                    dynamic_index,
+                    self.entries.len()
+                ));
             }
-            self.entries.get(dynamic_index as usize)
+            self.entries
+                .get(dynamic_index as usize)
                 .ok_or_else(|| format!("Name index {} not found in dynamic table", dynamic_index))?
-                .name.clone()
+                .name
+                .clone()
         };
 
         let entry = QpackTableEntry::new(name, value);
@@ -150,11 +158,16 @@ impl QpackDynamicTable {
     fn duplicate(&mut self, index: u64) -> Result<(), String> {
         // Index refers to dynamic table entry
         if index >= self.entries.len() as u64 {
-            return Err(format!("Duplicate index {} out of bounds (table size {})",
-                index, self.entries.len()));
+            return Err(format!(
+                "Duplicate index {} out of bounds (table size {})",
+                index,
+                self.entries.len()
+            ));
         }
 
-        let entry = self.entries.get(index as usize)
+        let entry = self
+            .entries
+            .get(index as usize)
             .ok_or_else(|| format!("Duplicate index {} not found", index))?
             .clone();
 
@@ -167,7 +180,10 @@ impl QpackDynamicTable {
 
         // Check if entry is too large for table
         if entry_size > self.capacity {
-            return Err(format!("Entry size {} exceeds table capacity {}", entry_size, self.capacity));
+            return Err(format!(
+                "Entry size {} exceeds table capacity {}",
+                entry_size, self.capacity
+            ));
         }
 
         // Add entry to front of table
@@ -236,17 +252,18 @@ impl QpackStreamState {
     }
 
     /// Process encoder instruction
-    fn process_encoder_instruction(&mut self, instruction: QpackEncoderInstruction) -> Result<(), String> {
+    fn process_encoder_instruction(
+        &mut self,
+        instruction: QpackEncoderInstruction,
+    ) -> Result<(), String> {
         match instruction {
-            QpackEncoderInstruction::InsertWithNameReference { name_index, value } => {
-                self.dynamic_table.insert_with_name_reference(name_index, value)
-            }
+            QpackEncoderInstruction::InsertWithNameReference { name_index, value } => self
+                .dynamic_table
+                .insert_with_name_reference(name_index, value),
             QpackEncoderInstruction::InsertWithLiteralName { name, value } => {
                 self.dynamic_table.insert_with_literal_name(name, value)
             }
-            QpackEncoderInstruction::Duplicate { index } => {
-                self.dynamic_table.duplicate(index)
-            }
+            QpackEncoderInstruction::Duplicate { index } => self.dynamic_table.duplicate(index),
             QpackEncoderInstruction::SetDynamicTableCapacity { capacity } => {
                 self.dynamic_table.set_capacity(capacity as usize)
             }
@@ -254,7 +271,10 @@ impl QpackStreamState {
     }
 
     /// Process decoder instruction
-    fn process_decoder_instruction(&mut self, instruction: QpackDecoderInstruction) -> Result<(), String> {
+    fn process_decoder_instruction(
+        &mut self,
+        instruction: QpackDecoderInstruction,
+    ) -> Result<(), String> {
         match instruction {
             QpackDecoderInstruction::SectionAcknowledgment { stream_id } => {
                 // Track section acknowledgment
@@ -278,7 +298,10 @@ impl QpackStreamState {
                 self.insert_count_increments.push(increment);
 
                 // Update known received count
-                let new_count = self.dynamic_table.known_received_count.saturating_add(increment);
+                let new_count = self
+                    .dynamic_table
+                    .known_received_count
+                    .saturating_add(increment);
                 self.dynamic_table.update_known_received_count(new_count);
                 Ok(())
             }
@@ -287,8 +310,12 @@ impl QpackStreamState {
 
     /// Block stream on required insert count
     fn block_stream(&mut self, stream_id: u64, required_insert_count: u64) {
-        if !self.dynamic_table.validate_insert_count(required_insert_count) {
-            self.blocked_streams.insert(stream_id, required_insert_count);
+        if !self
+            .dynamic_table
+            .validate_insert_count(required_insert_count)
+        {
+            self.blocked_streams
+                .insert(stream_id, required_insert_count);
         }
     }
 
@@ -297,32 +324,48 @@ impl QpackStreamState {
         // 1. Cancelled streams should not be in other collections
         for &stream_id in &self.cancelled_streams {
             if self.blocked_streams.contains_key(&stream_id) {
-                return Err(format!("Cancelled stream {} still in blocked streams", stream_id));
+                return Err(format!(
+                    "Cancelled stream {} still in blocked streams",
+                    stream_id
+                ));
             }
             if self.acknowledged_streams.contains(&stream_id) {
-                return Err(format!("Cancelled stream {} still in acknowledged streams", stream_id));
+                return Err(format!(
+                    "Cancelled stream {} still in acknowledged streams",
+                    stream_id
+                ));
             }
         }
 
         // 2. Dynamic table invariants
         if self.dynamic_table.current_size > self.dynamic_table.capacity {
-            return Err(format!("Dynamic table size {} exceeds capacity {}",
-                self.dynamic_table.current_size, self.dynamic_table.capacity));
+            return Err(format!(
+                "Dynamic table size {} exceeds capacity {}",
+                self.dynamic_table.current_size, self.dynamic_table.capacity
+            ));
         }
 
         // 3. Insert count should never decrease
         if self.dynamic_table.known_received_count > self.dynamic_table.insert_count {
-            return Err(format!("Known received count {} exceeds insert count {}",
-                self.dynamic_table.known_received_count, self.dynamic_table.insert_count));
+            return Err(format!(
+                "Known received count {} exceeds insert count {}",
+                self.dynamic_table.known_received_count, self.dynamic_table.insert_count
+            ));
         }
 
         // 4. Reasonable bounds on tracking data structures
         if self.blocked_streams.len() > 10000 {
-            return Err(format!("Too many blocked streams: {}", self.blocked_streams.len()));
+            return Err(format!(
+                "Too many blocked streams: {}",
+                self.blocked_streams.len()
+            ));
         }
 
         if self.section_acks.len() > 10000 {
-            return Err(format!("Too many section acknowledgments: {}", self.section_acks.len()));
+            return Err(format!(
+                "Too many section acknowledgments: {}",
+                self.section_acks.len()
+            ));
         }
 
         Ok(())
@@ -410,8 +453,14 @@ impl From<QpackDecoderInstructionFuzz> for QpackDecoderInstruction {
 
 #[derive(Arbitrary, Debug)]
 enum QpackStreamOperation {
-    BlockStream { stream_id: u16, required_insert_count: u16 },
-    ProcessField { stream_id: u16, field_data: Vec<u8> },
+    BlockStream {
+        stream_id: u16,
+        required_insert_count: u16,
+    },
+    ProcessField {
+        stream_id: u16,
+        field_data: Vec<u8>,
+    },
 }
 
 /// Test QPACK varint integer encoding/decoding bounds (Assertion 1)
@@ -421,7 +470,21 @@ fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
     }
 
     // Test encoding/decoding various integer values with different prefixes
-    let test_values = [0u64, 1, 30, 31, 127, 128, 255, 256, 1023, 1024, 16383, 16384, u64::MAX];
+    let test_values = [
+        0u64,
+        1,
+        30,
+        31,
+        127,
+        128,
+        255,
+        256,
+        1023,
+        1024,
+        16383,
+        16384,
+        u64::MAX,
+    ];
     let prefix_sizes = [1u8, 2, 3, 4, 5, 6, 7, 8];
 
     for &value in &test_values {
@@ -439,7 +502,10 @@ fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
             match decode_varint(&encoded) {
                 Ok((decoded_value, consumed)) => {
                     if decoded_value != value {
-                        return Err(format!("Varint round-trip mismatch: {} != {}", value, decoded_value));
+                        return Err(format!(
+                            "Varint round-trip mismatch: {} != {}",
+                            value, decoded_value
+                        ));
                     }
                     if consumed > encoded.len() {
                         return Err(format!("Varint decode consumed more bytes than available"));
@@ -459,11 +525,20 @@ fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
 }
 
 /// Test duplicate name reference handling (Assertion 2)
-fn test_duplicate_handling(state: &mut QpackStreamState, operations: &[QpackStreamOperation]) -> Result<(), String> {
+fn test_duplicate_handling(
+    state: &mut QpackStreamState,
+    operations: &[QpackStreamOperation],
+) -> Result<(), String> {
     // Insert some entries to create duplicates
-    let _ = state.dynamic_table.insert_with_literal_name("test-name".to_string(), "value1".to_string());
-    let _ = state.dynamic_table.insert_with_literal_name("test-name".to_string(), "value2".to_string());
-    let _ = state.dynamic_table.insert_with_literal_name("another-name".to_string(), "value3".to_string());
+    let _ = state
+        .dynamic_table
+        .insert_with_literal_name("test-name".to_string(), "value1".to_string());
+    let _ = state
+        .dynamic_table
+        .insert_with_literal_name("test-name".to_string(), "value2".to_string());
+    let _ = state
+        .dynamic_table
+        .insert_with_literal_name("another-name".to_string(), "value3".to_string());
 
     // Test duplicate instruction
     let duplicate_result = state.dynamic_table.duplicate(0);
@@ -492,13 +567,19 @@ fn test_insertion_count_tracking(state: &mut QpackStreamState) -> Result<(), Str
     let initial_count = state.dynamic_table.insert_count;
 
     // Perform several insertions
-    let _ = state.dynamic_table.insert_with_literal_name("name1".to_string(), "value1".to_string());
-    let _ = state.dynamic_table.insert_with_literal_name("name2".to_string(), "value2".to_string());
+    let _ = state
+        .dynamic_table
+        .insert_with_literal_name("name1".to_string(), "value1".to_string());
+    let _ = state
+        .dynamic_table
+        .insert_with_literal_name("name2".to_string(), "value2".to_string());
 
     // Insert count should have increased
     if state.dynamic_table.insert_count <= initial_count {
-        return Err(format!("Insert count did not increase: {} -> {}",
-            initial_count, state.dynamic_table.insert_count));
+        return Err(format!(
+            "Insert count did not increase: {} -> {}",
+            initial_count, state.dynamic_table.insert_count
+        ));
     }
 
     // Test insert count increment from decoder
@@ -508,8 +589,10 @@ fn test_insertion_count_tracking(state: &mut QpackStreamState) -> Result<(), Str
     state.process_decoder_instruction(decoder_instr)?;
 
     if state.dynamic_table.known_received_count != old_known_count + increment {
-        return Err(format!("Known received count not updated correctly: {} + {} != {}",
-            old_known_count, increment, state.dynamic_table.known_received_count));
+        return Err(format!(
+            "Known received count not updated correctly: {} + {} != {}",
+            old_known_count, increment, state.dynamic_table.known_received_count
+        ));
     }
 
     Ok(())
@@ -585,7 +668,11 @@ fn test_stream_cancellation(state: &mut QpackStreamState) -> Result<(), String> 
 
 fuzz_target!(|input: QpackStreamFuzzInput| {
     // Limit input complexity to prevent timeouts
-    if input.encoder_instructions.len() + input.decoder_instructions.len() + input.stream_operations.len() > MAX_OPERATIONS {
+    if input.encoder_instructions.len()
+        + input.decoder_instructions.len()
+        + input.stream_operations.len()
+        > MAX_OPERATIONS
+    {
         return;
     }
 
@@ -594,7 +681,9 @@ fuzz_target!(|input: QpackStreamFuzzInput| {
     let mut state = QpackStreamState::new(table_capacity);
 
     // Test varint bounds (Assertion 1)
-    let varint_test_data = input.encoder_instructions.get(0)
+    let varint_test_data = input
+        .encoder_instructions
+        .get(0)
         .map(|instr| match instr {
             QpackEncoderInstructionFuzz::InsertWithLiteralName { name, .. } => name.as_slice(),
             QpackEncoderInstructionFuzz::InsertWithNameReference { value, .. } => value.as_slice(),
@@ -631,10 +720,16 @@ fuzz_target!(|input: QpackStreamFuzzInput| {
     // Process stream operations
     for stream_op in &input.stream_operations {
         match stream_op {
-            QpackStreamOperation::BlockStream { stream_id, required_insert_count } => {
+            QpackStreamOperation::BlockStream {
+                stream_id,
+                required_insert_count,
+            } => {
                 state.block_stream(*stream_id as u64, *required_insert_count as u64);
             }
-            QpackStreamOperation::ProcessField { stream_id, field_data } => {
+            QpackStreamOperation::ProcessField {
+                stream_id,
+                field_data,
+            } => {
                 // Simulate field processing that may require dynamic table entries
                 if !field_data.is_empty() && *stream_id < 1000 {
                     let _ = decode_varint(field_data);

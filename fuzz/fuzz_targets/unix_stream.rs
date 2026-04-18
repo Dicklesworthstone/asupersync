@@ -29,7 +29,6 @@ use libfuzzer_sys::fuzz_target;
 use std::io;
 use std::os::unix::io::RawFd;
 
-
 /// Maximum number of file descriptors for practical testing
 const MAX_FDS_TO_TEST: usize = 1024; // Well above typical limits to test bounds
 
@@ -62,20 +61,11 @@ enum AncillaryOperation {
         malformed: bool,
     },
     /// Test buffer size edge cases
-    BufferEdgeCase {
-        size: u16,
-        pattern: BufferPattern,
-    },
+    BufferEdgeCase { size: u16, pattern: BufferPattern },
     /// Test truncated control message header
-    TruncatedCmsgHdr {
-        truncate_at: u8,
-        with_data: bool,
-    },
+    TruncatedCmsgHdr { truncate_at: u8, with_data: bool },
     /// Test malformed control message length
-    MalformedCmsgLen {
-        claimed_len: u16,
-        actual_len: u16,
-    },
+    MalformedCmsgLen { claimed_len: u16, actual_len: u16 },
 }
 
 /// Buffer allocation and sizing strategies
@@ -156,9 +146,7 @@ fuzz_target!(|input: UnixStreamFuzzInput| {
     }
 
     // Create a Unix socket pair for testing
-    let socket_pair_result = std::panic::catch_unwind(|| {
-        UnixStream::pair()
-    });
+    let socket_pair_result = std::panic::catch_unwind(|| UnixStream::pair());
 
     let (sender, receiver) = match socket_pair_result {
         Ok(Ok(pair)) => pair,
@@ -184,7 +172,10 @@ fuzz_target!(|input: UnixStreamFuzzInput| {
             }
             Err(_) => {
                 // **ASSERTION 4: Truncated cmsghdr returns error not panic**
-                panic!("Ancillary data operation panicked on input: {:?}", operation);
+                panic!(
+                    "Ancillary data operation panicked on input: {:?}",
+                    operation
+                );
             }
         }
     }
@@ -198,11 +189,20 @@ fn process_ancillary_operation(
     buffer_strategy: &BufferStrategy,
 ) -> io::Result<()> {
     match operation {
-        AncillaryOperation::ScmRights { fd_count, use_invalid_fds, exceed_limits } => {
+        AncillaryOperation::ScmRights {
+            fd_count,
+            use_invalid_fds,
+            exceed_limits,
+        } => {
             // **ASSERTION 1: SCM_RIGHTS fd-passing bounded and rejected when over limit**
             test_scm_rights_bounds(*fd_count, *use_invalid_fds, *exceed_limits, buffer_strategy)
         }
-        AncillaryOperation::ScmCredentials { pid, uid, gid, malformed } => {
+        AncillaryOperation::ScmCredentials {
+            pid,
+            uid,
+            gid,
+            malformed,
+        } => {
             // **ASSERTION 2: SCM_CREDENTIALS parsed with correct pid/uid/gid bounds**
             test_scm_credentials_bounds(*pid, *uid, *gid, *malformed)
         }
@@ -210,11 +210,17 @@ fn process_ancillary_operation(
             // **ASSERTION 5: msg_controllen bounds validated**
             test_buffer_edge_case(*size, pattern, buffer_strategy)
         }
-        AncillaryOperation::TruncatedCmsgHdr { truncate_at, with_data } => {
+        AncillaryOperation::TruncatedCmsgHdr {
+            truncate_at,
+            with_data,
+        } => {
             // **ASSERTION 4: Truncated cmsghdr returns error not panic**
             test_truncated_cmsg_hdr(*truncate_at, *with_data, buffer_strategy)
         }
-        AncillaryOperation::MalformedCmsgLen { claimed_len, actual_len } => {
+        AncillaryOperation::MalformedCmsgLen {
+            claimed_len,
+            actual_len,
+        } => {
             // **ASSERTION 3: Out-of-band control message handled**
             test_malformed_cmsg_len(*claimed_len, *actual_len, buffer_strategy)
         }
@@ -276,32 +282,31 @@ fn test_scm_rights_bounds(
 }
 
 /// Test SCM_CREDENTIALS bounds checking
-fn test_scm_credentials_bounds(
-    pid: i32,
-    uid: u32,
-    gid: u32,
-    _malformed: bool,
-) -> io::Result<()> {
+fn test_scm_credentials_bounds(pid: i32, uid: u32, gid: u32, _malformed: bool) -> io::Result<()> {
     // **ASSERTION 2: SCM_CREDENTIALS parsed with correct pid/uid/gid bounds**
 
     // Test boundary values
     let test_cases = [
         (pid, uid, gid),
-        (0, uid, gid),     // pid 0 (kernel)
-        (1, uid, gid),     // pid 1 (init)
-        (-1, uid, gid),    // invalid negative pid
-        (pid, 0, gid),     // root uid
-        (pid, u32::MAX, gid), // maximum uid
-        (pid, uid, 0),     // root gid
-        (pid, uid, u32::MAX), // maximum gid
+        (0, uid, gid),                  // pid 0 (kernel)
+        (1, uid, gid),                  // pid 1 (init)
+        (-1, uid, gid),                 // invalid negative pid
+        (pid, 0, gid),                  // root uid
+        (pid, u32::MAX, gid),           // maximum uid
+        (pid, uid, 0),                  // root gid
+        (pid, uid, u32::MAX),           // maximum gid
         (i32::MAX, u32::MAX, u32::MAX), // all maximum values
-        (i32::MIN, 0, 0),  // minimum/zero mix
+        (i32::MIN, 0, 0),               // minimum/zero mix
     ];
 
     for (test_pid, test_uid, test_gid) in &test_cases {
         // Create a synthetic UCred for testing bounds
         let _test_cred = asupersync::net::unix::UCred {
-            pid: if *test_pid >= 0 { Some(*test_pid) } else { None },
+            pid: if *test_pid >= 0 {
+                Some(*test_pid)
+            } else {
+                None
+            },
             uid: *test_uid,
             gid: *test_gid,
         };
@@ -424,4 +429,3 @@ fn test_malformed_cmsg_len(
 
     Ok(())
 }
-

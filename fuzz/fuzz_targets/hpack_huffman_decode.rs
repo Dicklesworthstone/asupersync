@@ -34,8 +34,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::hpack::{HpackDecoder, Header};
 use asupersync::http::h2::H2Error;
+use asupersync::http::h2::hpack::{Header, HpackDecoder};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_INPUT_SIZE: usize = 64_000;
@@ -122,12 +122,18 @@ fn test_huffman_decoder_invariants(huffman_data: &[u8]) -> Result<String, String
         Ok(headers) => {
             // Invariant 1: Valid Huffman codes decode to UTF-8 bytes
             for header in &headers {
-                assert!(std::str::from_utf8(header.value.as_bytes()).is_ok(),
-                    "Decoded header value must be valid UTF-8");
+                assert!(
+                    std::str::from_utf8(header.value.as_bytes()).is_ok(),
+                    "Decoded header value must be valid UTF-8"
+                );
 
                 // Invariant 4: Oversized decoded output bounded
-                assert!(header.value.len() <= MAX_DECODED_OUTPUT_SIZE,
-                    "Decoded output size {} exceeds maximum {}", header.value.len(), MAX_DECODED_OUTPUT_SIZE);
+                assert!(
+                    header.value.len() <= MAX_DECODED_OUTPUT_SIZE,
+                    "Decoded output size {} exceeds maximum {}",
+                    header.value.len(),
+                    MAX_DECODED_OUTPUT_SIZE
+                );
             }
 
             if !headers.is_empty() {
@@ -141,20 +147,27 @@ fn test_huffman_decoder_invariants(huffman_data: &[u8]) -> Result<String, String
 
             // Invariant 2: Invalid EOS sequences rejected with appropriate error
             if error_msg.contains("EOS") || error_msg.contains("huffman") {
-                assert!(error_msg.contains("compression") ||
-                        error_msg.contains("huffman") ||
-                        error_msg.contains("EOS"),
-                    "Huffman/EOS-related errors should be clearly identified");
+                assert!(
+                    error_msg.contains("compression")
+                        || error_msg.contains("huffman")
+                        || error_msg.contains("EOS"),
+                    "Huffman/EOS-related errors should be clearly identified"
+                );
             }
 
             // Invariant 3: Padding > 7 bits rejected
             if error_msg.contains("padding") {
-                assert!(error_msg.contains("padding") || error_msg.contains("overlong"),
-                    "Padding errors should be clearly identified");
+                assert!(
+                    error_msg.contains("padding") || error_msg.contains("overlong"),
+                    "Padding errors should be clearly identified"
+                );
             }
 
             // All errors should have descriptive messages
-            assert!(!error_msg.is_empty(), "Error messages should be descriptive");
+            assert!(
+                !error_msg.is_empty(),
+                "Error messages should be descriptive"
+            );
 
             Err(error_msg)
         }
@@ -171,31 +184,37 @@ fn generate_edge_case_input(edge_case: &HuffmanEdgeCase) -> Vec<u8> {
         HuffmanEdgeCase::AllOnes { length } => {
             let len = (*length as usize).min(100); // Cap for performance
             vec![0xFF; len]
-        },
+        }
 
         HuffmanEdgeCase::Alternating { pattern, length } => {
             let len = (*length as usize).min(100);
-            (0..len).map(|i| if i % 2 == 0 { *pattern } else { !*pattern }).collect()
-        },
+            (0..len)
+                .map(|i| if i % 2 == 0 { *pattern } else { !*pattern })
+                .collect()
+        }
 
         HuffmanEdgeCase::MaxLength { fill_byte } => {
             let len = MAX_FUZZ_INPUT_SIZE.min(1000); // Reasonable test size
             vec![*fill_byte; len]
-        },
+        }
 
         HuffmanEdgeCase::InvalidCodes { codes } => {
             // Convert invalid code patterns to bytes
             let mut result = Vec::new();
-            for &code in codes.iter().take(20) { // Limit for performance
+            for &code in codes.iter().take(20) {
+                // Limit for performance
                 result.push((code & 0xFF) as u8);
                 result.push(((code >> 8) & 0xFF) as u8);
                 result.push(((code >> 16) & 0xFF) as u8);
                 result.push(((code >> 24) & 0xFF) as u8);
             }
             result
-        },
+        }
 
-        HuffmanEdgeCase::TruncatedValid { prefix, truncate_bits } => {
+        HuffmanEdgeCase::TruncatedValid {
+            prefix,
+            truncate_bits,
+        } => {
             let mut result = prefix.clone();
             if !result.is_empty() && *truncate_bits < 8 {
                 let last_idx = result.len() - 1;
@@ -204,7 +223,7 @@ fn generate_edge_case_input(edge_case: &HuffmanEdgeCase) -> Vec<u8> {
                 result[last_idx] &= mask;
             }
             result
-        },
+        }
     }
 }
 
@@ -243,8 +262,11 @@ fuzz_target!(|fuzz_input: HuffmanFuzzInput| {
         let result = test_huffman_decoder_invariants(&test_data);
         // Empty input should either succeed (empty string) or fail gracefully
         match result {
-            Ok(decoded) => assert!(decoded.is_empty(), "Empty input should decode to empty string"),
-            Err(_) => {}, // Graceful failure is acceptable
+            Ok(decoded) => assert!(
+                decoded.is_empty(),
+                "Empty input should decode to empty string"
+            ),
+            Err(_) => {} // Graceful failure is acceptable
         }
         return;
     }
@@ -276,8 +298,13 @@ fuzz_target!(|fuzz_input: HuffmanFuzzInput| {
             HuffmanEdgeCase::SingleByte { byte: 0x80 },
             HuffmanEdgeCase::AllOnes { length: 1 },
             HuffmanEdgeCase::AllOnes { length: 8 },
-            HuffmanEdgeCase::Alternating { pattern: 0xAA, length: 10 },
-            HuffmanEdgeCase::InvalidCodes { codes: vec![0xFFFFFFFF, 0x00000000, 0x3FFFFFFF] },
+            HuffmanEdgeCase::Alternating {
+                pattern: 0xAA,
+                length: 10,
+            },
+            HuffmanEdgeCase::InvalidCodes {
+                codes: vec![0xFFFFFFFF, 0x00000000, 0x3FFFFFFF],
+            },
         ];
 
         for edge_case in &edge_cases {

@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::http::h2::frame::{FrameHeader, FrameType};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{FrameHeader, FrameType};
 
 /// Fuzz input for HTTP/2 WINDOW_UPDATE frame testing (RFC 7540 §6.9)
 #[derive(Arbitrary, Debug)]
@@ -28,10 +28,7 @@ enum WindowUpdateOperation {
     /// Parse WINDOW_UPDATE frame from raw bytes
     ParseRaw { data: Vec<u8> },
     /// Parse WINDOW_UPDATE with specific stream_id and increment
-    ParseStructured {
-        stream_id: u32,
-        increment: u32,
-    },
+    ParseStructured { stream_id: u32, increment: u32 },
     /// Parse multiple WINDOW_UPDATE frames
     ParseMultiple { frames: Vec<WindowUpdateFrameData> },
     /// Parse truncated WINDOW_UPDATE frame
@@ -131,24 +128,16 @@ enum WindowUpdateOverflow {
         stream_id: u32,
     },
     /// Large increment near max values
-    LargeIncrement {
-        base_increment: u32,
-        stream_id: u32,
-    },
+    LargeIncrement { base_increment: u32, stream_id: u32 },
 }
 
 /// Reserved bit manipulation tests
 #[derive(Arbitrary, Debug)]
 enum ReservedBitTest {
     /// Set reserved bit in increment field
-    IncrementReservedBit {
-        stream_id: u32,
-        increment: u32,
-    },
+    IncrementReservedBit { stream_id: u32, increment: u32 },
     /// Verify reserved bit is cleared during encoding
-    EncodingReservedBitClear {
-        frame: WindowUpdateFrameData,
-    },
+    EncodingReservedBitClear { frame: WindowUpdateFrameData },
     /// Multiple reserved bits set
     MultipleReservedBits {
         stream_id: u32,
@@ -226,7 +215,9 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
 
                     // Test WINDOW_UPDATE parsing
                     if header.frame_type == FrameType::WindowUpdate as u8 {
-                        let result = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
+                        let result = asupersync::http::h2::frame::WindowUpdateFrame::parse(
+                            &header, &payload,
+                        );
                         match result {
                             Ok(frame) => {
                                 verify_window_update_consistency(frame.stream_id, frame.increment);
@@ -241,13 +232,18 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
             }
         }
 
-        WindowUpdateOperation::ParseStructured { stream_id, increment } => {
+        WindowUpdateOperation::ParseStructured {
+            stream_id,
+            increment,
+        } => {
             let clamped_stream_id = stream_id & 0x7FFF_FFFF; // Clear reserved bit
             let clamped_increment = increment & 0x7FFF_FFFF; // Clear reserved bit
 
             // Construct well-formed WINDOW_UPDATE frame
-            if clamped_increment > 0 { // Valid increment
-                let frame_bytes = construct_window_update_frame(clamped_stream_id, clamped_increment);
+            if clamped_increment > 0 {
+                // Valid increment
+                let frame_bytes =
+                    construct_window_update_frame(clamped_stream_id, clamped_increment);
 
                 let mut buf = BytesMut::from(&frame_bytes[..]);
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
@@ -276,7 +272,8 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
                 let clamped_stream_id = frame.stream_id & 0x7FFF_FFFF;
                 let clamped_increment = (frame.increment & 0x7FFF_FFFF).max(1); // Ensure non-zero
 
-                let frame_bytes = construct_window_update_frame(clamped_stream_id, clamped_increment);
+                let frame_bytes =
+                    construct_window_update_frame(clamped_stream_id, clamped_increment);
                 combined_data.extend_from_slice(&frame_bytes);
             }
 
@@ -296,8 +293,15 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
                             if header.length as usize <= buf.len() {
                                 let payload = buf.split_to(header.length as usize).freeze();
 
-                                if let Ok(frame) = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
-                                    verify_window_update_consistency(frame.stream_id, frame.increment);
+                                if let Ok(frame) =
+                                    asupersync::http::h2::frame::WindowUpdateFrame::parse(
+                                        &header, &payload,
+                                    )
+                                {
+                                    verify_window_update_consistency(
+                                        frame.stream_id,
+                                        frame.increment,
+                                    );
                                     offset += 9 + header.length as usize;
                                     parsed_count += 1;
                                 } else {
@@ -315,11 +319,15 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
             }
         }
 
-        WindowUpdateOperation::ParseTruncated { complete_frame, truncate_at } => {
+        WindowUpdateOperation::ParseTruncated {
+            complete_frame,
+            truncate_at,
+        } => {
             let clamped_stream_id = complete_frame.stream_id & 0x7FFF_FFFF;
             let clamped_increment = (complete_frame.increment & 0x7FFF_FFFF).max(1);
 
-            let complete_bytes = construct_window_update_frame(clamped_stream_id, clamped_increment);
+            let complete_bytes =
+                construct_window_update_frame(clamped_stream_id, clamped_increment);
             let truncate_pos = (truncate_at as usize).min(complete_bytes.len());
             let truncated = &complete_bytes[..truncate_pos];
 
@@ -329,7 +337,8 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
                     let payload = buf.freeze();
 
-                    let result = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
+                    let result =
+                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
                     match result {
                         Ok(frame) => {
                             // If parsing succeeded, frame must be valid within truncated data
@@ -357,20 +366,42 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                let result = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
+                let result =
+                    asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
                 match result {
                     Err(ref err) if clamped_stream_id == 0 => {
                         // Connection-level zero increment should be protocol error
-                        assert!(err.is_connection_error(), "Should be connection-level error");
-                        assert_eq!(err.code, ErrorCode::ProtocolError, "Should be protocol error");
-                        assert!(err.message.contains("zero increment"), "Error message should mention zero increment");
+                        assert!(
+                            err.is_connection_error(),
+                            "Should be connection-level error"
+                        );
+                        assert_eq!(
+                            err.code,
+                            ErrorCode::ProtocolError,
+                            "Should be protocol error"
+                        );
+                        assert!(
+                            err.message.contains("zero increment"),
+                            "Error message should mention zero increment"
+                        );
                     }
                     Err(ref err) if clamped_stream_id > 0 => {
                         // Stream-level zero increment should be stream error
                         assert!(!err.is_connection_error(), "Should be stream-level error");
-                        assert_eq!(err.stream_id.unwrap(), clamped_stream_id, "Error stream ID should match");
-                        assert_eq!(err.code, ErrorCode::ProtocolError, "Should be protocol error");
-                        assert!(err.message.contains("zero increment"), "Error message should mention zero increment");
+                        assert_eq!(
+                            err.stream_id.unwrap(),
+                            clamped_stream_id,
+                            "Error stream ID should match"
+                        );
+                        assert_eq!(
+                            err.code,
+                            ErrorCode::ProtocolError,
+                            "Should be protocol error"
+                        );
+                        assert!(
+                            err.message.contains("zero increment"),
+                            "Error message should mention zero increment"
+                        );
                     }
                     Ok(_) => {
                         panic!("Zero increment should be rejected per RFC 7540 §6.9.1");
@@ -405,7 +436,10 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             }
         }
 
-        WindowUpdateEdgeCase::ConnectionVsStream { increment, connection_level } => {
+        WindowUpdateEdgeCase::ConnectionVsStream {
+            increment,
+            connection_level,
+        } => {
             let stream_id = if connection_level { 0 } else { 1 };
             let clamped_increment = (increment & 0x7FFF_FFFF).max(1);
 
@@ -431,7 +465,11 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             }
         }
 
-        WindowUpdateEdgeCase::InvalidPayloadLength { stream_id, payload_length, fill_byte } => {
+        WindowUpdateEdgeCase::InvalidPayloadLength {
+            stream_id,
+            payload_length,
+            fill_byte,
+        } => {
             let clamped_stream_id = stream_id & 0x7FFF_FFFF;
             let length = (payload_length as usize).min(64); // Limit to prevent memory issues
 
@@ -452,12 +490,16 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(parsed_header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(parsed_header.length as usize).freeze();
 
-                let result = asupersync::http::h2::frame::WindowUpdateFrame::parse(&parsed_header, &payload);
+                let result =
+                    asupersync::http::h2::frame::WindowUpdateFrame::parse(&parsed_header, &payload);
                 if length != WINDOW_UPDATE_PAYLOAD_SIZE {
                     // Should fail for invalid payload length
                     match result {
                         Err(ref err) if err.code == ErrorCode::FrameSizeError => {
-                            assert!(err.message.contains("4 bytes"), "Error should mention required 4 bytes");
+                            assert!(
+                                err.message.contains("4 bytes"),
+                                "Error should mention required 4 bytes"
+                            );
                         }
                         Ok(_) => {
                             panic!("Invalid payload length should be rejected");
@@ -471,7 +513,10 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             }
         }
 
-        WindowUpdateEdgeCase::StreamIdBoundary { stream_id_type, increment } => {
+        WindowUpdateEdgeCase::StreamIdBoundary {
+            stream_id_type,
+            increment,
+        } => {
             let stream_id = match stream_id_type {
                 StreamIdType::Connection => 0,
                 StreamIdType::MinStream => 1,
@@ -498,7 +543,8 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                let result = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
+                let result =
+                    asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
                 match result {
                     Ok(frame) => {
                         // Verify stream ID is properly handled (reserved bit should be cleared)
@@ -506,7 +552,11 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
 
                         if matches!(stream_id_type, StreamIdType::WithReservedBit { .. }) {
                             // Stream ID should have reserved bit cleared
-                            assert_eq!(frame.stream_id & 0x8000_0000, 0, "Reserved bit should be cleared");
+                            assert_eq!(
+                                frame.stream_id & 0x8000_0000,
+                                0,
+                                "Reserved bit should be cleared"
+                            );
                         }
                     }
                     Err(err) => {
@@ -536,12 +586,22 @@ fn test_window_update_roundtrip(roundtrip: WindowUpdateRoundTrip) {
                     match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
                         Ok(parsed) => {
                             // Verify round-trip consistency
-                            assert_eq!(parsed.stream_id, clamped_stream_id, "Stream ID round-trip failed");
-                            assert_eq!(parsed.increment, clamped_increment, "Increment round-trip failed");
+                            assert_eq!(
+                                parsed.stream_id, clamped_stream_id,
+                                "Stream ID round-trip failed"
+                            );
+                            assert_eq!(
+                                parsed.increment, clamped_increment,
+                                "Increment round-trip failed"
+                            );
 
                             // Verify re-encoding produces same result
-                            let re_encoded = construct_window_update_frame(parsed.stream_id, parsed.increment);
-                            assert_eq!(re_encoded, encoded, "Re-encoding should produce identical bytes");
+                            let re_encoded =
+                                construct_window_update_frame(parsed.stream_id, parsed.increment);
+                            assert_eq!(
+                                re_encoded, encoded,
+                                "Re-encoding should produce identical bytes"
+                            );
                         }
                         Err(err) => {
                             panic!("Round-trip decode failed: {:?}", err);
@@ -598,20 +658,26 @@ fn test_window_update_roundtrip(roundtrip: WindowUpdateRoundTrip) {
                 StreamIdPattern::Sequential { start, count } => {
                     let start = (start & 0x7FFF_FFFF).max(1); // Ensure valid stream ID
                     let count = count.min(20); // Limit iterations
-                    (0..count).map(|i| start.saturating_add(i as u32 * 2)).collect::<Vec<_>>()
+                    (0..count)
+                        .map(|i| start.saturating_add(i as u32 * 2))
+                        .collect::<Vec<_>>()
                 }
                 StreamIdPattern::Alternating { start, count } => {
                     let start = (start & 0x7FFF_FFFF).max(1);
                     let count = count.min(20);
-                    (0..count).map(|i| if i % 2 == 0 { start } else { start + 2 }).collect::<Vec<_>>()
+                    (0..count)
+                        .map(|i| if i % 2 == 0 { start } else { start + 2 })
+                        .collect::<Vec<_>>()
                 }
                 StreamIdPattern::Random { seed, count } => {
                     let count = count.min(20);
                     let mut val = seed as u32;
-                    (0..count).map(|_| {
-                        val = val.wrapping_mul(1103515245).wrapping_add(12345);
-                        ((val >> 16) & 0x7FFF_FFFF).max(1)
-                    }).collect::<Vec<_>>()
+                    (0..count)
+                        .map(|_| {
+                            val = val.wrapping_mul(1103515245).wrapping_add(12345);
+                            ((val >> 16) & 0x7FFF_FFFF).max(1)
+                        })
+                        .collect::<Vec<_>>()
                 }
             };
 
@@ -625,7 +691,9 @@ fn test_window_update_roundtrip(roundtrip: WindowUpdateRoundTrip) {
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
                     let payload = buf.split_to(header.length as usize).freeze();
 
-                    if let Ok(parsed) = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                    if let Ok(parsed) =
+                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload)
+                    {
                         assert_eq!(parsed.stream_id, stream_id);
                         assert_eq!(parsed.increment, increment);
                     }
@@ -637,7 +705,11 @@ fn test_window_update_roundtrip(roundtrip: WindowUpdateRoundTrip) {
 
 fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
     match overflow {
-        WindowUpdateOverflow::WindowOverflow { current_window_size, increment, stream_id } => {
+        WindowUpdateOverflow::WindowOverflow {
+            current_window_size,
+            increment,
+            stream_id,
+        } => {
             let clamped_stream_id = stream_id & 0x7FFF_FFFF;
             let clamped_increment = (increment & 0x7FFF_FFFF).max(1);
 
@@ -646,7 +718,8 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
             if total > MAX_WINDOW_SIZE {
                 // This represents a flow control violation scenario
                 // The frame itself should parse correctly, but application logic should detect overflow
-                let frame_bytes = construct_window_update_frame(clamped_stream_id, clamped_increment);
+                let frame_bytes =
+                    construct_window_update_frame(clamped_stream_id, clamped_increment);
 
                 let mut buf = BytesMut::from(&frame_bytes[..]);
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
@@ -658,7 +731,10 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
                             verify_window_update_consistency(frame.stream_id, frame.increment);
 
                             // Application should detect overflow separately
-                            assert!(current_window_size as u64 + frame.increment as u64 > MAX_WINDOW_SIZE);
+                            assert!(
+                                current_window_size as u64 + frame.increment as u64
+                                    > MAX_WINDOW_SIZE
+                            );
                         }
                         Err(err) => {
                             verify_window_update_error_consistency(&err, &header, &payload);
@@ -668,9 +744,13 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
             }
         }
 
-        WindowUpdateOverflow::CumulativeOverflow { increments, stream_id } => {
+        WindowUpdateOverflow::CumulativeOverflow {
+            increments,
+            stream_id,
+        } => {
             let clamped_stream_id = stream_id & 0x7FFF_FFFF;
-            let limited_increments: Vec<_> = increments.into_iter()
+            let limited_increments: Vec<_> = increments
+                .into_iter()
                 .take(10)
                 .map(|inc| (inc & 0x7FFF_FFFF).max(1))
                 .collect();
@@ -684,7 +764,9 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
                     let payload = buf.split_to(header.length as usize).freeze();
 
-                    if let Ok(frame) = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                    if let Ok(frame) =
+                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload)
+                    {
                         total_increment += frame.increment as u64;
 
                         // Each individual frame should be valid
@@ -699,7 +781,10 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
             }
         }
 
-        WindowUpdateOverflow::LargeIncrement { base_increment, stream_id } => {
+        WindowUpdateOverflow::LargeIncrement {
+            base_increment,
+            stream_id,
+        } => {
             let clamped_stream_id = stream_id & 0x7FFF_FFFF;
             let large_increment = (base_increment | 0x4000_0000) & 0x7FFF_FFFF; // Large but valid
 
@@ -726,12 +811,16 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
 
 fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
     match reserved_bit {
-        ReservedBitTest::IncrementReservedBit { stream_id, increment } => {
+        ReservedBitTest::IncrementReservedBit {
+            stream_id,
+            increment,
+        } => {
             let clamped_stream_id = stream_id & 0x7FFF_FFFF;
             let increment_with_reserved_bit = increment | 0x8000_0000; // Set reserved bit
 
             // Construct frame with reserved bit set in increment
-            let frame_bytes = construct_window_update_frame_raw(clamped_stream_id, increment_with_reserved_bit);
+            let frame_bytes =
+                construct_window_update_frame_raw(clamped_stream_id, increment_with_reserved_bit);
 
             let mut buf = BytesMut::from(&frame_bytes[..]);
             if let Ok(header) = FrameHeader::parse(&mut buf) {
@@ -741,7 +830,10 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
                     Ok(frame) => {
                         // Reserved bit should be cleared during parsing
                         let expected_increment = increment_with_reserved_bit & 0x7FFF_FFFF;
-                        assert_eq!(frame.increment, expected_increment, "Reserved bit should be cleared");
+                        assert_eq!(
+                            frame.increment, expected_increment,
+                            "Reserved bit should be cleared"
+                        );
 
                         if expected_increment == 0 {
                             panic!("Zero increment should have been rejected");
@@ -766,7 +858,10 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
             let clamped_increment = (frame.increment & 0x7FFF_FFFF).max(1);
 
             // Create frame using library encoding
-            let h2_frame = asupersync::http::h2::frame::WindowUpdateFrame::new(clamped_stream_id, clamped_increment);
+            let h2_frame = asupersync::http::h2::frame::WindowUpdateFrame::new(
+                clamped_stream_id,
+                clamped_increment,
+            );
 
             let mut encoded_buf = BytesMut::new();
             h2_frame.encode(&mut encoded_buf);
@@ -778,24 +873,40 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
 
                 // Check raw payload bytes - reserved bit should be clear
                 if payload.len() == 4 {
-                    let raw_increment = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    assert_eq!(raw_increment & 0x8000_0000, 0, "Encoded increment should have reserved bit clear");
+                    let raw_increment =
+                        u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    assert_eq!(
+                        raw_increment & 0x8000_0000,
+                        0,
+                        "Encoded increment should have reserved bit clear"
+                    );
 
                     // Also verify through parsing
-                    if let Ok(parsed) = asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
-                        assert_eq!(parsed.increment & 0x8000_0000, 0, "Parsed increment should have reserved bit clear");
+                    if let Ok(parsed) =
+                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload)
+                    {
+                        assert_eq!(
+                            parsed.increment & 0x8000_0000,
+                            0,
+                            "Parsed increment should have reserved bit clear"
+                        );
                     }
                 }
             }
         }
 
-        ReservedBitTest::MultipleReservedBits { stream_id, increment, pattern } => {
+        ReservedBitTest::MultipleReservedBits {
+            stream_id,
+            increment,
+            pattern,
+        } => {
             let clamped_stream_id = stream_id & 0x7FFF_FFFF;
 
             // Apply pattern to set various bits
             let modified_increment = increment ^ ((pattern as u32) << 24);
 
-            let frame_bytes = construct_window_update_frame_raw(clamped_stream_id, modified_increment);
+            let frame_bytes =
+                construct_window_update_frame_raw(clamped_stream_id, modified_increment);
 
             let mut buf = BytesMut::from(&frame_bytes[..]);
             if let Ok(header) = FrameHeader::parse(&mut buf) {
@@ -805,7 +916,10 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
                     Ok(frame) => {
                         // All reserved bits should be cleared
                         let expected_increment = modified_increment & 0x7FFF_FFFF;
-                        assert_eq!(frame.increment, expected_increment, "All reserved bits should be cleared");
+                        assert_eq!(
+                            frame.increment, expected_increment,
+                            "All reserved bits should be cleared"
+                        );
 
                         if expected_increment > 0 {
                             verify_window_update_consistency(frame.stream_id, frame.increment);
@@ -849,12 +963,23 @@ fn construct_window_update_frame_raw(stream_id: u32, increment: u32) -> Vec<u8> 
 
 fn verify_window_update_consistency(stream_id: u32, increment: u32) {
     // Verify stream ID is valid (reserved bit clear)
-    assert_eq!(stream_id & 0x8000_0000, 0, "Stream ID reserved bit should be clear");
+    assert_eq!(
+        stream_id & 0x8000_0000,
+        0,
+        "Stream ID reserved bit should be clear"
+    );
 
     // Verify increment is valid and non-zero
     assert!(increment > 0, "Increment must be non-zero");
-    assert!(increment <= MAX_INCREMENT, "Increment must not exceed 2^31-1");
-    assert_eq!(increment & 0x8000_0000, 0, "Increment reserved bit should be clear");
+    assert!(
+        increment <= MAX_INCREMENT,
+        "Increment must not exceed 2^31-1"
+    );
+    assert_eq!(
+        increment & 0x8000_0000,
+        0,
+        "Increment reserved bit should be clear"
+    );
 }
 
 fn verify_window_update_error_consistency(err: &H2Error, header: &FrameHeader, payload: &Bytes) {
@@ -862,17 +987,30 @@ fn verify_window_update_error_consistency(err: &H2Error, header: &FrameHeader, p
         ErrorCode::FrameSizeError => {
             // Should occur for invalid payload length
             if payload.len() != WINDOW_UPDATE_PAYLOAD_SIZE {
-                assert!(err.message.contains("4 bytes"), "Frame size error should mention 4 bytes");
+                assert!(
+                    err.message.contains("4 bytes"),
+                    "Frame size error should mention 4 bytes"
+                );
             }
         }
         ErrorCode::ProtocolError => {
             // Check if connection-level zero increment
             if header.stream_id == 0 && err.is_connection_error() {
-                assert!(err.message.contains("zero increment"), "Protocol error should mention zero increment");
+                assert!(
+                    err.message.contains("zero increment"),
+                    "Protocol error should mention zero increment"
+                );
             } else if header.stream_id > 0 && !err.is_connection_error() {
                 // Stream-level zero increment
-                assert_eq!(err.stream_id.unwrap(), header.stream_id, "Error stream ID should match header");
-                assert!(err.message.contains("zero increment"), "Stream error should mention zero increment");
+                assert_eq!(
+                    err.stream_id.unwrap(),
+                    header.stream_id,
+                    "Error stream ID should match header"
+                );
+                assert!(
+                    err.message.contains("zero increment"),
+                    "Stream error should mention zero increment"
+                );
             }
         }
         _ => {
@@ -896,8 +1034,14 @@ fn test_window_update_reencode(stream_id: u32, increment: u32) {
 
             match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
                 Ok(re_parsed) => {
-                    assert_eq!(re_parsed.stream_id, stream_id, "Re-encoding should preserve stream ID");
-                    assert_eq!(re_parsed.increment, increment, "Re-encoding should preserve increment");
+                    assert_eq!(
+                        re_parsed.stream_id, stream_id,
+                        "Re-encoding should preserve stream ID"
+                    );
+                    assert_eq!(
+                        re_parsed.increment, increment,
+                        "Re-encoding should preserve increment"
+                    );
                 }
                 Err(err) => {
                     panic!("Re-encoding should not fail: {:?}", err);

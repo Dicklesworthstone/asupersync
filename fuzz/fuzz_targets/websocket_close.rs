@@ -9,14 +9,14 @@
 //! 4. Close code + reason length bounds enforced
 //! 5. Close code 1000 (Normal Closure) correctly handled
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::net::websocket::{
-    close::{CloseReason, CloseCode},
-    frame::{Frame, FrameCodec, Opcode, WsError},
-};
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Decoder;
+use asupersync::net::websocket::{
+    close::{CloseCode, CloseReason},
+    frame::{Frame, FrameCodec, Opcode, WsError},
+};
+use libfuzzer_sys::fuzz_target;
 
 /// Structured input for controlled WebSocket close frame fuzzing scenarios.
 #[derive(Arbitrary, Debug)]
@@ -49,10 +49,7 @@ enum CloseFuzzInput {
     },
 
     /// Status code range testing
-    StatusCodeRangeTest {
-        code: u16,
-        reason_valid_utf8: bool,
-    },
+    StatusCodeRangeTest { code: u16, reason_valid_utf8: bool },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -72,8 +69,8 @@ enum CloseCodeWrapper {
     ServiceRestart,
     TryAgainLater,
     BadGateway,
-    TlsHandshake,     // 1015 - reserved
-    Custom(u16),      // 3000-4999
+    TlsHandshake, // 1015 - reserved
+    Custom(u16),  // 3000-4999
 }
 
 impl From<CloseCodeWrapper> for u16 {
@@ -207,7 +204,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Also fuzz raw bytes directly for maximum coverage
-    if data.len() <= 127 { // Control frame payload limit
+    if data.len() <= 127 {
+        // Control frame payload limit
         fuzz_raw_close_payload(data);
     }
 });
@@ -226,7 +224,13 @@ fn fuzz_websocket_close_frame(input: CloseFuzzInput) {
             fuzz_edge_case(edge);
         }
 
-        CloseFuzzInput::FullFrame { payload, fin, rsv1, rsv2, rsv3 } => {
+        CloseFuzzInput::FullFrame {
+            payload,
+            fin,
+            rsv1,
+            rsv2,
+            rsv3,
+        } => {
             fuzz_full_frame(payload, fin, rsv1, rsv2, rsv3);
         }
 
@@ -234,7 +238,10 @@ fn fuzz_websocket_close_frame(input: CloseFuzzInput) {
             fuzz_utf8_boundary_test(code, utf8_bytes);
         }
 
-        CloseFuzzInput::StatusCodeRangeTest { code, reason_valid_utf8 } => {
+        CloseFuzzInput::StatusCodeRangeTest {
+            code,
+            reason_valid_utf8,
+        } => {
             fuzz_status_code_range_test(code, reason_valid_utf8);
         }
     }
@@ -251,18 +258,29 @@ fn fuzz_raw_close_payload(payload: &[u8]) {
     match payload.len() {
         0 => {
             // Empty payload should always succeed
-            assert!(parse_result.is_ok(), "Empty close payload should parse successfully");
+            assert!(
+                parse_result.is_ok(),
+                "Empty close payload should parse successfully"
+            );
             let reason = parse_result.unwrap();
             assert!(reason.code.is_none(), "Empty payload should have no code");
-            assert!(reason.raw_code.is_none(), "Empty payload should have no raw code");
+            assert!(
+                reason.raw_code.is_none(),
+                "Empty payload should have no raw code"
+            );
             assert!(reason.text.is_none(), "Empty payload should have no text");
         }
 
         1 => {
             // Single byte payload is always invalid per RFC 6455
-            assert!(parse_result.is_err(), "Single byte close payload should be rejected");
-            assert!(matches!(parse_result, Err(WsError::InvalidClosePayload)),
-                "Single byte should return InvalidClosePayload error");
+            assert!(
+                parse_result.is_err(),
+                "Single byte close payload should be rejected"
+            );
+            assert!(
+                matches!(parse_result, Err(WsError::InvalidClosePayload)),
+                "Single byte should return InvalidClosePayload error"
+            );
         }
 
         _ => {
@@ -272,29 +290,46 @@ fn fuzz_raw_close_payload(payload: &[u8]) {
             match parse_result {
                 Ok(reason) => {
                     // ASSERTION 1: Status code must be in valid range
-                    assert!(is_valid_received_code(code_raw),
-                        "Successfully parsed code {} should be in valid received range", code_raw);
+                    assert!(
+                        is_valid_received_code(code_raw),
+                        "Successfully parsed code {} should be in valid received range",
+                        code_raw
+                    );
 
-                    assert_eq!(reason.raw_code, Some(code_raw),
-                        "Raw code should match parsed value");
+                    assert_eq!(
+                        reason.raw_code,
+                        Some(code_raw),
+                        "Raw code should match parsed value"
+                    );
 
                     // ASSERTION 2: Reason text must be valid UTF-8
                     if payload.len() > 2 {
                         let reason_bytes = &payload[2..];
-                        assert!(std::str::from_utf8(reason_bytes).is_ok(),
-                            "Successfully parsed reason should be valid UTF-8");
+                        assert!(
+                            std::str::from_utf8(reason_bytes).is_ok(),
+                            "Successfully parsed reason should be valid UTF-8"
+                        );
 
                         if let Some(text) = &reason.text {
-                            assert_eq!(text.as_bytes(), reason_bytes,
-                                "Parsed text should match original bytes");
+                            assert_eq!(
+                                text.as_bytes(),
+                                reason_bytes,
+                                "Parsed text should match original bytes"
+                            );
                         }
                     }
 
                     // ASSERTION 5: Close code 1000 Normal Closure handled correctly
                     if code_raw == 1000 {
-                        assert_eq!(reason.code, Some(CloseCode::Normal),
-                            "Code 1000 should map to CloseCode::Normal");
-                        assert!(reason.is_normal(), "Code 1000 should be recognized as normal");
+                        assert_eq!(
+                            reason.code,
+                            Some(CloseCode::Normal),
+                            "Code 1000 should map to CloseCode::Normal"
+                        );
+                        assert!(
+                            reason.is_normal(),
+                            "Code 1000 should be recognized as normal"
+                        );
                     }
                 }
 
@@ -312,11 +347,17 @@ fn fuzz_raw_close_payload(payload: &[u8]) {
 
                     // ASSERTION 3: Reserved codes 1005/1006 should be rejected
                     if code_raw == 1005 || code_raw == 1006 {
-                        assert!(!code_valid, "Reserved codes 1005/1006 should not be valid for receiving");
+                        assert!(
+                            !code_valid,
+                            "Reserved codes 1005/1006 should not be valid for receiving"
+                        );
                     }
 
-                    assert!(!code_valid || !utf8_valid,
-                        "InvalidClosePayload should only occur for invalid code {} or invalid UTF-8", code_raw);
+                    assert!(
+                        !code_valid || !utf8_valid,
+                        "InvalidClosePayload should only occur for invalid code {} or invalid UTF-8",
+                        code_raw
+                    );
                 }
 
                 Err(other) => {
@@ -332,15 +373,21 @@ fn fuzz_raw_close_payload(payload: &[u8]) {
 
         // ASSERTION 4: Close code + reason length bounds
         // Control frames have a maximum payload of 125 bytes
-        assert!(encoded.len() <= 125,
-            "Encoded close frame payload should not exceed 125 bytes, got {}", encoded.len());
+        assert!(
+            encoded.len() <= 125,
+            "Encoded close frame payload should not exceed 125 bytes, got {}",
+            encoded.len()
+        );
 
         // Re-parsing should yield the same result
         let reparsed = CloseReason::parse(&encoded);
         assert!(reparsed.is_ok(), "Round-trip parsing should succeed");
 
         let reparsed_reason = reparsed.unwrap();
-        assert_eq!(reason.raw_code, reparsed_reason.raw_code, "Raw code should round-trip");
+        assert_eq!(
+            reason.raw_code, reparsed_reason.raw_code,
+            "Raw code should round-trip"
+        );
         assert_eq!(reason.text, reparsed_reason.text, "Text should round-trip");
     }
 }
@@ -494,13 +541,11 @@ fn fuzz_forbidden_codes(forbidden: ForbiddenCodeTest) {
         ForbiddenCodeTest::NoStatusReceived1005 => 1005,
         ForbiddenCodeTest::AbnormalClosure1006 => 1006,
         ForbiddenCodeTest::TlsHandshake1015 => 1015,
-        ForbiddenCodeTest::OutOfRange(out_of_range) => {
-            match out_of_range {
-                OutOfRangeCode::TooLow(code) => code.min(999),
-                OutOfRangeCode::Unassigned(code) => code.clamp(1016, 2999),
-                OutOfRangeCode::TooHigh(code) => code.max(5000),
-            }
-        }
+        ForbiddenCodeTest::OutOfRange(out_of_range) => match out_of_range {
+            OutOfRangeCode::TooLow(code) => code.min(999),
+            OutOfRangeCode::Unassigned(code) => code.clamp(1016, 2999),
+            OutOfRangeCode::TooHigh(code) => code.max(5000),
+        },
     };
 
     let payload = code.to_be_bytes();
@@ -510,22 +555,38 @@ fn fuzz_forbidden_codes(forbidden: ForbiddenCodeTest) {
     match code {
         1005 | 1006 => {
             // These codes are reserved for wire-only use and should be rejected
-            assert!(result.is_err(), "Reserved codes {} should be rejected", code);
+            assert!(
+                result.is_err(),
+                "Reserved codes {} should be rejected",
+                code
+            );
         }
 
         1004 | 1015 => {
             // These are also reserved/forbidden
-            assert!(result.is_err(), "Forbidden code {} should be rejected", code);
+            assert!(
+                result.is_err(),
+                "Forbidden code {} should be rejected",
+                code
+            );
         }
 
         1016..=2999 => {
             // Unassigned codes should be accepted per RFC 6455 §7.4.2
-            assert!(result.is_ok(), "Unassigned code {} should be accepted", code);
+            assert!(
+                result.is_ok(),
+                "Unassigned code {} should be accepted",
+                code
+            );
         }
 
         0..=999 | 5000.. => {
             // Out of valid range
-            assert!(result.is_err(), "Out-of-range code {} should be rejected", code);
+            assert!(
+                result.is_err(),
+                "Out-of-range code {} should be rejected",
+                code
+            );
         }
 
         _ => {
@@ -565,25 +626,44 @@ fn fuzz_boundary_codes(boundary: BoundaryCodeTest) {
     // Check specific boundary expectations
     match code {
         1000 => {
-            assert_eq!(reason.code, Some(CloseCode::Normal), "1000 should map to Normal");
+            assert_eq!(
+                reason.code,
+                Some(CloseCode::Normal),
+                "1000 should map to Normal"
+            );
             assert!(reason.is_normal(), "1000 should be recognized as normal");
         }
 
         1003 => {
-            assert_eq!(reason.code, Some(CloseCode::Unsupported), "1003 should map to Unsupported");
+            assert_eq!(
+                reason.code,
+                Some(CloseCode::Unsupported),
+                "1003 should map to Unsupported"
+            );
         }
 
         1007 => {
-            assert_eq!(reason.code, Some(CloseCode::InvalidPayload), "1007 should map to InvalidPayload");
+            assert_eq!(
+                reason.code,
+                Some(CloseCode::InvalidPayload),
+                "1007 should map to InvalidPayload"
+            );
         }
 
         1014 => {
-            assert_eq!(reason.code, Some(CloseCode::BadGateway), "1014 should map to BadGateway");
+            assert_eq!(
+                reason.code,
+                Some(CloseCode::BadGateway),
+                "1014 should map to BadGateway"
+            );
         }
 
         1016..=2999 | 3000..=4999 => {
             // Unassigned or custom codes - should parse but not map to enum
-            assert!(reason.code.is_none(), "Unassigned/custom codes should not map to enum variants");
+            assert!(
+                reason.code.is_none(),
+                "Unassigned/custom codes should not map to enum variants"
+            );
             assert_eq!(reason.raw_code, Some(code), "Raw code should be preserved");
         }
 
@@ -624,14 +704,21 @@ fn fuzz_full_frame(payload: Vec<u8>, fin: bool, rsv1: bool, rsv2: bool, rsv3: bo
                     Ok(expected_reason) => {
                         match reason_opt {
                             Some(actual_reason) => {
-                                assert_eq!(actual_reason.raw_code, expected_reason.raw_code,
-                                    "Frame conversion should preserve raw code");
-                                assert_eq!(actual_reason.text, expected_reason.text,
-                                    "Frame conversion should preserve text");
+                                assert_eq!(
+                                    actual_reason.raw_code, expected_reason.raw_code,
+                                    "Frame conversion should preserve raw code"
+                                );
+                                assert_eq!(
+                                    actual_reason.text, expected_reason.text,
+                                    "Frame conversion should preserve text"
+                                );
                             }
                             None => {
                                 // Only acceptable if payload was empty
-                                assert!(payload.is_empty(), "Empty reason only valid for empty payload");
+                                assert!(
+                                    payload.is_empty(),
+                                    "Empty reason only valid for empty payload"
+                                );
                             }
                         }
                     }
@@ -663,7 +750,11 @@ fn fuzz_utf8_boundary_test(code: u16, utf8_bytes: Vec<u8>) {
     let is_valid_code = is_valid_received_code(code);
 
     if is_valid_code && is_valid_utf8 {
-        assert!(result.is_ok(), "Valid code {} with valid UTF-8 should parse", code);
+        assert!(
+            result.is_ok(),
+            "Valid code {} with valid UTF-8 should parse",
+            code
+        );
     } else if !is_valid_code {
         assert!(result.is_err(), "Invalid code {} should be rejected", code);
     } else if !is_valid_utf8 {
@@ -687,18 +778,30 @@ fn fuzz_status_code_range_test(code: u16, reason_valid_utf8: bool) {
     let is_valid_code = is_valid_received_code(code);
 
     if is_valid_code && reason_valid_utf8 {
-        assert!(result.is_ok(), "Valid code {} with valid UTF-8 should parse", code);
+        assert!(
+            result.is_ok(),
+            "Valid code {} with valid UTF-8 should parse",
+            code
+        );
 
         let reason = result.unwrap();
         assert_eq!(reason.raw_code, Some(code), "Raw code should match");
 
         // ASSERTION 5: Normal closure handling
         if code == 1000 {
-            assert_eq!(reason.code, Some(CloseCode::Normal), "Code 1000 should be Normal");
+            assert_eq!(
+                reason.code,
+                Some(CloseCode::Normal),
+                "Code 1000 should be Normal"
+            );
             assert!(reason.is_normal(), "Code 1000 should be normal");
         }
     } else {
-        assert!(result.is_err(), "Invalid code {} or UTF-8 should be rejected", code);
+        assert!(
+            result.is_err(),
+            "Invalid code {} or UTF-8 should be rejected",
+            code
+        );
     }
 }
 
@@ -710,7 +813,7 @@ mod tests {
     #[test]
     fn test_all_standard_close_codes() {
         let standard_codes = [
-            1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014
+            1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014,
         ];
 
         for &code in &standard_codes {
@@ -764,7 +867,11 @@ mod tests {
         max_payload.extend_from_slice(&1000u16.to_be_bytes());
         max_payload.extend_from_slice("A".repeat(123).as_bytes()); // 125 total
 
-        assert_eq!(max_payload.len(), 125, "Should be exactly at control frame limit");
+        assert_eq!(
+            max_payload.len(),
+            125,
+            "Should be exactly at control frame limit"
+        );
 
         let result = CloseReason::parse(&max_payload);
         assert!(result.is_ok(), "Maximum length payload should parse");
@@ -778,11 +885,18 @@ mod tests {
         for &code in &unassigned_codes {
             let payload = code.to_be_bytes();
             let result = CloseReason::parse(&payload);
-            assert!(result.is_ok(), "Unassigned code {} should be accepted", code);
+            assert!(
+                result.is_ok(),
+                "Unassigned code {} should be accepted",
+                code
+            );
 
             let reason = result.unwrap();
             assert_eq!(reason.raw_code, Some(code));
-            assert!(reason.code.is_none(), "Unassigned codes should not map to enum");
+            assert!(
+                reason.code.is_none(),
+                "Unassigned codes should not map to enum"
+            );
         }
     }
 

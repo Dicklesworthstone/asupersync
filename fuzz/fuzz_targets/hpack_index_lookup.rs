@@ -81,10 +81,7 @@ impl HeaderTemplate {
             .take(100) // Limit value length
             .collect();
 
-        Header::new(
-            if name.is_empty() { "x-test" } else { &name },
-            &value,
-        )
+        Header::new(if name.is_empty() { "x-test" } else { &name }, &value)
     }
 }
 
@@ -124,7 +121,10 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
     match lookup_result {
         Ok(header) => {
             if test_index == 0 {
-                panic!("Index 0 should be invalid but returned header: {:?}", header);
+                panic!(
+                    "Index 0 should be invalid but returned header: {:?}",
+                    header
+                );
             }
 
             // Assertion 1: Static indices 1..=61 resolve correctly
@@ -136,9 +136,13 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
                 );
                 // Static table entries should have well-known names
                 assert!(
-                    header.name.chars().all(|c| c.is_ascii_lowercase() || c == ':' || c == '-'),
+                    header
+                        .name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == ':' || c == '-'),
                     "Static index {} returned invalid header name: '{}'",
-                    test_index, header.name
+                    test_index,
+                    header.name
                 );
             }
             // Assertion 2: Dynamic indices > 61 offset correctly
@@ -147,7 +151,9 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
                 assert!(
                     dynamic_offset <= dynamic_entries_added,
                     "Dynamic index {} (offset {}) beyond added entries {}",
-                    test_index, dynamic_offset, dynamic_entries_added
+                    test_index,
+                    dynamic_offset,
+                    dynamic_entries_added
                 );
             }
         }
@@ -166,17 +172,15 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
                         );
                     } else if test_index <= STATIC_TABLE_SIZE {
                         // Static indices should not fail unless there's a bug
-                        panic!(
-                            "Static index {} unexpectedly failed: {}",
-                            test_index, error
-                        );
+                        panic!("Static index {} unexpectedly failed: {}", test_index, error);
                     } else {
                         // Dynamic index failures are expected when out of bounds
                         let dynamic_offset = test_index - STATIC_TABLE_SIZE;
                         assert!(
                             dynamic_offset > dynamic_entries_added,
                             "Dynamic index {} should be valid but failed: {}",
-                            test_index, error
+                            test_index,
+                            error
                         );
                     }
                 }
@@ -354,7 +358,8 @@ mod tests {
         };
 
         // This should panic with our assertion
-        std::panic::catch_unwind(|| test_hpack_index_lookup(&input)).expect_err("Index 0 should panic");
+        std::panic::catch_unwind(|| test_hpack_index_lookup(&input))
+            .expect_err("Index 0 should panic");
     }
 
     #[test]

@@ -32,12 +32,12 @@ const MAX_INPUT_SIZE: usize = 100_000;
 
 /// HPACK literal header field patterns (RFC 7541 Section 6.2).
 const LITERAL_INCREMENTAL_INDEXING: u8 = 0x40; // 01xxxxxx
-const LITERAL_NEVER_INDEXED: u8 = 0x10;        // 0001xxxx
-const LITERAL_WITHOUT_INDEXING: u8 = 0x00;     // 0000xxxx
+const LITERAL_NEVER_INDEXED: u8 = 0x10; // 0001xxxx
+const LITERAL_WITHOUT_INDEXING: u8 = 0x00; // 0000xxxx
 
 /// String encoding patterns (RFC 7541 Section 5.2).
-const HUFFMAN_ENCODED_FLAG: u8 = 0x80;         // 1xxxxxxx
-const RAW_OCTET_FLAG: u8 = 0x00;               // 0xxxxxxx
+const HUFFMAN_ENCODED_FLAG: u8 = 0x80; // 1xxxxxxx
+const RAW_OCTET_FLAG: u8 = 0x00; // 0xxxxxxx
 
 /// Maximum string length allowed by HPACK (256KB).
 const MAX_STRING_LENGTH: usize = 256 * 1024;
@@ -145,26 +145,57 @@ fuzz_target!(|data: &[u8]| {
 /// Test a specific literal header field fuzzing scenario.
 fn test_literal_scenario(scenario: LiteralFuzzScenario) {
     match scenario {
-        LiteralFuzzScenario::NeverIndexedFlag { use_never_indexed, name_encoding, value_encoding } => {
+        LiteralFuzzScenario::NeverIndexedFlag {
+            use_never_indexed,
+            name_encoding,
+            value_encoding,
+        } => {
             test_never_indexed_flag_preservation(use_never_indexed, name_encoding, value_encoding);
         }
-        LiteralFuzzScenario::IndexedNamePath { index_value, name_string, value_encoding, literal_pattern } => {
-            test_indexed_name_path_selection(index_value, name_string, value_encoding, literal_pattern);
+        LiteralFuzzScenario::IndexedNamePath {
+            index_value,
+            name_string,
+            value_encoding,
+            literal_pattern,
+        } => {
+            test_indexed_name_path_selection(
+                index_value,
+                name_string,
+                value_encoding,
+                literal_pattern,
+            );
         }
-        LiteralFuzzScenario::HuffmanEncoding { name_huffman, value_huffman, name_content, value_content } => {
+        LiteralFuzzScenario::HuffmanEncoding {
+            name_huffman,
+            value_huffman,
+            name_content,
+            value_content,
+        } => {
             test_huffman_vs_raw_encoding(name_huffman, value_huffman, name_content, value_content);
         }
-        LiteralFuzzScenario::LengthLimits { name_length, value_length, use_huffman } => {
+        LiteralFuzzScenario::LengthLimits {
+            name_length,
+            value_length,
+            use_huffman,
+        } => {
             test_length_limits_enforcement(name_length, value_length, use_huffman);
         }
-        LiteralFuzzScenario::OversizedLiteral { declared_length, actual_data_size, huffman_flag } => {
+        LiteralFuzzScenario::OversizedLiteral {
+            declared_length,
+            actual_data_size,
+            huffman_flag,
+        } => {
             test_oversized_literal_rejection(declared_length, actual_data_size, huffman_flag);
         }
     }
 }
 
 /// Test never-indexed flag preservation (Assertion 1)
-fn test_never_indexed_flag_preservation(use_never_indexed: bool, name_encoding: NameEncoding, value_encoding: StringEncoding) {
+fn test_never_indexed_flag_preservation(
+    use_never_indexed: bool,
+    name_encoding: NameEncoding,
+    value_encoding: StringEncoding,
+) {
     let mut wire_data = Vec::new();
 
     // Construct literal header field with appropriate pattern
@@ -199,7 +230,12 @@ fn test_never_indexed_flag_preservation(use_never_indexed: bool, name_encoding: 
 }
 
 /// Test indexed-name vs new-name path selection (Assertion 2)
-fn test_indexed_name_path_selection(index_value: u16, name_string: Vec<u8>, value_encoding: StringEncoding, literal_pattern: LiteralPattern) {
+fn test_indexed_name_path_selection(
+    index_value: u16,
+    name_string: Vec<u8>,
+    value_encoding: StringEncoding,
+    literal_pattern: LiteralPattern,
+) {
     let mut wire_data = Vec::new();
 
     let pattern_byte = match literal_pattern {
@@ -222,7 +258,8 @@ fn test_indexed_name_path_selection(index_value: u16, name_string: Vec<u8>, valu
     // Test decoding - should choose correct path based on index value
     let expected = if index_value == 0 {
         ExpectedResult::MaySucceed // New name path
-    } else if index_value > 61 { // Beyond static table (61 entries)
+    } else if index_value > 61 {
+        // Beyond static table (61 entries)
         ExpectedResult::ShouldFail // Invalid index
     } else {
         ExpectedResult::MaySucceed // Valid indexed name
@@ -232,7 +269,12 @@ fn test_indexed_name_path_selection(index_value: u16, name_string: Vec<u8>, valu
 }
 
 /// Test Huffman vs raw-octet encoding (Assertion 3)
-fn test_huffman_vs_raw_encoding(name_huffman: bool, value_huffman: bool, name_content: Vec<u8>, value_content: Vec<u8>) {
+fn test_huffman_vs_raw_encoding(
+    name_huffman: bool,
+    value_huffman: bool,
+    name_content: Vec<u8>,
+    value_content: Vec<u8>,
+) {
     let mut wire_data = Vec::new();
 
     // Use literal without indexing for simplicity
@@ -276,21 +318,30 @@ fn test_length_limits_enforcement(name_length: u32, value_length: u32, use_huffm
     wire_data.extend_from_slice(&actual_value_data);
 
     // Test decoding - should reject if lengths exceed MAX_STRING_LENGTH
-    let expected = if name_length > MAX_STRING_LENGTH as u32 || value_length > MAX_STRING_LENGTH as u32 {
-        ExpectedResult::ShouldFail
-    } else {
-        ExpectedResult::MaySucceed
-    };
+    let expected =
+        if name_length > MAX_STRING_LENGTH as u32 || value_length > MAX_STRING_LENGTH as u32 {
+            ExpectedResult::ShouldFail
+        } else {
+            ExpectedResult::MaySucceed
+        };
 
     test_hpack_decode_wire_data(&wire_data, expected);
 }
 
 /// Test oversized literal rejection (Assertion 5)
-fn test_oversized_literal_rejection(declared_length: u32, actual_data_size: u16, huffman_flag: bool) {
+fn test_oversized_literal_rejection(
+    declared_length: u32,
+    actual_data_size: u16,
+    huffman_flag: bool,
+) {
     let mut wire_data = Vec::new();
 
     // Create a string with declared length much larger than actual data
-    let flag_byte = if huffman_flag { HUFFMAN_ENCODED_FLAG } else { RAW_OCTET_FLAG };
+    let flag_byte = if huffman_flag {
+        HUFFMAN_ENCODED_FLAG
+    } else {
+        RAW_OCTET_FLAG
+    };
 
     // Encode the oversized length
     encode_hpack_integer(&mut wire_data, declared_length as u64, 7, flag_byte);
@@ -316,7 +367,11 @@ fn test_raw_literal_data(data: &[u8]) {
     test_hpack_decode_raw_string(data, ExpectedResult::MayFail);
 
     // Test with various literal patterns prepended
-    for &pattern in &[LITERAL_INCREMENTAL_INDEXING, LITERAL_NEVER_INDEXED, LITERAL_WITHOUT_INDEXING] {
+    for &pattern in &[
+        LITERAL_INCREMENTAL_INDEXING,
+        LITERAL_NEVER_INDEXED,
+        LITERAL_WITHOUT_INDEXING,
+    ] {
         let mut test_data = vec![pattern];
         test_data.extend_from_slice(data);
         test_hpack_decode_wire_data(&test_data, ExpectedResult::MayFail);
@@ -334,13 +389,21 @@ fn append_string_encoding(wire_data: &mut Vec<u8>, encoding: &StringEncoding) {
 }
 
 fn encode_string_with_huffman_flag(wire_data: &mut Vec<u8>, content: &[u8], use_huffman: bool) {
-    let flag_byte = if use_huffman { HUFFMAN_ENCODED_FLAG } else { RAW_OCTET_FLAG };
+    let flag_byte = if use_huffman {
+        HUFFMAN_ENCODED_FLAG
+    } else {
+        RAW_OCTET_FLAG
+    };
     encode_hpack_integer(wire_data, content.len() as u64, 7, flag_byte);
     wire_data.extend_from_slice(content);
 }
 
 fn encode_string_with_length(wire_data: &mut Vec<u8>, length: u32, use_huffman: bool) {
-    let flag_byte = if use_huffman { HUFFMAN_ENCODED_FLAG } else { RAW_OCTET_FLAG };
+    let flag_byte = if use_huffman {
+        HUFFMAN_ENCODED_FLAG
+    } else {
+        RAW_OCTET_FLAG
+    };
     encode_hpack_integer(wire_data, length as u64, 7, flag_byte);
 }
 

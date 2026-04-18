@@ -36,14 +36,14 @@ const MAX_FRAME_PAYLOAD_SIZE: usize = 10_000;
 /// Length field width configuration for variable-width testing
 #[derive(Arbitrary, Debug, Clone)]
 enum LengthFieldWidth {
-    U8,   // 1 byte
-    U16,  // 2 bytes
-    U24,  // 3 bytes (non-standard)
-    U32,  // 4 bytes
-    U40,  // 5 bytes (non-standard)
-    U48,  // 6 bytes (non-standard)
-    U56,  // 7 bytes (non-standard)
-    U64,  // 8 bytes
+    U8,  // 1 byte
+    U16, // 2 bytes
+    U24, // 3 bytes (non-standard)
+    U32, // 4 bytes
+    U40, // 5 bytes (non-standard)
+    U48, // 6 bytes (non-standard)
+    U56, // 7 bytes (non-standard)
+    U64, // 8 bytes
 }
 
 impl LengthFieldWidth {
@@ -79,15 +79,15 @@ impl LengthFieldWidth {
 #[derive(Arbitrary, Debug, Clone)]
 struct FuzzConfig {
     /// Offset to length field in frame header
-    length_field_offset: u8,        // 0-255
+    length_field_offset: u8, // 0-255
     /// Width of length field (variable width testing)
     length_field_width: LengthFieldWidth,
     /// Adjustment applied to length value (overflow/underflow testing)
-    length_adjustment: i32,         // Full range for overflow testing
+    length_adjustment: i32, // Full range for overflow testing
     /// Bytes to skip after reading length
-    num_skip: u8,                   // 0-255
+    num_skip: u8, // 0-255
     /// Maximum allowed frame length (security boundary)
-    max_frame_length: u32,          // Full range for boundary testing
+    max_frame_length: u32, // Full range for boundary testing
     /// Byte order for multi-byte length fields
     big_endian: bool,
 }
@@ -174,33 +174,51 @@ impl FuzzInput {
         let mut frame = BytesMut::new();
 
         match &self.operation {
-            FuzzOperation::OversizedLength { oversized_value, payload } => {
+            FuzzOperation::OversizedLength {
+                oversized_value,
+                payload,
+            } => {
                 self.write_header(&mut frame, *oversized_value);
                 frame.extend_from_slice(payload);
             }
-            FuzzOperation::TruncatedPayload { length_value, payload } => {
+            FuzzOperation::TruncatedPayload {
+                length_value,
+                payload,
+            } => {
                 self.write_header(&mut frame, *length_value as u64);
                 // Write only part of the declared payload
                 let truncated_len = payload.len().min(*length_value as usize / 2);
                 frame.extend_from_slice(&payload[..truncated_len]);
             }
-            FuzzOperation::LengthAdjustmentEdgeCase { base_length, payload } => {
+            FuzzOperation::LengthAdjustmentEdgeCase {
+                base_length,
+                payload,
+            } => {
                 // Test edge cases around length adjustment
                 self.write_header(&mut frame, *base_length as u64);
                 frame.extend_from_slice(payload);
             }
-            FuzzOperation::VariableWidthLength { length_value, payload } => {
+            FuzzOperation::VariableWidthLength {
+                length_value,
+                payload,
+            } => {
                 // Clamp length_value to field width maximum
                 let clamped = (*length_value).min(self.config.length_field_width.max_value());
                 self.write_header(&mut frame, clamped);
                 frame.extend_from_slice(payload);
             }
-            FuzzOperation::MalformedHeader { header_bytes, payload } => {
+            FuzzOperation::MalformedHeader {
+                header_bytes,
+                payload,
+            } => {
                 // Write potentially malformed header directly
                 frame.extend_from_slice(header_bytes);
                 frame.extend_from_slice(payload);
             }
-            FuzzOperation::BoundaryCondition { at_boundary, payload } => {
+            FuzzOperation::BoundaryCondition {
+                at_boundary,
+                payload,
+            } => {
                 let length = if *at_boundary {
                     self.config.max_frame_length as u64
                 } else {
@@ -308,7 +326,10 @@ fuzz_target!(|input: FuzzInput| {
     let mut frame = frame_bytes.clone();
 
     // **ASSERTION 1: Oversized length fields guarded by max_frame_length**
-    if let FuzzOperation::OversizedLength { oversized_value, .. } = &input.operation {
+    if let FuzzOperation::OversizedLength {
+        oversized_value, ..
+    } = &input.operation
+    {
         if *oversized_value > input.config.max_frame_length as u64 {
             // Decoding should return an error, not panic or infinite loop
             match codec.decode(&mut frame) {
@@ -329,7 +350,11 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // **ASSERTION 2: Truncated payloads return Incomplete (None), not panic**
-    if let FuzzOperation::TruncatedPayload { length_value, payload } = &input.operation {
+    if let FuzzOperation::TruncatedPayload {
+        length_value,
+        payload,
+    } = &input.operation
+    {
         let mut truncated_frame = frame_bytes.clone();
 
         // Attempt decode on truncated payload
@@ -376,8 +401,8 @@ fuzz_target!(|input: FuzzInput| {
         match codec.decode(&mut width_frame) {
             Ok(Some(decoded)) => {
                 // If frame was decoded successfully, verify basic properties
-                let header_len = input.config.length_field_offset as usize +
-                                input.config.length_field_width.to_bytes();
+                let header_len = input.config.length_field_offset as usize
+                    + input.config.length_field_width.to_bytes();
 
                 // Frame should not be empty unless that was intended
                 // Basic sanity check that decode produces reasonable output
@@ -390,9 +415,7 @@ fuzz_target!(|input: FuzzInput| {
                 assert!(
                     matches!(
                         e.kind(),
-                        ErrorKind::InvalidData |
-                        ErrorKind::UnexpectedEof |
-                        ErrorKind::Other
+                        ErrorKind::InvalidData | ErrorKind::UnexpectedEof | ErrorKind::Other
                     ),
                     "Variable width decode should return proper error type, got: {:?}",
                     e.kind()

@@ -62,7 +62,7 @@ enum WriterBehavior {
     /// Combines partial writes with pending
     PartialWithPending {
         max_write_size: u8,
-        pending_frequency: u8
+        pending_frequency: u8,
     },
     /// Fails writes occasionally with WriteZero error
     OccasionalWriteZero { failure_rate: u8 },
@@ -75,10 +75,10 @@ enum WriterBehavior {
 /// Buffer capacity options for testing different memory pressures
 #[derive(Arbitrary, Debug)]
 enum BufferCapacity {
-    Tiny,    // 64 bytes
-    Small,   // 512 bytes
-    Medium,  // 2KB
-    Large,   // 8KB
+    Tiny,   // 64 bytes
+    Small,  // 512 bytes
+    Medium, // 2KB
+    Large,  // 8KB
     Custom { size: u16 },
 }
 
@@ -166,9 +166,9 @@ impl BackpressureWriter {
                 // Deterministic "randomness" based on poll count
                 (self.poll_count * 31) % 256 < *frequency as usize
             }
-            WriterBehavior::PartialWithPending { pending_frequency, .. } => {
-                self.poll_count % ((*pending_frequency as usize).max(1)) == 0
-            }
+            WriterBehavior::PartialWithPending {
+                pending_frequency, ..
+            } => self.poll_count % ((*pending_frequency as usize).max(1)) == 0,
             WriterBehavior::OccasionalWriteZero { failure_rate } => {
                 (self.poll_count * 17) % 256 < *failure_rate as usize
             }
@@ -181,7 +181,9 @@ impl BackpressureWriter {
                     should_pending
                 }
             }
-            WriterBehavior::BytesWrittenPending { pending_every_n_bytes } => {
+            WriterBehavior::BytesWrittenPending {
+                pending_every_n_bytes,
+            } => {
                 let threshold = (*pending_every_n_bytes as usize).max(1);
                 self.bytes_written >= (self.poll_count / 3) * threshold
             }
@@ -192,9 +194,7 @@ impl BackpressureWriter {
     /// Get maximum write size for this attempt
     fn max_write_size(&self) -> usize {
         match &self.behavior {
-            WriterBehavior::PartialWrites { max_write_size } => {
-                (*max_write_size as usize).max(1)
-            }
+            WriterBehavior::PartialWrites { max_write_size } => (*max_write_size as usize).max(1),
             WriterBehavior::PartialWithPending { max_write_size, .. } => {
                 (*max_write_size as usize).max(1)
             }
@@ -337,8 +337,8 @@ impl TestState {
     /// Check for obvious violations
     fn check_sanity(&self) -> bool {
         // Basic sanity checks
-        self.items_encoded >= self.successful_flushes &&
-        self.encoded_data.len() == self.items_encoded
+        self.items_encoded >= self.successful_flushes
+            && self.encoded_data.len() == self.items_encoded
     }
 }
 
@@ -385,7 +385,8 @@ fuzz_target!(|input: BackpressureFuzzConfig| {
 
     // Final integrity checks
     // Try to flush everything at the end to check for data loss
-    for _ in 0..10 { // Multiple attempts to handle pending
+    for _ in 0..10 {
+        // Multiple attempts to handle pending
         match framed.poll_flush(&mut cx) {
             Poll::Ready(Ok(())) => break,
             Poll::Ready(Err(_)) => break, // Error is ok, but shouldn't panic
@@ -396,18 +397,21 @@ fuzz_target!(|input: BackpressureFuzzConfig| {
     // Check that no data was lost or duplicated
     // This is a basic check - more sophisticated checks could verify exact data integrity
     let final_written = &framed.get_ref().written_data;
-    let expected_data_present = test_state.encoded_data.iter()
-        .all(|data| {
-            // Check if this data (with newline) appears in the written data
-            let mut with_newline = data.clone();
-            with_newline.push(b'\n');
-            final_written.windows(with_newline.len()).any(|window| window == &with_newline[..])
-        });
+    let expected_data_present = test_state.encoded_data.iter().all(|data| {
+        // Check if this data (with newline) appears in the written data
+        let mut with_newline = data.clone();
+        with_newline.push(b'\n');
+        final_written
+            .windows(with_newline.len())
+            .any(|window| window == &with_newline[..])
+    });
 
     if !expected_data_present && test_state.items_encoded > 0 && test_state.successful_flushes > 0 {
         // Data loss detected - this is a serious bug
-        panic!("Data loss detected: encoded {} items, had {} successful flushes, but data not found in writer",
-               test_state.items_encoded, test_state.successful_flushes);
+        panic!(
+            "Data loss detected: encoded {} items, had {} successful flushes, but data not found in writer",
+            test_state.items_encoded, test_state.successful_flushes
+        );
     }
 });
 
@@ -463,8 +467,10 @@ fn execute_operation<W>(
         }
 
         BackpressureOperation::EncodeSequence { items } => {
-            for item in items.iter().take(10) { // Limit sequence length
-                let limited_item: Vec<u8> = item.iter().take(MAX_INPUT_SIZE / 10).cloned().collect();
+            for item in items.iter().take(10) {
+                // Limit sequence length
+                let limited_item: Vec<u8> =
+                    item.iter().take(MAX_INPUT_SIZE / 10).cloned().collect();
                 if let Ok(string_data) = String::from_utf8(limited_item.clone()) {
                     let result = framed.send(string_data);
                     if result.is_ok() {
@@ -513,7 +519,10 @@ fn execute_operation<W>(
             }
         }
 
-        BackpressureOperation::InterleavedEncodeFLush { encode_data, flush_between } => {
+        BackpressureOperation::InterleavedEncodeFLush {
+            encode_data,
+            flush_between,
+        } => {
             // Encode data
             let limited_data: Vec<u8> = encode_data.iter().take(MAX_INPUT_SIZE).cloned().collect();
             if let Ok(string_data) = String::from_utf8(limited_data.clone()) {

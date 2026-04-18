@@ -30,10 +30,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::grpc::{
-    server::{Server, ServerBuilder, parse_grpc_timeout, CallContext},
-    service::{ServiceDescriptor, MethodDescriptor, ServiceHandler, NamedService},
+    server::{CallContext, Server, ServerBuilder, parse_grpc_timeout},
+    service::{MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler},
+    status::{Code, Status},
     streaming::{Metadata, Request, Response},
-    status::{Status, Code},
 };
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
@@ -96,13 +96,13 @@ enum GrpcFuzzScenario {
 /// Timeout unit suffixes as per gRPC specification
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum TimeoutUnit {
-    Hours,      // H
-    Minutes,    // M
-    Seconds,    // S
-    Millis,     // m
-    Micros,     // u (μ)
-    Nanos,      // n
-    Invalid,    // Invalid unit for testing
+    Hours,   // H
+    Minutes, // M
+    Seconds, // S
+    Millis,  // m
+    Micros,  // u (μ)
+    Nanos,   // n
+    Invalid, // Invalid unit for testing
 }
 
 impl TimeoutUnit {
@@ -167,19 +167,41 @@ fuzz_target!(|data: &[u8]| {
 /// Test a specific gRPC server fuzzing scenario
 fn test_grpc_scenario(scenario: GrpcFuzzScenario) {
     match scenario {
-        GrpcFuzzScenario::PathHeaderValidation { path, include_service, malformed_segments } => {
+        GrpcFuzzScenario::PathHeaderValidation {
+            path,
+            include_service,
+            malformed_segments,
+        } => {
             test_path_validation(path, include_service, malformed_segments);
         }
-        GrpcFuzzScenario::TimeoutParsing { timeout_value, unit_suffix, include_invalid_chars } => {
+        GrpcFuzzScenario::TimeoutParsing {
+            timeout_value,
+            unit_suffix,
+            include_invalid_chars,
+        } => {
             test_timeout_parsing(timeout_value, unit_suffix, include_invalid_chars);
         }
-        GrpcFuzzScenario::MethodDispatch { service_name, method_name, is_known_method, metadata } => {
+        GrpcFuzzScenario::MethodDispatch {
+            service_name,
+            method_name,
+            is_known_method,
+            metadata,
+        } => {
             test_method_dispatch(service_name, method_name, is_known_method, metadata);
         }
-        GrpcFuzzScenario::StreamingDetection { path, client_streaming, server_streaming, confusing_headers } => {
+        GrpcFuzzScenario::StreamingDetection {
+            path,
+            client_streaming,
+            server_streaming,
+            confusing_headers,
+        } => {
             test_streaming_detection(path, client_streaming, server_streaming, confusing_headers);
         }
-        GrpcFuzzScenario::DeadlinePropagation { timeout_header, default_timeout, time_offset_ms } => {
+        GrpcFuzzScenario::DeadlinePropagation {
+            timeout_header,
+            default_timeout,
+            time_offset_ms,
+        } => {
             test_deadline_propagation(timeout_header, default_timeout, time_offset_ms);
         }
     }
@@ -197,14 +219,18 @@ fn test_path_validation(path: Vec<u8>, include_service: bool, malformed_segments
     let test_paths = vec![
         path_str.to_string(),
         format!("{}{}", path_str, malformed_segments.join("/")),
-        if include_service { format!("/test.Service{}", path_str) } else { path_str.to_string() },
+        if include_service {
+            format!("/test.Service{}", path_str)
+        } else {
+            path_str.to_string()
+        },
         // Test edge cases
-        String::new(),                    // Empty path
-        "/".to_string(),                  // Root only
-        "no-leading-slash".to_string(),   // Missing leading slash
-        "/invalid\0null".to_string(),     // Embedded null
-        "/invalid\npath".to_string(),     // Newline injection
-        "/🦀/rust".to_string(),          // Unicode characters
+        String::new(),                  // Empty path
+        "/".to_string(),                // Root only
+        "no-leading-slash".to_string(), // Missing leading slash
+        "/invalid\0null".to_string(),   // Embedded null
+        "/invalid\npath".to_string(),   // Newline injection
+        "/🦀/rust".to_string(),         // Unicode characters
     ];
 
     for test_path in test_paths {
@@ -213,7 +239,11 @@ fn test_path_validation(path: Vec<u8>, include_service: bool, malformed_segments
 }
 
 /// Test grpc-timeout trailer parsing (Assertion 2)
-fn test_timeout_parsing(mut timeout_value: String, unit_suffix: TimeoutUnit, include_invalid_chars: bool) {
+fn test_timeout_parsing(
+    mut timeout_value: String,
+    unit_suffix: TimeoutUnit,
+    include_invalid_chars: bool,
+) {
     if include_invalid_chars {
         timeout_value.push_str("\0\n\r");
     }
@@ -227,14 +257,21 @@ fn test_timeout_parsing(mut timeout_value: String, unit_suffix: TimeoutUnit, inc
     match unit_suffix {
         TimeoutUnit::Invalid => {
             // Should fail to parse invalid units
-            assert!(parsed.is_none(), "Invalid unit should not parse: {}", timeout_header);
+            assert!(
+                parsed.is_none(),
+                "Invalid unit should not parse: {}",
+                timeout_header
+            );
         }
         _ => {
             // Valid units should either parse or fail gracefully
             if let Some(duration) = parsed {
                 // Parsed successfully - validate reasonable bounds
-                assert!(duration <= Duration::from_secs(3600 * 24 * 365),
-                       "Timeout too large: {:?}", duration);
+                assert!(
+                    duration <= Duration::from_secs(3600 * 24 * 365),
+                    "Timeout too large: {:?}",
+                    duration
+                );
             }
             // Parsing failure is acceptable for malformed values
         }
@@ -245,7 +282,12 @@ fn test_timeout_parsing(mut timeout_value: String, unit_suffix: TimeoutUnit, inc
 }
 
 /// Test method dispatch routing (Assertion 3)
-fn test_method_dispatch(service_name: String, method_name: String, is_known_method: bool, metadata: Vec<(String, String)>) {
+fn test_method_dispatch(
+    service_name: String,
+    method_name: String,
+    is_known_method: bool,
+    metadata: Vec<(String, String)>,
+) {
     // Create a mock server with known methods
     let mock_methods = vec![
         MethodDescriptor::unary("TestMethod", "/test.Service/TestMethod"),
@@ -255,9 +297,7 @@ fn test_method_dispatch(service_name: String, method_name: String, is_known_meth
     ];
 
     let service_handler = MockServiceHandler::new("Service", mock_methods);
-    let server = ServerBuilder::new()
-        .add_service(service_handler)
-        .build();
+    let server = ServerBuilder::new().add_service(service_handler).build();
 
     let request_path = format!("/{}/{}", service_name, method_name);
 
@@ -277,7 +317,12 @@ fn test_method_dispatch(service_name: String, method_name: String, is_known_meth
 }
 
 /// Test streaming vs unary detection (Assertion 4)
-fn test_streaming_detection(_path: String, client_streaming: bool, server_streaming: bool, confusing_headers: Vec<(String, String)>) {
+fn test_streaming_detection(
+    _path: String,
+    client_streaming: bool,
+    server_streaming: bool,
+    confusing_headers: Vec<(String, String)>,
+) {
     // Create method descriptor with specified streaming characteristics using static paths
     let descriptor = if client_streaming && server_streaming {
         MethodDescriptor::bidi_streaming("TestMethod", "/test.Service/TestMethod")
@@ -292,7 +337,10 @@ fn test_streaming_detection(_path: String, client_streaming: bool, server_stream
     // Verify streaming detection is correct
     assert_eq!(descriptor.client_streaming, client_streaming);
     assert_eq!(descriptor.server_streaming, server_streaming);
-    assert_eq!(descriptor.is_unary(), !client_streaming && !server_streaming);
+    assert_eq!(
+        descriptor.is_unary(),
+        !client_streaming && !server_streaming
+    );
 
     // Test with confusing headers that shouldn't affect detection
     let mut metadata = Metadata::new();
@@ -307,7 +355,11 @@ fn test_streaming_detection(_path: String, client_streaming: bool, server_stream
 }
 
 /// Test deadline propagation (Assertion 5)
-fn test_deadline_propagation(timeout_header: Option<String>, default_timeout: Option<u32>, _time_offset_ms: i64) {
+fn test_deadline_propagation(
+    timeout_header: Option<String>,
+    default_timeout: Option<u32>,
+    _time_offset_ms: i64,
+) {
     let mut metadata = Metadata::new();
     if let Some(ref timeout) = timeout_header {
         metadata.insert("grpc-timeout", timeout);
@@ -345,9 +397,9 @@ fn test_deadline_propagation(timeout_header: Option<String>, default_timeout: Op
 /// Helper function to validate path format
 fn validate_path_format(path: &str) {
     // Basic gRPC path validation
-    let valid = path.starts_with('/') &&
-                path.chars().all(|c| c.is_ascii_graphic() || c == '/') &&
-                !path.contains('\0');
+    let valid = path.starts_with('/')
+        && path.chars().all(|c| c.is_ascii_graphic() || c == '/')
+        && !path.contains('\0');
 
     // Don't assert here - just test that validation doesn't panic
     let _ = valid;
@@ -356,15 +408,15 @@ fn validate_path_format(path: &str) {
 /// Test boundary cases for timeout parsing
 fn test_timeout_boundary_cases() {
     let boundary_cases = vec![
-        "0H",           // Zero timeout
-        "9999999H",     // Large number
-        "1.5S",         // Decimal (invalid)
-        "-5M",          // Negative (invalid)
+        "0H",                           // Zero timeout
+        "9999999H",                     // Large number
+        "1.5S",                         // Decimal (invalid)
+        "-5M",                          // Negative (invalid)
         "999999999999999999999999999H", // Overflow
-        "H",            // Missing number
-        "123",          // Missing unit
-        "",             // Empty string
-        " 5S ",         // Whitespace
+        "H",                            // Missing number
+        "123",                          // Missing unit
+        "",                             // Empty string
+        " 5S ",                         // Whitespace
     ];
 
     for case in boundary_cases {

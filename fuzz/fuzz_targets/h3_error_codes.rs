@@ -282,24 +282,39 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     match error_classification {
         H3ErrorClass::ValidH3Error => {
             // All HTTP/3 error codes should be recognized
-            assert!(h3_error_name(input.error_code).is_some(),
-                "Valid HTTP/3 error code 0x{:x} should have a name", input.error_code);
+            assert!(
+                h3_error_name(input.error_code).is_some(),
+                "Valid HTTP/3 error code 0x{:x} should have a name",
+                input.error_code
+            );
 
             // Error code should be in the correct range
-            assert!(input.error_code >= H3_NO_ERROR && input.error_code <= H3_VERSION_FALLBACK,
-                "HTTP/3 error code 0x{:x} should be in range 0x100-0x110", input.error_code);
+            assert!(
+                input.error_code >= H3_NO_ERROR && input.error_code <= H3_VERSION_FALLBACK,
+                "HTTP/3 error code 0x{:x} should be in range 0x100-0x110",
+                input.error_code
+            );
         }
         H3ErrorClass::QuicTransportError => {
             // QUIC codes should be in transport range
-            assert!(input.error_code <= QUIC_AEAD_LIMIT_REACHED,
-                "QUIC transport error 0x{:x} should be <= 0xF", input.error_code);
+            assert!(
+                input.error_code <= QUIC_AEAD_LIMIT_REACHED,
+                "QUIC transport error 0x{:x} should be <= 0xF",
+                input.error_code
+            );
         }
         H3ErrorClass::UnknownError => {
             // Unknown codes should not have names in either namespace
-            assert!(h3_error_name(input.error_code).is_none(),
-                "Unknown error code 0x{:x} should not have an HTTP/3 name", input.error_code);
-            assert!(quic_error_name(input.error_code).is_none(),
-                "Unknown error code 0x{:x} should not have a QUIC name", input.error_code);
+            assert!(
+                h3_error_name(input.error_code).is_none(),
+                "Unknown error code 0x{:x} should not have an HTTP/3 name",
+                input.error_code
+            );
+            assert!(
+                quic_error_name(input.error_code).is_none(),
+                "Unknown error code 0x{:x} should not have a QUIC name",
+                input.error_code
+            );
         }
     }
 
@@ -315,13 +330,19 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     // === Assertion 3: QUIC error codes distinct from HTTP/3 codes ===
     if matches!(error_classification, H3ErrorClass::QuicTransportError) {
         // QUIC transport error codes should not be confused with HTTP/3 codes
-        assert!(h3_error_name(input.error_code).is_none(),
-            "QUIC error code 0x{:x} should not map to HTTP/3 error name", input.error_code);
+        assert!(
+            h3_error_name(input.error_code).is_none(),
+            "QUIC error code 0x{:x} should not map to HTTP/3 error name",
+            input.error_code
+        );
 
         // Should have a QUIC name if it's a known transport error
         if input.error_code <= QUIC_AEAD_LIMIT_REACHED {
-            assert!(quic_error_name(input.error_code).is_some(),
-                "Known QUIC error code 0x{:x} should have a name", input.error_code);
+            assert!(
+                quic_error_name(input.error_code).is_some(),
+                "Known QUIC error code 0x{:x} should have a name",
+                input.error_code
+            );
         }
     }
 
@@ -339,14 +360,19 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
                     ErrorFrameEncoding::RawErrorCode => {
                         // Direct encoding should preserve the error code
                         if input.error_code <= 0x3F {
-                            assert_eq!(code, input.error_code,
-                                "Simple varint encoding should preserve error code");
+                            assert_eq!(
+                                code, input.error_code,
+                                "Simple varint encoding should preserve error code"
+                            );
                         }
                     }
                     _ => {
                         // Other encodings may have additional data, but code should be reasonable
-                        assert!(code <= (1u64 << 62) - 1,
-                            "Parsed error code 0x{:x} exceeds varint maximum", code);
+                        assert!(
+                            code <= (1u64 << 62) - 1,
+                            "Parsed error code 0x{:x} exceeds varint maximum",
+                            code
+                        );
                     }
                 }
             }
@@ -354,7 +380,11 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
 
         // Frame processing should not cause infinite loops or excessive memory usage
         let frame_len = frame_data.len();
-        assert!(frame_len <= 100_000, "Frame length {} exceeds reasonable bound", frame_len);
+        assert!(
+            frame_len <= 100_000,
+            "Frame length {} exceeds reasonable bound",
+            frame_len
+        );
     }
 
     // === Assertion 5: Reason phrase UTF-8 validated ===
@@ -366,12 +396,16 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
             match utf8_result {
                 Ok(valid_reason) => {
                     // Valid UTF-8 should be accepted
-                    assert!(valid_reason.len() <= input.reason_phrase.len(),
-                        "Valid UTF-8 string should not exceed byte length");
+                    assert!(
+                        valid_reason.len() <= input.reason_phrase.len(),
+                        "Valid UTF-8 string should not exceed byte length"
+                    );
 
                     // Should not contain null bytes (per QUIC spec)
-                    assert!(!valid_reason.contains('\0'),
-                        "Reason phrase should not contain null bytes");
+                    assert!(
+                        !valid_reason.contains('\0'),
+                        "Reason phrase should not contain null bytes"
+                    );
                 }
                 Err(_utf8_error) => {
                     // Invalid UTF-8 should be detected and handled gracefully
@@ -400,7 +434,10 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     if frame_data.len() >= 8 {
         let first_parse = parse_error_code(&frame_data);
         let second_parse = parse_error_code(&frame_data);
-        assert_eq!(first_parse, second_parse, "Error code parsing should be deterministic");
+        assert_eq!(
+            first_parse, second_parse,
+            "Error code parsing should be deterministic"
+        );
     }
 
     // Should handle edge case error codes gracefully

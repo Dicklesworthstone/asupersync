@@ -13,11 +13,11 @@
 //! - **Boundary conditions**: Empty files, minimal files, large files
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use asupersync::trace::integrity::{verify_trace, VerificationOptions};
-use asupersync::trace::replay::{ReplayEvent, TraceMetadata, CompactTaskId};
+use asupersync::trace::integrity::{VerificationOptions, verify_trace};
+use asupersync::trace::replay::{CompactTaskId, ReplayEvent, TraceMetadata};
 use libfuzzer_sys::fuzz_target;
-use std::fs::{self, File};
 use std::env;
+use std::fs::{self, File};
 
 // =============================================================================
 // Constants from trace/file.rs
@@ -46,7 +46,7 @@ enum IntegrityOperation {
     /// Test with completely random blob
     RandomBlob {
         #[arbitrary(with = bounded_blob)]
-        data: Vec<u8>
+        data: Vec<u8>,
     },
 
     /// Tamper with header components
@@ -88,19 +88,29 @@ enum IntegrityOperation {
 
 #[derive(Debug, Arbitrary)]
 enum MetadataOperation {
-    InvalidLength { length: u32 },
+    InvalidLength {
+        length: u32,
+    },
     CorruptedMsgPack {
         #[arbitrary(with = bounded_blob)]
-        corrupt_data: Vec<u8>
+        corrupt_data: Vec<u8>,
     },
-    SchemaMismatch { version: u32 },
-    ValidMetadata { replay_id: u64 },
+    SchemaMismatch {
+        version: u32,
+    },
+    ValidMetadata {
+        replay_id: u64,
+    },
 }
 
 #[derive(Debug, Arbitrary)]
 enum EventOperation {
-    NonMonotonicTimeline { event_count: u8 },
-    CorruptedEventLength { corrupt_length: u32 },
+    NonMonotonicTimeline {
+        event_count: u8,
+    },
+    CorruptedEventLength {
+        corrupt_length: u32,
+    },
     CorruptedEventData {
         event_count: u8,
         corrupt_index: u8,
@@ -109,9 +119,11 @@ enum EventOperation {
     },
     EventCountMismatch {
         declared_count: u64,
-        actual_count: u8
+        actual_count: u8,
     },
-    ValidEvents { count: u8 },
+    ValidEvents {
+        count: u8,
+    },
 }
 
 #[derive(Debug, Arbitrary)]
@@ -174,7 +186,10 @@ fuzz_target!(|data: &[u8]| {
     test_verification_modes(path);
 });
 
-fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -> std::io::Result<()> {
+fn generate_trace_blob(
+    operation: &IntegrityOperation,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
     match operation {
         IntegrityOperation::RandomBlob { data } => {
             fs::write(path, data)?;
@@ -216,7 +231,10 @@ fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -
             fs::write(path, blob)?;
         }
 
-        IntegrityOperation::MetadataTamper { valid_header, metadata_op } => {
+        IntegrityOperation::MetadataTamper {
+            valid_header,
+            metadata_op,
+        } => {
             let mut blob = Vec::new();
 
             if *valid_header {
@@ -260,7 +278,11 @@ fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -
             fs::write(path, blob)?;
         }
 
-        IntegrityOperation::EventTamper { valid_header, valid_metadata, event_op } => {
+        IntegrityOperation::EventTamper {
+            valid_header,
+            valid_metadata,
+            event_op,
+        } => {
             let mut blob = Vec::new();
 
             if *valid_header {
@@ -302,7 +324,11 @@ fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -
                     blob.extend_from_slice(b"short");
                 }
 
-                EventOperation::CorruptedEventData { event_count, corrupt_index, corrupt_data } => {
+                EventOperation::CorruptedEventData {
+                    event_count,
+                    corrupt_index,
+                    corrupt_data,
+                } => {
                     let count = (*event_count).min(MAX_EVENTS as u8) as u64;
                     blob.extend_from_slice(&count.to_le_bytes());
 
@@ -322,7 +348,10 @@ fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -
                     }
                 }
 
-                EventOperation::EventCountMismatch { declared_count, actual_count } => {
+                EventOperation::EventCountMismatch {
+                    declared_count,
+                    actual_count,
+                } => {
                     blob.extend_from_slice(&declared_count.to_le_bytes());
 
                     let actual = (*actual_count).min(MAX_EVENTS as u8) as u64;
@@ -352,7 +381,10 @@ fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -
             fs::write(path, blob)?;
         }
 
-        IntegrityOperation::SizeAttack { attack_type, size_multiplier } => {
+        IntegrityOperation::SizeAttack {
+            attack_type,
+            size_multiplier,
+        } => {
             let mut blob = Vec::new();
             write_valid_header(&mut blob);
 
@@ -388,7 +420,10 @@ fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -
             fs::write(path, blob)?;
         }
 
-        IntegrityOperation::Truncation { truncate_at, offset } => {
+        IntegrityOperation::Truncation {
+            truncate_at,
+            offset,
+        } => {
             let mut blob = Vec::new();
             write_valid_header(&mut blob);
             write_valid_metadata(&mut blob);
@@ -412,7 +447,9 @@ fn generate_trace_blob(operation: &IntegrityOperation, path: &std::path::Path) -
                     let meta_len = get_metadata_length();
                     HEADER_SIZE + 4 + meta_len + (*offset).min(7)
                 }
-                TruncationPoint::InEventLength => blob.len().saturating_sub(100) + (*offset).min(50),
+                TruncationPoint::InEventLength => {
+                    blob.len().saturating_sub(100) + (*offset).min(50)
+                }
                 TruncationPoint::InEventData => blob.len().saturating_sub(50) + (*offset).min(30),
             };
 

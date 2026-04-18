@@ -21,7 +21,10 @@ use std::time::Duration;
 
 // Import the TLS acceptor and related types
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
-use asupersync::tls::{TlsAcceptor, TlsAcceptorBuilder, TlsError, CertificateChain, PrivateKey, ClientAuth, RootCertStore};
+use asupersync::tls::{
+    CertificateChain, ClientAuth, PrivateKey, RootCertStore, TlsAcceptor, TlsAcceptorBuilder,
+    TlsError,
+};
 
 /// Maximum input size to prevent timeouts during fuzzing
 const MAX_FUZZ_INPUT_SIZE: usize = 128 * 1024; // 128KB
@@ -120,35 +123,25 @@ enum TlsAcceptorOperation {
     /// Test basic accept with normal handshake
     BasicAccept,
     /// Test accept with malformed ClientHello
-    AcceptMalformedClientHello {
-        client_hello_data: Vec<u8>,
-    },
+    AcceptMalformedClientHello { client_hello_data: Vec<u8> },
     /// Test ALPN negotiation edge cases
-    TestAlpnNegotiation {
-        client_alpn: Vec<AlpnProtocol>,
-    },
+    TestAlpnNegotiation { client_alpn: Vec<AlpnProtocol> },
     /// Test client certificate validation
     TestClientCertValidation {
         present_client_cert: bool,
         cert_is_valid: bool,
     },
     /// Test handshake timeout behavior
-    TestHandshakeTimeout {
-        delay_response_ms: u16,
-    },
+    TestHandshakeTimeout { delay_response_ms: u16 },
     /// Test early data handling
-    TestEarlyDataHandling {
-        early_data: Vec<u8>,
-    },
+    TestEarlyDataHandling { early_data: Vec<u8> },
     /// Test post-handshake alerts
     TestPostHandshakeAlerts {
         alert_type: u8,
         alert_description: u8,
     },
     /// Test connection close during handshake
-    TestConnectionCloseInHandshake {
-        close_at_stage: HandshakeStage,
-    },
+    TestConnectionCloseInHandshake { close_at_stage: HandshakeStage },
 }
 
 /// Handshake stages for connection close testing
@@ -220,7 +213,10 @@ impl AsyncRead for MockTlsStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if self.simulate_error {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "simulated error")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "simulated error",
+            )));
         }
 
         if self.simulate_close || !self.readable {
@@ -250,7 +246,10 @@ impl AsyncWrite for MockTlsStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if self.simulate_error {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "simulated write error")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "simulated write error",
+            )));
         }
 
         if !self.writable {
@@ -263,7 +262,10 @@ impl AsyncWrite for MockTlsStream {
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.simulate_error {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "simulated flush error")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "simulated flush error",
+            )));
         }
         Poll::Ready(Ok(()))
     }
@@ -330,7 +332,10 @@ impl TlsAcceptorShadowModel {
     /// Validate that no security violations occurred
     fn validate_security_invariants(&self) -> Result<(), String> {
         if self.panics_detected > 0 {
-            return Err(format!("Security violation: {} panics detected", self.panics_detected));
+            return Err(format!(
+                "Security violation: {} panics detected",
+                self.panics_detected
+            ));
         }
         Ok(())
     }
@@ -397,7 +402,8 @@ fn create_test_acceptor(config: &TlsAcceptorFuzzConfig) -> Result<TlsAcceptor, T
 
     // Configure ALPN protocols
     if config.enable_alpn && !config.alpn_protocols.is_empty() {
-        let protocols: Vec<Vec<u8>> = config.alpn_protocols
+        let protocols: Vec<Vec<u8>> = config
+            .alpn_protocols
             .iter()
             .map(|p| p.to_bytes())
             .filter(|p| !p.is_empty() && p.len() <= 255) // Valid ALPN protocol constraints
@@ -438,7 +444,8 @@ fn create_test_acceptor(config: &TlsAcceptorFuzzConfig) -> Result<TlsAcceptor, T
 
     // Configure handshake timeout
     if let Some(timeout_ms) = config.handshake_timeout_ms {
-        if timeout_ms > 0 && timeout_ms <= 30000 { // Max 30 seconds for fuzzing
+        if timeout_ms > 0 && timeout_ms <= 30000 {
+            // Max 30 seconds for fuzzing
             builder = builder.handshake_timeout(Duration::from_millis(timeout_ms as u64));
         }
     }
@@ -473,7 +480,11 @@ fn generate_malformed_client_hello(data: &[u8]) -> Vec<u8> {
         malformed.push((handshake_len & 0xff) as u8);
 
         // Add fuzzing data as ClientHello content
-        let data_to_add = data.iter().take(handshake_len).cloned().collect::<Vec<u8>>();
+        let data_to_add = data
+            .iter()
+            .take(handshake_len)
+            .cloned()
+            .collect::<Vec<u8>>();
         malformed.extend_from_slice(&data_to_add);
     }
 
@@ -484,11 +495,13 @@ fn generate_malformed_client_hello(data: &[u8]) -> Vec<u8> {
 fn is_unsupported_cipher_error(error: &TlsError) -> bool {
     match error {
         TlsError::Handshake(msg) => {
-            msg.contains("cipher") || msg.contains("ciphersuite") || msg.contains("no_application_protocol")
+            msg.contains("cipher")
+                || msg.contains("ciphersuite")
+                || msg.contains("no_application_protocol")
         }
         TlsError::Rustls(rustls_error) => {
-            format!("{:?}", rustls_error).contains("cipher") ||
-            format!("{:?}", rustls_error).contains("no_application_protocol")
+            format!("{:?}", rustls_error).contains("cipher")
+                || format!("{:?}", rustls_error).contains("no_application_protocol")
         }
         _ => false,
     }
@@ -497,12 +510,8 @@ fn is_unsupported_cipher_error(error: &TlsError) -> bool {
 /// Check if an error indicates early data was properly rejected
 fn is_early_data_rejection(error: &TlsError) -> bool {
     match error {
-        TlsError::Handshake(msg) => {
-            msg.contains("early data") || msg.contains("early_data")
-        }
-        TlsError::Rustls(rustls_error) => {
-            format!("{:?}", rustls_error).contains("early_data")
-        }
+        TlsError::Handshake(msg) => msg.contains("early data") || msg.contains("early_data"),
+        TlsError::Rustls(rustls_error) => format!("{:?}", rustls_error).contains("early_data"),
         _ => false,
     }
 }
@@ -561,7 +570,10 @@ fn test_acceptor_operation_no_panic(
                 }
             }
 
-            TlsAcceptorOperation::TestClientCertValidation { present_client_cert: _, cert_is_valid: _ } => {
+            TlsAcceptorOperation::TestClientCertValidation {
+                present_client_cert: _,
+                cert_is_valid: _,
+            } => {
                 // Test client certificate validation logic
                 let stream = MockTlsStream::new(handshake_data.to_vec());
                 let result = test_accept_sync(acceptor, stream);
@@ -571,7 +583,9 @@ fn test_acceptor_operation_no_panic(
                 }
             }
 
-            TlsAcceptorOperation::TestHandshakeTimeout { delay_response_ms: _ } => {
+            TlsAcceptorOperation::TestHandshakeTimeout {
+                delay_response_ms: _,
+            } => {
                 // Test timeout behavior by providing no data
                 let stream = MockTlsStream::new(vec![]);
                 let result = test_accept_sync(acceptor, stream);
@@ -593,7 +607,10 @@ fn test_acceptor_operation_no_panic(
                 }
             }
 
-            TlsAcceptorOperation::TestPostHandshakeAlerts { alert_type: _, alert_description: _ } => {
+            TlsAcceptorOperation::TestPostHandshakeAlerts {
+                alert_type: _,
+                alert_description: _,
+            } => {
                 // Test post-handshake alert handling
                 let stream = MockTlsStream::new(handshake_data.to_vec());
                 let result = test_accept_sync(acceptor, stream);
@@ -637,7 +654,10 @@ fn test_accept_sync(acceptor: &TlsAcceptor, stream: MockTlsStream) -> Result<(),
 
     // Test for configuration errors that could cause panics
     if stream.read_data.is_empty() {
-        return Err(TlsError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no data")));
+        return Err(TlsError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "no data",
+        )));
     }
 
     // Simulate basic TLS parsing without actual async execution
@@ -651,7 +671,8 @@ fn test_accept_sync(acceptor: &TlsAcceptor, stream: MockTlsStream) -> Result<(),
         let length = ((data[3] as u16) << 8) | (data[4] as u16);
 
         // Validate basic TLS record structure
-        if content_type != 0x16 { // Must be Handshake
+        if content_type != 0x16 {
+            // Must be Handshake
             return Err(TlsError::Handshake("invalid content type".into()));
         }
 
@@ -714,19 +735,21 @@ fuzz_target!(|data: &[u8]| {
     let mut shadow_model = TlsAcceptorShadowModel::default();
 
     // Test acceptor creation doesn't panic
-    let acceptor = match std::panic::catch_unwind(|| {
-        create_test_acceptor(&fuzz_input.acceptor_config)
-    }) {
-        Ok(Ok(acceptor)) => acceptor,
-        Ok(Err(_)) => {
-            // Configuration error is acceptable, not a security issue
-            return;
-        }
-        Err(_) => {
-            // Panic during acceptor creation is a security issue
-            panic!("TLS acceptor creation panicked on configuration: {:?}", fuzz_input.acceptor_config);
-        }
-    };
+    let acceptor =
+        match std::panic::catch_unwind(|| create_test_acceptor(&fuzz_input.acceptor_config)) {
+            Ok(Ok(acceptor)) => acceptor,
+            Ok(Err(_)) => {
+                // Configuration error is acceptable, not a security issue
+                return;
+            }
+            Err(_) => {
+                // Panic during acceptor creation is a security issue
+                panic!(
+                    "TLS acceptor creation panicked on configuration: {:?}",
+                    fuzz_input.acceptor_config
+                );
+            }
+        };
 
     // Test each operation for panics and security violations
     for operation in &fuzz_input.operations {

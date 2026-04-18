@@ -14,7 +14,7 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use asupersync::plan::{PlanDag, PlanId, PlanNode, PlanError};
+use asupersync::plan::{PlanDag, PlanError, PlanId, PlanNode};
 
 /// Fuzz input for plan DAG construction and analysis
 #[derive(Arbitrary, Debug, Clone)]
@@ -37,7 +37,10 @@ enum DagOperation {
     /// Create a race node from existing nodes
     CreateRace { child_indices: Vec<u8> },
     /// Create a timeout node wrapping an existing node
-    CreateTimeout { child_index: u8, duration_millis: u32 },
+    CreateTimeout {
+        child_index: u8,
+        duration_millis: u32,
+    },
     /// Set the root node
     SetRoot { node_index: u8 },
     /// Validate the current DAG structure
@@ -110,9 +113,11 @@ impl DagShadowModel {
     }
 
     fn record_validation(&self, success: bool) {
-        self.validation_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.validation_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if success {
-            self.successful_validations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.successful_validations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -145,7 +150,7 @@ fn normalize_fuzz_input(input: &mut PlanDagFuzzInput) {
     // Ensure we have some operations to test
     if input.operations.is_empty() {
         input.operations.push(DagOperation::CreateLeaf {
-            label: "fuzz_root".to_string()
+            label: "fuzz_root".to_string(),
         });
     }
 }
@@ -209,10 +214,14 @@ fn execute_dag_operations(
                 }
             }
 
-            DagOperation::CreateTimeout { child_index, duration_millis } => {
-                if let Some(&child_id) = node_ids.get(*child_index as usize % node_ids.len().max(1)) {
+            DagOperation::CreateTimeout {
+                child_index,
+                duration_millis,
+            } => {
+                if let Some(&child_id) = node_ids.get(*child_index as usize % node_ids.len().max(1))
+                {
                     let duration = Duration::from_millis(
-                        (*duration_millis).clamp(1, input.config.max_timeout_millis) as u64
+                        (*duration_millis).clamp(1, input.config.max_timeout_millis) as u64,
                     );
                     let timeout_id = dag.timeout(child_id, duration);
                     node_ids.push(timeout_id);
@@ -337,9 +346,7 @@ fn create_deep_nesting(
                 shadow.add_node();
                 dag.race(vec![current_id, leaf])
             }
-            NestingPattern::NestedTimeouts => {
-                dag.timeout(current_id, Duration::from_millis(100))
-            }
+            NestingPattern::NestedTimeouts => dag.timeout(current_id, Duration::from_millis(100)),
             NestingPattern::Mixed => {
                 // Alternate between join, race, timeout
                 match node_ids.len() % 3 {

@@ -63,9 +63,9 @@ impl StructuredPriorityPayload {
         // Mask dependency to 31 bits and set exclusive flag in bit 31
         let dependency = self.dependency & 0x7FFF_FFFF;
         let first_byte = if self.exclusive {
-            ((dependency >> 24) as u8) | 0x80  // Set E flag
+            ((dependency >> 24) as u8) | 0x80 // Set E flag
         } else {
-            (dependency >> 24) as u8            // Clear E flag
+            (dependency >> 24) as u8 // Clear E flag
         };
 
         payload.push(first_byte);
@@ -93,7 +93,7 @@ fn fuzz_priority_frame(input: &PriorityFrameFuzzInput) {
     let header = FrameHeader {
         length: payload.len() as u32,
         frame_type: FrameType::Priority as u8,
-        flags: 0,  // PRIORITY frames have no flags
+        flags: 0, // PRIORITY frames have no flags
         stream_id: input.stream_id,
     };
 
@@ -168,7 +168,10 @@ fn fuzz_priority_frame(input: &PriorityFrameFuzzInput) {
                 }
 
                 // Assertion 1: Frame length != 5 bytes triggers FRAME_SIZE_ERROR
-                H2Error::Stream { error_code: ErrorCode::FrameSizeError, .. } => {
+                H2Error::Stream {
+                    error_code: ErrorCode::FrameSizeError,
+                    ..
+                } => {
                     assert!(
                         header.length != 5,
                         "FRAME_SIZE_ERROR should only occur when length != 5, got length {}",
@@ -177,12 +180,16 @@ fn fuzz_priority_frame(input: &PriorityFrameFuzzInput) {
                 }
 
                 // Stream errors for self-dependency
-                H2Error::Stream { error_code: ErrorCode::ProtocolError, message, .. } => {
+                H2Error::Stream {
+                    error_code: ErrorCode::ProtocolError,
+                    message,
+                    ..
+                } => {
                     if message.contains("stream cannot depend on itself") {
                         // This is expected when dependency == stream_id
                         assert!(
-                            input.use_structured_payload &&
-                            (input.structured.dependency & 0x7FFF_FFFF) == header.stream_id,
+                            input.use_structured_payload
+                                && (input.structured.dependency & 0x7FFF_FFFF) == header.stream_id,
                             "Self-dependency error without actual self-dependency"
                         );
                     }
@@ -228,7 +235,7 @@ mod tests {
     #[test]
     fn test_priority_frame_stream_zero() {
         let input = PriorityFrameFuzzInput {
-            stream_id: 0,  // Should trigger PROTOCOL_ERROR
+            stream_id: 0, // Should trigger PROTOCOL_ERROR
             payload_length: 5,
             payload_bytes: vec![],
             use_structured_payload: true,
@@ -246,8 +253,8 @@ mod tests {
     fn test_priority_frame_wrong_size() {
         let input = PriorityFrameFuzzInput {
             stream_id: 1,
-            payload_length: 4,  // Should trigger FRAME_SIZE_ERROR
-            payload_bytes: vec![0x80, 0x00, 0x00, 0x01],  // Only 4 bytes
+            payload_length: 4, // Should trigger FRAME_SIZE_ERROR
+            payload_bytes: vec![0x80, 0x00, 0x00, 0x01], // Only 4 bytes
             use_structured_payload: false,
             structured: StructuredPriorityPayload {
                 exclusive: false,
@@ -268,7 +275,7 @@ mod tests {
             use_structured_payload: true,
             structured: StructuredPriorityPayload {
                 exclusive: true,
-                dependency: 0x1234567,  // 31-bit dependency
+                dependency: 0x1234567, // 31-bit dependency
                 weight: 255,
             },
         };
@@ -285,7 +292,7 @@ mod tests {
             use_structured_payload: true,
             structured: StructuredPriorityPayload {
                 exclusive: false,
-                dependency: MAX_STREAM_ID,  // Maximum 31-bit value
+                dependency: MAX_STREAM_ID, // Maximum 31-bit value
                 weight: 0,
             },
         };
@@ -303,7 +310,7 @@ mod tests {
             use_structured_payload: true,
             structured: StructuredPriorityPayload {
                 exclusive: false,
-                dependency: stream_id,  // Should trigger self-dependency error
+                dependency: stream_id, // Should trigger self-dependency error
                 weight: 64,
             },
         };

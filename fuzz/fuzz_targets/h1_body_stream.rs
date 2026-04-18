@@ -28,7 +28,7 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h1::stream::{ChunkedEncoder, IncomingBody, BodyKind};
+use asupersync::http::h1::stream::{BodyKind, ChunkedEncoder, IncomingBody};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing
 const MAX_INPUT_SIZE: usize = 512 * 1024; // 512KB
@@ -266,12 +266,14 @@ fn test_chunked_encoder_consistency(chunks: &[Vec<u8>]) -> Result<(), String> {
 fn validate_chunked_assertions(response_body: &[u8], config: &ChunkedBodyFuzzConfig) {
     // Assertion 1: Chunk-size hex case tolerance
     // Check that both upper and lowercase hex are handled consistently
-    let contains_upper_hex = response_body
-        .windows(2)
-        .any(|w| w.iter().any(|&b| b.is_ascii_hexdigit() && b.is_ascii_uppercase()));
-    let contains_lower_hex = response_body
-        .windows(2)
-        .any(|w| w.iter().any(|&b| b.is_ascii_hexdigit() && b.is_ascii_lowercase()));
+    let contains_upper_hex = response_body.windows(2).any(|w| {
+        w.iter()
+            .any(|&b| b.is_ascii_hexdigit() && b.is_ascii_uppercase())
+    });
+    let contains_lower_hex = response_body.windows(2).any(|w| {
+        w.iter()
+            .any(|&b| b.is_ascii_hexdigit() && b.is_ascii_lowercase())
+    });
 
     if contains_upper_hex || contains_lower_hex {
         // Both cases should be tolerated (no assertion failure)
@@ -280,9 +282,7 @@ fn validate_chunked_assertions(response_body: &[u8], config: &ChunkedBodyFuzzCon
 
     // Assertion 2: Chunk extensions tolerance
     // Extensions after chunk size should be parsed without error
-    let contains_extensions = response_body
-        .windows(10)
-        .any(|w| w.contains(&b';'));
+    let contains_extensions = response_body.windows(10).any(|w| w.contains(&b';'));
 
     if contains_extensions {
         // Extensions should be tolerated but may be ignored

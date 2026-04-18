@@ -93,8 +93,8 @@ enum ControlOpcode {
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum LengthEncoding {
-    SevenBit,   // 0-125 bytes
-    SixteenBit, // 126-65535 bytes
+    SevenBit,     // 0-125 bytes
+    SixteenBit,   // 126-65535 bytes
     SixtyFourBit, // 65536+ bytes
 }
 
@@ -151,7 +151,12 @@ fn test_frame_operation(operation: FrameParseOperation) {
             actual_length,
             minimal_encoding,
         } => {
-            test_payload_length_encoding(role, length_encoding, actual_length as usize, minimal_encoding);
+            test_payload_length_encoding(
+                role,
+                length_encoding,
+                actual_length as usize,
+                minimal_encoding,
+            );
         }
 
         FrameParseOperation::OversizeTest {
@@ -174,7 +179,12 @@ fn test_frame_operation(operation: FrameParseOperation) {
 }
 
 /// Test RFC 6455 §5.1: Client frames MUST be masked, server frames MUST NOT be masked
-fn test_masking_requirement(role: TestRole, mut payload: Vec<u8>, force_masked: bool, opcode: TestOpcode) {
+fn test_masking_requirement(
+    role: TestRole,
+    mut payload: Vec<u8>,
+    force_masked: bool,
+    opcode: TestOpcode,
+) {
     payload.truncate(MAX_PAYLOAD);
 
     let ws_role = match role {
@@ -193,33 +203,37 @@ fn test_masking_requirement(role: TestRole, mut payload: Vec<u8>, force_masked: 
         match (ws_role, force_masked) {
             (Role::Server, false) => {
                 // Server receiving unmasked frame from client → should reject
-                assert!(matches!(result, Err(WsError::UnmaskedClientFrame)),
-                        "Server must reject unmasked client frames (RFC 6455 §5.1)");
+                assert!(
+                    matches!(result, Err(WsError::UnmaskedClientFrame)),
+                    "Server must reject unmasked client frames (RFC 6455 §5.1)"
+                );
             }
             (Role::Client, true) => {
                 // Client receiving masked frame from server → should reject (optional but common)
-                assert!(matches!(result, Err(WsError::MaskedServerFrame)),
-                        "Client should reject masked server frames (RFC 6455 §5.1)");
+                assert!(
+                    matches!(result, Err(WsError::MaskedServerFrame)),
+                    "Client should reject masked server frames (RFC 6455 §5.1)"
+                );
             }
             (Role::Server, true) => {
                 // Server receiving masked frame from client → should accept
                 // Note: may still fail for other reasons (reserved bits, etc.)
                 match result {
-                    Ok(_) => {}, // Expected
+                    Ok(_) => {} // Expected
                     Err(WsError::UnmaskedClientFrame) => {
                         panic!("Server incorrectly rejected masked client frame");
                     }
-                    Err(_) => {}, // Other validation errors are fine
+                    Err(_) => {} // Other validation errors are fine
                 }
             }
             (Role::Client, false) => {
                 // Client receiving unmasked frame from server → should accept
                 match result {
-                    Ok(_) => {}, // Expected
+                    Ok(_) => {} // Expected
                     Err(WsError::MaskedServerFrame) => {
                         panic!("Client incorrectly rejected unmasked server frame");
                     }
-                    Err(_) => {}, // Other validation errors are fine
+                    Err(_) => {} // Other validation errors are fine
                 }
             }
         }
@@ -227,8 +241,15 @@ fn test_masking_requirement(role: TestRole, mut payload: Vec<u8>, force_masked: 
 }
 
 /// Test RFC 6455 §5.2: Reserved bits must be 0 unless extension negotiated
-fn test_reserved_bits(role: TestRole, mut payload: Vec<u8>, rsv1: bool, rsv2: bool, rsv3: bool,
-                      opcode: TestOpcode, validate_reserved: bool) {
+fn test_reserved_bits(
+    role: TestRole,
+    mut payload: Vec<u8>,
+    rsv1: bool,
+    rsv2: bool,
+    rsv3: bool,
+    opcode: TestOpcode,
+    validate_reserved: bool,
+) {
     payload.truncate(MAX_PAYLOAD);
 
     let ws_role = match role {
@@ -237,7 +258,14 @@ fn test_reserved_bits(role: TestRole, mut payload: Vec<u8>, rsv1: bool, rsv2: bo
     };
 
     let mut codec = FrameCodec::new(ws_role).validate_reserved_bits(validate_reserved);
-    let frame_bytes = construct_frame_with_reserved_bits(&payload, convert_opcode(opcode), rsv1, rsv2, rsv3, ws_role);
+    let frame_bytes = construct_frame_with_reserved_bits(
+        &payload,
+        convert_opcode(opcode),
+        rsv1,
+        rsv2,
+        rsv3,
+        ws_role,
+    );
 
     if frame_bytes.len() <= MAX_PAYLOAD {
         let mut buf = BytesMut::from(frame_bytes.as_slice());
@@ -245,14 +273,21 @@ fn test_reserved_bits(role: TestRole, mut payload: Vec<u8>, rsv1: bool, rsv2: bo
 
         // If reserved bits validation is enabled and any reserved bit is set, should reject
         if validate_reserved && (rsv1 || rsv2 || rsv3) {
-            assert!(matches!(result, Err(WsError::ReservedBitsSet)),
-                    "Parser must reject frames with reserved bits set when validation enabled (RFC 6455 §5.2)");
+            assert!(
+                matches!(result, Err(WsError::ReservedBitsSet)),
+                "Parser must reject frames with reserved bits set when validation enabled (RFC 6455 §5.2)"
+            );
         }
     }
 }
 
 /// Test RFC 6455 §5.5: Control frames MUST NOT be fragmented
-fn test_control_fragmentation(role: TestRole, control_opcode: ControlOpcode, mut payload: Vec<u8>, fin: bool) {
+fn test_control_fragmentation(
+    role: TestRole,
+    control_opcode: ControlOpcode,
+    mut payload: Vec<u8>,
+    fin: bool,
+) {
     payload.truncate(125); // Control frames limited to 125 bytes
 
     let ws_role = match role {
@@ -275,21 +310,29 @@ fn test_control_fragmentation(role: TestRole, control_opcode: ControlOpcode, mut
 
         // Control frames with FIN=false must be rejected
         if !fin {
-            assert!(matches!(result, Err(WsError::FragmentedControlFrame)),
-                    "Parser must reject fragmented control frames (RFC 6455 §5.5)");
+            assert!(
+                matches!(result, Err(WsError::FragmentedControlFrame)),
+                "Parser must reject fragmented control frames (RFC 6455 §5.5)"
+            );
         }
 
         // Control frames > 125 bytes must be rejected
         if payload.len() > 125 {
-            assert!(matches!(result, Err(WsError::ControlFrameTooLarge(_))),
-                    "Parser must reject oversized control frames (RFC 6455 §5.5)");
+            assert!(
+                matches!(result, Err(WsError::ControlFrameTooLarge(_))),
+                "Parser must reject oversized control frames (RFC 6455 §5.5)"
+            );
         }
     }
 }
 
 /// Test RFC 6455 §5.2: Payload length encoding must be minimal
-fn test_payload_length_encoding(role: TestRole, length_encoding: LengthEncoding,
-                                actual_length: usize, minimal_encoding: bool) {
+fn test_payload_length_encoding(
+    role: TestRole,
+    length_encoding: LengthEncoding,
+    actual_length: usize,
+    minimal_encoding: bool,
+) {
     let actual_length = actual_length.min(MAX_PAYLOAD);
 
     let ws_role = match role {
@@ -298,7 +341,12 @@ fn test_payload_length_encoding(role: TestRole, length_encoding: LengthEncoding,
     };
 
     let mut codec = FrameCodec::new(ws_role);
-    let frame_bytes = construct_frame_with_length_encoding(actual_length, length_encoding, minimal_encoding, ws_role);
+    let frame_bytes = construct_frame_with_length_encoding(
+        actual_length,
+        length_encoding,
+        minimal_encoding,
+        ws_role,
+    );
 
     if frame_bytes.len() <= MAX_PAYLOAD && actual_length <= MAX_PAYLOAD {
         let mut buf = BytesMut::from(frame_bytes.as_slice());
@@ -313,16 +361,22 @@ fn test_payload_length_encoding(role: TestRole, length_encoding: LengthEncoding,
             };
 
             if should_reject {
-                assert!(matches!(result, Err(WsError::ProtocolViolation(_))),
-                        "Parser must reject non-minimal length encodings (RFC 6455 §5.2)");
+                assert!(
+                    matches!(result, Err(WsError::ProtocolViolation(_))),
+                    "Parser must reject non-minimal length encodings (RFC 6455 §5.2)"
+                );
             }
         }
     }
 }
 
 /// Test payload size limits enforcement
-fn test_oversize_rejection(role: TestRole, max_payload_size: u32, requested_length: u32,
-                          length_encoding: LengthEncoding) {
+fn test_oversize_rejection(
+    role: TestRole,
+    max_payload_size: u32,
+    requested_length: u32,
+    length_encoding: LengthEncoding,
+) {
     let max_size = (max_payload_size as usize).min(MAX_PAYLOAD);
     let req_length = (requested_length as usize).min(MAX_PAYLOAD * 2);
 
@@ -340,8 +394,10 @@ fn test_oversize_rejection(role: TestRole, max_payload_size: u32, requested_leng
 
         // Payloads exceeding max_payload_size should be rejected
         if req_length > max_size {
-            assert!(matches!(result, Err(WsError::PayloadTooLarge { .. })),
-                    "Parser must reject oversized payloads");
+            assert!(
+                matches!(result, Err(WsError::PayloadTooLarge { .. })),
+                "Parser must reject oversized payloads"
+            );
         }
     }
 }
@@ -354,7 +410,8 @@ fn test_length_msb_enforcement(role: TestRole, payload: Vec<u8>, msb_set: bool) 
     };
 
     let mut codec = FrameCodec::new(ws_role);
-    let frame_bytes = construct_frame_with_msb_length(payload.len().min(MAX_PAYLOAD), msb_set, ws_role);
+    let frame_bytes =
+        construct_frame_with_msb_length(payload.len().min(MAX_PAYLOAD), msb_set, ws_role);
 
     if frame_bytes.len() <= MAX_PAYLOAD {
         let mut buf = BytesMut::from(frame_bytes.as_slice());
@@ -362,8 +419,10 @@ fn test_length_msb_enforcement(role: TestRole, payload: Vec<u8>, msb_set: bool) 
 
         // 64-bit length with MSB set should be rejected
         if msb_set {
-            assert!(matches!(result, Err(WsError::ProtocolViolation(_))),
-                    "Parser must reject 64-bit length with MSB set (RFC 6455 §5.2)");
+            assert!(
+                matches!(result, Err(WsError::ProtocolViolation(_))),
+                "Parser must reject 64-bit length with MSB set (RFC 6455 §5.2)"
+            );
         }
     }
 }
@@ -418,14 +477,27 @@ fn construct_frame_with_masking(payload: &[u8], opcode: Opcode, masked: bool) ->
     frame
 }
 
-fn construct_frame_with_reserved_bits(payload: &[u8], opcode: Opcode, rsv1: bool, rsv2: bool, rsv3: bool, role: Role) -> Vec<u8> {
+fn construct_frame_with_reserved_bits(
+    payload: &[u8],
+    opcode: Opcode,
+    rsv1: bool,
+    rsv2: bool,
+    rsv3: bool,
+    role: Role,
+) -> Vec<u8> {
     let mut frame = Vec::new();
 
     // First byte: FIN + RSV + opcode
     let mut first_byte = 0x80 | (opcode as u8); // FIN=1
-    if rsv1 { first_byte |= 0x40; }
-    if rsv2 { first_byte |= 0x20; }
-    if rsv3 { first_byte |= 0x10; }
+    if rsv1 {
+        first_byte |= 0x40;
+    }
+    if rsv2 {
+        first_byte |= 0x20;
+    }
+    if rsv3 {
+        first_byte |= 0x10;
+    }
     frame.push(first_byte);
 
     // Apply correct masking based on role
@@ -481,8 +553,12 @@ fn construct_frame_with_fin(payload: &[u8], opcode: Opcode, fin: bool, role: Rol
     frame
 }
 
-fn construct_frame_with_length_encoding(actual_length: usize, encoding: LengthEncoding,
-                                       minimal: bool, role: Role) -> Vec<u8> {
+fn construct_frame_with_length_encoding(
+    actual_length: usize,
+    encoding: LengthEncoding,
+    minimal: bool,
+    role: Role,
+) -> Vec<u8> {
     let mut frame = Vec::new();
 
     // First byte: FIN=1, opcode=binary
@@ -531,7 +607,11 @@ fn construct_frame_with_length_encoding(actual_length: usize, encoding: LengthEn
     frame
 }
 
-fn construct_frame_with_declared_length(declared_length: usize, encoding: LengthEncoding, role: Role) -> Vec<u8> {
+fn construct_frame_with_declared_length(
+    declared_length: usize,
+    encoding: LengthEncoding,
+    role: Role,
+) -> Vec<u8> {
     let mut frame = Vec::new();
 
     // First byte: FIN=1, opcode=binary

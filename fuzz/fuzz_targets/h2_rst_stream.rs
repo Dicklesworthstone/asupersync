@@ -15,8 +15,8 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::frame::{FrameHeader, FrameType, RstStreamFrame};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{FrameHeader, FrameType, RstStreamFrame};
 
 /// Maximum reasonable frame payload size for testing
 const MAX_PAYLOAD_SIZE: usize = 65536;
@@ -85,14 +85,20 @@ impl H2ConnectionMock {
 
     fn reset_stream(&mut self, stream_id: u32, error_code: ErrorCode) {
         self.reset_streams.insert(stream_id);
-        self.rst_attempts.entry(stream_id).or_insert_with(Vec::new).push(error_code);
+        self.rst_attempts
+            .entry(stream_id)
+            .or_insert_with(Vec::new)
+            .push(error_code);
         if let Some(state) = self.stream_states.get_mut(&stream_id) {
             *state = StreamState::Reset;
         }
     }
 
     fn get_rst_attempts(&self, stream_id: u32) -> usize {
-        self.rst_attempts.get(&stream_id).map(|v| v.len()).unwrap_or(0)
+        self.rst_attempts
+            .get(&stream_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 }
 
@@ -147,7 +153,9 @@ fuzz_target!(|input: RstStreamFuzzInput| {
                     connection.reset_stream(*stream_id, ErrorCode::Cancel);
                 }
                 StreamState::Closed => {
-                    connection.stream_states.insert(*stream_id, StreamState::Closed);
+                    connection
+                        .stream_states
+                        .insert(*stream_id, StreamState::Closed);
                 }
                 _ => {}
             }
@@ -174,8 +182,10 @@ fuzz_target!(|input: RstStreamFuzzInput| {
 
             if let Err(err) = result {
                 assert_eq!(
-                    err.code, ErrorCode::FrameSizeError,
-                    "Incorrect frame length should cause FrameSizeError, got: {:?}", err
+                    err.code,
+                    ErrorCode::FrameSizeError,
+                    "Incorrect frame length should cause FrameSizeError, got: {:?}",
+                    err
                 );
             }
         } else {
@@ -183,7 +193,8 @@ fuzz_target!(|input: RstStreamFuzzInput| {
             if result.is_err() {
                 let err = result.unwrap_err();
                 assert_ne!(
-                    err.code, ErrorCode::FrameSizeError,
+                    err.code,
+                    ErrorCode::FrameSizeError,
                     "Correct frame length should not cause FrameSizeError"
                 );
             }
@@ -208,8 +219,10 @@ fuzz_target!(|input: RstStreamFuzzInput| {
                 // Unknown error codes should map to InternalError
                 if input.error_code > 0xd && input.error_code != 0x2 {
                     assert_eq!(
-                        parsed_frame.error_code, ErrorCode::InternalError,
-                        "Unknown error code 0x{:x} should map to InternalError", input.error_code
+                        parsed_frame.error_code,
+                        ErrorCode::InternalError,
+                        "Unknown error code 0x{:x} should map to InternalError",
+                        input.error_code
                     );
                 }
             }
@@ -232,8 +245,10 @@ fuzz_target!(|input: RstStreamFuzzInput| {
 
             if let Err(err) = result {
                 assert_eq!(
-                    err.code, ErrorCode::ProtocolError,
-                    "RST_STREAM on stream ID 0 should cause ProtocolError, got: {:?}", err
+                    err.code,
+                    ErrorCode::ProtocolError,
+                    "RST_STREAM on stream ID 0 should cause ProtocolError, got: {:?}",
+                    err
                 );
             }
         }
@@ -296,9 +311,14 @@ fuzz_target!(|input: RstStreamFuzzInput| {
                         let mut parse_frame = additional_frame.clone();
                         if let Ok(add_header) = FrameHeader::parse(&mut parse_frame) {
                             let add_payload = parse_frame.freeze();
-                            if let Ok(additional_parsed) = RstStreamFrame::parse(&add_header, &add_payload) {
+                            if let Ok(additional_parsed) =
+                                RstStreamFrame::parse(&add_header, &add_payload)
+                            {
                                 // Record the additional RST_STREAM attempt
-                                connection.reset_stream(additional_parsed.stream_id, additional_parsed.error_code);
+                                connection.reset_stream(
+                                    additional_parsed.stream_id,
+                                    additional_parsed.error_code,
+                                );
                             }
                         }
                     }
@@ -355,14 +375,12 @@ fuzz_target!(|input: RstStreamFuzzInput| {
             let result = RstStreamFrame::parse(&header, &payload);
 
             // Empty RST_STREAM should be rejected
-            assert!(
-                result.is_err(),
-                "Empty RST_STREAM frame should be rejected"
-            );
+            assert!(result.is_err(), "Empty RST_STREAM frame should be rejected");
 
             if let Err(err) = result {
                 assert_eq!(
-                    err.code, ErrorCode::FrameSizeError,
+                    err.code,
+                    ErrorCode::FrameSizeError,
                     "Empty RST_STREAM should cause FrameSizeError"
                 );
             }
@@ -399,12 +417,14 @@ fuzz_target!(|input: RstStreamFuzzInput| {
             if header.length != 4 {
                 assert!(
                     result.is_err(),
-                    "Oversized RST_STREAM frame (length {}) should be rejected", header.length
+                    "Oversized RST_STREAM frame (length {}) should be rejected",
+                    header.length
                 );
 
                 if let Err(err) = result {
                     assert_eq!(
-                        err.code, ErrorCode::FrameSizeError,
+                        err.code,
+                        ErrorCode::FrameSizeError,
                         "Oversized RST_STREAM should cause FrameSizeError"
                     );
                 }
@@ -415,20 +435,20 @@ fuzz_target!(|input: RstStreamFuzzInput| {
     // Test all known error codes for completeness
     if input.stream_id > 0 {
         let known_error_codes = [
-            0x0,  // NoError
-            0x1,  // ProtocolError
-            0x2,  // InternalError
-            0x3,  // FlowControlError
-            0x4,  // SettingsTimeout
-            0x5,  // StreamClosed
-            0x6,  // FrameSizeError
-            0x7,  // RefusedStream
-            0x8,  // Cancel
-            0x9,  // CompressionError
-            0xa,  // ConnectError
-            0xb,  // EnhanceYourCalm
-            0xc,  // InadequateSecurity
-            0xd,  // Http11Required
+            0x0, // NoError
+            0x1, // ProtocolError
+            0x2, // InternalError
+            0x3, // FlowControlError
+            0x4, // SettingsTimeout
+            0x5, // StreamClosed
+            0x6, // FrameSizeError
+            0x7, // RefusedStream
+            0x8, // Cancel
+            0x9, // CompressionError
+            0xa, // ConnectError
+            0xb, // EnhanceYourCalm
+            0xc, // InadequateSecurity
+            0xd, // Http11Required
         ];
 
         for &known_code in &known_error_codes {
@@ -456,12 +476,14 @@ fuzz_target!(|input: RstStreamFuzzInput| {
                 if input.stream_id > 0 {
                     assert!(
                         result.is_ok(),
-                        "Known error code 0x{:x} should parse successfully", known_code
+                        "Known error code 0x{:x} should parse successfully",
+                        known_code
                     );
 
                     if let Ok(parsed) = result {
                         assert_eq!(
-                            u32::from(parsed.error_code), known_code,
+                            u32::from(parsed.error_code),
+                            known_code,
                             "Parsed error code should match input"
                         );
                     }

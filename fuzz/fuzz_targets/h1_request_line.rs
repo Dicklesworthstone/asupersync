@@ -89,7 +89,12 @@ enum UriStrategy {
     /// Origin-form: /path?query#fragment
     OriginForm { path: String, query: Option<String> },
     /// Absolute-form: http://host/path (for proxy requests)
-    AbsoluteForm { scheme: String, host: String, port: Option<u16>, path: String },
+    AbsoluteForm {
+        scheme: String,
+        host: String,
+        port: Option<u16>,
+        path: String,
+    },
     /// Authority-form: host:port (for CONNECT)
     AuthorityForm { host: String, port: u16 },
     /// Asterisk-form: * (for OPTIONS)
@@ -163,9 +168,15 @@ enum CorruptionStrategy {
     /// Insert null bytes
     NullBytes { positions: Vec<usize> },
     /// Insert control characters
-    ControlChars { chars: Vec<u8>, positions: Vec<usize> },
+    ControlChars {
+        chars: Vec<u8>,
+        positions: Vec<usize>,
+    },
     /// Insert non-ASCII characters
-    NonAscii { chars: Vec<u8>, positions: Vec<usize> },
+    NonAscii {
+        chars: Vec<u8>,
+        positions: Vec<usize>,
+    },
     /// Truncate at random position
     Truncate { position: usize },
     /// Duplicate components
@@ -220,7 +231,10 @@ impl FuzzInput {
             // Standard order: METHOD SP URI SP VERSION
             request_line.extend_from_slice(method_str.as_bytes());
 
-            if let CorruptionStrategy::Duplicate { component: ComponentType::Method } = &self.corruption {
+            if let CorruptionStrategy::Duplicate {
+                component: ComponentType::Method,
+            } = &self.corruption
+            {
                 request_line.extend_from_slice(&spacing);
                 request_line.extend_from_slice(method_str.as_bytes());
             }
@@ -228,7 +242,10 @@ impl FuzzInput {
             request_line.extend_from_slice(&spacing);
             request_line.extend_from_slice(uri_str.as_bytes());
 
-            if let CorruptionStrategy::Duplicate { component: ComponentType::Uri } = &self.corruption {
+            if let CorruptionStrategy::Duplicate {
+                component: ComponentType::Uri,
+            } = &self.corruption
+            {
                 request_line.extend_from_slice(&spacing);
                 request_line.extend_from_slice(uri_str.as_bytes());
             }
@@ -236,7 +253,10 @@ impl FuzzInput {
             request_line.extend_from_slice(&spacing);
             request_line.extend_from_slice(version_str.as_bytes());
 
-            if let CorruptionStrategy::Duplicate { component: ComponentType::Version } = &self.corruption {
+            if let CorruptionStrategy::Duplicate {
+                component: ComponentType::Version,
+            } = &self.corruption
+            {
                 request_line.extend_from_slice(&spacing);
                 request_line.extend_from_slice(version_str.as_bytes());
             }
@@ -255,10 +275,13 @@ impl FuzzInput {
                 name.chars()
                     .map(|c| match c {
                         c if c.is_ascii_alphanumeric() => c,
-                        _ => ['!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~']
-                            .get((c as usize) % 15)
-                            .copied()
-                            .unwrap_or('X')
+                        _ => [
+                            '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|',
+                            '~',
+                        ]
+                        .get((c as usize) % 15)
+                        .copied()
+                        .unwrap_or('X'),
                     })
                     .collect::<String>()
                     .chars()
@@ -280,9 +303,7 @@ impl FuzzInput {
             MethodStrategy::WithWhitespace { name } => {
                 format!(" {} ", name.trim())
             }
-            MethodStrategy::VeryLong { length } => {
-                "M".repeat((*length).min(10000))
-            }
+            MethodStrategy::VeryLong { length } => "M".repeat((*length).min(10000)),
         }
     }
 
@@ -302,7 +323,12 @@ impl FuzzInput {
                 }
                 uri
             }
-            UriStrategy::AbsoluteForm { scheme, host, port, path } => {
+            UriStrategy::AbsoluteForm {
+                scheme,
+                host,
+                port,
+                path,
+            } => {
                 let mut uri = format!("{}://{}", scheme, host);
                 if let Some(p) = port {
                     uri.push_str(&format!(":{}", p));
@@ -363,9 +389,7 @@ impl FuzzInput {
             SpacingStrategy::Tabs { count } => {
                 vec![b'\t'; (*count as usize).min(100)]
             }
-            SpacingStrategy::Mixed { chars } => {
-                chars.bytes().take(100).collect()
-            }
+            SpacingStrategy::Mixed { chars } => chars.bytes().take(100).collect(),
             SpacingStrategy::None => Vec::new(),
         }
     }
@@ -376,12 +400,8 @@ impl FuzzInput {
             TerminationStrategy::None => Vec::new(),
             TerminationStrategy::LfOnly => b"\n".to_vec(),
             TerminationStrategy::CrOnly => b"\r".to_vec(),
-            TerminationStrategy::Wrong { termination } => {
-                termination.bytes().take(10).collect()
-            }
-            TerminationStrategy::Multiple { count } => {
-                b"\r\n".repeat((*count as usize).min(10))
-            }
+            TerminationStrategy::Wrong { termination } => termination.bytes().take(10).collect(),
+            TerminationStrategy::Multiple { count } => b"\r\n".repeat((*count as usize).min(10)),
         }
     }
 
@@ -450,8 +470,8 @@ impl MockH1RequestLineParser {
             return Err(ParseError::RequestLineTooLong);
         }
 
-        let line_str = std::str::from_utf8(line_without_crlf)
-            .map_err(|_| ParseError::InvalidUtf8)?;
+        let line_str =
+            std::str::from_utf8(line_without_crlf).map_err(|_| ParseError::InvalidUtf8)?;
 
         let parts: Vec<&str> = line_str.split_whitespace().collect();
         if parts.len() != 3 {
@@ -481,7 +501,10 @@ impl MockH1RequestLineParser {
         }
 
         // Standard methods
-        if matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH") {
+        if matches!(
+            method,
+            "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH"
+        ) {
             return Ok(());
         }
 
@@ -491,8 +514,24 @@ impl MockH1RequestLineParser {
         //         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
         for byte in method.bytes() {
             match byte {
-                b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
-                b'^' | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {
+                b'!'
+                | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+                | b'0'..=b'9'
+                | b'A'..=b'Z'
+                | b'a'..=b'z' => {
                     // Valid tchar
                 }
                 _ => return Err(ParseError::InvalidMethodToken),
@@ -585,9 +624,8 @@ fuzz_target!(|input: FuzzInput| {
     let mut codec = Http1Codec::new();
     let mut buffer = BytesMut::from(full_request.as_slice());
 
-    let codec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        codec.decode(&mut buffer)
-    }));
+    let codec_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut buffer)));
 
     match codec_result {
         Ok(parse_result) => {
@@ -619,12 +657,16 @@ fuzz_target!(|input: FuzzInput| {
                             panic!("Codec accepted oversized request line that should be rejected");
                         }
                         ParseError::InvalidMethodToken => {
-                            panic!("Codec accepted invalid method token: {:?}",
-                                String::from_utf8_lossy(&request_line_bytes));
+                            panic!(
+                                "Codec accepted invalid method token: {:?}",
+                                String::from_utf8_lossy(&request_line_bytes)
+                            );
                         }
                         ParseError::MissingHttpPrefix => {
-                            panic!("Codec accepted version without HTTP/ prefix: {:?}",
-                                String::from_utf8_lossy(&request_line_bytes));
+                            panic!(
+                                "Codec accepted version without HTTP/ prefix: {:?}",
+                                String::from_utf8_lossy(&request_line_bytes)
+                            );
                         }
                         ParseError::MissingCrlf => {
                             panic!("Codec accepted request line without proper CRLF termination");
@@ -636,8 +678,10 @@ fuzz_target!(|input: FuzzInput| {
                 }
                 (Ok(_), Err(HttpError::RequestLineTooLong)) => {
                     // **ASSERTION 1: Oversized URI rejected per max_uri_length**
-                    assert!(request_line_bytes.len().saturating_sub(2) > MAX_REQUEST_LINE_LENGTH,
-                        "Codec rejected request line within size limits");
+                    assert!(
+                        request_line_bytes.len().saturating_sub(2) > MAX_REQUEST_LINE_LENGTH,
+                        "Codec rejected request line within size limits"
+                    );
                 }
                 (Ok(_), Err(HttpError::BadMethod)) => {
                     // **ASSERTION 2: Method token validated against RFC 9110 Section 9.1**
@@ -664,8 +708,10 @@ fuzz_target!(|input: FuzzInput| {
         }
         Err(_) => {
             // Codec panicked - this is a bug
-            panic!("HTTP/1.1 codec panicked on input: {:?}",
-                String::from_utf8_lossy(&request_line_bytes));
+            panic!(
+                "HTTP/1.1 codec panicked on input: {:?}",
+                String::from_utf8_lossy(&request_line_bytes)
+            );
         }
     }
 
@@ -690,7 +736,8 @@ fn validate_method_consistency(method: &Method) {
                         b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
                         b'^' | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
                     ),
-                    "Extension method contains invalid token character: {:02x}", byte
+                    "Extension method contains invalid token character: {:02x}",
+                    byte
                 );
             }
             assert!(!ext.is_empty(), "Extension method cannot be empty");
@@ -704,11 +751,17 @@ fn validate_method_consistency(method: &Method) {
 fn validate_uri_form_consistency(method: &str, uri: &str) {
     if method == "CONNECT" && !uri.contains("://") {
         // Authority-form for CONNECT should not contain scheme
-        assert!(uri.contains(':'), "CONNECT authority-form should contain port");
+        assert!(
+            uri.contains(':'),
+            "CONNECT authority-form should contain port"
+        );
     }
 
     if uri == "*" {
-        assert_eq!(method, "OPTIONS", "Asterisk-form only valid for OPTIONS method");
+        assert_eq!(
+            method, "OPTIONS",
+            "Asterisk-form only valid for OPTIONS method"
+        );
     }
 
     if uri.starts_with("http://") || uri.starts_with("https://") {

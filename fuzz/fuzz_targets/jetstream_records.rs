@@ -9,8 +9,8 @@
 //! 4. Oversized records rejected (size limits enforced)
 //! 5. Heartbeat frame interval honored (timeout handling)
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 /// Structured input for controlled JetStream record fuzzing scenarios.
@@ -198,18 +198,27 @@ fn fuzz_api_response_parsing(json_bytes: &[u8]) {
 
 fn fuzz_reply_subject_parsing(reply: &str) {
     // ASSERTION 1: Sequence number parsing must be monotonic and consistent
-    let result = std::panic::catch_unwind(|| {
-        parse_js_reply_subject_simulation(reply)
-    });
+    let result = std::panic::catch_unwind(|| parse_js_reply_subject_simulation(reply));
 
     if let Ok(Some((sequence, delivered))) = result {
         // ASSERTION 1: Sequence numbers should be reasonable values
-        assert!(sequence <= u64::MAX, "Sequence number overflow: {}", sequence);
-        assert!(delivered <= u32::MAX, "Delivered count overflow: {}", delivered);
+        assert!(
+            sequence <= u64::MAX,
+            "Sequence number overflow: {}",
+            sequence
+        );
+        assert!(
+            delivered <= u32::MAX,
+            "Delivered count overflow: {}",
+            delivered
+        );
 
         // Sequence should be non-zero for valid messages
         if sequence > 0 {
-            assert!(delivered > 0, "Delivered count should be > 0 for valid sequence");
+            assert!(
+                delivered > 0,
+                "Delivered count should be > 0 for valid sequence"
+            );
         }
     }
 }
@@ -289,7 +298,8 @@ fn fuzz_message_sequence_validation(messages: Vec<FuzzMessage>) {
         }
 
         // ASSERTION 4: Message size limits
-        if msg.payload.len() > 16 * 1024 * 1024 { // 16MB reasonable limit
+        if msg.payload.len() > 16 * 1024 * 1024 {
+            // 16MB reasonable limit
             // Should be rejected by proper size checking
             panic!("Message payload too large: {} bytes", msg.payload.len());
         }
@@ -350,15 +360,23 @@ fn fuzz_edge_case(edge: EdgeCaseVariant) {
             if let Some(max_size) = limits.max_msg_size {
                 if max_size > 0 && limits.actual_msg_size > max_size as usize {
                     // Should be rejected
-                    assert!(limits.actual_msg_size <= max_size as usize,
-                        "Message size {} exceeds limit {}", limits.actual_msg_size, max_size);
+                    assert!(
+                        limits.actual_msg_size <= max_size as usize,
+                        "Message size {} exceeds limit {}",
+                        limits.actual_msg_size,
+                        max_size
+                    );
                 }
             }
 
             if let Some(max_bytes) = limits.max_bytes {
                 if max_bytes > 0 && limits.actual_bytes > max_bytes as usize {
-                    assert!(limits.actual_bytes <= max_bytes as usize,
-                        "Total bytes {} exceeds limit {}", limits.actual_bytes, max_bytes);
+                    assert!(
+                        limits.actual_bytes <= max_bytes as usize,
+                        "Total bytes {} exceeds limit {}",
+                        limits.actual_bytes,
+                        max_bytes
+                    );
                 }
             }
         }
@@ -366,8 +384,11 @@ fn fuzz_edge_case(edge: EdgeCaseVariant) {
         EdgeCaseVariant::SequenceEdgeCases(sequences) => {
             // ASSERTION 1: Sequence number monotonic
             for seq in sequences {
-                assert!(seq != u64::MAX || seq == 0,
-                    "Invalid sequence number: {}", seq);
+                assert!(
+                    seq != u64::MAX || seq == 0,
+                    "Invalid sequence number: {}",
+                    seq
+                );
             }
         }
 
@@ -389,7 +410,8 @@ fn fuzz_ack_state_transitions(ack_test: AckTransitionTest) {
         let prev_acked = acked;
 
         match operation % 4 {
-            0 => { // ack
+            0 => {
+                // ack
                 if acked {
                     // Should return AlreadyAcknowledged error
                     assert!(acked, "Double ack should fail");
@@ -397,7 +419,8 @@ fn fuzz_ack_state_transitions(ack_test: AckTransitionTest) {
                     acked = true;
                 }
             }
-            1 => { // nack
+            1 => {
+                // nack
                 if acked {
                     // Should return AlreadyAcknowledged error
                     assert!(acked, "Nack after ack should fail");
@@ -405,7 +428,8 @@ fn fuzz_ack_state_transitions(ack_test: AckTransitionTest) {
                     acked = true; // nack also marks as processed
                 }
             }
-            2 => { // term
+            2 => {
+                // term
                 if acked {
                     // Should return AlreadyAcknowledged error
                     assert!(acked, "Term after ack should fail");
@@ -420,8 +444,12 @@ fn fuzz_ack_state_transitions(ack_test: AckTransitionTest) {
         }
 
         // Ack state should never go from true to false
-        assert!(!(prev_acked && !acked),
-            "Ack state regressed from {} to {}", prev_acked, acked);
+        assert!(
+            !(prev_acked && !acked),
+            "Ack state regressed from {} to {}",
+            prev_acked,
+            acked
+        );
     }
 }
 
@@ -490,7 +518,9 @@ fn serialize_stream_config_simulation(config: &FuzzStreamConfig) -> String {
     if !config.subjects.is_empty() {
         json.push_str(",\"subjects\":[");
         for (i, subject) in config.subjects.iter().enumerate() {
-            if i > 0 { json.push(','); }
+            if i > 0 {
+                json.push(',');
+            }
             json.push_str(&format!("\"{}\"", json_escape(subject)));
         }
         json.push(']');
@@ -506,7 +536,8 @@ fn serialize_stream_config_simulation(config: &FuzzStreamConfig) -> String {
     json.push('}');
 
     // ASSERTION 4: Check serialized size
-    if json.len() > 1024 * 1024 { // 1MB limit
+    if json.len() > 1024 * 1024 {
+        // 1MB limit
         panic!("Serialized config too large: {} bytes", json.len());
     }
 
@@ -537,7 +568,11 @@ fn parse_api_error_simulation(json: &str) {
     // ASSERTION 3: Error classification should be consistent
     if err_code == 10059 && code != 10059 {
         // Should classify as StreamNotFound based on err_code, not code
-        assert_ne!(code, err_code, "Error code mismatch: code={}, err_code={}", code, err_code);
+        assert_ne!(
+            code, err_code,
+            "Error code mismatch: code={}, err_code={}",
+            code, err_code
+        );
     }
 }
 
@@ -555,7 +590,9 @@ fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
     let pattern = format!("\"{key}\":");
     let start = json.find(&pattern)? + pattern.len();
     let rest = json[start..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -611,7 +648,10 @@ mod tests {
     #[test]
     fn test_json_extraction() {
         let json = r#"{"name":"test","seq":42}"#;
-        assert_eq!(extract_json_string_simple(json, "name"), Some("test".to_string()));
+        assert_eq!(
+            extract_json_string_simple(json, "name"),
+            Some("test".to_string())
+        );
         assert_eq!(extract_json_u64(json, "seq"), Some(42));
         assert_eq!(extract_json_u64(json, "missing"), None);
     }

@@ -19,12 +19,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::codec::Decoder;
 use asupersync::grpc::codec::{GrpcCodec, GrpcMessage};
 use asupersync::grpc::status::GrpcError;
-use asupersync::codec::Decoder;
-use asupersync::bytes::{BufMut, BytesMut};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum iterations to prevent infinite loops during multi-message testing
 const MAX_DECODE_ITERATIONS: usize = 100;
@@ -158,16 +158,29 @@ fn fuzz_single_frame(codec: &mut GrpcCodec, frame: &GrpcFrame) {
         Ok(Some(msg)) => {
             // Successfully decoded - validate compression flag was respected
             if frame.compression_flag == 0 {
-                assert!(!msg.compressed, "Compression flag 0 should result in uncompressed message");
+                assert!(
+                    !msg.compressed,
+                    "Compression flag 0 should result in uncompressed message"
+                );
             } else if frame.compression_flag == 1 {
-                assert!(msg.compressed, "Compression flag 1 should result in compressed message");
+                assert!(
+                    msg.compressed,
+                    "Compression flag 1 should result in compressed message"
+                );
             } else {
-                panic!("Invalid compression flag {} should have been rejected", frame.compression_flag);
+                panic!(
+                    "Invalid compression flag {} should have been rejected",
+                    frame.compression_flag
+                );
             }
 
             // Validate payload size matches length field (when not truncated)
             if frame.truncate.is_none() && frame.length == frame.payload.len() as u32 {
-                assert_eq!(msg.data.len(), frame.payload.len(), "Decoded payload size should match original");
+                assert_eq!(
+                    msg.data.len(),
+                    frame.payload.len(),
+                    "Decoded payload size should match original"
+                );
             }
         }
         Ok(None) => {
@@ -198,7 +211,8 @@ fn fuzz_multiple_frames(codec: &mut GrpcCodec, frames: &[GrpcFrame]) {
     let mut buffer = BytesMut::new();
 
     // Concatenate all frames
-    for frame in frames.iter().take(10) { // Limit to prevent excessive memory usage
+    for frame in frames.iter().take(10) {
+        // Limit to prevent excessive memory usage
         buffer.extend_from_slice(&frame.to_bytes());
     }
 
@@ -269,7 +283,8 @@ fn fuzz_fragmented_input(codec: &mut GrpcCodec, frames: &[GrpcFrame], chunk_size
 /// Test oversized message handling
 fn fuzz_oversized_messages(codec: &mut GrpcCodec, frames: &[GrpcFrame]) {
     // Assertion 2: 4-byte length field bounds enforced
-    for frame in frames.iter().take(5) { // Limit iterations
+    for frame in frames.iter().take(5) {
+        // Limit iterations
         let mut oversized_frame = frame.clone();
 
         // Create a frame that claims to be larger than the codec limit
@@ -304,7 +319,8 @@ fn fuzz_oversized_messages(codec: &mut GrpcCodec, frames: &[GrpcFrame]) {
 fn fuzz_invalid_compression(codec: &mut GrpcCodec, frames: &[GrpcFrame]) {
     // Assertion 1: compressed-flag byte respected
     // Assertion 5: unknown compression schemes rejected
-    for frame in frames.iter().take(5) { // Limit iterations
+    for frame in frames.iter().take(5) {
+        // Limit iterations
         let mut test_frame = frame.clone();
 
         // Test various invalid compression flags
@@ -315,20 +331,27 @@ fn fuzz_invalid_compression(codec: &mut GrpcCodec, frames: &[GrpcFrame]) {
             match codec.decode(&mut buffer) {
                 Ok(Some(_)) => {
                     // Should not succeed for invalid compression flags
-                    panic!("Invalid compression flag {} should not decode successfully", invalid_flag);
+                    panic!(
+                        "Invalid compression flag {} should not decode successfully",
+                        invalid_flag
+                    );
                 }
                 Ok(None) => {
                     // Incomplete - check if this is due to insufficient data
                     if buffer.len() >= MESSAGE_HEADER_SIZE {
                         // We have enough for header, so this should have been rejected
-                        panic!("Invalid compression flag {} should be rejected, not incomplete", invalid_flag);
+                        panic!(
+                            "Invalid compression flag {} should be rejected, not incomplete",
+                            invalid_flag
+                        );
                     }
                 }
                 Err(GrpcError::Protocol(msg)) => {
                     // Expected - invalid compression flags should cause protocol errors
                     assert!(
                         msg.contains("compression flag") || msg.contains("invalid"),
-                        "Protocol error should mention compression flag: {}", msg
+                        "Protocol error should mention compression flag: {}",
+                        msg
                     );
                 }
                 Err(_) => {
@@ -384,7 +407,11 @@ fn test_boundary_conditions() {
 
     match codec.decode(&mut buffer) {
         Ok(Some(msg)) => {
-            assert_eq!(msg.data.len(), 0, "Zero-length message should have empty payload");
+            assert_eq!(
+                msg.data.len(),
+                0,
+                "Zero-length message should have empty payload"
+            );
         }
         _ => panic!("Zero-length frame should decode successfully"),
     }

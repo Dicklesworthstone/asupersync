@@ -207,9 +207,15 @@ enum CorruptionStrategy {
     /// Insert null bytes
     NullBytes { positions: Vec<usize> },
     /// Insert control characters
-    ControlChars { chars: Vec<u8>, positions: Vec<usize> },
+    ControlChars {
+        chars: Vec<u8>,
+        positions: Vec<usize>,
+    },
     /// Insert non-ASCII characters
-    NonAscii { chars: Vec<u8>, positions: Vec<usize> },
+    NonAscii {
+        chars: Vec<u8>,
+        positions: Vec<usize>,
+    },
     /// Truncate at random position
     Truncate { position: usize },
     /// Duplicate components
@@ -266,7 +272,10 @@ impl FuzzInput {
             // Standard order: VERSION SP STATUS-CODE SP REASON-PHRASE
             status_line.extend_from_slice(version_str.as_bytes());
 
-            if let CorruptionStrategy::Duplicate { component: ComponentType::Version } = &self.corruption {
+            if let CorruptionStrategy::Duplicate {
+                component: ComponentType::Version,
+            } = &self.corruption
+            {
                 status_line.extend_from_slice(&spacing);
                 status_line.extend_from_slice(version_str.as_bytes());
             }
@@ -274,7 +283,10 @@ impl FuzzInput {
             status_line.extend_from_slice(&spacing);
             status_line.extend_from_slice(status_str.as_bytes());
 
-            if let CorruptionStrategy::Duplicate { component: ComponentType::StatusCode } = &self.corruption {
+            if let CorruptionStrategy::Duplicate {
+                component: ComponentType::StatusCode,
+            } = &self.corruption
+            {
                 status_line.extend_from_slice(&spacing);
                 status_line.extend_from_slice(status_str.as_bytes());
             }
@@ -283,7 +295,10 @@ impl FuzzInput {
                 status_line.extend_from_slice(&spacing);
                 status_line.extend_from_slice(reason_str.as_bytes());
 
-                if let CorruptionStrategy::Duplicate { component: ComponentType::ReasonPhrase } = &self.corruption {
+                if let CorruptionStrategy::Duplicate {
+                    component: ComponentType::ReasonPhrase,
+                } = &self.corruption
+                {
                     status_line.extend_from_slice(&spacing);
                     status_line.extend_from_slice(reason_str.as_bytes());
                 }
@@ -398,9 +413,7 @@ impl FuzzInput {
                 format!("{}\t{}", text, text)
             }
             ReasonPhraseStrategy::Empty => String::new(),
-            ReasonPhraseStrategy::VeryLong { length } => {
-                "R".repeat((*length).min(10000))
-            }
+            ReasonPhraseStrategy::VeryLong { length } => "R".repeat((*length).min(10000)),
             ReasonPhraseStrategy::ObsFold { text } => {
                 // obs-fold: CRLF 1*( SP / HTAB ) - forbidden in RFC 9112
                 format!("{}\r\n {}", text, text)
@@ -417,9 +430,7 @@ impl FuzzInput {
             SpacingStrategy::Tabs { count } => {
                 vec![b'\t'; (*count as usize).min(100)]
             }
-            SpacingStrategy::Mixed { chars } => {
-                chars.bytes().take(100).collect()
-            }
+            SpacingStrategy::Mixed { chars } => chars.bytes().take(100).collect(),
             SpacingStrategy::None => Vec::new(),
         }
     }
@@ -430,12 +441,8 @@ impl FuzzInput {
             TerminationStrategy::None => Vec::new(),
             TerminationStrategy::LfOnly => b"\n".to_vec(),
             TerminationStrategy::CrOnly => b"\r".to_vec(),
-            TerminationStrategy::Wrong { termination } => {
-                termination.bytes().take(10).collect()
-            }
-            TerminationStrategy::Multiple { count } => {
-                b"\r\n".repeat((*count as usize).min(10))
-            }
+            TerminationStrategy::Wrong { termination } => termination.bytes().take(10).collect(),
+            TerminationStrategy::Multiple { count } => b"\r\n".repeat((*count as usize).min(10)),
         }
     }
 
@@ -508,8 +515,8 @@ impl MockH1StatusLineParser {
             return Err(ParseError::StatusLineTooLong);
         }
 
-        let line_str = std::str::from_utf8(line_without_crlf)
-            .map_err(|_| ParseError::InvalidUtf8)?;
+        let line_str =
+            std::str::from_utf8(line_without_crlf).map_err(|_| ParseError::InvalidUtf8)?;
 
         // **ASSERTION 5: obs-fold rejected per RFC 9112**
         if line_str.contains("\r\n ") || line_str.contains("\r\n\t") {
@@ -548,7 +555,8 @@ impl MockH1StatusLineParser {
         }
 
         // Must be numeric
-        let status_num: u16 = status_code.parse()
+        let status_num: u16 = status_code
+            .parse()
             .map_err(|_| ParseError::NonNumericStatusCode)?;
 
         // Must be in range 100-599
@@ -567,9 +575,9 @@ impl MockH1StatusLineParser {
 
         for byte in reason_phrase.bytes() {
             match byte {
-                0x09 | 0x20 => {}, // HTAB, SP - allowed
-                0x21..=0x7E => {}, // VCHAR - allowed
-                0x80..=0xFF => {}, // obs-text - allowed
+                0x09 | 0x20 => {} // HTAB, SP - allowed
+                0x21..=0x7E => {} // VCHAR - allowed
+                0x80..=0xFF => {} // obs-text - allowed
                 _ => return Err(ParseError::InvalidReasonPhraseChar),
             }
         }
@@ -611,9 +619,8 @@ fuzz_target!(|input: FuzzInput| {
     let mut codec = Http1ClientCodec::new();
     let mut buffer = BytesMut::from(full_response.as_slice());
 
-    let codec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        codec.decode(&mut buffer)
-    }));
+    let codec_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut buffer)));
 
     match codec_result {
         Ok(parse_result) => {
@@ -626,7 +633,10 @@ fuzz_target!(|input: FuzzInput| {
 
                     // **ASSERTION 1: HTTP-version prefix strict (HTTP/1.1 or HTTP/1.0)**
                     assert!(version.starts_with("HTTP/"));
-                    assert!(matches!(response.version, Version::Http10 | Version::Http11));
+                    assert!(matches!(
+                        response.version,
+                        Version::Http10 | Version::Http11
+                    ));
 
                     // **ASSERTION 2: 3-digit status-code within 100..=599**
                     assert!(status_code >= 100 && status_code <= 599);
@@ -639,42 +649,62 @@ fuzz_target!(|input: FuzzInput| {
                     // Already validated by successful parsing
 
                     // **ASSERTION 5: obs-fold rejected per RFC 9112**
-                    assert!(!status_line_bytes.windows(3).any(|w| w == b"\r\n " || w == b"\r\n\t"));
+                    assert!(
+                        !status_line_bytes
+                            .windows(3)
+                            .any(|w| w == b"\r\n " || w == b"\r\n\t")
+                    );
                 }
                 (Err(expected_error), Ok(Some(_))) => {
                     // Mock parser correctly rejected but codec accepted - potential issue
                     match expected_error {
                         ParseError::MissingHttpPrefix => {
-                            panic!("Codec accepted version without HTTP/ prefix: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted version without HTTP/ prefix: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         ParseError::UnsupportedVersion => {
-                            panic!("Codec accepted unsupported HTTP version: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted unsupported HTTP version: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         ParseError::StatusCodeOutOfRange => {
-                            panic!("Codec accepted status code outside 100-599 range: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted status code outside 100-599 range: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         ParseError::InvalidStatusCodeLength => {
-                            panic!("Codec accepted non-3-digit status code: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted non-3-digit status code: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         ParseError::NonNumericStatusCode => {
-                            panic!("Codec accepted non-numeric status code: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted non-numeric status code: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         ParseError::MissingCrlf => {
-                            panic!("Codec accepted status line without proper CRLF termination: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted status line without proper CRLF termination: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         ParseError::ObsFoldDetected => {
-                            panic!("Codec accepted obs-fold which is forbidden by RFC 9112: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted obs-fold which is forbidden by RFC 9112: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         ParseError::InvalidReasonPhraseChar => {
-                            panic!("Codec accepted invalid character in reason phrase: {:?}",
-                                String::from_utf8_lossy(&status_line_bytes));
+                            panic!(
+                                "Codec accepted invalid character in reason phrase: {:?}",
+                                String::from_utf8_lossy(&status_line_bytes)
+                            );
                         }
                         _ => {
                             // Other validation differences may be acceptable
@@ -704,20 +734,27 @@ fuzz_target!(|input: FuzzInput| {
         }
         Err(_) => {
             // Codec panicked - this is a bug
-            panic!("HTTP/1.1 client codec panicked on input: {:?}",
-                String::from_utf8_lossy(&status_line_bytes));
+            panic!(
+                "HTTP/1.1 client codec panicked on input: {:?}",
+                String::from_utf8_lossy(&status_line_bytes)
+            );
         }
     }
 
     // Additional validation for specific assertion coverage
     if let Ok((version, status_code, reason_phrase)) = &mock_result {
         // **ASSERTION 1: HTTP-version prefix strict**
-        assert!(version == "HTTP/1.0" || version == "HTTP/1.1",
-            "Only HTTP/1.0 and HTTP/1.1 should be accepted");
+        assert!(
+            version == "HTTP/1.0" || version == "HTTP/1.1",
+            "Only HTTP/1.0 and HTTP/1.1 should be accepted"
+        );
 
         // **ASSERTION 2: 3-digit status-code within 100..=599**
-        assert!(*status_code >= 100 && *status_code <= 599,
-            "Status code {} outside valid range 100-599", status_code);
+        assert!(
+            *status_code >= 100 && *status_code <= 599,
+            "Status code {} outside valid range 100-599",
+            status_code
+        );
 
         // **ASSERTION 3: reason-phrase tolerates VCHAR + obs-text**
         for byte in reason_phrase.bytes() {
@@ -725,13 +762,16 @@ fuzz_target!(|input: FuzzInput| {
                 byte == 0x09 || byte == 0x20 || // HTAB, SP
                 (byte >= 0x21 && byte <= 0x7E) || // VCHAR
                 (byte >= 0x80), // obs-text
-                "Invalid character in reason phrase: 0x{:02X}", byte
+                "Invalid character in reason phrase: 0x{:02X}",
+                byte
             );
         }
 
         // **ASSERTION 5: obs-fold rejected per RFC 9112**
-        assert!(!reason_phrase.contains("\r\n ") && !reason_phrase.contains("\r\n\t"),
-            "obs-fold detected in reason phrase, should be rejected per RFC 9112");
+        assert!(
+            !reason_phrase.contains("\r\n ") && !reason_phrase.contains("\r\n\t"),
+            "obs-fold detected in reason phrase, should be rejected per RFC 9112"
+        );
     }
 });
 
@@ -742,11 +782,15 @@ fn validate_reason_phrase_consistency(reason_phrase: &str) {
             byte == 0x09 || byte == 0x20 || // HTAB, SP
             (byte >= 0x21 && byte <= 0x7E) || // VCHAR
             (byte >= 0x80), // obs-text
-            "Invalid character in reason phrase: 0x{:02X}", byte
+            "Invalid character in reason phrase: 0x{:02X}",
+            byte
         );
     }
 
     // Verify no obs-fold sequences
-    assert!(!reason_phrase.contains("\r\n ") && !reason_phrase.contains("\r\n\t"),
-        "obs-fold sequence found in reason phrase: {:?}", reason_phrase);
+    assert!(
+        !reason_phrase.contains("\r\n ") && !reason_phrase.contains("\r\n\t"),
+        "obs-fold sequence found in reason phrase: {:?}",
+        reason_phrase
+    );
 }

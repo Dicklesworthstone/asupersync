@@ -24,13 +24,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BufMut};
-use asupersync::http::h2::frame::{
-    FrameHeader, parse_frame,
-    data_flags, headers_flags, settings_flags, ping_flags, continuation_flags,
-    MAX_FRAME_SIZE,
-};
+use asupersync::bytes::{BufMut, Bytes};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{
+    FrameHeader, MAX_FRAME_SIZE, continuation_flags, data_flags, headers_flags, parse_frame,
+    ping_flags, settings_flags,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts
@@ -42,17 +41,33 @@ const MAX_FRAME_PAYLOAD_SIZE: usize = 32_768;
 /// HTTP/2 frame type configuration for fuzzing
 #[derive(Arbitrary, Debug, Clone)]
 enum FuzzFrameType {
-    Data { end_stream: bool, padded: bool },
-    Headers { end_stream: bool, end_headers: bool, padded: bool, priority: bool },
+    Data {
+        end_stream: bool,
+        padded: bool,
+    },
+    Headers {
+        end_stream: bool,
+        end_headers: bool,
+        padded: bool,
+        priority: bool,
+    },
     Priority,
     RstStream,
-    Settings { ack: bool },
+    Settings {
+        ack: bool,
+    },
     PushPromise,
-    Ping { ack: bool },
+    Ping {
+        ack: bool,
+    },
     GoAway,
     WindowUpdate,
-    Continuation { end_headers: bool },
-    Unknown { frame_type: u8 },
+    Continuation {
+        end_headers: bool,
+    },
+    Unknown {
+        frame_type: u8,
+    },
 }
 
 impl FuzzFrameType {
@@ -78,26 +93,55 @@ impl FuzzFrameType {
         match self {
             Self::Data { end_stream, padded } => {
                 let mut flags = 0;
-                if *end_stream { flags |= data_flags::END_STREAM; }
-                if *padded { flags |= data_flags::PADDED; }
+                if *end_stream {
+                    flags |= data_flags::END_STREAM;
+                }
+                if *padded {
+                    flags |= data_flags::PADDED;
+                }
                 flags
             }
-            Self::Headers { end_stream, end_headers, padded, priority } => {
+            Self::Headers {
+                end_stream,
+                end_headers,
+                padded,
+                priority,
+            } => {
                 let mut flags = 0;
-                if *end_stream { flags |= headers_flags::END_STREAM; }
-                if *end_headers { flags |= headers_flags::END_HEADERS; }
-                if *padded { flags |= headers_flags::PADDED; }
-                if *priority { flags |= headers_flags::PRIORITY; }
+                if *end_stream {
+                    flags |= headers_flags::END_STREAM;
+                }
+                if *end_headers {
+                    flags |= headers_flags::END_HEADERS;
+                }
+                if *padded {
+                    flags |= headers_flags::PADDED;
+                }
+                if *priority {
+                    flags |= headers_flags::PRIORITY;
+                }
                 flags
             }
             Self::Settings { ack } => {
-                if *ack { settings_flags::ACK } else { 0 }
+                if *ack {
+                    settings_flags::ACK
+                } else {
+                    0
+                }
             }
             Self::Ping { ack } => {
-                if *ack { ping_flags::ACK } else { 0 }
+                if *ack {
+                    ping_flags::ACK
+                } else {
+                    0
+                }
             }
             Self::Continuation { end_headers } => {
-                if *end_headers { continuation_flags::END_HEADERS } else { 0 }
+                if *end_headers {
+                    continuation_flags::END_HEADERS
+                } else {
+                    0
+                }
             }
             _ => 0, // No flags for other frame types
         }
@@ -116,14 +160,20 @@ impl FuzzFrameType {
     /// Generate minimum payload size for this frame type
     fn min_payload_size(&self) -> usize {
         match self {
-            Self::Priority => 5, // stream dependency (4) + weight (1)
+            Self::Priority => 5,  // stream dependency (4) + weight (1)
             Self::RstStream => 4, // error code (4)
-            Self::Settings { ack } => if *ack { 0 } else { 6 }, // setting pairs (6 bytes each)
+            Self::Settings { ack } => {
+                if *ack {
+                    0
+                } else {
+                    6
+                }
+            } // setting pairs (6 bytes each)
             Self::PushPromise => 4, // promised stream ID (4)
             Self::Ping { .. } => 8, // ping data (8)
-            Self::GoAway => 8, // last stream ID (4) + error code (4)
+            Self::GoAway => 8,    // last stream ID (4) + error code (4)
             Self::WindowUpdate => 4, // window size increment (4)
-            _ => 0, // DATA, HEADERS, CONTINUATION can be empty
+            _ => 0,               // DATA, HEADERS, CONTINUATION can be empty
         }
     }
 }
@@ -149,7 +199,11 @@ impl StreamIdStrategy {
             Self::Zero => 0,
             Self::ReservedBitSet(id) => *id | 0x8000_0000, // Set reserved bit
             Self::Boundary { at_max } => {
-                if *at_max { 0x7FFF_FFFF } else { 1 }
+                if *at_max {
+                    0x7FFF_FFFF
+                } else {
+                    1
+                }
             }
         }
     }
@@ -195,7 +249,11 @@ enum PayloadStrategy {
     /// Malformed padding (length exceeds payload)
     MalformedPadding { padding_len: u8, payload: Vec<u8> },
     /// Priority frame structure
-    Priority { exclusive: bool, dependency: u32, weight: u8 },
+    Priority {
+        exclusive: bool,
+        dependency: u32,
+        weight: u8,
+    },
     /// Settings frame payload
     Settings { settings: Vec<(u16, u32)> },
     /// Invalid settings (unknown identifier, invalid value)
@@ -207,7 +265,10 @@ enum PayloadStrategy {
     /// PING data
     Ping { data: [u8; 8] },
     /// GOAWAY with last stream ID and error code
-    GoAway { last_stream_id: u32, error_code: u32 },
+    GoAway {
+        last_stream_id: u32,
+        error_code: u32,
+    },
     /// Raw bytes for corruption testing
     RawBytes(Vec<u8>),
 }
@@ -221,23 +282,37 @@ impl PayloadStrategy {
                 let min_size = frame_type.min_payload_size();
                 vec![0; min_size]
             }
-            Self::WithPadding { padding_len, payload } => {
+            Self::WithPadding {
+                padding_len,
+                payload,
+            } => {
                 let mut result = Vec::new();
                 result.push(*padding_len);
                 result.extend_from_slice(payload);
                 result.extend(vec![0; *padding_len as usize]);
                 result
             }
-            Self::MalformedPadding { padding_len, payload } => {
+            Self::MalformedPadding {
+                padding_len,
+                payload,
+            } => {
                 let mut result = Vec::new();
                 result.push(*padding_len);
                 result.extend_from_slice(payload);
                 // Padding length exceeds remaining bytes - this should be caught
                 result
             }
-            Self::Priority { exclusive, dependency, weight } => {
+            Self::Priority {
+                exclusive,
+                dependency,
+                weight,
+            } => {
                 let mut result = Vec::new();
-                let dep = if *exclusive { *dependency | 0x8000_0000 } else { *dependency & 0x7FFF_FFFF };
+                let dep = if *exclusive {
+                    *dependency | 0x8000_0000
+                } else {
+                    *dependency & 0x7FFF_FFFF
+                };
                 result.put_u32(dep);
                 result.push(*weight);
                 result
@@ -250,7 +325,10 @@ impl PayloadStrategy {
                 }
                 result
             }
-            Self::InvalidSettings { invalid_id, invalid_value } => {
+            Self::InvalidSettings {
+                invalid_id,
+                invalid_value,
+            } => {
                 let mut result = Vec::new();
                 result.put_u16(*invalid_id);
                 result.put_u32(*invalid_value);
@@ -267,7 +345,10 @@ impl PayloadStrategy {
                 result
             }
             Self::Ping { data } => data.to_vec(),
-            Self::GoAway { last_stream_id, error_code } => {
+            Self::GoAway {
+                last_stream_id,
+                error_code,
+            } => {
                 let mut result = Vec::new();
                 result.put_u32(*last_stream_id & 0x7FFF_FFFF); // Clear reserved bit
                 result.put_u32(*error_code);
@@ -299,7 +380,12 @@ impl FuzzInput {
         // Generate payload
         let payload_bytes = self.payload.to_payload(&self.frame_type);
         let payload_size = payload_bytes.len().min(MAX_FRAME_PAYLOAD_SIZE);
-        let payload = Bytes::from(payload_bytes.into_iter().take(payload_size).collect::<Vec<_>>());
+        let payload = Bytes::from(
+            payload_bytes
+                .into_iter()
+                .take(payload_size)
+                .collect::<Vec<_>>(),
+        );
 
         // Generate stream ID
         let mut stream_id = self.stream_id.to_stream_id();
@@ -351,7 +437,10 @@ fuzz_target!(|input: FuzzInput| {
     if header.length > MAX_FRAME_SIZE {
         // Parser should reject oversized frames
         match parse_frame(&header, payload) {
-            Ok(_) => panic!("Parser accepted frame with length {} > {}", header.length, MAX_FRAME_SIZE),
+            Ok(_) => panic!(
+                "Parser accepted frame with length {} > {}",
+                header.length, MAX_FRAME_SIZE
+            ),
             Err(err) if err.code == ErrorCode::FrameSizeError => {
                 // Expected: oversized frame rejected
             }
@@ -364,15 +453,17 @@ fuzz_target!(|input: FuzzInput| {
 
     // **ASSERTION 2: No panic on malformed padding**
     // Parser should handle malformed padding gracefully
-    let parse_result = std::panic::catch_unwind(|| {
-        parse_frame(&header, payload.clone())
-    });
+    let parse_result = std::panic::catch_unwind(|| parse_frame(&header, payload.clone()));
 
     let frame_result = match parse_result {
         Ok(result) => result,
         Err(_) => {
             // Panic detected - this is a bug
-            panic!("Frame parser panicked on input: header={:?}, payload_len={}", header, payload.len());
+            panic!(
+                "Frame parser panicked on input: header={:?}, payload_len={}",
+                header,
+                payload.len()
+            );
         }
     };
 
@@ -389,15 +480,17 @@ fuzz_target!(|input: FuzzInput| {
             };
 
             if !allows_stream && header.stream_id != 0 {
-                panic!("Connection-scoped frame type {} with non-zero stream ID {}",
-                    header.frame_type, header.stream_id);
+                panic!(
+                    "Connection-scoped frame type {} with non-zero stream ID {}",
+                    header.frame_type, header.stream_id
+                );
             }
 
             if allows_stream && header.stream_id == 0 {
                 // This is allowed for some frame types like WINDOW_UPDATE on connection
                 // But check specific rules per frame type
                 match header.frame_type {
-                    0x8 => {}, // WINDOW_UPDATE allowed on connection (stream 0)
+                    0x8 => {} // WINDOW_UPDATE allowed on connection (stream 0)
                     0x0 | 0x1 | 0x2 | 0x3 | 0x5 | 0x9 => {
                         // DATA, HEADERS, PRIORITY, RST_STREAM, PUSH_PROMISE, CONTINUATION
                         // These should not appear on stream 0
@@ -410,18 +503,21 @@ fuzz_target!(|input: FuzzInput| {
             // **ASSERTION 4: PROTOCOL_ERROR on invalid transitions**
             // Verify frame-specific validity rules
             match header.frame_type {
-                0x2 => { // PRIORITY
+                0x2 => {
+                    // PRIORITY
                     if header.length != 5 {
                         // Priority frames must be exactly 5 bytes
                         // Parser should reject, but if it accepts, don't panic
                     }
                 }
-                0x3 => { // RST_STREAM
+                0x3 => {
+                    // RST_STREAM
                     if header.length != 4 {
                         // RST_STREAM frames must be exactly 4 bytes
                     }
                 }
-                0x4 => { // SETTINGS
+                0x4 => {
+                    // SETTINGS
                     if header.length % 6 != 0 && (header.flags & settings_flags::ACK) == 0 {
                         // Non-ACK SETTINGS must be multiple of 6 bytes
                     }
@@ -429,12 +525,14 @@ fuzz_target!(|input: FuzzInput| {
                         // ACK SETTINGS must have zero length
                     }
                 }
-                0x6 => { // PING
+                0x6 => {
+                    // PING
                     if header.length != 8 {
                         // PING frames must be exactly 8 bytes
                     }
                 }
-                0x8 => { // WINDOW_UPDATE
+                0x8 => {
+                    // WINDOW_UPDATE
                     if header.length != 4 {
                         // WINDOW_UPDATE frames must be exactly 4 bytes
                     }

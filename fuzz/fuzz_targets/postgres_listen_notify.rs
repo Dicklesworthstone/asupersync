@@ -46,7 +46,7 @@ enum ListenNotifyOperation {
     ReceiveNotification {
         channel: String,
         payload: String,
-        sender_pid: u32
+        sender_pid: u32,
     },
     /// Test notification response parsing
     ParseNotificationResponse { raw_data: Vec<u8> },
@@ -57,7 +57,9 @@ enum ListenNotifyOperation {
     /// Test error conditions
     ErrorCondition { error_type: ErrorType },
     /// Test notification queuing and delivery
-    QueueNotifications { notifications: Vec<PendingNotification> },
+    QueueNotifications {
+        notifications: Vec<PendingNotification>,
+    },
 }
 
 /// Error conditions to test
@@ -131,7 +133,10 @@ impl ListenNotifyShadowModel {
     }
 
     fn add_channel(&self, channel: &str) {
-        self.listened_channels.lock().unwrap().insert(channel.to_string());
+        self.listened_channels
+            .lock()
+            .unwrap()
+            .insert(channel.to_string());
         self.listen_count.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -153,7 +158,9 @@ impl ListenNotifyShadowModel {
     }
 
     fn get_notifications_for_channel(&self, channel: &str) -> Vec<PendingNotification> {
-        self.notification_queue.lock().unwrap()
+        self.notification_queue
+            .lock()
+            .unwrap()
             .iter()
             .filter(|n| n.channel == channel)
             .cloned()
@@ -187,8 +194,14 @@ fn normalize_fuzz_input(input: &mut ListenNotifyFuzzInput) {
 
     // Normalize configuration
     input.config.max_operations = input.config.max_operations.clamp(1, MAX_OPERATIONS as u8);
-    input.config.max_channel_length = input.config.max_channel_length.clamp(1, MAX_CHANNEL_NAME_LENGTH as u8);
-    input.config.max_payload_size = input.config.max_payload_size.clamp(1, MAX_PAYLOAD_SIZE as u16);
+    input.config.max_channel_length = input
+        .config
+        .max_channel_length
+        .clamp(1, MAX_CHANNEL_NAME_LENGTH as u8);
+    input.config.max_payload_size = input
+        .config
+        .max_payload_size
+        .clamp(1, MAX_PAYLOAD_SIZE as u16);
     input.config.max_queue_size = input.config.max_queue_size.clamp(1, MAX_QUEUE_SIZE as u16);
 
     // Normalize individual operations
@@ -209,7 +222,9 @@ fn normalize_operation(operation: &mut ListenNotifyOperation, config: &ListenNot
             truncate_string(channel, config.max_channel_length as usize);
             truncate_string(payload, config.max_payload_size as usize);
         }
-        ListenNotifyOperation::ReceiveNotification { channel, payload, .. } => {
+        ListenNotifyOperation::ReceiveNotification {
+            channel, payload, ..
+        } => {
             truncate_string(channel, config.max_channel_length as usize);
             truncate_string(payload, config.max_payload_size as usize);
         }
@@ -230,7 +245,10 @@ fn normalize_operation(operation: &mut ListenNotifyOperation, config: &ListenNot
         ListenNotifyOperation::QueueNotifications { notifications } => {
             notifications.truncate(config.max_queue_size as usize);
             for notification in notifications {
-                truncate_string(&mut notification.channel, config.max_channel_length as usize);
+                truncate_string(
+                    &mut notification.channel,
+                    config.max_channel_length as usize,
+                );
                 truncate_string(&mut notification.payload, config.max_payload_size as usize);
             }
         }
@@ -274,7 +292,11 @@ fn execute_listen_notify_operations(
                 test_notify_operation(channel, payload, shadow)?;
             }
 
-            ListenNotifyOperation::ReceiveNotification { channel, payload, sender_pid } => {
+            ListenNotifyOperation::ReceiveNotification {
+                channel,
+                payload,
+                sender_pid,
+            } => {
                 test_receive_notification(channel, payload, *sender_pid, shadow)?;
             }
 
@@ -338,7 +360,10 @@ fn test_listen_operation(channel: &str, shadow: &ListenNotifyShadowModel) -> Res
 
     // Verify channel is now being listened to
     if !shadow.is_listening(channel) {
-        return Err(format!("Channel '{}' should be listened after LISTEN operation", channel));
+        return Err(format!(
+            "Channel '{}' should be listened after LISTEN operation",
+            channel
+        ));
     }
 
     Ok(())
@@ -351,12 +376,18 @@ fn test_unlisten_operation(channel: &str, shadow: &ListenNotifyShadowModel) -> R
 
     // Verify consistency: should only remove if was actually listening
     if removed != was_listening {
-        shadow.add_violation(format!("UNLISTEN consistency violation: was_listening={}, removed={}", was_listening, removed));
+        shadow.add_violation(format!(
+            "UNLISTEN consistency violation: was_listening={}, removed={}",
+            was_listening, removed
+        ));
     }
 
     // Verify channel is no longer being listened to
     if shadow.is_listening(channel) {
-        return Err(format!("Channel '{}' should not be listened after UNLISTEN operation", channel));
+        return Err(format!(
+            "Channel '{}' should not be listened after UNLISTEN operation",
+            channel
+        ));
     }
 
     Ok(())
@@ -369,14 +400,21 @@ fn test_unlisten_all_operation(shadow: &ListenNotifyShadowModel) -> Result<(), S
     // Verify no channels are being listened to
     let channel_count = shadow.listened_channels.lock().unwrap().len();
     if channel_count != 0 {
-        return Err(format!("Expected 0 channels after UNLISTEN *, got {}", channel_count));
+        return Err(format!(
+            "Expected 0 channels after UNLISTEN *, got {}",
+            channel_count
+        ));
     }
 
     Ok(())
 }
 
 /// Test NOTIFY operation
-fn test_notify_operation(channel: &str, payload: &str, shadow: &ListenNotifyShadowModel) -> Result<(), String> {
+fn test_notify_operation(
+    channel: &str,
+    payload: &str,
+    shadow: &ListenNotifyShadowModel,
+) -> Result<(), String> {
     // Validate inputs
     if !is_valid_channel_name(channel) {
         shadow.record_error();
@@ -406,7 +444,7 @@ fn test_receive_notification(
     channel: &str,
     payload: &str,
     sender_pid: u32,
-    shadow: &ListenNotifyShadowModel
+    shadow: &ListenNotifyShadowModel,
 ) -> Result<(), String> {
     // Only process if we're listening to this channel
     if !shadow.is_listening(channel) {
@@ -434,7 +472,10 @@ fn test_receive_notification(
 }
 
 /// Test notification response parsing (mock PostgreSQL wire protocol)
-fn test_parse_notification_response(raw_data: &[u8], shadow: &ListenNotifyShadowModel) -> Result<(), String> {
+fn test_parse_notification_response(
+    raw_data: &[u8],
+    shadow: &ListenNotifyShadowModel,
+) -> Result<(), String> {
     // Mock PostgreSQL NotificationResponse format:
     // Byte 'A' + length(4 bytes) + pid(4 bytes) + channel(null-terminated) + payload(null-terminated)
 
@@ -449,7 +490,8 @@ fn test_parse_notification_response(raw_data: &[u8], shadow: &ListenNotifyShadow
         return Ok(());
     }
 
-    if raw_data.len() < 9 { // Minimum: 'A' + length(4) + pid(4)
+    if raw_data.len() < 9 {
+        // Minimum: 'A' + length(4) + pid(4)
         shadow.record_error();
         return Ok(());
     }
@@ -458,7 +500,8 @@ fn test_parse_notification_response(raw_data: &[u8], shadow: &ListenNotifyShadow
     let length = u32::from_be_bytes([raw_data[1], raw_data[2], raw_data[3], raw_data[4]]) as usize;
 
     // Verify length consistency
-    if length + 1 > raw_data.len() { // +1 for the 'A' byte
+    if length + 1 > raw_data.len() {
+        // +1 for the 'A' byte
         shadow.record_error();
         return Ok(());
     }
@@ -529,7 +572,10 @@ fn test_parse_notification_response(raw_data: &[u8], shadow: &ListenNotifyShadow
 }
 
 /// Test channel name validation
-fn test_channel_name_validation(name: &str, shadow: &ListenNotifyShadowModel) -> Result<(), String> {
+fn test_channel_name_validation(
+    name: &str,
+    shadow: &ListenNotifyShadowModel,
+) -> Result<(), String> {
     let valid = is_valid_channel_name(name);
     let has_injection = contains_sql_injection(name);
 
@@ -549,7 +595,10 @@ fn test_channel_name_validation(name: &str, shadow: &ListenNotifyShadowModel) ->
 }
 
 /// Test concurrent LISTEN/NOTIFY operations
-fn test_concurrent_operations(ops: &[ListenNotifyOperation], shadow: &ListenNotifyShadowModel) -> Result<(), String> {
+fn test_concurrent_operations(
+    ops: &[ListenNotifyOperation],
+    shadow: &ListenNotifyShadowModel,
+) -> Result<(), String> {
     // Simulate concurrent execution by processing all operations
     // In a real implementation, this would test thread safety
     for op in ops {
@@ -568,7 +617,10 @@ fn test_concurrent_operations(ops: &[ListenNotifyOperation], shadow: &ListenNoti
 }
 
 /// Test error conditions
-fn test_error_condition(error_type: &ErrorType, shadow: &ListenNotifyShadowModel) -> Result<(), String> {
+fn test_error_condition(
+    error_type: &ErrorType,
+    shadow: &ListenNotifyShadowModel,
+) -> Result<(), String> {
     match error_type {
         ErrorType::InvalidChannelName(name) => {
             if is_valid_channel_name(name) {
@@ -613,7 +665,10 @@ fn test_error_condition(error_type: &ErrorType, shadow: &ListenNotifyShadowModel
 }
 
 /// Test notification queuing and delivery
-fn test_notification_queuing(notifications: &[PendingNotification], shadow: &ListenNotifyShadowModel) -> Result<(), String> {
+fn test_notification_queuing(
+    notifications: &[PendingNotification],
+    shadow: &ListenNotifyShadowModel,
+) -> Result<(), String> {
     for notification in notifications {
         // Validate notification
         if !is_valid_channel_name(&notification.channel) {
@@ -638,7 +693,10 @@ fn test_notification_queuing(notifications: &[PendingNotification], shadow: &Lis
     // Verify queue doesn't exceed limits
     let queue_size = shadow.notification_queue.lock().unwrap().len();
     if queue_size > MAX_QUEUE_SIZE {
-        shadow.add_violation(format!("Notification queue exceeded limit: {} > {}", queue_size, MAX_QUEUE_SIZE));
+        shadow.add_violation(format!(
+            "Notification queue exceeded limit: {} > {}",
+            queue_size, MAX_QUEUE_SIZE
+        ));
     }
 
     Ok(())
@@ -649,13 +707,20 @@ fn verify_shadow_model_consistency(shadow: &ListenNotifyShadowModel) -> Result<(
     // Verify queue size limits
     let queue_size = shadow.notification_queue.lock().unwrap().len();
     if queue_size > MAX_QUEUE_SIZE {
-        return Err(format!("Notification queue size {} exceeds limit {}", queue_size, MAX_QUEUE_SIZE));
+        return Err(format!(
+            "Notification queue size {} exceeds limit {}",
+            queue_size, MAX_QUEUE_SIZE
+        ));
     }
 
     // Verify channel count limits
     let channel_count = shadow.listened_channels.lock().unwrap().len();
-    if channel_count > 1000 { // Reasonable limit
-        return Err(format!("Listened channel count {} exceeds reasonable limit", channel_count));
+    if channel_count > 1000 {
+        // Reasonable limit
+        return Err(format!(
+            "Listened channel count {} exceeds reasonable limit",
+            channel_count
+        ));
     }
 
     // Verify counters are reasonable
@@ -663,7 +728,10 @@ fn verify_shadow_model_consistency(shadow: &ListenNotifyShadowModel) -> Result<(
     let notify_count = shadow.notify_count.load(Ordering::SeqCst);
 
     if listen_count > 10000 || notify_count > 10000 {
-        return Err(format!("Operation counters too high: listen={}, notify={}", listen_count, notify_count));
+        return Err(format!(
+            "Operation counters too high: listen={}, notify={}",
+            listen_count, notify_count
+        ));
     }
 
     Ok(())
@@ -694,8 +762,8 @@ fn is_valid_channel_name(name: &str) -> bool {
 fn contains_sql_injection(input: &str) -> bool {
     let input_lower = input.to_lowercase();
     let injection_patterns = [
-        "select", "insert", "update", "delete", "drop", "create", "alter", "exec",
-        "union", "or", "and", "'", "\"", ";", "--", "/*", "*/", "xp_", "sp_"
+        "select", "insert", "update", "delete", "drop", "create", "alter", "exec", "union", "or",
+        "and", "'", "\"", ";", "--", "/*", "*/", "xp_", "sp_",
     ];
 
     for pattern in &injection_patterns {

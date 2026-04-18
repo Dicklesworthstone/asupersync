@@ -107,16 +107,16 @@ enum BufferOperation {
 
 fuzz_target!(|input: BytesCodecFuzzInput| {
     // Guard against excessively large inputs to prevent OOM
-    let total_payload_size: usize = input.payloads.iter()
-        .map(|p| p.data.len())
-        .sum();
+    let total_payload_size: usize = input.payloads.iter().map(|p| p.data.len()).sum();
 
     if total_payload_size > MAX_TOTAL_DATA {
         return;
     }
 
     // Filter payloads that are too large individually
-    let payloads: Vec<_> = input.payloads.into_iter()
+    let payloads: Vec<_> = input
+        .payloads
+        .into_iter()
         .filter(|p| p.data.len() <= MAX_CHUNK_SIZE)
         .take(MAX_OPERATIONS)
         .collect();
@@ -127,7 +127,9 @@ fuzz_target!(|input: BytesCodecFuzzInput| {
 
     match input.scenario {
         TestScenario::RoundTrip => test_roundtrip_identity(&payloads),
-        TestScenario::PartialAccumulation => test_partial_accumulation(&payloads, &input.partial_config),
+        TestScenario::PartialAccumulation => {
+            test_partial_accumulation(&payloads, &input.partial_config)
+        }
         TestScenario::BufferManipulation => test_buffer_manipulation(&payloads, &input.buffer_ops),
         TestScenario::EmptyFrames => test_empty_frames_tolerance(),
         TestScenario::Comprehensive => {
@@ -163,17 +165,21 @@ fn test_roundtrip_identity(payloads: &[DataPayload]) {
                 let bytes_mut_data = BytesMut::from(original_data.as_slice());
                 codec.encode(bytes_mut_data, &mut encode_buffer)
             }
-            PayloadFormat::Vec => {
-                codec.encode(original_data.clone(), &mut encode_buffer)
-            }
+            PayloadFormat::Vec => codec.encode(original_data.clone(), &mut encode_buffer),
         };
 
         // Encoding should never fail for BytesCodec
-        assert!(encode_result.is_ok(), "BytesCodec encoding failed unexpectedly");
+        assert!(
+            encode_result.is_ok(),
+            "BytesCodec encoding failed unexpectedly"
+        );
 
         // Decode back
         let decoded_result = codec.decode(&mut encode_buffer);
-        assert!(decoded_result.is_ok(), "BytesCodec decoding failed unexpectedly");
+        assert!(
+            decoded_result.is_ok(),
+            "BytesCodec decoding failed unexpectedly"
+        );
 
         if let Ok(Some(decoded)) = decoded_result {
             // **Roundtrip identity property**
@@ -208,7 +214,8 @@ fn test_partial_accumulation(payloads: &[DataPayload], partial_config: &PartialR
     let mut codec = BytesCodec::new();
 
     // Concatenate all payloads to create test data
-    let complete_data: Vec<u8> = payloads.iter()
+    let complete_data: Vec<u8> = payloads
+        .iter()
         .flat_map(|p| p.data.iter().copied())
         .take(MAX_CHUNK_SIZE)
         .collect();
@@ -219,14 +226,18 @@ fn test_partial_accumulation(payloads: &[DataPayload], partial_config: &PartialR
 
     // Encode the complete data
     let mut complete_buffer = BytesMut::new();
-    codec.encode(complete_data.clone(), &mut complete_buffer).unwrap();
+    codec
+        .encode(complete_data.clone(), &mut complete_buffer)
+        .unwrap();
 
     // Test 1: Decode all at once (reference result)
     let mut reference_buffer = complete_buffer.clone();
     let reference_result = codec.decode(&mut reference_buffer).unwrap();
 
     // Test 2: Decode in chunks and verify accumulation
-    let chunk_sizes: Vec<usize> = partial_config.chunk_sizes.iter()
+    let chunk_sizes: Vec<usize> = partial_config
+        .chunk_sizes
+        .iter()
         .map(|&size| 1 + (size as usize % 256)) // 1-256 bytes per chunk
         .take(20) // Limit number of chunks
         .collect();
@@ -285,12 +296,12 @@ fn test_partial_accumulation(payloads: &[DataPayload], partial_config: &PartialR
         }
         (Some(_), n) if n > 1 => {
             // This could happen if decode was called multiple times - verify total correctness
-            let total_accumulated: Vec<u8> = accumulated_results.iter()
+            let total_accumulated: Vec<u8> = accumulated_results
+                .iter()
                 .flat_map(|buf| buf.iter().copied())
                 .collect();
             assert_eq!(
-                total_accumulated,
-                complete_data,
+                total_accumulated, complete_data,
                 "Multiple partial results don't sum to original data"
             );
         }
@@ -334,7 +345,8 @@ fn test_buffer_manipulation(payloads: &[DataPayload], buffer_ops: &[BufferOperat
     let mut buffer = BytesMut::new();
 
     // Start with some encoded data
-    for payload in payloads.iter().take(5) { // Limit to prevent timeout
+    for payload in payloads.iter().take(5) {
+        // Limit to prevent timeout
         if buffer.len() + payload.data.len() > MAX_CHUNK_SIZE {
             break;
         }
@@ -344,7 +356,8 @@ fn test_buffer_manipulation(payloads: &[DataPayload], buffer_ops: &[BufferOperat
     let original_buffer_content = buffer.clone();
 
     // Apply buffer operations (simulating various cancellation/manipulation scenarios)
-    for buffer_op in buffer_ops.iter().take(10) { // Limit operations
+    for buffer_op in buffer_ops.iter().take(10) {
+        // Limit operations
         match buffer_op {
             BufferOperation::Clear => {
                 buffer.clear();
@@ -400,7 +413,9 @@ fn test_buffer_manipulation(payloads: &[DataPayload], buffer_ops: &[BufferOperat
     // Verify codec can still handle fresh data
     let fresh_data = b"fresh_test_data";
     let mut fresh_buffer = BytesMut::new();
-    codec.encode(fresh_data.to_vec(), &mut fresh_buffer).unwrap();
+    codec
+        .encode(fresh_data.to_vec(), &mut fresh_buffer)
+        .unwrap();
     let fresh_result = codec.decode(&mut fresh_buffer).unwrap();
     if let Some(decoded) = fresh_result {
         assert_eq!(decoded.as_ref(), fresh_data);
@@ -467,22 +482,24 @@ fn test_comprehensive_edge_cases() {
 
     // Test byte patterns that might cause issues
     let test_patterns = [
-        vec![], // Empty
-        vec![0], // Single null byte
-        vec![255], // Single max byte
-        vec![0; 1024], // All zeros
-        vec![255; 1024], // All max bytes
+        vec![],                                        // Empty
+        vec![0],                                       // Single null byte
+        vec![255],                                     // Single max byte
+        vec![0; 1024],                                 // All zeros
+        vec![255; 1024],                               // All max bytes
         (0..256).map(|i| i as u8).collect::<Vec<_>>(), // Full byte range
-        vec![0xDE, 0xAD, 0xBE, 0xEF], // Common hex patterns
+        vec![0xDE, 0xAD, 0xBE, 0xEF],                  // Common hex patterns
     ];
 
     for (i, pattern) in test_patterns.iter().enumerate() {
         let mut buffer = BytesMut::new();
 
         // Encode
-        codec.encode(pattern.clone(), &mut buffer).unwrap_or_else(|_| {
-            panic!("Encode failed for pattern {}: {:?}", i, pattern);
-        });
+        codec
+            .encode(pattern.clone(), &mut buffer)
+            .unwrap_or_else(|_| {
+                panic!("Encode failed for pattern {}: {:?}", i, pattern);
+            });
 
         // Decode
         let decoded = codec.decode(&mut buffer).unwrap_or_else(|_| {
@@ -499,7 +516,10 @@ fn test_comprehensive_edge_cases() {
                 pattern
             );
         } else if !pattern.is_empty() {
-            panic!("Unexpected None result for non-empty pattern {}: {:?}", i, pattern);
+            panic!(
+                "Unexpected None result for non-empty pattern {}: {:?}",
+                i, pattern
+            );
         }
     }
 }

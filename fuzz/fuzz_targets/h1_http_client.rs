@@ -28,8 +28,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
-use asupersync::http::h1::client::{Http1ClientCodec, ClientDecodeState};
-use asupersync::http::h1::types::{StatusCode, HeaderMap, HttpError};
+use asupersync::http::h1::client::{ClientDecodeState, Http1ClientCodec};
+use asupersync::http::h1::types::{HeaderMap, HttpError, StatusCode};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_SIZE: usize = 64_000;
@@ -138,31 +138,82 @@ fuzz_target!(|data: &[u8]| {
 /// Test a specific HTTP client fuzzing scenario
 fn test_http_client_scenario(scenario: HttpClientFuzzScenario) {
     match scenario {
-        HttpClientFuzzScenario::StatusLineParsing { version, status_code, reason_phrase, include_crlf, malformed_suffix } => {
-            test_status_line_parsing(version, status_code, reason_phrase, include_crlf, malformed_suffix);
+        HttpClientFuzzScenario::StatusLineParsing {
+            version,
+            status_code,
+            reason_phrase,
+            include_crlf,
+            malformed_suffix,
+        } => {
+            test_status_line_parsing(
+                version,
+                status_code,
+                reason_phrase,
+                include_crlf,
+                malformed_suffix,
+            );
         }
-        HttpClientFuzzScenario::HeaderParsing { status_line, header_name, header_value, proper_crlf, extra_headers } => {
-            test_header_parsing(status_line, header_name, header_value, proper_crlf, extra_headers);
+        HttpClientFuzzScenario::HeaderParsing {
+            status_line,
+            header_name,
+            header_value,
+            proper_crlf,
+            extra_headers,
+        } => {
+            test_header_parsing(
+                status_line,
+                header_name,
+                header_value,
+                proper_crlf,
+                extra_headers,
+            );
         }
-        HttpClientFuzzScenario::ContentLengthParsing { base_response, content_length, duplicate_headers, body_data } => {
-            test_content_length_parsing(base_response, content_length, duplicate_headers, body_data);
+        HttpClientFuzzScenario::ContentLengthParsing {
+            base_response,
+            content_length,
+            duplicate_headers,
+            body_data,
+        } => {
+            test_content_length_parsing(
+                base_response,
+                content_length,
+                duplicate_headers,
+                body_data,
+            );
         }
-        HttpClientFuzzScenario::BodyParsing { headers, body_data, use_chunked, chunk_sizes } => {
+        HttpClientFuzzScenario::BodyParsing {
+            headers,
+            body_data,
+            use_chunked,
+            chunk_sizes,
+        } => {
             test_body_parsing(headers, body_data, use_chunked, chunk_sizes);
         }
-        HttpClientFuzzScenario::HeaderInjection { base_name, base_value, injection_payload, injection_position } => {
+        HttpClientFuzzScenario::HeaderInjection {
+            base_name,
+            base_value,
+            injection_payload,
+            injection_position,
+        } => {
             test_header_injection(base_name, base_value, injection_payload, injection_position);
         }
     }
 }
 
 /// Test status line parsing (Assertion 1: status code range 100-599)
-fn test_status_line_parsing(version: HttpVersion, status_code: u16, reason_phrase: Vec<u8>, include_crlf: bool, malformed_suffix: Vec<u8>) {
+fn test_status_line_parsing(
+    version: HttpVersion,
+    status_code: u16,
+    reason_phrase: Vec<u8>,
+    include_crlf: bool,
+    malformed_suffix: Vec<u8>,
+) {
     let reason_str = String::from_utf8_lossy(&reason_phrase);
     let crlf = if include_crlf { "\r\n" } else { "" };
     let suffix = String::from_utf8_lossy(&malformed_suffix);
 
-    let status_line = format!("{} {} {}{}{}",
+    let status_line = format!(
+        "{} {} {}{}{}",
         version.to_string(),
         status_code,
         reason_str,
@@ -177,8 +228,11 @@ fn test_status_line_parsing(version: HttpVersion, status_code: u16, reason_phras
         Ok(Some(response)) => {
             // Assertion 1: Status code must be in valid range
             let status = response.status();
-            assert!(status >= 100 && status <= 599,
-                "Invalid status code {} outside range 100-599", status);
+            assert!(
+                status >= 100 && status <= 599,
+                "Invalid status code {} outside range 100-599",
+                status
+            );
 
             // Assertion 2: Reason phrase must be CRLF-terminated if present
             validate_reason_phrase_termination(&reason_phrase);
@@ -198,7 +252,13 @@ fn test_status_line_parsing(version: HttpVersion, status_code: u16, reason_phras
 }
 
 /// Test header parsing (Assertions 3 & 4: header name token grammar, header value visible-ASCII)
-fn test_header_parsing(status_line: String, header_name: Vec<u8>, header_value: Vec<u8>, proper_crlf: bool, extra_headers: Vec<(String, String)>) {
+fn test_header_parsing(
+    status_line: String,
+    header_name: Vec<u8>,
+    header_value: Vec<u8>,
+    proper_crlf: bool,
+    extra_headers: Vec<(String, String)>,
+) {
     let name_str = String::from_utf8_lossy(&header_name);
     let value_str = String::from_utf8_lossy(&header_value);
 
@@ -247,7 +307,12 @@ fn test_header_parsing(status_line: String, header_name: Vec<u8>, header_value: 
 }
 
 /// Test Content-Length parsing (Assertion 5: oversized Content-Length rejected)
-fn test_content_length_parsing(base_response: String, content_length: String, duplicate_headers: bool, body_data: Vec<u8>) {
+fn test_content_length_parsing(
+    base_response: String,
+    content_length: String,
+    duplicate_headers: bool,
+    body_data: Vec<u8>,
+) {
     let mut response = if base_response.is_empty() {
         "HTTP/1.1 200 OK\r\n".to_string()
     } else {
@@ -284,7 +349,12 @@ fn test_content_length_parsing(base_response: String, content_length: String, du
 }
 
 /// Test body parsing with various encoding schemes
-fn test_body_parsing(headers: Vec<(String, String)>, body_data: Vec<u8>, use_chunked: bool, chunk_sizes: Vec<String>) {
+fn test_body_parsing(
+    headers: Vec<(String, String)>,
+    body_data: Vec<u8>,
+    use_chunked: bool,
+    chunk_sizes: Vec<String>,
+) {
     let mut response = "HTTP/1.1 200 OK\r\n".to_string();
 
     if use_chunked {
@@ -303,7 +373,8 @@ fn test_body_parsing(headers: Vec<(String, String)>, body_data: Vec<u8>, use_chu
             let chunk_start = i * 10;
             let chunk_end = std::cmp::min(chunk_start + 10, body_data.len());
             if chunk_start < body_data.len() {
-                response.extend(String::from_utf8_lossy(&body_data[chunk_start..chunk_end]).chars());
+                response
+                    .extend(String::from_utf8_lossy(&body_data[chunk_start..chunk_end]).chars());
             }
             response.push_str("\r\n");
         }
@@ -320,13 +391,21 @@ fn test_body_parsing(headers: Vec<(String, String)>, body_data: Vec<u8>, use_chu
 }
 
 /// Test header injection attacks
-fn test_header_injection(base_name: String, base_value: String, injection_payload: Vec<u8>, injection_position: u8) {
+fn test_header_injection(
+    base_name: String,
+    base_value: String,
+    injection_payload: Vec<u8>,
+    injection_position: u8,
+) {
     let injection_str = String::from_utf8_lossy(&injection_payload);
 
     let (final_name, final_value) = match injection_position % 3 {
         0 => (format!("{}{}", base_name, injection_str), base_value),
         1 => (base_name, format!("{}{}", base_value, injection_str)),
-        _ => (format!("{}{}", base_name, injection_str), format!("{}{}", base_value, injection_str)),
+        _ => (
+            format!("{}{}", base_name, injection_str),
+            format!("{}{}", base_value, injection_str),
+        ),
     };
 
     let response = format!("HTTP/1.1 200 OK\r\n{}: {}\r\n\r\n", final_name, final_value);
@@ -361,16 +440,23 @@ fn validate_reason_phrase_termination(reason_phrase: &[u8]) {
 /// Helper: Validate header name follows token grammar per RFC 7230
 fn validate_header_name_token_grammar(name: &str) {
     for ch in name.chars() {
-        assert!(is_token_char(ch),
-            "Invalid token character '{}' (U+{:04X}) in header name", ch, ch as u32);
+        assert!(
+            is_token_char(ch),
+            "Invalid token character '{}' (U+{:04X}) in header name",
+            ch,
+            ch as u32
+        );
     }
 }
 
 /// Helper: Validate header value is visible-ASCII
 fn validate_header_value_visible_ascii(value: &[u8]) {
     for &byte in value {
-        assert!(is_visible_ascii_byte(byte),
-            "Non-visible-ASCII byte 0x{:02X} in header value", byte);
+        assert!(
+            is_visible_ascii_byte(byte),
+            "Non-visible-ASCII byte 0x{:02X} in header value",
+            byte
+        );
     }
 }
 
@@ -378,8 +464,11 @@ fn validate_header_value_visible_ascii(value: &[u8]) {
 fn validate_content_length_bounds(cl_str: &str) {
     if let Ok(cl_value) = cl_str.parse::<u64>() {
         // Ensure no overflow and reasonable bounds
-        assert!(cl_value <= 1024 * 1024 * 1024,
-            "Content-Length {} exceeds maximum safe size", cl_value);
+        assert!(
+            cl_value <= 1024 * 1024 * 1024,
+            "Content-Length {} exceeds maximum safe size",
+            cl_value
+        );
     }
 }
 
@@ -414,8 +503,8 @@ fn is_visible_ascii(bytes: &[u8]) -> bool {
 fn is_token_char(ch: char) -> bool {
     match ch {
         'A'..='Z' | 'a'..='z' | '0'..='9' => true,
-        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' |
-        '^' | '_' | '`' | '|' | '~' => true,
+        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|'
+        | '~' => true,
         _ => false,
     }
 }
@@ -424,8 +513,8 @@ fn is_token_char(ch: char) -> bool {
 fn is_token_byte(byte: u8) -> bool {
     match byte {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => true,
-        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
-        b'^' | b'_' | b'`' | b'|' | b'~' => true,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
+        | b'`' | b'|' | b'~' => true,
         _ => false,
     }
 }
@@ -450,8 +539,10 @@ fn validate_no_header_injection(headers: &HeaderMap, injection_payload: &[u8]) {
     if injection_str.contains("\r\n") {
         // CRLF injection attempt - verify it didn't succeed
         for (_name, value) in headers.iter() {
-            assert!(!value.to_str().unwrap_or("").contains("\r\n"),
-                "CRLF injection succeeded in header value");
+            assert!(
+                !value.to_str().unwrap_or("").contains("\r\n"),
+                "CRLF injection succeeded in header value"
+            );
         }
     }
 }
@@ -465,11 +556,7 @@ fn test_raw_response_parsing(input: &[u8]) {
 
     // Test with common HTTP prefixes
     if input.len() > 4 {
-        let prefixes = [
-            b"HTTP/1.1 ",
-            b"HTTP/1.0 ",
-            b"HTTP/2.0 ",
-        ];
+        let prefixes = [b"HTTP/1.1 ", b"HTTP/1.0 ", b"HTTP/2.0 "];
 
         for prefix in &prefixes {
             let mut test_input = prefix.to_vec();

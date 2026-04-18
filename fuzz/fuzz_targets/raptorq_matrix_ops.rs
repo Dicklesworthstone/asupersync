@@ -117,7 +117,11 @@ impl Matrix {
         let cols = if force_square {
             rows
         } else {
-            data.iter().map(|row| row.len()).max().unwrap_or(0).min(MAX_MATRIX_SIZE)
+            data.iter()
+                .map(|row| row.len())
+                .max()
+                .unwrap_or(0)
+                .min(MAX_MATRIX_SIZE)
         };
 
         if rows == 0 || cols == 0 {
@@ -281,9 +285,11 @@ fn matrix_determinant_mod2(matrix: &Matrix) -> u8 {
         // Eliminate below pivot
         for row in (pivot_col + 1)..n {
             if !temp_matrix.get(row, pivot_col).is_zero() {
-                let factor = temp_matrix.get(row, pivot_col) / temp_matrix.get(pivot_col, pivot_col);
+                let factor =
+                    temp_matrix.get(row, pivot_col) / temp_matrix.get(pivot_col, pivot_col);
                 for col in pivot_col..n {
-                    let value = temp_matrix.get(row, col) - (factor * temp_matrix.get(pivot_col, col));
+                    let value =
+                        temp_matrix.get(row, col) - (factor * temp_matrix.get(pivot_col, col));
                     temp_matrix.set(row, col, value);
                 }
             }
@@ -487,7 +493,10 @@ fn test_oversized_rejection(test: &OversizedTest) {
         match test.operation {
             OversizedOperation::Inversion => {
                 // Large square matrix inversion should be rejected
-                let large_data = vec![vec![1u8; test.cols.min(MAX_MATRIX_SIZE * 2)]; test.rows.min(MAX_MATRIX_SIZE * 2)];
+                let large_data = vec![
+                    vec![1u8; test.cols.min(MAX_MATRIX_SIZE * 2)];
+                    test.rows.min(MAX_MATRIX_SIZE * 2)
+                ];
                 let matrix = Matrix::from_data(large_data, true);
 
                 // Should either return None or handle gracefully
@@ -516,7 +525,8 @@ fn test_oversized_rejection(test: &OversizedTest) {
 
             OversizedOperation::MatrixMultiply => {
                 // Large matrix multiplication should be bounded
-                let matrix_data = vec![vec![1u8; test.cols.min(MAX_VECTOR_SIZE)]; test.rows.min(MAX_VECTOR_SIZE)];
+                let matrix_data =
+                    vec![vec![1u8; test.cols.min(MAX_VECTOR_SIZE)]; test.rows.min(MAX_VECTOR_SIZE)];
                 if let Some(matrix) = Matrix::from_data(matrix_data, false) {
                     let vector = vec![Gf256::new(1); matrix.cols.min(MAX_VECTOR_SIZE)];
                     let _result = matrix_vector_multiply(&matrix, &vector);

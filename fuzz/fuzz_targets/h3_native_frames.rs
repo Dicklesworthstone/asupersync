@@ -14,7 +14,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::http::h3_native::{H3Frame, H3NativeError};
-use asupersync::net::quic_core::{encode_varint, decode_varint, QUIC_VARINT_MAX};
+use asupersync::net::quic_core::{QUIC_VARINT_MAX, decode_varint, encode_varint};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -35,17 +35,17 @@ const KNOWN_FRAME_TYPES: &[u64] = &[
 
 /// HTTP/2 reserved frame types that should be rejected in HTTP/3
 const H2_RESERVED_FRAME_TYPES: &[u64] = &[
-    0x2,  // PRIORITY (HTTP/2)
-    0x6,  // PING (HTTP/2)
-    0x8,  // WINDOW_UPDATE (HTTP/2)
-    0x9,  // CONTINUATION (HTTP/2)
+    0x2, // PRIORITY (HTTP/2)
+    0x6, // PING (HTTP/2)
+    0x8, // WINDOW_UPDATE (HTTP/2)
+    0x9, // CONTINUATION (HTTP/2)
 ];
 
 /// GREASE frame types for extensibility testing
 /// Following the GREASE pattern: 0x1f * N + 0x21 where N = 0,1,2,...
 const GREASE_FRAME_TYPES: &[u64] = &[
-    0x21, 0x40, 0x5F, 0x7E, 0x9D, 0xBC, 0xDB, 0xFA,
-    0x119, 0x138, 0x157, 0x176, 0x195, 0x1B4, 0x1D3, 0x1F2,
+    0x21, 0x40, 0x5F, 0x7E, 0x9D, 0xBC, 0xDB, 0xFA, 0x119, 0x138, 0x157, 0x176, 0x195, 0x1B4,
+    0x1D3, 0x1F2,
 ];
 
 /// Fuzzing input structure for HTTP/3 frame type parser
@@ -69,14 +69,9 @@ struct H3FrameFuzzInput {
 #[derive(Arbitrary, Debug)]
 enum FrameTypeTest {
     /// Parse frame with valid type and length
-    ValidFrame {
-        frame_type: u64,
-        payload: Vec<u8>,
-    },
+    ValidFrame { frame_type: u64, payload: Vec<u8> },
     /// Parse frame with maximum varint type value
-    MaxVarintType {
-        payload: Vec<u8>,
-    },
+    MaxVarintType { payload: Vec<u8> },
     /// Parse frame with malformed type varint
     MalformedTypeVarint {
         malformed_data: Vec<u8>,
@@ -111,27 +106,18 @@ enum FrameLengthTest {
         actual_data: Vec<u8>,
     },
     /// Parse frame with maximum varint length
-    MaxVarintLength {
-        frame_type: u64,
-    },
+    MaxVarintLength { frame_type: u64 },
     /// Parse frame with zero length
-    ZeroLength {
-        frame_type: u64,
-    },
+    ZeroLength { frame_type: u64 },
 }
 
 /// Unknown frame type handling test case
 #[derive(Arbitrary, Debug)]
 enum UnknownFrameTest {
     /// Parse unknown frame type (should be preserved)
-    UnknownType {
-        unknown_type: u64,
-        payload: Vec<u8>,
-    },
+    UnknownType { unknown_type: u64, payload: Vec<u8> },
     /// Parse stream of frames with unknown types mixed with known types
-    MixedUnknownKnown {
-        frame_sequence: Vec<FrameSpec>,
-    },
+    MixedUnknownKnown { frame_sequence: Vec<FrameSpec> },
     /// Parse unknown frame with various payload patterns
     UnknownWithPayloadPattern {
         unknown_type: u64,
@@ -148,9 +134,7 @@ enum GreaseTest {
         payload: Vec<u8>,
     },
     /// Parse stream of GREASE frames
-    MultipleGrease {
-        grease_frames: Vec<GreaseFrame>,
-    },
+    MultipleGrease { grease_frames: Vec<GreaseFrame> },
     /// Parse GREASE frame with specific payload patterns
     GreaseWithPattern {
         grease_index: u8,
@@ -186,13 +170,9 @@ enum BoundaryTest {
     /// Test single byte frame
     SingleByte { byte: u8 },
     /// Test frame at maximum payload size
-    MaxPayloadFrame {
-        frame_type: u64,
-    },
+    MaxPayloadFrame { frame_type: u64 },
     /// Test concatenated frames
-    ConcatenatedFrames {
-        frame_specs: Vec<FrameSpec>,
-    },
+    ConcatenatedFrames { frame_specs: Vec<FrameSpec> },
 }
 
 /// Frame specification for test construction
@@ -207,7 +187,7 @@ struct FrameSpec {
 enum FrameTypeChoice {
     Known { index: u8 }, // Index into KNOWN_FRAME_TYPES
     Unknown { type_value: u64 },
-    Grease { index: u8 }, // Index into GREASE_FRAME_TYPES
+    Grease { index: u8 },   // Index into GREASE_FRAME_TYPES
     Reserved { index: u8 }, // Index into H2_RESERVED_FRAME_TYPES
 }
 
@@ -277,7 +257,10 @@ fuzz_target!(|input: H3FrameFuzzInput| {
 
 fn test_frame_type_parsing(test: &FrameTypeTest) {
     match test {
-        FrameTypeTest::ValidFrame { frame_type, payload } => {
+        FrameTypeTest::ValidFrame {
+            frame_type,
+            payload,
+        } => {
             // Assertion 1: varint Type within u62 range
             if *frame_type > QUIC_VARINT_MAX {
                 return; // Skip invalid test case
@@ -292,14 +275,22 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
                     match H3Frame::decode(&frame_data) {
                         Ok((frame, consumed)) => {
                             // Verify complete consumption
-                            assert_eq!(consumed, frame_data.len(),
-                                "Frame parsing did not consume all input");
+                            assert_eq!(
+                                consumed,
+                                frame_data.len(),
+                                "Frame parsing did not consume all input"
+                            );
 
                             // Verify frame type is preserved correctly
                             match frame {
-                                H3Frame::Unknown { frame_type: parsed_type, .. } => {
-                                    assert_eq!(parsed_type, *frame_type,
-                                        "Unknown frame type not preserved correctly");
+                                H3Frame::Unknown {
+                                    frame_type: parsed_type,
+                                    ..
+                                } => {
+                                    assert_eq!(
+                                        parsed_type, *frame_type,
+                                        "Unknown frame type not preserved correctly"
+                                    );
                                 }
                                 _ => {
                                     // Known frame types should match expected patterns
@@ -331,8 +322,10 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
 
                     match H3Frame::decode(&frame_data) {
                         Ok((H3Frame::Unknown { frame_type, .. }, _)) => {
-                            assert_eq!(frame_type, QUIC_VARINT_MAX,
-                                "Maximum varint frame type not preserved");
+                            assert_eq!(
+                                frame_type, QUIC_VARINT_MAX,
+                                "Maximum varint frame type not preserved"
+                            );
                         }
                         Ok(_) => {
                             panic!("Maximum varint frame type should be treated as Unknown");
@@ -345,7 +338,10 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
             }
         }
 
-        FrameTypeTest::MalformedTypeVarint { malformed_data, payload } => {
+        FrameTypeTest::MalformedTypeVarint {
+            malformed_data,
+            payload,
+        } => {
             // Test malformed frame type varint handling
             let mut frame_data = malformed_data.clone();
             frame_data.truncate(8); // Limit malformed data length
@@ -361,8 +357,11 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
                         // Success is fine - malformed data might accidentally be valid
                     }
                     Err(H3NativeError::InvalidFrame(msg)) => {
-                        assert!(msg.contains("frame type varint"),
-                            "Expected frame type varint error, got: {}", msg);
+                        assert!(
+                            msg.contains("frame type varint"),
+                            "Expected frame type varint error, got: {}",
+                            msg
+                        );
                     }
                     Err(_) => {
                         // Other errors are acceptable
@@ -371,7 +370,10 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
             }
         }
 
-        FrameTypeTest::OutOfRangeType { oversized_type, payload } => {
+        FrameTypeTest::OutOfRangeType {
+            oversized_type,
+            payload,
+        } => {
             // Test frame type larger than u62 range (should be rejected)
             let mut frame_data = oversized_type.clone();
             frame_data.truncate(9); // Varint can be at most 8 bytes, plus safety margin
@@ -399,7 +401,11 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
 
 fn test_frame_length_parsing(test: &FrameLengthTest) {
     match test {
-        FrameLengthTest::ValidLength { frame_type, payload_length, actual_payload } => {
+        FrameLengthTest::ValidLength {
+            frame_type,
+            payload_length,
+            actual_payload,
+        } => {
             // Assertion 2: Length varint bounded
             if *frame_type > QUIC_VARINT_MAX || *payload_length > QUIC_VARINT_MAX {
                 return;
@@ -407,26 +413,29 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
 
             let mut frame_data = Vec::new();
             if encode_varint(*frame_type, &mut frame_data).is_ok()
-                && encode_varint(*payload_length, &mut frame_data).is_ok() {
-
+                && encode_varint(*payload_length, &mut frame_data).is_ok()
+            {
                 let limited_payload = limit_payload(actual_payload);
                 frame_data.extend_from_slice(&limited_payload);
 
                 match H3Frame::decode(&frame_data) {
                     Ok((frame, consumed)) => {
                         // Verify length consistency
-                        let expected_consumed =
-                            varint_encoded_length(*frame_type) +
-                            varint_encoded_length(*payload_length) +
-                            (*payload_length as usize).min(limited_payload.len());
+                        let expected_consumed = varint_encoded_length(*frame_type)
+                            + varint_encoded_length(*payload_length)
+                            + (*payload_length as usize).min(limited_payload.len());
 
-                        assert!(consumed <= frame_data.len(),
-                            "Frame consumed more bytes than available");
+                        assert!(
+                            consumed <= frame_data.len(),
+                            "Frame consumed more bytes than available"
+                        );
                     }
                     Err(H3NativeError::UnexpectedEof) => {
                         // Expected when payload_length > actual_payload.len()
-                        assert!((*payload_length as usize) > limited_payload.len(),
-                            "UnexpectedEof should only occur when length > available data");
+                        assert!(
+                            (*payload_length as usize) > limited_payload.len(),
+                            "UnexpectedEof should only occur when length > available data"
+                        );
                     }
                     Err(_) => {
                         // Other errors acceptable
@@ -435,7 +444,11 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
             }
         }
 
-        FrameLengthTest::MalformedLengthVarint { frame_type, malformed_length, payload } => {
+        FrameLengthTest::MalformedLengthVarint {
+            frame_type,
+            malformed_length,
+            payload,
+        } => {
             if *frame_type > QUIC_VARINT_MAX {
                 return;
             }
@@ -452,8 +465,11 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
                         // Malformed data might accidentally be valid
                     }
                     Err(H3NativeError::InvalidFrame(msg)) => {
-                        assert!(msg.contains("frame length varint"),
-                            "Expected frame length varint error, got: {}", msg);
+                        assert!(
+                            msg.contains("frame length varint"),
+                            "Expected frame length varint error, got: {}",
+                            msg
+                        );
                     }
                     Err(_) => {
                         // Other errors acceptable
@@ -462,23 +478,29 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
             }
         }
 
-        FrameLengthTest::InsufficientData { frame_type, claimed_length, actual_data } => {
+        FrameLengthTest::InsufficientData {
+            frame_type,
+            claimed_length,
+            actual_data,
+        } => {
             if *frame_type > QUIC_VARINT_MAX || *claimed_length > QUIC_VARINT_MAX {
                 return;
             }
 
             let mut frame_data = Vec::new();
             if encode_varint(*frame_type, &mut frame_data).is_ok()
-                && encode_varint(*claimed_length, &mut frame_data).is_ok() {
-
+                && encode_varint(*claimed_length, &mut frame_data).is_ok()
+            {
                 let limited_data = limit_payload(actual_data);
                 frame_data.extend_from_slice(&limited_data);
 
                 match H3Frame::decode(&frame_data) {
                     Ok(_) => {
                         // Success implies claimed_length <= actual_data.len()
-                        assert!((*claimed_length as usize) <= limited_data.len(),
-                            "Should not succeed when claimed length > available data");
+                        assert!(
+                            (*claimed_length as usize) <= limited_data.len(),
+                            "Should not succeed when claimed length > available data"
+                        );
                     }
                     Err(H3NativeError::UnexpectedEof) => {
                         // Expected when claimed_length > actual_data.len()
@@ -497,8 +519,8 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
 
             let mut frame_data = Vec::new();
             if encode_varint(*frame_type, &mut frame_data).is_ok()
-                && encode_varint(QUIC_VARINT_MAX, &mut frame_data).is_ok() {
-
+                && encode_varint(QUIC_VARINT_MAX, &mut frame_data).is_ok()
+            {
                 // Don't actually include QUIC_VARINT_MAX bytes of payload
                 // Just test that the length varint itself is handled
                 match H3Frame::decode(&frame_data) {
@@ -528,15 +550,17 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
 
             let mut frame_data = Vec::new();
             if encode_varint(*frame_type, &mut frame_data).is_ok()
-                && encode_varint(0, &mut frame_data).is_ok() {
-
+                && encode_varint(0, &mut frame_data).is_ok()
+            {
                 match H3Frame::decode(&frame_data) {
                     Ok((frame, consumed)) => {
                         // Zero-length frames should parse successfully
                         let expected_consumed =
                             varint_encoded_length(*frame_type) + varint_encoded_length(0);
-                        assert_eq!(consumed, expected_consumed,
-                            "Zero-length frame consumption mismatch");
+                        assert_eq!(
+                            consumed, expected_consumed,
+                            "Zero-length frame consumption mismatch"
+                        );
 
                         // Verify payload is empty
                         verify_frame_payload_empty(&frame);
@@ -552,7 +576,10 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
 
 fn test_unknown_frame_handling(test: &UnknownFrameTest) {
     match test {
-        UnknownFrameTest::UnknownType { unknown_type, payload } => {
+        UnknownFrameTest::UnknownType {
+            unknown_type,
+            payload,
+        } => {
             // Assertion 3: unknown frame types ignored gracefully per RFC 9114
             if *unknown_type > QUIC_VARINT_MAX {
                 return;
@@ -570,16 +597,32 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
                     frame_data.extend_from_slice(&limited_payload);
 
                     match H3Frame::decode(&frame_data) {
-                        Ok((H3Frame::Unknown { frame_type, payload: parsed_payload }, consumed)) => {
-                            assert_eq!(frame_type, *unknown_type,
-                                "Unknown frame type not preserved correctly");
-                            assert_eq!(parsed_payload, limited_payload,
-                                "Unknown frame payload not preserved correctly");
-                            assert_eq!(consumed, frame_data.len(),
-                                "Unknown frame consumption mismatch");
+                        Ok((
+                            H3Frame::Unknown {
+                                frame_type,
+                                payload: parsed_payload,
+                            },
+                            consumed,
+                        )) => {
+                            assert_eq!(
+                                frame_type, *unknown_type,
+                                "Unknown frame type not preserved correctly"
+                            );
+                            assert_eq!(
+                                parsed_payload, limited_payload,
+                                "Unknown frame payload not preserved correctly"
+                            );
+                            assert_eq!(
+                                consumed,
+                                frame_data.len(),
+                                "Unknown frame consumption mismatch"
+                            );
                         }
                         Ok(_) => {
-                            panic!("Unknown frame type {} should produce Unknown variant", unknown_type);
+                            panic!(
+                                "Unknown frame type {} should produce Unknown variant",
+                                unknown_type
+                            );
                         }
                         Err(_) => {
                             // Errors are acceptable for malformed payloads
@@ -603,7 +646,8 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
 
                 let mut frame_data = Vec::new();
                 if encode_varint(frame_type, &mut frame_data).is_ok()
-                    && encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
+                    && encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok()
+                {
                     frame_data.extend_from_slice(&limited_payload);
                     combined_data.extend_from_slice(&frame_data);
                     expected_frames.push((frame_type, limited_payload));
@@ -630,7 +674,10 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
             }
         }
 
-        UnknownFrameTest::UnknownWithPayloadPattern { unknown_type, payload_pattern } => {
+        UnknownFrameTest::UnknownWithPayloadPattern {
+            unknown_type,
+            payload_pattern,
+        } => {
             if *unknown_type > QUIC_VARINT_MAX || KNOWN_FRAME_TYPES.contains(unknown_type) {
                 return;
             }
@@ -639,11 +686,18 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
             let mut frame_data = Vec::new();
 
             if encode_varint(*unknown_type, &mut frame_data).is_ok()
-                && encode_varint(test_payload.len() as u64, &mut frame_data).is_ok() {
+                && encode_varint(test_payload.len() as u64, &mut frame_data).is_ok()
+            {
                 frame_data.extend_from_slice(&test_payload);
 
                 match H3Frame::decode(&frame_data) {
-                    Ok((H3Frame::Unknown { frame_type, payload }, _)) => {
+                    Ok((
+                        H3Frame::Unknown {
+                            frame_type,
+                            payload,
+                        },
+                        _,
+                    )) => {
                         assert_eq!(frame_type, *unknown_type);
                         assert_eq!(payload, test_payload);
                     }
@@ -661,9 +715,13 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
 
 fn test_grease_frame_handling(test: &GreaseTest) {
     match test {
-        GreaseTest::GreaseType { grease_index, payload } => {
+        GreaseTest::GreaseType {
+            grease_index,
+            payload,
+        } => {
             // Assertion 4: GREASE frame types tolerated
-            let grease_type = GREASE_FRAME_TYPES[(*grease_index as usize) % GREASE_FRAME_TYPES.len()];
+            let grease_type =
+                GREASE_FRAME_TYPES[(*grease_index as usize) % GREASE_FRAME_TYPES.len()];
 
             let mut frame_data = Vec::new();
             if encode_varint(grease_type, &mut frame_data).is_ok() {
@@ -672,11 +730,18 @@ fn test_grease_frame_handling(test: &GreaseTest) {
                     frame_data.extend_from_slice(&limited_payload);
 
                     match H3Frame::decode(&frame_data) {
-                        Ok((H3Frame::Unknown { frame_type, payload: parsed_payload }, _)) => {
-                            assert_eq!(frame_type, grease_type,
-                                "GREASE frame type not preserved");
-                            assert_eq!(parsed_payload, limited_payload,
-                                "GREASE frame payload not preserved");
+                        Ok((
+                            H3Frame::Unknown {
+                                frame_type,
+                                payload: parsed_payload,
+                            },
+                            _,
+                        )) => {
+                            assert_eq!(frame_type, grease_type, "GREASE frame type not preserved");
+                            assert_eq!(
+                                parsed_payload, limited_payload,
+                                "GREASE frame payload not preserved"
+                            );
                         }
                         Ok(_) => {
                             panic!("GREASE frame should produce Unknown variant");
@@ -693,12 +758,14 @@ fn test_grease_frame_handling(test: &GreaseTest) {
             let mut combined_data = Vec::new();
 
             for grease_frame in grease_frames.iter().take(4) {
-                let grease_type = GREASE_FRAME_TYPES[(grease_frame.grease_type as usize) % GREASE_FRAME_TYPES.len()];
+                let grease_type = GREASE_FRAME_TYPES
+                    [(grease_frame.grease_type as usize) % GREASE_FRAME_TYPES.len()];
                 let limited_payload = limit_payload(&grease_frame.payload);
 
                 let mut frame_data = Vec::new();
                 if encode_varint(grease_type, &mut frame_data).is_ok()
-                    && encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
+                    && encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok()
+                {
                     frame_data.extend_from_slice(&limited_payload);
                     combined_data.extend_from_slice(&frame_data);
                 }
@@ -709,8 +776,11 @@ fn test_grease_frame_handling(test: &GreaseTest) {
             while pos < combined_data.len() {
                 match H3Frame::decode(&combined_data[pos..]) {
                     Ok((H3Frame::Unknown { frame_type, .. }, consumed)) => {
-                        assert!(GREASE_FRAME_TYPES.contains(&frame_type),
-                            "Expected GREASE frame type, got {}", frame_type);
+                        assert!(
+                            GREASE_FRAME_TYPES.contains(&frame_type),
+                            "Expected GREASE frame type, got {}",
+                            frame_type
+                        );
                         pos += consumed;
                     }
                     Ok(_) => {
@@ -723,17 +793,28 @@ fn test_grease_frame_handling(test: &GreaseTest) {
             }
         }
 
-        GreaseTest::GreaseWithPattern { grease_index, payload_pattern } => {
-            let grease_type = GREASE_FRAME_TYPES[(*grease_index as usize) % GREASE_FRAME_TYPES.len()];
+        GreaseTest::GreaseWithPattern {
+            grease_index,
+            payload_pattern,
+        } => {
+            let grease_type =
+                GREASE_FRAME_TYPES[(*grease_index as usize) % GREASE_FRAME_TYPES.len()];
             let test_payload = generate_payload_pattern(payload_pattern);
 
             let mut frame_data = Vec::new();
             if encode_varint(grease_type, &mut frame_data).is_ok()
-                && encode_varint(test_payload.len() as u64, &mut frame_data).is_ok() {
+                && encode_varint(test_payload.len() as u64, &mut frame_data).is_ok()
+            {
                 frame_data.extend_from_slice(&test_payload);
 
                 match H3Frame::decode(&frame_data) {
-                    Ok((H3Frame::Unknown { frame_type, payload }, _)) => {
+                    Ok((
+                        H3Frame::Unknown {
+                            frame_type,
+                            payload,
+                        },
+                        _,
+                    )) => {
                         assert_eq!(frame_type, grease_type);
                         assert_eq!(payload, test_payload);
                     }
@@ -751,9 +832,13 @@ fn test_grease_frame_handling(test: &GreaseTest) {
 
 fn test_reserved_frame_handling(test: &ReservedTest) {
     match test {
-        ReservedTest::H2ReservedType { reserved_index, payload } => {
+        ReservedTest::H2ReservedType {
+            reserved_index,
+            payload,
+        } => {
             // Assertion 5: reserved frame types rejected cleanly
-            let reserved_type = H2_RESERVED_FRAME_TYPES[(*reserved_index as usize) % H2_RESERVED_FRAME_TYPES.len()];
+            let reserved_type =
+                H2_RESERVED_FRAME_TYPES[(*reserved_index as usize) % H2_RESERVED_FRAME_TYPES.len()];
 
             let mut frame_data = Vec::new();
             if encode_varint(reserved_type, &mut frame_data).is_ok() {
@@ -769,7 +854,10 @@ fn test_reserved_frame_handling(test: &ReservedTest) {
                         }
                         Ok(_) => {
                             // Should not parse as known frame type
-                            panic!("HTTP/2 reserved frame type {} should not parse as known frame", reserved_type);
+                            panic!(
+                                "HTTP/2 reserved frame type {} should not parse as known frame",
+                                reserved_type
+                            );
                         }
                         Err(_) => {
                             // Rejection is also acceptable
@@ -779,7 +867,10 @@ fn test_reserved_frame_handling(test: &ReservedTest) {
             }
         }
 
-        ReservedTest::CustomReserved { reserved_type, payload } => {
+        ReservedTest::CustomReserved {
+            reserved_type,
+            payload,
+        } => {
             if *reserved_type > QUIC_VARINT_MAX {
                 return;
             }
@@ -807,7 +898,10 @@ fn test_reserved_frame_handling(test: &ReservedTest) {
 
 fn test_boundary_conditions(test: &BoundaryTest) {
     match test {
-        BoundaryTest::VarintBoundary { boundary_type, is_frame_type } => {
+        BoundaryTest::VarintBoundary {
+            boundary_type,
+            is_frame_type,
+        } => {
             let boundary_value = match boundary_type {
                 VarintBoundaryType::SixBit => 63u64,
                 VarintBoundaryType::FourteenBit => 16383u64,
@@ -823,8 +917,8 @@ fn test_boundary_conditions(test: &BoundaryTest) {
 
             let mut frame_data = Vec::new();
             if encode_varint(frame_type, &mut frame_data).is_ok()
-                && encode_varint(payload_length, &mut frame_data).is_ok() {
-
+                && encode_varint(payload_length, &mut frame_data).is_ok()
+            {
                 if payload_length == 0 {
                     // Zero-length frame
                     match H3Frame::decode(&frame_data) {
@@ -894,8 +988,8 @@ fn test_boundary_conditions(test: &BoundaryTest) {
 
             let mut frame_data = Vec::new();
             if encode_varint(*frame_type, &mut frame_data).is_ok()
-                && encode_varint(MAX_FRAME_PAYLOAD as u64, &mut frame_data).is_ok() {
-
+                && encode_varint(MAX_FRAME_PAYLOAD as u64, &mut frame_data).is_ok()
+            {
                 // Don't actually create max payload - just test the header
                 match H3Frame::decode(&frame_data) {
                     Ok(_) => {
@@ -925,7 +1019,8 @@ fn test_boundary_conditions(test: &BoundaryTest) {
                 let mut frame_data = Vec::new();
 
                 if encode_varint(frame_type, &mut frame_data).is_ok()
-                    && encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
+                    && encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok()
+                {
                     frame_data.extend_from_slice(&limited_payload);
                     combined_data.extend_from_slice(&frame_data);
                     expected_count += 1;
@@ -969,10 +1064,15 @@ fn encode_varint_to_bytes(value: u64) -> Result<Vec<u8>, ()> {
 }
 
 fn varint_encoded_length(value: u64) -> usize {
-    if value < (1 << 6) { 1 }
-    else if value < (1 << 14) { 2 }
-    else if value < (1 << 30) { 4 }
-    else { 8 }
+    if value < (1 << 6) {
+        1
+    } else if value < (1 << 14) {
+        2
+    } else if value < (1 << 30) {
+        4
+    } else {
+        8
+    }
 }
 
 fn resolve_frame_type(choice: &FrameTypeChoice) -> u64 {
@@ -995,19 +1095,18 @@ fn generate_payload_pattern(pattern: &PayloadPattern) -> Vec<u8> {
         PayloadPattern::Empty => Vec::new(),
         PayloadPattern::AllZeros { length } => vec![0; (*length as usize).min(MAX_FRAME_PAYLOAD)],
         PayloadPattern::AllOnes { length } => vec![0xFF; (*length as usize).min(MAX_FRAME_PAYLOAD)],
-        PayloadPattern::Sequential { length } => {
-            (0..).take((*length as usize).min(MAX_FRAME_PAYLOAD))
-                .map(|i| (i % 256) as u8)
-                .collect()
-        }
-        PayloadPattern::Alternating { length } => {
-            (0..).take((*length as usize).min(MAX_FRAME_PAYLOAD))
-                .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
-                .collect()
-        }
+        PayloadPattern::Sequential { length } => (0..)
+            .take((*length as usize).min(MAX_FRAME_PAYLOAD))
+            .map(|i| (i % 256) as u8)
+            .collect(),
+        PayloadPattern::Alternating { length } => (0..)
+            .take((*length as usize).min(MAX_FRAME_PAYLOAD))
+            .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
+            .collect(),
         PayloadPattern::Random { seed, length } => {
             let mut rng_state = *seed;
-            (0..).take((*length as usize).min(MAX_FRAME_PAYLOAD))
+            (0..)
+                .take((*length as usize).min(MAX_FRAME_PAYLOAD))
                 .map(|_| {
                     rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
                     (rng_state >> 16) as u8
@@ -1019,14 +1118,14 @@ fn generate_payload_pattern(pattern: &PayloadPattern) -> Vec<u8> {
 
 fn verify_known_frame_type(frame: &H3Frame, expected_type: u64) {
     match (frame, expected_type) {
-        (H3Frame::Data(_), 0x0) => {},
-        (H3Frame::Headers(_), 0x1) => {},
-        (H3Frame::CancelPush(_), 0x3) => {},
-        (H3Frame::Settings(_), 0x4) => {},
-        (H3Frame::PushPromise { .. }, 0x5) => {},
-        (H3Frame::Goaway(_), 0x7) => {},
-        (H3Frame::MaxPushId(_), 0xD) => {},
-        (H3Frame::Datagram { .. }, 0x30) => {},
+        (H3Frame::Data(_), 0x0) => {}
+        (H3Frame::Headers(_), 0x1) => {}
+        (H3Frame::CancelPush(_), 0x3) => {}
+        (H3Frame::Settings(_), 0x4) => {}
+        (H3Frame::PushPromise { .. }, 0x5) => {}
+        (H3Frame::Goaway(_), 0x7) => {}
+        (H3Frame::MaxPushId(_), 0xD) => {}
+        (H3Frame::Datagram { .. }, 0x30) => {}
         _ => {
             // Unknown frame or type mismatch - this might be acceptable
             // depending on payload validity
@@ -1051,7 +1150,10 @@ fn verify_frame_payload_empty(frame: &H3Frame) {
 
 fn verify_frame_matches_expected(frame: &H3Frame, expected_type: u64, expected_payload: &[u8]) {
     match frame {
-        H3Frame::Unknown { frame_type, payload } => {
+        H3Frame::Unknown {
+            frame_type,
+            payload,
+        } => {
             assert_eq!(*frame_type, expected_type);
             assert_eq!(payload, expected_payload);
         }
@@ -1066,11 +1168,17 @@ fn verify_frame_handled_appropriately(frame: &H3Frame, frame_type: u64) {
         verify_known_frame_type(frame, frame_type);
     } else {
         match frame {
-            H3Frame::Unknown { frame_type: parsed_type, .. } => {
+            H3Frame::Unknown {
+                frame_type: parsed_type,
+                ..
+            } => {
                 assert_eq!(*parsed_type, frame_type);
             }
             _ => {
-                panic!("Unknown frame type {} should produce Unknown variant", frame_type);
+                panic!(
+                    "Unknown frame type {} should produce Unknown variant",
+                    frame_type
+                );
             }
         }
     }
@@ -1085,7 +1193,10 @@ fn verify_boundary_frame_type(frame: &H3Frame, boundary_value: u64) {
                 assert_eq!(*frame_type, boundary_value);
             }
             _ => {
-                panic!("Boundary frame type {} should be handled appropriately", boundary_value);
+                panic!(
+                    "Boundary frame type {} should be handled appropriately",
+                    boundary_value
+                );
             }
         }
     }

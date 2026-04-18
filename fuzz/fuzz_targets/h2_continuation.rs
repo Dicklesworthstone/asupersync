@@ -27,13 +27,12 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::frame::{
-    parse_frame, ContinuationFrame, Frame, FrameHeader, FrameType, HeadersFrame,
-    PushPromiseFrame, SettingValue, SettingsFrame,
-    continuation_flags, headers_flags,
-    FRAME_HEADER_SIZE, DEFAULT_MAX_FRAME_SIZE,
-};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{
+    ContinuationFrame, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType,
+    HeadersFrame, PushPromiseFrame, SettingValue, SettingsFrame, continuation_flags, headers_flags,
+    parse_frame,
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -179,7 +178,9 @@ fn fuzz_continuation_sequence(input: ContinuationFuzzInput) {
             FuzzStrategy::ValidSequence => fuzz_valid_sequence(&operation, &mut state),
             FuzzStrategy::ContinuationFlood => fuzz_continuation_flood(&operation, &mut state),
             FuzzStrategy::StreamIdMismatch => fuzz_stream_id_mismatch(&operation, &mut state),
-            FuzzStrategy::OrphanedContinuation => fuzz_orphaned_continuation(&operation, &mut state),
+            FuzzStrategy::OrphanedContinuation => {
+                fuzz_orphaned_continuation(&operation, &mut state)
+            }
             FuzzStrategy::OversizedHeaders => fuzz_oversized_headers(&operation, &mut state),
             FuzzStrategy::ConnectionLevelContinuation => {
                 fuzz_connection_level_continuation(&operation, &mut state)
@@ -202,7 +203,8 @@ fn fuzz_valid_sequence(operation: &FrameOperation, state: &mut ContinuationState
             end_headers,
             flags,
         } => {
-            let frame = create_headers_frame(*stream_id, header_block.clone(), *end_headers, *flags);
+            let frame =
+                create_headers_frame(*stream_id, header_block.clone(), *end_headers, *flags);
             let result = test_frame_parsing(&frame, state);
 
             if !*end_headers {
@@ -226,7 +228,8 @@ fn fuzz_valid_sequence(operation: &FrameOperation, state: &mut ContinuationState
             let continuation_after_valid_frame = expected_stream.is_some();
 
             // Assertion 3: Stream ID must match preceding frame
-            let stream_id_matches = expected_stream.map_or(false, |expected| expected == *stream_id);
+            let stream_id_matches =
+                expected_stream.map_or(false, |expected| expected == *stream_id);
 
             let flags = force_flags.unwrap_or(if *end_headers {
                 continuation_flags::END_HEADERS
@@ -282,7 +285,11 @@ fn fuzz_valid_sequence(operation: &FrameOperation, state: &mut ContinuationState
 /// Test CONTINUATION flood scenarios
 fn fuzz_continuation_flood(operation: &FrameOperation, state: &mut ContinuationState) {
     match operation {
-        FrameOperation::Headers { stream_id, header_block, .. } => {
+        FrameOperation::Headers {
+            stream_id,
+            header_block,
+            ..
+        } => {
             // Start with HEADERS that doesn't have END_HEADERS
             let frame = create_headers_frame(*stream_id, header_block.clone(), false, 0);
             let _ = test_frame_parsing(&frame, state);
@@ -318,7 +325,11 @@ fn fuzz_continuation_flood(operation: &FrameOperation, state: &mut ContinuationS
 /// Test stream ID mismatch scenarios
 fn fuzz_stream_id_mismatch(operation: &FrameOperation, state: &mut ContinuationState) {
     match operation {
-        FrameOperation::Headers { stream_id, header_block, .. } => {
+        FrameOperation::Headers {
+            stream_id,
+            header_block,
+            ..
+        } => {
             // Start normal sequence
             let frame = create_headers_frame(*stream_id, header_block.clone(), false, 0);
             let _ = test_frame_parsing(&frame, state);
@@ -326,8 +337,11 @@ fn fuzz_stream_id_mismatch(operation: &FrameOperation, state: &mut ContinuationS
 
             // Send CONTINUATION with different stream ID (assertion 3)
             let wrong_stream_id = stream_id.wrapping_add(2);
-            let continuation_frame =
-                create_continuation_frame(wrong_stream_id, vec![0x01, 0x02], continuation_flags::END_HEADERS);
+            let continuation_frame = create_continuation_frame(
+                wrong_stream_id,
+                vec![0x01, 0x02],
+                continuation_flags::END_HEADERS,
+            );
             let result = test_frame_parsing(&continuation_frame, state);
 
             assert!(
@@ -345,14 +359,24 @@ fn fuzz_stream_id_mismatch(operation: &FrameOperation, state: &mut ContinuationS
 
 /// Test orphaned CONTINUATION frames
 fn fuzz_orphaned_continuation(operation: &FrameOperation, state: &mut ContinuationState) {
-    if let FrameOperation::Continuation { stream_id, header_block, end_headers, .. } = operation {
+    if let FrameOperation::Continuation {
+        stream_id,
+        header_block,
+        end_headers,
+        ..
+    } = operation
+    {
         // Send CONTINUATION without preceding HEADERS (assertion 1)
         state.expecting_continuation_stream = None; // Ensure no expectation
 
         let frame = create_continuation_frame(
             *stream_id,
             header_block.clone(),
-            if *end_headers { continuation_flags::END_HEADERS } else { 0 },
+            if *end_headers {
+                continuation_flags::END_HEADERS
+            } else {
+                0
+            },
         );
         let result = test_frame_parsing(&frame, state);
 
@@ -405,25 +429,38 @@ fn fuzz_oversized_headers(operation: &FrameOperation, state: &mut ContinuationSt
 
 /// Test CONTINUATION on connection-level stream (Stream ID 0)
 fn fuzz_connection_level_continuation(operation: &FrameOperation, state: &mut ContinuationState) {
-    if let FrameOperation::Continuation { header_block, end_headers, .. } = operation {
+    if let FrameOperation::Continuation {
+        header_block,
+        end_headers,
+        ..
+    } = operation
+    {
         // Assertion 5: CONTINUATION on Stream ID 0 triggers PROTOCOL_ERROR
         let frame = create_continuation_frame(
             0, // Stream ID 0 (connection-level)
             header_block.clone(),
-            if *end_headers { continuation_flags::END_HEADERS } else { 0 },
+            if *end_headers {
+                continuation_flags::END_HEADERS
+            } else {
+                0
+            },
         );
         let result = test_frame_parsing(&frame, state);
 
-        assert!(
-            result.is_err(),
-            "CONTINUATION on stream ID 0 not rejected"
-        );
+        assert!(result.is_err(), "CONTINUATION on stream ID 0 not rejected");
 
         // Verify it's specifically a PROTOCOL_ERROR
-        if let Err(H2Error { code: ErrorCode::ProtocolError, .. }) = result {
+        if let Err(H2Error {
+            code: ErrorCode::ProtocolError,
+            ..
+        }) = result
+        {
             // Expected
         } else {
-            panic!("CONTINUATION on stream ID 0 should trigger PROTOCOL_ERROR, got {:?}", result);
+            panic!(
+                "CONTINUATION on stream ID 0 should trigger PROTOCOL_ERROR, got {:?}",
+                result
+            );
         }
 
         log_frame_result("CONNECTION_LEVEL_CONTINUATION", &result, state);
@@ -441,7 +478,12 @@ fn handle_generic_operation(operation: &FrameOperation, state: &mut Continuation
             header_block,
             end_headers,
         } => {
-            let frame = create_push_promise_frame(*stream_id, *promised_stream_id, header_block.clone(), *end_headers);
+            let frame = create_push_promise_frame(
+                *stream_id,
+                *promised_stream_id,
+                header_block.clone(),
+                *end_headers,
+            );
             let result = test_frame_parsing(&frame, state);
 
             if !*end_headers {
@@ -451,7 +493,11 @@ fn handle_generic_operation(operation: &FrameOperation, state: &mut Continuation
 
             log_frame_result("PUSH_PROMISE", &result, state);
         }
-        FrameOperation::UnrelatedFrame { frame_type, stream_id, payload } => {
+        FrameOperation::UnrelatedFrame {
+            frame_type,
+            stream_id,
+            payload,
+        } => {
             // Send frame that should interrupt CONTINUATION sequence
             if state.is_expecting_continuation() {
                 let frame = create_generic_frame(*frame_type, *stream_id, payload.clone());
@@ -464,7 +510,10 @@ fn handle_generic_operation(operation: &FrameOperation, state: &mut Continuation
         FrameOperation::ResetState => {
             state.reset();
         }
-        FrameOperation::UpdateSettings { max_header_list_size, .. } => {
+        FrameOperation::UpdateSettings {
+            max_header_list_size,
+            ..
+        } => {
             if let Some(size) = max_header_list_size {
                 state.max_header_list_size = (*size as usize).max(1024);
             }
@@ -474,7 +523,12 @@ fn handle_generic_operation(operation: &FrameOperation, state: &mut Continuation
 }
 
 /// Create a HEADERS frame
-fn create_headers_frame(stream_id: u32, header_block: Vec<u8>, end_headers: bool, extra_flags: u8) -> Frame {
+fn create_headers_frame(
+    stream_id: u32,
+    header_block: Vec<u8>,
+    end_headers: bool,
+    extra_flags: u8,
+) -> Frame {
     Frame::Headers(HeadersFrame {
         stream_id,
         header_block: Bytes::copy_from_slice(&header_block),

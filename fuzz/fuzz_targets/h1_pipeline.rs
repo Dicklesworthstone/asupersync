@@ -267,7 +267,7 @@ fuzz_target!(|input: H1PipelineFuzz| {
             MAX_PIPELINE_DEPTH * 2
         } else {
             MAX_PIPELINE_DEPTH
-        }
+        },
     );
 
     if pipeline_depth == 0 {
@@ -306,7 +306,8 @@ fuzz_target!(|input: H1PipelineFuzz| {
             }
 
             // Limit header value size
-            let header_value: String = header.value
+            let header_value: String = header
+                .value
                 .chars()
                 .filter(|c| c.is_ascii() && *c != '\r' && *c != '\n')
                 .take(200)
@@ -326,7 +327,10 @@ fuzz_target!(|input: H1PipelineFuzz| {
         }
 
         // Add Connection: close for final request if specified
-        if has_connection_close || (idx == requests.len() - 1 && input.termination_scenario == TerminationScenario::Normal) {
+        if has_connection_close
+            || (idx == requests.len() - 1
+                && input.termination_scenario == TerminationScenario::Normal)
+        {
             if !has_connection_close {
                 request_stream.extend_from_slice(b"Connection: close\r\n");
             }
@@ -363,13 +367,17 @@ fuzz_target!(|input: H1PipelineFuzz| {
 
                     // Chunk size line
                     if let Some(ext) = &chunk.extensions {
-                        let extensions: String = ext.chars()
+                        let extensions: String = ext
+                            .chars()
                             .filter(|c| c.is_ascii() && *c != '\r' && *c != '\n')
                             .take(50)
                             .collect();
-                        request_stream.extend_from_slice(format!("{:X};{}\r\n", chunk_data.len(), extensions).as_bytes());
+                        request_stream.extend_from_slice(
+                            format!("{:X};{}\r\n", chunk_data.len(), extensions).as_bytes(),
+                        );
                     } else {
-                        request_stream.extend_from_slice(format!("{:X}\r\n", chunk_data.len()).as_bytes());
+                        request_stream
+                            .extend_from_slice(format!("{:X}\r\n", chunk_data.len()).as_bytes());
                     }
 
                     // Chunk data
@@ -409,7 +417,9 @@ fuzz_target!(|input: H1PipelineFuzz| {
                             BoundaryType::NoNewline => {
                                 // Missing newline - parser should handle gracefully
                             }
-                            BoundaryType::ExtraNewline => request_stream.extend_from_slice(b"\r\n\r\n"),
+                            BoundaryType::ExtraNewline => {
+                                request_stream.extend_from_slice(b"\r\n\r\n")
+                            }
                             BoundaryType::InvalidChars => {
                                 request_stream.extend_from_slice(b"\r\n\x00\x01\r\n");
                             }
@@ -533,7 +543,8 @@ fuzz_target!(|input: H1PipelineFuzz| {
     // Invariant 3: Chunked body boundary handling
     // If we successfully parsed any requests with chunked bodies,
     // the parser correctly handled the chunk-to-request boundary
-    let chunked_requests = requests.iter()
+    let chunked_requests = requests
+        .iter()
         .filter(|req| matches!(&req.body, RequestBody::Chunked(_)))
         .count();
 
@@ -568,10 +579,7 @@ fn validate_pipeline_state(requests: &[Request]) {
     // 4. Proper header structure
 
     for (idx, request) in requests.iter().enumerate() {
-        assert!(
-            !request.uri().is_empty(),
-            "Request {} has empty URI", idx
-        );
+        assert!(!request.uri().is_empty(), "Request {} has empty URI", idx);
 
         // Verify request is in a valid state after parsing
         let _method = request.method();

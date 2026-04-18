@@ -20,10 +20,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::distributed::bridge::{RegionBridge, RegionMode, BridgeConfig, SyncMode, ConflictResolution};
-use asupersync::distributed::snapshot::{RegionSnapshot, TaskSnapshot, TaskState, BudgetSnapshot};
+use asupersync::distributed::bridge::{
+    BridgeConfig, ConflictResolution, RegionBridge, RegionMode, SyncMode,
+};
+use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use asupersync::record::region::RegionState;
-use asupersync::types::{RegionId, TaskId, Time, Budget};
+use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
@@ -143,8 +145,13 @@ struct BridgeTestConfig {
 #[derive(Arbitrary, Debug, Clone)]
 enum FuzzRegionMode {
     Local,
-    Distributed { replication_factor: u8 },
-    Hybrid { replication_factor: u8, max_lag_secs: u8 },
+    Distributed {
+        replication_factor: u8,
+    },
+    Hybrid {
+        replication_factor: u8,
+        max_lag_secs: u8,
+    },
 }
 
 /// Fuzzable bridge configuration
@@ -179,7 +186,10 @@ impl FuzzRegionMode {
                 let factor = replication_factor.max(1).min(10) as u32;
                 RegionMode::distributed(factor)
             }
-            Self::Hybrid { replication_factor, max_lag_secs } => {
+            Self::Hybrid {
+                replication_factor,
+                max_lag_secs,
+            } => {
                 let factor = replication_factor.max(1).min(10) as u32;
                 let mut mode = RegionMode::hybrid(factor);
                 if let RegionMode::Hybrid { max_lag, .. } = &mut mode {
@@ -269,7 +279,9 @@ impl FuzzRegionSnapshot {
                 cost_remaining: self.budget.cost_remaining,
             },
             cancel_reason: self.cancel_reason,
-            parent: self.parent.map(|p| RegionId::from_arena(ArenaIndex::new(p.arena_gen, p.arena_slot))),
+            parent: self
+                .parent
+                .map(|p| RegionId::from_arena(ArenaIndex::new(p.arena_gen, p.arena_slot))),
             metadata,
         })
     }
@@ -277,10 +289,8 @@ impl FuzzRegionSnapshot {
 
 impl FuzzTaskSnapshot {
     fn to_task_snapshot(self) -> Option<TaskSnapshot> {
-        let task_id = TaskId::from_arena(ArenaIndex::new(
-            self.task_arena_gen,
-            self.task_arena_slot,
-        ));
+        let task_id =
+            TaskId::from_arena(ArenaIndex::new(self.task_arena_gen, self.task_arena_slot));
 
         // Validate task state
         let state = match self.state_value {
@@ -373,10 +383,16 @@ fuzz_target!(|data: &[u8]| {
                                 }
                                 (Err(e1), Err(e2)) => {
                                     // Both failed - should be same error kind
-                                    assert_eq!(e1.kind(), e2.kind(), "Idempotent apply should produce same error");
+                                    assert_eq!(
+                                        e1.kind(),
+                                        e2.kind(),
+                                        "Idempotent apply should produce same error"
+                                    );
                                 }
                                 _ => {
-                                    panic!("Snapshot apply not idempotent: different results for same input");
+                                    panic!(
+                                        "Snapshot apply not idempotent: different results for same input"
+                                    );
                                 }
                             }
                             continue;
@@ -393,8 +409,8 @@ fuzz_target!(|data: &[u8]| {
 
                             // Validate that sequence was properly updated
                             assert!(
-                                bridge.sync_state.last_synced_sequence >= snapshot.sequence ||
-                                bridge.sync_state.last_synced_sequence == 0,
+                                bridge.sync_state.last_synced_sequence >= snapshot.sequence
+                                    || bridge.sync_state.last_synced_sequence == 0,
                                 "Bridge sequence state should be consistent after apply"
                             );
                         }
@@ -407,11 +423,17 @@ fuzz_target!(|data: &[u8]| {
                     // Invalid snapshot format - should be ignored gracefully
                 }
             }
-            MessagePayload::Heartbeat { node_id: _, timestamp: _ } => {
+            MessagePayload::Heartbeat {
+                node_id: _,
+                timestamp: _,
+            } => {
                 // Property 3: Unknown message types ignored
                 // Heartbeats are processed but don't affect bridge state
             }
-            MessagePayload::StateTransition { region_id: _, new_state: _ } => {
+            MessagePayload::StateTransition {
+                region_id: _,
+                new_state: _,
+            } => {
                 // Property 3: Unknown message types ignored
                 // State transitions are processed but don't directly affect snapshot logic
             }

@@ -23,9 +23,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
-use asupersync::http::h2::hpack::{Decoder, Header, DynamicTable, DEFAULT_MAX_TABLE_SIZE};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::hpack::{DEFAULT_MAX_TABLE_SIZE, Decoder, DynamicTable, Header};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts (8KB)
@@ -248,13 +248,23 @@ fuzz_target!(|input: HpackStaticInput| {
         HpackTestScenario::InvalidIndexZero => {
             fuzz_invalid_index_zero();
         }
-        HpackTestScenario::DynamicTableOffset { dynamic_entries, index } => {
+        HpackTestScenario::DynamicTableOffset {
+            dynamic_entries,
+            index,
+        } => {
             fuzz_dynamic_table_offset(dynamic_entries, index);
         }
-        HpackTestScenario::IntegerEncoding { value, prefix_bits, prefix } => {
+        HpackTestScenario::IntegerEncoding {
+            value,
+            prefix_bits,
+            prefix,
+        } => {
             fuzz_integer_encoding(value, prefix_bits, prefix);
         }
-        HpackTestScenario::LongIndexSequence { encoded_bytes, prefix_bits } => {
+        HpackTestScenario::LongIndexSequence {
+            encoded_bytes,
+            prefix_bits,
+        } => {
             fuzz_long_index_sequence(encoded_bytes, prefix_bits);
         }
     }
@@ -263,7 +273,11 @@ fuzz_target!(|input: HpackStaticInput| {
 /// Test static table index resolution for indices 1-61
 fn fuzz_static_table_lookup(index: u8) {
     // Clamp index to test range 1-61
-    let test_index = if index == 0 { 1 } else { ((index as usize) % 61) + 1 };
+    let test_index = if index == 0 {
+        1
+    } else {
+        ((index as usize) % 61) + 1
+    };
 
     // Create a decoder to test static table access
     let decoder = Decoder::new();
@@ -273,19 +287,25 @@ fn fuzz_static_table_lookup(index: u8) {
         Ok(name) => {
             // Verify the name matches the expected static table entry
             let expected_entry = STATIC_TABLE_EXPECTED[test_index - 1];
-            assert_eq!(name, expected_entry.0,
+            assert_eq!(
+                name, expected_entry.0,
                 "Static table index {} should resolve to name '{}', got '{}'",
-                test_index, expected_entry.0, name);
+                test_index, expected_entry.0, name
+            );
 
             // The static table lookup should be consistent
             let name2 = decoder.get_indexed_name(test_index).unwrap();
-            assert_eq!(name, name2,
+            assert_eq!(
+                name, name2,
                 "Static table lookup should be deterministic for index {}",
-                test_index);
+                test_index
+            );
         }
         Err(err) => {
-            panic!("Static table index {} should be valid but got error: {:?}",
-                test_index, err);
+            panic!(
+                "Static table index {} should be valid but got error: {:?}",
+                test_index, err
+            );
         }
     }
 }
@@ -336,9 +356,11 @@ fn fuzz_dynamic_table_offset(dynamic_entries: Vec<TestHeader>, index: u16) {
             let dyn_index = test_index - 61; // Dynamic table is 0-indexed after static table
             if dyn_index <= dynamic_entries.len() && dyn_index > 0 {
                 let expected_name = &dynamic_entries[dyn_index - 1].name;
-                assert_eq!(name, *expected_name,
+                assert_eq!(
+                    name, *expected_name,
                     "Dynamic table index {} should resolve to name '{}', got '{}'",
-                    test_index, expected_name, name);
+                    test_index, expected_name, name
+                );
             }
         }
         Err(err) => {
@@ -348,7 +370,10 @@ fn fuzz_dynamic_table_offset(dynamic_entries: Vec<TestHeader>, index: u16) {
                     // This is expected when the dynamic index is out of bounds
                 }
                 other => {
-                    panic!("Invalid dynamic index should return CompressionError, got {:?}", other);
+                    panic!(
+                        "Invalid dynamic index should return CompressionError, got {:?}",
+                        other
+                    );
                 }
             }
         }
@@ -364,9 +389,12 @@ fn fuzz_integer_encoding(value: usize, prefix_bits: u8, prefix: u8) {
     let roundtrip_success = test_integer_encoding_roundtrip(test_value, prefix_bits, prefix);
 
     // Integer encoding should be deterministic and reversible
-    assert!(roundtrip_success || test_value >= (1 << 28),
+    assert!(
+        roundtrip_success || test_value >= (1 << 28),
         "Integer encoding roundtrip failed for value {} with prefix_bits {}",
-        test_value, prefix_bits);
+        test_value,
+        prefix_bits
+    );
 }
 
 /// Test long-index integer sequence parsing

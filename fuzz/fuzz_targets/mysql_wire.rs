@@ -99,7 +99,10 @@ fuzz_target!(|data: &[u8]| {
 /// Test a specific fuzzing scenario.
 fn test_scenario(scenario: FuzzScenario) {
     match scenario {
-        FuzzScenario::PacketHeader { header, expected_sequence } => {
+        FuzzScenario::PacketHeader {
+            header,
+            expected_sequence,
+        } => {
             test_packet_header_parsing(header, expected_sequence);
         }
         FuzzScenario::CommandPhase { command, payload } => {
@@ -111,7 +114,10 @@ fn test_scenario(scenario: FuzzScenario) {
         FuzzScenario::EofOkDiscrimination { packet_data } => {
             test_eof_ok_discrimination(packet_data);
         }
-        FuzzScenario::OversizedPacket { length_bytes, sequence } => {
+        FuzzScenario::OversizedPacket {
+            length_bytes,
+            sequence,
+        } => {
             test_oversized_packet_rejection(length_bytes, sequence);
         }
     }
@@ -120,9 +126,7 @@ fn test_scenario(scenario: FuzzScenario) {
 /// Test packet header parsing (Assertion 1: 24-bit LE length + sequence ID).
 fn test_packet_header_parsing(header: [u8; 4], expected_sequence: u8) {
     // Decode 24-bit little-endian length
-    let length = u32::from(header[0])
-        | (u32::from(header[1]) << 8)
-        | (u32::from(header[2]) << 16);
+    let length = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
     let sequence = header[3];
 
     // Test length field bounds (should be ≤ MAX_PACKET_SIZE)
@@ -269,9 +273,7 @@ fn test_raw_packet_data(data: &[u8]) {
     let header: [u8; 4] = data[0..4].try_into().unwrap();
     let payload = &data[4..];
 
-    let length = u32::from(header[0])
-        | (u32::from(header[1]) << 8)
-        | (u32::from(header[2]) << 16);
+    let length = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
 
     // If payload is shorter than declared length, it should be handled gracefully
     if (payload.len() as u32) < length {
@@ -286,7 +288,10 @@ fn decode_packet_header_mock(header: [u8; 4], expected_seq: u8) -> Result<(u32, 
     let seq = header[3];
 
     if seq != expected_seq {
-        return Err(format!("sequence mismatch: expected {}, got {}", expected_seq, seq));
+        return Err(format!(
+            "sequence mismatch: expected {}, got {}",
+            expected_seq, seq
+        ));
     }
 
     if len > MAX_PACKET_SIZE {
