@@ -750,6 +750,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tls_acceptor"
+path = "fuzz_targets/tls_acceptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_hpack"
 path = "fuzz_targets/h2_hpack.rs"
 test = false
