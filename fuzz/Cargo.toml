@@ -618,3 +618,10 @@ path = "fuzz_targets/consistent_hash_ring.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h3_client_response_fuzz"
+path = "fuzz_targets/h3_client_response_fuzz.rs"
+test = false
+doc = false
+bench = false
