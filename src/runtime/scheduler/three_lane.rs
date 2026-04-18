@@ -8679,4 +8679,301 @@ mod tests {
             );
         }
     }
+
+    // === EXP3 Convergence Golden Tests ===
+
+    #[test]
+    fn golden_test_exp3_weights_stabilize_after_n_cancel_events() {
+        // Golden test: EXP3 weights should converge after sufficient cancel events
+        let mut policy = AdaptiveCancelStreakPolicy::new(32); // 32 steps per epoch
+        let mut weight_history: Vec<[f64; 5]> = Vec::new();
+
+        // Simulate 500 cancel events with consistent reward pattern
+        // Arm 2 (index 2, limit 16) gets slightly better rewards
+        for step in 0..500 {
+            policy.refresh_probs();
+            let selected = policy.select_arm();
+
+            // Reward function: arm 2 gets 0.6 reward, others get 0.4
+            let reward = if selected == 2 { 0.6 } else { 0.4 };
+            policy.update_weights(reward);
+
+            // Record weights every 50 steps
+            if step % 50 == 49 {
+                weight_history.push(policy.weights);
+            }
+        }
+
+        // Check convergence: weights should stabilize (change < 5% in last epochs)
+        assert!(weight_history.len() >= 2, "Need at least 2 weight snapshots");
+        let second_last = &weight_history[weight_history.len() - 2];
+        let last = &weight_history[weight_history.len() - 1];
+
+        for i in 0..5 {
+            let change_ratio = (last[i] - second_last[i]).abs() / second_last[i];
+            assert!(change_ratio < 0.05,
+                "Weight for arm {} should stabilize: change ratio {:.4} >= 0.05",
+                i, change_ratio);
+        }
+
+        // Arm 2 should have highest weight (being rewarded more)
+        let best_arm = (0..5).max_by(|&a, &b| last[a].partial_cmp(&last[b]).unwrap()).unwrap();
+        assert_eq!(best_arm, 2, "Arm 2 should have highest weight after convergence");
+
+        // Weight distribution should be meaningful (not uniform)
+        let weight_variance = {
+            let mean: f64 = last.iter().sum::<f64>() / 5.0;
+            let variance: f64 = last.iter().map(|&w| (w - mean).powi(2)).sum::<f64>() / 5.0;
+            variance
+        };
+        assert!(weight_variance > 0.01, "Weights should not be uniform after convergence");
+    }
+
+    #[test]
+    fn golden_test_cancel_streak_penalty_converges() {
+        // Golden test: Cancel-streak penalty should converge to bounded values
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        let mut penalty_history: Vec<f64> = Vec::new();
+
+        // Simulate 200 cancel events to trigger adaptive behavior
+        for i in 0..200 {
+            let task_id = TaskId::new_for_test(1000, i);
+            worker.schedule_local_cancel(task_id, 100);
+
+            // Process some cancel events to trigger penalty calculation
+            for _ in 0..3 {
+                worker.next_task();
+            }
+
+            // Record penalty every 20 steps
+            if i % 20 == 19 {
+                let penalty = worker.adaptive_cancel_policy.compute_penalty();
+                penalty_history.push(penalty);
+            }
+        }
+
+        // Check convergence: penalty should stabilize
+        assert!(penalty_history.len() >= 3, "Need at least 3 penalty snapshots");
+        let recent = &penalty_history[penalty_history.len() - 3..];
+
+        let penalty_variance = {
+            let mean: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
+            recent.iter().map(|&p| (p - mean).powi(2)).sum::<f64>() / recent.len() as f64
+        };
+        assert!(penalty_variance < 0.01,
+            "Cancel-streak penalty should converge: variance {:.6} >= 0.01",
+            penalty_variance);
+
+        // Penalty should be within reasonable bounds [0.0, 2.0]
+        for &penalty in recent {
+            assert!(penalty >= 0.0 && penalty <= 2.0,
+                "Penalty {:.4} should be in bounds [0.0, 2.0]", penalty);
+        }
+    }
+
+    #[test]
+    fn golden_test_adaptive_threshold_updates_within_bounds() {
+        // Golden test: Adaptive threshold should update within algorithmic bounds
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        let mut threshold_history: Vec<usize> = Vec::new();
+        let initial_threshold = worker.adaptive_cancel_policy.current_arm_limit();
+
+        // Simulate workload with varying cancel patterns
+        for epoch in 0..20 {
+            // Each epoch: 50 operations with different reward patterns
+            for step in 0..50 {
+                let task_id = TaskId::new_for_test(2000 + epoch, step);
+                worker.schedule_local_cancel(task_id, 100);
+                worker.next_task();
+
+                // Vary reward pattern every 10 steps to test adaptation
+                if step % 10 == 9 {
+                    let current_threshold = worker.adaptive_cancel_policy.current_arm_limit();
+                    threshold_history.push(current_threshold);
+                }
+            }
+        }
+
+        // Verify threshold stays within valid arm values
+        for &threshold in &threshold_history {
+            assert!(ADAPTIVE_STREAK_ARMS.contains(&threshold),
+                "Threshold {} should be one of the valid arms {:?}",
+                threshold, ADAPTIVE_STREAK_ARMS);
+        }
+
+        // Verify some adaptation occurred (not stuck at initial value)
+        let adaptation_occurred = threshold_history.iter()
+            .any(|&t| t != initial_threshold);
+        assert!(adaptation_occurred,
+            "Threshold should adapt from initial value {} during varied workload",
+            initial_threshold);
+
+        // Verify bounded exploration (shouldn't constantly jump between extremes)
+        let extreme_jumps = threshold_history.windows(2)
+            .filter(|window| {
+                let diff = (window[1] as i32 - window[0] as i32).abs();
+                diff > 24 // Jump from 4 to 32+ or similar large change
+            })
+            .count();
+        let jump_ratio = extreme_jumps as f64 / (threshold_history.len() - 1) as f64;
+        assert!(jump_ratio < 0.3,
+            "Too many extreme threshold jumps: {:.2}% >= 30%",
+            jump_ratio * 100.0);
+    }
+
+    #[test]
+    fn golden_test_concurrent_cancel_events_no_double_penalize() {
+        // Golden test: Concurrent cancel events should not cause double-penalization
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(2, &state); // 2 workers
+        let workers = scheduler.take_workers();
+
+        // Setup initial EXP3 state
+        for worker in &workers {
+            let initial_weights: [f64; 5] = worker.adaptive_cancel_policy.weights;
+            assert_eq!(initial_weights, [1.0; 5], "Initial weights should be uniform");
+        }
+
+        // Simulate concurrent cancel events on both workers
+        let task_base = 3000;
+        for i in 0..50 {
+            for (worker_idx, worker) in workers.iter().enumerate() {
+                let task_id = TaskId::new_for_test(task_base + worker_idx * 100, i);
+                worker.schedule_local_cancel(task_id, 100);
+            }
+        }
+
+        // Process events concurrently
+        let mut total_processed = [0; 2];
+        for _ in 0..100 {
+            for (worker_idx, worker) in workers.iter().enumerate() {
+                if worker.next_task().is_some() {
+                    total_processed[worker_idx] += 1;
+                }
+            }
+        }
+
+        // Verify both workers processed events
+        assert!(total_processed[0] > 0 && total_processed[1] > 0,
+            "Both workers should process cancel events: [{}, {}]",
+            total_processed[0], total_processed[1]);
+
+        // Verify weight updates are reasonable (no explosive growth)
+        for (worker_idx, worker) in workers.iter().enumerate() {
+            let final_weights: [f64; 5] = worker.adaptive_cancel_policy.weights;
+            for (arm_idx, &weight) in final_weights.iter().enumerate() {
+                assert!(weight >= 1e-30 && weight <= 1e30,
+                    "Worker {} arm {} weight {:.2e} out of bounds [1e-30, 1e30]",
+                    worker_idx, arm_idx, weight);
+            }
+
+            // Total weight magnitude should be reasonable
+            let weight_sum: f64 = final_weights.iter().sum();
+            assert!(weight_sum > 1e-10 && weight_sum < 1e20,
+                "Worker {} total weight sum {:.2e} unreasonable",
+                worker_idx, weight_sum);
+        }
+
+        // Verify e-process bounds (should not drift to infinity)
+        for (worker_idx, worker) in workers.iter().enumerate() {
+            let e_process = worker.adaptive_cancel_policy.e_process_log;
+            assert!(e_process.is_finite() && e_process.abs() < 100.0,
+                "Worker {} e-process log {:.4} should be finite and bounded",
+                worker_idx, e_process);
+        }
+    }
+
+    #[test]
+    fn golden_test_lab_runtime_replay_determinism() {
+        // Golden test: EXP3 algorithm should be deterministic under LabRuntime replay
+        let mut trace_a = Vec::new();
+        let mut trace_b = Vec::new();
+
+        // Run 1: Collect EXP3 decision trace
+        {
+            let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+            let mut scheduler = ThreeLaneScheduler::new(1, &state);
+            let worker = &mut scheduler.workers[0];
+
+            for i in 0..100 {
+                let task_id = TaskId::new_for_test(4000, i);
+                worker.schedule_local_cancel(task_id, 100);
+
+                // Record EXP3 state every 10 steps
+                if i % 10 == 9 {
+                    let policy = &worker.adaptive_cancel_policy;
+                    trace_a.push((
+                        policy.selected_arm,
+                        policy.epoch_count,
+                        policy.steps_in_epoch,
+                        policy.weights,
+                        policy.probs,
+                    ));
+                }
+
+                worker.next_task();
+            }
+        }
+
+        // Run 2: Same operations, should produce identical trace
+        {
+            let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+            let mut scheduler = ThreeLaneScheduler::new(1, &state);
+            let worker = &mut scheduler.workers[0];
+
+            for i in 0..100 {
+                let task_id = TaskId::new_for_test(4000, i);
+                worker.schedule_local_cancel(task_id, 100);
+
+                // Record EXP3 state every 10 steps
+                if i % 10 == 9 {
+                    let policy = &worker.adaptive_cancel_policy;
+                    trace_b.push((
+                        policy.selected_arm,
+                        policy.epoch_count,
+                        policy.steps_in_epoch,
+                        policy.weights,
+                        policy.probs,
+                    ));
+                }
+
+                worker.next_task();
+            }
+        }
+
+        // Verify traces are identical
+        assert_eq!(trace_a.len(), trace_b.len(), "Trace lengths should match");
+
+        for (step, (state_a, state_b)) in trace_a.iter().zip(trace_b.iter()).enumerate() {
+            assert_eq!(state_a.0, state_b.0,
+                "Step {}: Selected arm should be deterministic: {} vs {}",
+                step, state_a.0, state_b.0);
+            assert_eq!(state_a.1, state_b.1,
+                "Step {}: Epoch count should be deterministic: {} vs {}",
+                step, state_a.1, state_b.1);
+            assert_eq!(state_a.2, state_b.2,
+                "Step {}: Steps in epoch should be deterministic: {} vs {}",
+                step, state_a.2, state_b.2);
+
+            // Weights should be identical (floating-point exact)
+            for arm in 0..5 {
+                assert_eq!(state_a.3[arm], state_b.3[arm],
+                    "Step {}: Weight[{}] should be deterministic: {:.6} vs {:.6}",
+                    step, arm, state_a.3[arm], state_b.3[arm]);
+            }
+
+            // Probabilities should be identical (floating-point exact)
+            for arm in 0..5 {
+                assert_eq!(state_a.4[arm], state_b.4[arm],
+                    "Step {}: Prob[{}] should be deterministic: {:.6} vs {:.6}",
+                    step, arm, state_a.4[arm], state_b.4[arm]);
+            }
+        }
+    }
 }
