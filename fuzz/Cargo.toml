@@ -918,6 +918,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h3_error_codes"
+path = "fuzz_targets/h3_error_codes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h1_http_client"
 path = "fuzz_targets/h1_http_client.rs"
 test = false
