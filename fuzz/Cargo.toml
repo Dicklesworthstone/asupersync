@@ -1168,3 +1168,10 @@ path = "fuzz_targets/hpack_index_lookup.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "grpc_streaming"
+path = "fuzz_targets/grpc_streaming.rs"
+test = false
+doc = false
+bench = false
