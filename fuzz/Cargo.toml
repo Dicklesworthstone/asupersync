@@ -916,3 +916,10 @@ path = "fuzz_targets/fs_uring.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h1_http_client"
+path = "fuzz_targets/h1_http_client.rs"
+test = false
+doc = false
+bench = false
