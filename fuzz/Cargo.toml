@@ -706,3 +706,10 @@ path = "fuzz_targets/h3_datagram_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_window_update_frame"
+path = "fuzz_targets/h2_window_update_frame.rs"
+test = false
+doc = false
+bench = false
