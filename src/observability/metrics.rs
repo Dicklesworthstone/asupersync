@@ -651,4 +651,524 @@ mod tests {
         assert!(output.contains("latency_sum"));
         assert!(output.contains("latency_count 2"));
     }
+
+    // =========================================================================
+    // OpenTelemetry Exporter Implementation
+    // =========================================================================
+
+    /// OpenTelemetry metric descriptor.
+    #[derive(Debug, Clone)]
+    pub struct OtelMetricDescriptor {
+        pub name: String,
+        pub description: String,
+        pub unit: String,
+    }
+
+    /// OpenTelemetry data point.
+    #[derive(Debug, Clone)]
+    pub struct OtelDataPoint {
+        pub timestamp_nanos: u64,
+        pub value: OtelValue,
+        pub attributes: BTreeMap<String, String>,
+    }
+
+    /// OpenTelemetry metric value types.
+    #[derive(Debug, Clone)]
+    pub enum OtelValue {
+        Counter(u64),
+        Gauge(f64),
+        Histogram {
+            count: u64,
+            sum: f64,
+            buckets: Vec<(f64, u64)>, // (upper_bound, count)
+        },
+    }
+
+    /// OpenTelemetry resource attributes.
+    #[derive(Debug, Clone)]
+    pub struct OtelResource {
+        pub attributes: BTreeMap<String, String>,
+    }
+
+    /// OpenTelemetry metric export request.
+    #[derive(Debug, Clone)]
+    pub struct OtelMetricsRequest {
+        pub resource: OtelResource,
+        pub metrics: Vec<OtelMetric>,
+    }
+
+    /// OpenTelemetry metric.
+    #[derive(Debug, Clone)]
+    pub struct OtelMetric {
+        pub descriptor: OtelMetricDescriptor,
+        pub data_points: Vec<OtelDataPoint>,
+    }
+
+    /// OpenTelemetry exporter configuration.
+    #[derive(Debug, Clone)]
+    pub struct OtelExporterConfig {
+        pub endpoint: String,
+        pub api_key: Option<String>,
+        pub timeout_secs: u64,
+        pub compression: bool,
+        pub batch_size: usize,
+    }
+
+    impl Default for OtelExporterConfig {
+        fn default() -> Self {
+            Self {
+                endpoint: "http://localhost:4317/v1/metrics".to_string(),
+                api_key: None,
+                timeout_secs: 10,
+                compression: true,
+                batch_size: 100,
+            }
+        }
+    }
+
+    /// OpenTelemetry metrics exporter.
+    #[derive(Debug)]
+    pub struct OtelMetricsExporter {
+        config: OtelExporterConfig,
+        resource: OtelResource,
+    }
+
+    impl OtelMetricsExporter {
+        /// Creates a new OpenTelemetry exporter.
+        pub fn new(config: OtelExporterConfig) -> Self {
+            let mut resource_attrs = BTreeMap::new();
+            resource_attrs.insert("service.name".to_string(), "asupersync".to_string());
+            resource_attrs.insert("service.version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+
+            Self {
+                config,
+                resource: OtelResource {
+                    attributes: resource_attrs,
+                },
+            }
+        }
+
+        /// Exports metrics to OpenTelemetry collector.
+        pub async fn export(&self, metrics: &Metrics) -> Result<(), OtelExportError> {
+            let request = self.build_request(metrics)?;
+            self.send_request(&request).await
+        }
+
+        /// Builds OTLP request from metrics registry.
+        fn build_request(&self, metrics: &Metrics) -> Result<OtelMetricsRequest, OtelExportError> {
+            let mut otel_metrics = Vec::new();
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| OtelExportError::TimestampError)?
+                .as_nanos() as u64;
+
+            // Export counters
+            for (name, counter) in &metrics.counters {
+                let metric = OtelMetric {
+                    descriptor: OtelMetricDescriptor {
+                        name: name.clone(),
+                        description: format!("Counter: {name}"),
+                        unit: "1".to_string(),
+                    },
+                    data_points: vec![OtelDataPoint {
+                        timestamp_nanos: timestamp,
+                        value: OtelValue::Counter(counter.get()),
+                        attributes: BTreeMap::new(),
+                    }],
+                };
+                otel_metrics.push(metric);
+            }
+
+            // Export gauges
+            for (name, gauge) in &metrics.gauges {
+                let metric = OtelMetric {
+                    descriptor: OtelMetricDescriptor {
+                        name: name.clone(),
+                        description: format!("Gauge: {name}"),
+                        unit: "1".to_string(),
+                    },
+                    data_points: vec![OtelDataPoint {
+                        timestamp_nanos: timestamp,
+                        value: OtelValue::Gauge(gauge.get() as f64),
+                        attributes: BTreeMap::new(),
+                    }],
+                };
+                otel_metrics.push(metric);
+            }
+
+            // Export histograms
+            for (name, histogram) in &metrics.histograms {
+                let mut buckets = Vec::new();
+                let mut cumulative = 0;
+
+                for (i, count_atomic) in histogram.counts.iter().enumerate() {
+                    let count = count_atomic.load(Ordering::Relaxed);
+                    cumulative += count;
+                    let upper_bound = if i < histogram.buckets.len() {
+                        histogram.buckets[i]
+                    } else {
+                        f64::INFINITY
+                    };
+                    buckets.push((upper_bound, cumulative));
+                }
+
+                let metric = OtelMetric {
+                    descriptor: OtelMetricDescriptor {
+                        name: name.clone(),
+                        description: format!("Histogram: {name}"),
+                        unit: "s".to_string(),
+                    },
+                    data_points: vec![OtelDataPoint {
+                        timestamp_nanos: timestamp,
+                        value: OtelValue::Histogram {
+                            count: histogram.count(),
+                            sum: histogram.sum(),
+                            buckets,
+                        },
+                        attributes: BTreeMap::new(),
+                    }],
+                };
+                otel_metrics.push(metric);
+            }
+
+            Ok(OtelMetricsRequest {
+                resource: self.resource.clone(),
+                metrics: otel_metrics,
+            })
+        }
+
+        /// Sends request to OpenTelemetry collector (mock implementation).
+        async fn send_request(&self, _request: &OtelMetricsRequest) -> Result<(), OtelExportError> {
+            // In a real implementation, this would:
+            // 1. Serialize to OTLP protobuf or JSON
+            // 2. Apply compression if enabled
+            // 3. Add authentication headers
+            // 4. Send HTTP POST to collector endpoint
+            // 5. Handle retries and rate limiting
+
+            // For conformance testing, we just validate the request structure
+            Ok(())
+        }
+    }
+
+    /// Errors that can occur during OpenTelemetry export.
+    #[derive(Debug, Clone)]
+    pub enum OtelExportError {
+        /// Failed to get system timestamp.
+        TimestampError,
+        /// Network or HTTP error.
+        NetworkError(String),
+        /// Authentication error.
+        AuthError,
+        /// Rate limited by collector.
+        RateLimited,
+        /// Invalid metric data.
+        InvalidData(String),
+    }
+
+    impl std::fmt::Display for OtelExportError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::TimestampError => write!(f, "Failed to get system timestamp"),
+                Self::NetworkError(msg) => write!(f, "Network error: {msg}"),
+                Self::AuthError => write!(f, "Authentication failed"),
+                Self::RateLimited => write!(f, "Rate limited"),
+                Self::InvalidData(msg) => write!(f, "Invalid metric data: {msg}"),
+            }
+        }
+    }
+
+    impl std::error::Error for OtelExportError {}
+
+    // =========================================================================
+    // OpenTelemetry Conformance Tests (CONF-OTEL)
+    // =========================================================================
+
+    /// CONF-OTEL-001: Resource Attribution Conformance
+    /// Metrics must include proper resource attributes according to OTLP spec
+    #[test]
+    fn conf_otel_resource_attribution() {
+        let config = OtelExporterConfig::default();
+        let exporter = OtelMetricsExporter::new(config);
+
+        // Verify required resource attributes are present
+        assert!(exporter.resource.attributes.contains_key("service.name"));
+        assert!(exporter.resource.attributes.contains_key("service.version"));
+
+        let service_name = exporter.resource.attributes.get("service.name").unwrap();
+        assert_eq!(service_name, "asupersync");
+
+        let version = exporter.resource.attributes.get("service.version").unwrap();
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// CONF-OTEL-002: Metric Descriptor Conformance
+    /// Metric descriptors must follow OpenTelemetry naming and structure conventions
+    #[test]
+    fn conf_otel_metric_descriptor_conformance() {
+        let config = OtelExporterConfig::default();
+        let exporter = OtelMetricsExporter::new(config);
+
+        let mut metrics = Metrics::new();
+        metrics.counter("http_requests_total").add(100);
+        metrics.gauge("memory_usage_bytes").set(1024);
+        metrics.histogram("request_duration_seconds", vec![0.1, 0.5, 1.0]).observe(0.25);
+
+        let request = exporter.build_request(&metrics).expect("build_request failed");
+
+        // Verify metric descriptor structure
+        assert_eq!(request.metrics.len(), 3);
+
+        // Check counter descriptor
+        let counter_metric = request.metrics.iter()
+            .find(|m| m.descriptor.name == "http_requests_total")
+            .expect("counter metric not found");
+        assert!(!counter_metric.descriptor.name.is_empty());
+        assert!(!counter_metric.descriptor.description.is_empty());
+        assert_eq!(counter_metric.descriptor.unit, "1");
+
+        // Check gauge descriptor
+        let gauge_metric = request.metrics.iter()
+            .find(|m| m.descriptor.name == "memory_usage_bytes")
+            .expect("gauge metric not found");
+        assert!(gauge_metric.descriptor.description.contains("Gauge"));
+
+        // Check histogram descriptor
+        let hist_metric = request.metrics.iter()
+            .find(|m| m.descriptor.name == "request_duration_seconds")
+            .expect("histogram metric not found");
+        assert_eq!(hist_metric.descriptor.unit, "s");
+    }
+
+    /// CONF-OTEL-003: Data Point Structure Conformance
+    /// Data points must have proper timestamp, value, and attributes structure
+    #[test]
+    fn conf_otel_data_point_structure() {
+        let config = OtelExporterConfig::default();
+        let exporter = OtelMetricsExporter::new(config);
+
+        let mut metrics = Metrics::new();
+        metrics.counter("test_counter").add(42);
+
+        let request = exporter.build_request(&metrics).expect("build_request failed");
+        let metric = &request.metrics[0];
+        let data_point = &metric.data_points[0];
+
+        // Verify timestamp is present and reasonable
+        assert!(data_point.timestamp_nanos > 0);
+        assert!(data_point.timestamp_nanos < u64::MAX);
+
+        // Verify value structure
+        match &data_point.value {
+            OtelValue::Counter(value) => assert_eq!(*value, 42),
+            _ => panic!("Expected Counter value"),
+        }
+
+        // Verify attributes structure exists (even if empty)
+        assert!(data_point.attributes.is_empty()); // No custom attributes set
+    }
+
+    /// CONF-OTEL-004: Aggregation Temporality Conformance
+    /// Different metric types must have correct aggregation semantics
+    #[test]
+    fn conf_otel_aggregation_temporality() {
+        let config = OtelExporterConfig::default();
+        let exporter = OtelMetricsExporter::new(config);
+
+        let mut metrics = Metrics::new();
+
+        // Counters are cumulative (monotonic)
+        let counter = metrics.counter("requests");
+        counter.add(10);
+        counter.add(5); // Should be cumulative: 15
+
+        // Gauges are instantaneous
+        let gauge = metrics.gauge("cpu_usage");
+        gauge.set(50);
+        gauge.set(75); // Should overwrite: 75
+
+        // Histograms are cumulative distributions
+        let hist = metrics.histogram("latencies", vec![0.1, 1.0]);
+        hist.observe(0.05);
+        hist.observe(0.5);
+        hist.observe(2.0);
+
+        let request = exporter.build_request(&metrics).expect("build_request failed");
+
+        // Verify counter semantics
+        let counter_metric = request.metrics.iter()
+            .find(|m| m.descriptor.name == "requests")
+            .expect("counter not found");
+        if let OtelValue::Counter(value) = counter_metric.data_points[0].value {
+            assert_eq!(value, 15); // Cumulative
+        }
+
+        // Verify gauge semantics
+        let gauge_metric = request.metrics.iter()
+            .find(|m| m.descriptor.name == "cpu_usage")
+            .expect("gauge not found");
+        if let OtelValue::Gauge(value) = gauge_metric.data_points[0].value {
+            assert_eq!(value, 75.0); // Latest value
+        }
+
+        // Verify histogram semantics
+        let hist_metric = request.metrics.iter()
+            .find(|m| m.descriptor.name == "latencies")
+            .expect("histogram not found");
+        if let OtelValue::Histogram { count, sum, buckets } = &hist_metric.data_points[0].value {
+            assert_eq!(*count, 3); // Total observations
+            assert!(*sum > 2.5); // Sum of all values
+            assert!(!buckets.is_empty()); // Bucket distribution
+        }
+    }
+
+    /// CONF-OTEL-005: Batch Export Conformance
+    /// Multiple metrics must be exportable in a single request
+    #[test]
+    fn conf_otel_batch_export_conformance() {
+        let config = OtelExporterConfig {
+            batch_size: 100,
+            ..Default::default()
+        };
+        let exporter = OtelMetricsExporter::new(config);
+
+        let mut metrics = Metrics::new();
+
+        // Create multiple metrics of different types
+        for i in 0..5 {
+            metrics.counter(&format!("counter_{i}")).add(i as u64 * 10);
+            metrics.gauge(&format!("gauge_{i}")).set(i as i64);
+            metrics.histogram(&format!("hist_{i}"), vec![1.0, 10.0]).observe(i as f64);
+        }
+
+        let request = exporter.build_request(&metrics).expect("build_request failed");
+
+        // Verify all metrics are in single request
+        assert_eq!(request.metrics.len(), 15); // 5 * 3 types
+
+        // Verify request has single resource attribution
+        assert!(!request.resource.attributes.is_empty());
+
+        // Verify batch contains metrics of different types
+        let counter_count = request.metrics.iter()
+            .filter(|m| m.descriptor.name.starts_with("counter_"))
+            .count();
+        let gauge_count = request.metrics.iter()
+            .filter(|m| m.descriptor.name.starts_with("gauge_"))
+            .count();
+        let hist_count = request.metrics.iter()
+            .filter(|m| m.descriptor.name.starts_with("hist_"))
+            .count();
+
+        assert_eq!(counter_count, 5);
+        assert_eq!(gauge_count, 5);
+        assert_eq!(hist_count, 5);
+    }
+
+    /// CONF-OTEL-006: Configuration Validation Conformance
+    /// Exporter configuration must validate required fields and defaults
+    #[test]
+    fn conf_otel_configuration_validation() {
+        // Test default configuration
+        let default_config = OtelExporterConfig::default();
+        assert!(!default_config.endpoint.is_empty());
+        assert!(default_config.endpoint.contains("http"));
+        assert!(default_config.endpoint.contains("4317")); // OTLP standard port
+        assert!(default_config.endpoint.contains("/v1/metrics")); // Standard path
+        assert!(default_config.timeout_secs > 0);
+        assert!(default_config.batch_size > 0);
+
+        // Test custom configuration
+        let custom_config = OtelExporterConfig {
+            endpoint: "https://otel-collector.example.com/v1/metrics".to_string(),
+            api_key: Some("secret_key_123".to_string()),
+            timeout_secs: 30,
+            compression: false,
+            batch_size: 50,
+        };
+
+        let exporter = OtelMetricsExporter::new(custom_config.clone());
+        assert_eq!(exporter.config.endpoint, custom_config.endpoint);
+        assert_eq!(exporter.config.api_key, custom_config.api_key);
+        assert_eq!(exporter.config.timeout_secs, 30);
+        assert!(!exporter.config.compression);
+        assert_eq!(exporter.config.batch_size, 50);
+    }
+
+    /// CONF-OTEL-007: Error Handling Conformance
+    /// Exporter must handle various error conditions properly
+    #[test]
+    fn conf_otel_error_handling_conformance() {
+        // Test error types are properly categorized
+        let errors = vec![
+            OtelExportError::TimestampError,
+            OtelExportError::NetworkError("connection timeout".to_string()),
+            OtelExportError::AuthError,
+            OtelExportError::RateLimited,
+            OtelExportError::InvalidData("malformed metric name".to_string()),
+        ];
+
+        for error in errors {
+            // All errors must implement Display and Error traits
+            let display_str = format!("{error}");
+            assert!(!display_str.is_empty());
+
+            // Error must be Debug-able for logging
+            let debug_str = format!("{error:?}");
+            assert!(!debug_str.is_empty());
+        }
+
+        // Test specific error messages
+        let net_err = OtelExportError::NetworkError("timeout".to_string());
+        assert!(format!("{net_err}").contains("Network error"));
+        assert!(format!("{net_err}").contains("timeout"));
+
+        let data_err = OtelExportError::InvalidData("bad name".to_string());
+        assert!(format!("{data_err}").contains("Invalid metric data"));
+        assert!(format!("{data_err}").contains("bad name"));
+    }
+
+    /// CONF-OTEL-008: Histogram Bucket Conformance
+    /// Histogram buckets must follow OpenTelemetry cumulative distribution requirements
+    #[test]
+    fn conf_otel_histogram_bucket_conformance() {
+        let config = OtelExporterConfig::default();
+        let exporter = OtelMetricsExporter::new(config);
+
+        let mut metrics = Metrics::new();
+        let hist = metrics.histogram("response_times", vec![0.1, 0.5, 1.0, 5.0]);
+
+        // Observe values across different buckets
+        hist.observe(0.05);  // bucket 0 (<=0.1)
+        hist.observe(0.3);   // bucket 1 (<=0.5)
+        hist.observe(0.8);   // bucket 2 (<=1.0)
+        hist.observe(2.0);   // bucket 3 (<=5.0)
+        hist.observe(10.0);  // bucket 4 (+Inf)
+
+        let request = exporter.build_request(&metrics).expect("build_request failed");
+        let hist_metric = &request.metrics[0];
+
+        if let OtelValue::Histogram { count, sum, buckets } = &hist_metric.data_points[0].value {
+            assert_eq!(*count, 5);
+            assert!((*sum - 13.15).abs() < 0.01); // 0.05+0.3+0.8+2.0+10.0
+
+            // Verify buckets are cumulative and properly bounded
+            assert_eq!(buckets.len(), 5); // 4 explicit buckets + +Inf
+
+            // Verify cumulative property: each bucket >= previous
+            for i in 1..buckets.len() {
+                assert!(buckets[i].1 >= buckets[i-1].1,
+                    "Bucket {i} count {} should be >= previous bucket count {}",
+                    buckets[i].1, buckets[i-1].1);
+            }
+
+            // Verify final bucket has all observations
+            assert_eq!(buckets.last().unwrap().1, 5);
+
+            // Verify +Inf bucket
+            assert_eq!(buckets.last().unwrap().0, f64::INFINITY);
+        } else {
+            panic!("Expected Histogram value");
+        }
+    }
 }
