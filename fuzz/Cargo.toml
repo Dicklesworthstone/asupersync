@@ -176,6 +176,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_pipeline"
+path = "fuzz_targets/h1_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_gf256_operations"
 path = "fuzz_targets/gf256_operations.rs"
 test = false
