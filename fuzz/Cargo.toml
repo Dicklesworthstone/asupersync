@@ -64,6 +64,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "hpack_literal"
+path = "fuzz_targets/hpack_literal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_hpack_round_trip"
 path = "fuzz_targets/hpack_round_trip.rs"
 test = false
