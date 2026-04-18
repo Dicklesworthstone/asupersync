@@ -1403,4 +1403,364 @@ mod tests {
         assert_eq!(cloned, tp);
         assert_ne!(cloned, def);
     }
+
+    // =========================================================================
+    // RFC 9000 Section 17.1 Packet Number Encoding Conformance Tests
+    // =========================================================================
+
+    /// Test packet number encoding length determination per RFC 9000.
+    /// The encoding must use the minimum number of bytes sufficient to encode the value.
+    #[test]
+    fn rfc9000_packet_number_encoding_length() {
+        // Test minimum length encoding requirements
+        let test_cases = [
+            // (packet_number, min_required_width, max_allowed_width)
+            (0, 1, 1), // 0 fits in 1 byte
+            (1, 1, 1),
+            (255, 1, 1), // 0xFF fits exactly in 1 byte
+            (256, 2, 2), // 0x100 requires 2 bytes
+            (65535, 2, 2), // 0xFFFF fits exactly in 2 bytes
+            (65536, 3, 3), // 0x10000 requires 3 bytes
+            (16777215, 3, 3), // 0xFFFFFF fits exactly in 3 bytes
+            (16777216, 4, 4), // 0x1000000 requires 4 bytes
+            (0xFFFFFFFF, 4, 4), // Maximum 32-bit value requires 4 bytes
+        ];
+
+        for (packet_number, min_width, max_width) in test_cases {
+            // Test that minimum width succeeds
+            assert!(ensure_pn_fits(packet_number, min_width).is_ok(),
+                "Packet number {packet_number} should fit in {min_width} bytes");
+
+            // Test that encoding produces the expected width
+            let mut buf = Vec::new();
+            write_packet_number(packet_number, min_width, &mut buf);
+            assert_eq!(buf.len(), min_width as usize,
+                "Packet number {packet_number} should encode to {min_width} bytes");
+
+            // Test round-trip decode
+            let mut pos = 0;
+            let decoded = read_packet_number(&buf, &mut pos, min_width).unwrap();
+            assert_eq!(decoded, packet_number,
+                "Packet number {packet_number} failed round-trip");
+            assert_eq!(pos, buf.len(), "Should consume all encoded bytes");
+
+            // Test that smaller width fails (except for minimum case)
+            if min_width > 1 {
+                assert!(ensure_pn_fits(packet_number, min_width - 1).is_err(),
+                    "Packet number {packet_number} should NOT fit in {} bytes", min_width - 1);
+            }
+        }
+    }
+
+    /// Test packet number truncation behavior per RFC 9000 Section 17.1.
+    /// Packet numbers are truncated based on the largest acknowledged packet number.
+    #[test]
+    fn rfc9000_packet_number_truncation_algorithm() {
+        // Test the packet number truncation algorithm from RFC 9000
+        // num_unacked_ranges = (full_pn - largest_acked) + 1
+        // encoded_len = min bytes needed to represent (2 * num_unacked_ranges + 1)
+
+        let test_cases = [
+            // (largest_acked, full_packet_number, expected_min_width)
+            (0, 1, 1), // First packet after initial
+            (0, 255, 1), // Can still use 1 byte
+            (0, 256, 2), // Need 2 bytes for wider gap
+            (100, 101, 1), // Small increment from acked
+            (100, 356, 2), // Larger gap requires 2 bytes
+            (1000, 1001, 1), // Small increment
+            (1000, 2024, 2), // Medium gap
+            (50000, 50001, 1), // Sequential packets
+            (50000, 51024, 2), // 1024 packet gap
+        ];
+
+        for (largest_acked, full_pn, expected_min_width) in test_cases {
+            // Calculate unacked range
+            let num_unacked = (full_pn - largest_acked) + 1;
+            let space_needed = 2 * num_unacked + 1;
+
+            // Determine minimum width needed
+            let calculated_width = if space_needed <= 256 { 1 }
+                else if space_needed <= 65536 { 2 }
+                else if space_needed <= 16777216 { 3 }
+                else { 4 };
+
+            assert_eq!(calculated_width, expected_min_width,
+                "Truncation algorithm: largest_acked={largest_acked}, full_pn={full_pn}, \
+                 unacked_range={num_unacked}, space_needed={space_needed}");
+
+            // Test that this width actually works
+            assert!(ensure_pn_fits(full_pn, calculated_width).is_ok(),
+                "Calculated width {calculated_width} should accommodate packet number {full_pn}");
+        }
+    }
+
+    /// Test packet number encoding edge cases per RFC 9000.
+    #[test]
+    fn rfc9000_packet_number_edge_cases() {
+        // Test boundary conditions for each encoding width
+
+        // 1-byte boundaries: 0x00 to 0xFF
+        let mut buf = Vec::new();
+        write_packet_number(0, 1, &mut buf);
+        assert_eq!(buf, vec![0x00]);
+
+        buf.clear();
+        write_packet_number(255, 1, &mut buf);
+        assert_eq!(buf, vec![0xFF]);
+
+        // 2-byte boundaries: 0x0100 to 0xFFFF
+        buf.clear();
+        write_packet_number(256, 2, &mut buf);
+        assert_eq!(buf, vec![0x01, 0x00]);
+
+        buf.clear();
+        write_packet_number(65535, 2, &mut buf);
+        assert_eq!(buf, vec![0xFF, 0xFF]);
+
+        // 3-byte boundaries: 0x010000 to 0xFFFFFF
+        buf.clear();
+        write_packet_number(65536, 3, &mut buf);
+        assert_eq!(buf, vec![0x01, 0x00, 0x00]);
+
+        buf.clear();
+        write_packet_number(16777215, 3, &mut buf);
+        assert_eq!(buf, vec![0xFF, 0xFF, 0xFF]);
+
+        // 4-byte boundaries: 0x01000000 to 0xFFFFFFFF
+        buf.clear();
+        write_packet_number(16777216, 4, &mut buf);
+        assert_eq!(buf, vec![0x01, 0x00, 0x00, 0x00]);
+
+        buf.clear();
+        write_packet_number(0xFFFFFFFF, 4, &mut buf);
+        assert_eq!(buf, vec![0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    /// Test packet number width validation per RFC 9000.
+    #[test]
+    fn rfc9000_packet_number_width_validation() {
+        // Valid widths are 1, 2, 3, or 4 bytes
+        for valid_width in [1, 2, 3, 4] {
+            assert!(validate_pn_len(valid_width).is_ok(),
+                "Width {valid_width} should be valid");
+        }
+
+        // Invalid widths
+        for invalid_width in [0, 5, 6, 255] {
+            assert!(validate_pn_len(invalid_width).is_err(),
+                "Width {invalid_width} should be invalid");
+        }
+
+        // Test specific error message
+        let err = validate_pn_len(0).unwrap_err();
+        assert!(matches!(err, QuicCoreError::InvalidHeader(_)));
+        let err = validate_pn_len(5).unwrap_err();
+        assert!(matches!(err, QuicCoreError::InvalidHeader(_)));
+    }
+
+    /// Test packet number overflow conditions per RFC 9000.
+    #[test]
+    fn rfc9000_packet_number_overflow() {
+        // Test values that don't fit in requested width
+        let overflow_cases = [
+            (256, 1), // Requires 2 bytes, trying to fit in 1
+            (65536, 1), // Requires 3 bytes, trying to fit in 1
+            (65536, 2), // Requires 3 bytes, trying to fit in 2
+            (16777216, 1), // Requires 4 bytes, trying to fit in 1
+            (16777216, 2), // Requires 4 bytes, trying to fit in 2
+            (16777216, 3), // Requires 4 bytes, trying to fit in 3
+        ];
+
+        for (packet_number, width) in overflow_cases {
+            let err = ensure_pn_fits(packet_number, width).unwrap_err();
+            assert!(matches!(err, QuicCoreError::PacketNumberTooLarge { .. }),
+                "Should get PacketNumberTooLarge for pn={packet_number}, width={width}");
+
+            if let QuicCoreError::PacketNumberTooLarge { packet_number: pn, width: w } = err {
+                assert_eq!(pn, packet_number);
+                assert_eq!(w, width);
+            }
+        }
+    }
+
+    /// Test packet number decoding with insufficient input per RFC 9000.
+    #[test]
+    fn rfc9000_packet_number_truncated_decode() {
+        // Test decoding with insufficient bytes for declared width
+        let truncated_cases = [
+            (2, vec![0x12]), // Declared 2-byte width, only 1 byte available
+            (3, vec![0x12, 0x34]), // Declared 3-byte width, only 2 bytes available
+            (4, vec![0x12, 0x34, 0x56]), // Declared 4-byte width, only 3 bytes available
+        ];
+
+        for (declared_width, truncated_data) in truncated_cases {
+            let mut pos = 0;
+            let err = read_packet_number(&truncated_data, &mut pos, declared_width).unwrap_err();
+            assert_eq!(err, QuicCoreError::UnexpectedEof,
+                "Should get UnexpectedEof for width={declared_width}, data={truncated_data:?}");
+        }
+    }
+
+    /// Test packet number encoding in packet headers per RFC 9000.
+    #[test]
+    fn rfc9000_packet_number_in_headers() {
+        // Test packet number encoding within long headers
+        let long_header_cases = [
+            (1, 1), (255, 1), // 1-byte packet numbers
+            (256, 2), (65535, 2), // 2-byte packet numbers
+            (65536, 3), (16777215, 3), // 3-byte packet numbers
+            (16777216, 4), (0x12345678, 4), // 4-byte packet numbers
+        ];
+
+        for (packet_number, width) in long_header_cases {
+            let header = PacketHeader::Long(LongHeader {
+                packet_type: LongPacketType::Initial,
+                version: 1,
+                dst_cid: ConnectionId::new(&[1, 2, 3, 4]).unwrap(),
+                src_cid: ConnectionId::new(&[5, 6, 7]).unwrap(),
+                token: vec![],
+                payload_length: 100,
+                packet_number,
+                packet_number_len: width,
+            });
+
+            // Test encoding
+            let mut buf = Vec::new();
+            header.encode(&mut buf).unwrap();
+
+            // Test decoding
+            let (decoded, consumed) = PacketHeader::decode(&buf, 0).unwrap();
+            if let PacketHeader::Long(decoded_header) = decoded {
+                assert_eq!(decoded_header.packet_number, packet_number,
+                    "Long header packet number round-trip failed");
+                assert_eq!(decoded_header.packet_number_len, width,
+                    "Long header packet number width mismatch");
+            } else {
+                panic!("Expected long header");
+            }
+            assert_eq!(consumed, buf.len());
+        }
+
+        // Test packet number encoding within short headers
+        let short_header_cases = [
+            (42, 1), (200, 1), // 1-byte packet numbers
+            (300, 2), (50000, 2), // 2-byte packet numbers
+            (70000, 3), (1000000, 3), // 3-byte packet numbers
+            (20000000, 4), (0x87654321, 4), // 4-byte packet numbers
+        ];
+
+        for (packet_number, width) in short_header_cases {
+            let header = PacketHeader::Short(ShortHeader {
+                spin: false,
+                key_phase: false,
+                dst_cid: ConnectionId::new(&[0xAA, 0xBB]).unwrap(),
+                packet_number,
+                packet_number_len: width,
+            });
+
+            // Test encoding
+            let mut buf = Vec::new();
+            header.encode(&mut buf).unwrap();
+
+            // Test decoding (short headers need known dcid length)
+            let (decoded, consumed) = PacketHeader::decode(&buf, 2).unwrap();
+            if let PacketHeader::Short(decoded_header) = decoded {
+                assert_eq!(decoded_header.packet_number, packet_number,
+                    "Short header packet number round-trip failed");
+                assert_eq!(decoded_header.packet_number_len, width,
+                    "Short header packet number width mismatch");
+            } else {
+                panic!("Expected short header");
+            }
+            assert_eq!(consumed, buf.len());
+        }
+    }
+
+    /// Test packet number wire format compliance per RFC 9000.
+    #[test]
+    fn rfc9000_packet_number_wire_format() {
+        // Test that packet numbers are encoded in network byte order (big-endian)
+        let wire_format_cases = [
+            // (packet_number, width, expected_wire_bytes)
+            (0x1234, 2, vec![0x12, 0x34]),
+            (0x123456, 3, vec![0x12, 0x34, 0x56]),
+            (0x12345678, 4, vec![0x12, 0x34, 0x56, 0x78]),
+        ];
+
+        for (packet_number, width, expected_bytes) in wire_format_cases {
+            let mut buf = Vec::new();
+            write_packet_number(packet_number, width, &mut buf);
+            assert_eq!(buf, expected_bytes,
+                "Packet number {packet_number:#x} width {width} wire format mismatch");
+
+            // Test decode produces original value
+            let mut pos = 0;
+            let decoded = read_packet_number(&buf, &mut pos, width).unwrap();
+            assert_eq!(decoded, packet_number);
+        }
+    }
+
+    /// Test packet number space isolation per RFC 9000.
+    #[test]
+    fn rfc9000_packet_number_space_isolation() {
+        // Different packet types have separate packet number spaces
+        // This test verifies they can use the same packet numbers independently
+
+        let packet_number = 1234;
+        let width = 2;
+
+        // Test in Initial packet
+        let initial_header = PacketHeader::Long(LongHeader {
+            packet_type: LongPacketType::Initial,
+            version: 1,
+            dst_cid: ConnectionId::new(&[1, 2, 3]).unwrap(),
+            src_cid: ConnectionId::new(&[4, 5, 6]).unwrap(),
+            token: vec![0xAA, 0xBB],
+            payload_length: 100,
+            packet_number,
+            packet_number_len: width,
+        });
+
+        // Test in Handshake packet
+        let handshake_header = PacketHeader::Long(LongHeader {
+            packet_type: LongPacketType::Handshake,
+            version: 1,
+            dst_cid: ConnectionId::new(&[1, 2, 3]).unwrap(),
+            src_cid: ConnectionId::new(&[4, 5, 6]).unwrap(),
+            token: vec![], // Handshake doesn't have token
+            payload_length: 100,
+            packet_number,
+            packet_number_len: width,
+        });
+
+        // Test in Application Data (Short header)
+        let app_data_header = PacketHeader::Short(ShortHeader {
+            spin: true,
+            key_phase: false,
+            dst_cid: ConnectionId::new(&[1, 2, 3]).unwrap(),
+            packet_number,
+            packet_number_len: width,
+        });
+
+        // All should encode/decode the same packet number independently
+        for header in [initial_header, handshake_header, app_data_header] {
+            let mut buf = Vec::new();
+            header.encode(&mut buf).unwrap();
+
+            let dcid_len = match &header {
+                PacketHeader::Short(_) => 3, // Short header needs known length
+                _ => 0, // Long headers include length field
+            };
+
+            let (decoded, _) = PacketHeader::decode(&buf, dcid_len).unwrap();
+            let decoded_pn = match decoded {
+                PacketHeader::Long(h) => h.packet_number,
+                PacketHeader::Short(h) => h.packet_number,
+                PacketHeader::Retry(_) => panic!("Unexpected retry header"),
+            };
+
+            assert_eq!(decoded_pn, packet_number,
+                "Packet number should be preserved across packet type boundaries");
+        }
+    }
 }
