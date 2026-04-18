@@ -1042,3 +1042,10 @@ path = "fuzz_targets/quic_tls_hello.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "protobuf_varint"
+path = "fuzz_targets/protobuf_varint.rs"
+test = false
+doc = false
+bench = false
