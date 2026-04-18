@@ -867,3 +867,10 @@ path = "fuzz_targets/qpack_stream.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sqlite_sql"
+path = "fuzz_targets/sqlite_sql.rs"
+test = false
+doc = false
+bench = false
