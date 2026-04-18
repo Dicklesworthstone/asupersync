@@ -853,3 +853,10 @@ path = "fuzz_targets/quic_stream.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "qpack_stream"
+path = "fuzz_targets/qpack_stream.rs"
+test = false
+doc = false
+bench = false
