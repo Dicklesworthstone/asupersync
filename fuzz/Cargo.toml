@@ -1147,3 +1147,10 @@ path = "fuzz_targets/bytes_codec.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hpack_index_lookup"
+path = "fuzz_targets/hpack_index_lookup.rs"
+test = false
+doc = false
+bench = false
