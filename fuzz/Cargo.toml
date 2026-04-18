@@ -1084,3 +1084,10 @@ path = "fuzz_targets/h2_ping.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "raptorq_matrix_ops"
+path = "fuzz_targets/raptorq_matrix_ops.rs"
+test = false
+doc = false
+bench = false
