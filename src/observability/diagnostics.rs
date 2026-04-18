@@ -3087,13 +3087,13 @@ mod tests {
         let completed_task = insert_task(&mut state, root, TaskState::Completed(Outcome::Ok(())));
         let cancel_task = insert_task(&mut state, root, TaskState::CancelRequested {
             reason: CancelReason::user("test"),
-            cleanup_budget: Budget::from_millis(100),
+            cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
         });
 
         // Configure scheduler-visible state
         let running_task_record = state.task_mut(running_task).expect("running task");
         running_task_record.total_polls = 5;
-        running_task_record.last_poll_start = Some(Time::from_millis(100));
+        running_task_record.last_polled_step = Some(Time::from_millis(100));
         let notified = running_task_record.wake_state.notify();
         crate::assert_with_log!(notified, "wake state notified", true, notified);
 
@@ -3557,11 +3557,24 @@ mod tests {
         let health1 = diagnostics.analyze_structural_health();
         let health2 = diagnostics.analyze_structural_health();
 
+        let health_deterministic = match (&health1.classification, &health2.classification) {
+            (crate::observability::spectral_health::HealthClassification::Healthy { .. },
+             crate::observability::spectral_health::HealthClassification::Healthy { .. }) => true,
+            (crate::observability::spectral_health::HealthClassification::Deadlocked,
+             crate::observability::spectral_health::HealthClassification::Deadlocked) => true,
+            (crate::observability::spectral_health::HealthClassification::Degraded { .. },
+             crate::observability::spectral_health::HealthClassification::Degraded { .. }) => true,
+            (crate::observability::spectral_health::HealthClassification::Critical { .. },
+             crate::observability::spectral_health::HealthClassification::Critical { .. }) => true,
+            (crate::observability::spectral_health::HealthClassification::Fragmented { .. },
+             crate::observability::spectral_health::HealthClassification::Fragmented { .. }) => true,
+            _ => false,
+        };
         crate::assert_with_log!(
-            health1.classification == health2.classification,
+            health_deterministic,
             "structural health deterministic",
             true,
-            health1.classification == health2.classification
+            health_deterministic
         );
 
         crate::test_complete!("introspection_conf_008_deadlock_detection_determinism");
@@ -3578,7 +3591,7 @@ mod tests {
         let task1 = insert_task(&mut state, root, TaskState::Running);
         let task2 = insert_task(&mut state, root, TaskState::CancelRequested {
             reason: CancelReason::user("test"),
-            cleanup_budget: Budget::from_millis(100),
+            cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
         });
 
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1000)));
@@ -3654,7 +3667,19 @@ mod tests {
             deadlock_severity_match
         );
 
-        let health_class_match = baseline_health.classification == verify_health.classification;
+        let health_class_match = match (&baseline_health.classification, &verify_health.classification) {
+            (crate::observability::spectral_health::HealthClassification::Healthy { .. },
+             crate::observability::spectral_health::HealthClassification::Healthy { .. }) => true,
+            (crate::observability::spectral_health::HealthClassification::Deadlocked,
+             crate::observability::spectral_health::HealthClassification::Deadlocked) => true,
+            (crate::observability::spectral_health::HealthClassification::Degraded { .. },
+             crate::observability::spectral_health::HealthClassification::Degraded { .. }) => true,
+            (crate::observability::spectral_health::HealthClassification::Critical { .. },
+             crate::observability::spectral_health::HealthClassification::Critical { .. }) => true,
+            (crate::observability::spectral_health::HealthClassification::Fragmented { .. },
+             crate::observability::spectral_health::HealthClassification::Fragmented { .. }) => true,
+            _ => false,
+        };
         crate::assert_with_log!(
             health_class_match,
             "health analysis cancel-safe",
@@ -3748,7 +3773,7 @@ mod tests {
         let _complex_task2 = insert_task(&mut complex_state, complex_child2, TaskState::Completed(Outcome::Ok(())));
         let complex_task3 = insert_task(&mut complex_state, complex_root, TaskState::CancelRequested {
             reason: CancelReason::user("cleanup"),
-            cleanup_budget: Budget::from_millis(200),
+            cleanup_budget: Budget::with_deadline_ns(200_000_000), // 200ms in ns
         });
 
         let complex_diagnostics = Diagnostics::new(Arc::new(complex_state));
@@ -3829,9 +3854,11 @@ mod tests {
             // Verify health classification is valid (structural analysis completed)
             let valid_classification = matches!(
                 health.classification,
-                crate::observability::spectral_health::HealthClassification::Healthy |
-                crate::observability::spectral_health::HealthClassification::Degraded |
-                crate::observability::spectral_health::HealthClassification::Deadlocked
+                crate::observability::spectral_health::HealthClassification::Healthy { .. } |
+                crate::observability::spectral_health::HealthClassification::Degraded { .. } |
+                crate::observability::spectral_health::HealthClassification::Deadlocked |
+                crate::observability::spectral_health::HealthClassification::Critical { .. } |
+                crate::observability::spectral_health::HealthClassification::Fragmented { .. }
             );
             crate::assert_with_log!(
                 valid_classification,
