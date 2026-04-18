@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["tls", "postgres", "mysql", "kafka", "test-internals"] }
+asupersync = { path = "..", features = ["tls", "postgres", "mysql", "kafka", "test-internals", "trace-compression"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -251,6 +251,13 @@ bench = false
 [[bin]]
 name = "fuzz_trace_file_parsing"
 path = "fuzz_targets/trace_file_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_file_durability"
+path = "fuzz_targets/trace_file_durability.rs"
 test = false
 doc = false
 bench = false
@@ -580,6 +587,13 @@ bench = false
 [[bin]]
 name = "bytes_mut_freeze_split"
 path = "fuzz_targets/bytes_mut_freeze_split.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "consistent_hash_ring"
+path = "fuzz_targets/consistent_hash_ring.rs"
 test = false
 doc = false
 bench = false
