@@ -930,3 +930,10 @@ path = "fuzz_targets/h1_http_client.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h1_header_values"
+path = "fuzz_targets/h1_header_values.rs"
+test = false
+doc = false
+bench = false
