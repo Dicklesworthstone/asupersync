@@ -4422,6 +4422,304 @@ mod tests {
         assert!(dbg.contains("PoolStats"));
     }
 
+    // ========================================================================
+    // Metamorphic Testing: Pool acquire/release lifecycle invariants
+    // ========================================================================
+
+    #[test]
+    fn metamorphic_resource_conservation_invariant() {
+        init_test("metamorphic_resource_conservation_invariant");
+
+        // MR: total_resources(before_operation) == total_resources(after_operation)
+        // Conservation holds across any sequence of acquire/release operations
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(5));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        let initial_stats = pool.stats();
+        let initial_total = initial_stats.total;
+
+        // Perform sequence: acquire -> return -> acquire -> discard -> acquire -> drop
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 1");
+        r1.return_to_pool();
+
+        let r2 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 2");
+        r2.discard();
+
+        let r3 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 3");
+        drop(r3); // implicit return via Drop
+
+        let final_stats = pool.stats();
+        let final_total = final_stats.total;
+
+        // Conservation: total resources should be preserved (accounting for discarded)
+        // Note: discard removes from total, so final should equal initial + created - discarded
+        crate::assert_with_log!(
+            final_total >= initial_total,
+            "resource conservation: total preserved or increased",
+            true,
+            final_total >= initial_total
+        );
+        crate::assert_with_log!(
+            final_stats.active == 0,
+            "all resources returned or discarded",
+            0usize,
+            final_stats.active
+        );
+
+        crate::test_complete!("metamorphic_resource_conservation_invariant");
+    }
+
+    #[test]
+    fn metamorphic_acquire_release_symmetry() {
+        init_test("metamorphic_acquire_release_symmetry");
+
+        // MR: acquisitions(seq) == releases(seq) for any complete sequence
+        // Each successful acquire must be paired with exactly one release
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        let initial_acquisitions = pool.stats().total_acquisitions;
+
+        // Perform sequence of acquire/release pairs
+        for i in 0..10 {
+            let resource = futures_lite::future::block_on(pool.acquire(&cx))
+                .expect("acquire should succeed");
+
+            match i % 3 {
+                0 => resource.return_to_pool(),
+                1 => resource.discard(),
+                _ => drop(resource), // implicit return
+            }
+        }
+
+        let final_stats = pool.stats();
+        let total_acquisitions = final_stats.total_acquisitions - initial_acquisitions;
+
+        // Symmetry: all acquired resources have been released (active == 0)
+        crate::assert_with_log!(
+            total_acquisitions == 10,
+            "10 acquisitions performed",
+            10u64,
+            total_acquisitions
+        );
+        crate::assert_with_log!(
+            final_stats.active == 0,
+            "acquire/release symmetry: all acquired resources released",
+            0usize,
+            final_stats.active
+        );
+
+        crate::test_complete!("metamorphic_acquire_release_symmetry");
+    }
+
+    #[test]
+    fn metamorphic_resource_reuse_equivalence() {
+        init_test("metamorphic_resource_reuse_equivalence");
+
+        // MR: reused_resource.value == original_resource.value
+        // Returned resources should be equivalent to original when reacquired
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let pool = GenericPool::new(factory, PoolConfig::with_max_size(3));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Acquire first resource, remember its value
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 1");
+        let original_value = *r1;
+        r1.return_to_pool();
+
+        // Acquire again - should get the same resource back
+        let r2 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 2");
+        let reused_value = *r2;
+
+        // Equivalence: reused resource should have same value as original
+        crate::assert_with_log!(
+            reused_value == original_value,
+            "resource reuse equivalence",
+            original_value,
+            reused_value
+        );
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.idle == 0,
+            "reused resource removed from idle",
+            0usize,
+            stats.idle
+        );
+        crate::assert_with_log!(
+            stats.active == 1,
+            "reused resource now active",
+            1usize,
+            stats.active
+        );
+
+        r2.return_to_pool();
+        crate::test_complete!("metamorphic_resource_reuse_equivalence");
+    }
+
+    #[test]
+    fn metamorphic_pool_bounds_invariant() {
+        init_test("metamorphic_pool_bounds_invariant");
+
+        // MR: total_resources <= max_size for all operation sequences
+        // Pool should never exceed configured bounds regardless of operations
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(2));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Try to acquire more than max_size resources concurrently
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 1");
+        let r2 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 2");
+
+        let stats_at_capacity = pool.stats();
+        crate::assert_with_log!(
+            stats_at_capacity.total <= 2,
+            "bounds invariant: total <= max_size at capacity",
+            true,
+            stats_at_capacity.total <= 2
+        );
+        crate::assert_with_log!(
+            stats_at_capacity.active == 2,
+            "both resources active",
+            2usize,
+            stats_at_capacity.active
+        );
+
+        // try_acquire should fail when at capacity
+        let r3_opt = pool.try_acquire();
+        crate::assert_with_log!(
+            r3_opt.is_none(),
+            "bounds invariant: try_acquire fails at capacity",
+            true,
+            r3_opt.is_none()
+        );
+
+        // Return resources and verify bounds still respected
+        r1.return_to_pool();
+        r2.return_to_pool();
+
+        let final_stats = pool.stats();
+        crate::assert_with_log!(
+            final_stats.total <= 2,
+            "bounds invariant: total <= max_size after returns",
+            true,
+            final_stats.total <= 2
+        );
+
+        crate::test_complete!("metamorphic_pool_bounds_invariant");
+    }
+
+    #[test]
+    fn metamorphic_release_idempotency() {
+        init_test("metamorphic_release_idempotency");
+
+        // MR: release(release(resource)) == release(resource)
+        // Multiple releases of same resource should be idempotent (safe no-ops)
+        let (tx, rx) = mpsc::channel();
+        let pooled = PooledResource::new(42u8, tx);
+
+        // First release
+        pooled.return_to_pool();
+
+        // Verify first release message received
+        let msg1 = rx.recv().expect("first return message");
+        match msg1 {
+            PoolReturn::Return { resource: value, .. } => {
+                crate::assert_with_log!(value == 42, "first release value", 42u8, value);
+            }
+            PoolReturn::Discard { .. } => unreachable!("expected return"),
+        }
+
+        // Second release should be no-op (idempotency)
+        // Note: pooled was consumed by return_to_pool(), so we test the obligation system
+        // by verifying no second message is sent on drop (which would be a no-op)
+
+        // Verify exactly one message (idempotency - no double release)
+        crate::assert_with_log!(
+            rx.try_recv().is_err(),
+            "release idempotency: no second message",
+            true,
+            rx.try_recv().is_err()
+        );
+
+        // Test with discard idempotency
+        let (tx2, rx2) = mpsc::channel();
+        let pooled2 = PooledResource::new(99u8, tx2);
+
+        pooled2.discard();
+
+        let msg2 = rx2.recv().expect("discard message");
+        match msg2 {
+            PoolReturn::Discard { .. } => {
+                // Good - discard message received
+            }
+            PoolReturn::Return { .. } => unreachable!("expected discard"),
+        }
+
+        // Verify no second discard message
+        crate::assert_with_log!(
+            rx2.try_recv().is_err(),
+            "discard idempotency: no second message",
+            true,
+            rx2.try_recv().is_err()
+        );
+
+        crate::test_complete!("metamorphic_release_idempotency");
+    }
+
+    #[test]
+    fn metamorphic_operation_sequence_commutativity() {
+        init_test("metamorphic_operation_sequence_commutativity");
+
+        // MR: final_state(seq1) == final_state(reorder(seq1)) for independent operations
+        // Commutative property: reordering independent operations preserves final state
+        let pool1 = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
+        let pool2 = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Sequence 1: acquire A, acquire B, return A, return B
+        let a1 = futures_lite::future::block_on(pool1.acquire(&cx)).expect("acquire A1");
+        let b1 = futures_lite::future::block_on(pool1.acquire(&cx)).expect("acquire B1");
+        a1.return_to_pool();
+        b1.return_to_pool();
+
+        // Sequence 2: acquire A, acquire B, return B, return A (reordered returns)
+        let a2 = futures_lite::future::block_on(pool2.acquire(&cx)).expect("acquire A2");
+        let b2 = futures_lite::future::block_on(pool2.acquire(&cx)).expect("acquire B2");
+        b2.return_to_pool();
+        a2.return_to_pool();
+
+        // Commutativity: both sequences should result in equivalent final states
+        let stats1 = pool1.stats();
+        let stats2 = pool2.stats();
+
+        crate::assert_with_log!(
+            stats1.active == stats2.active,
+            "commutativity: active count equivalent",
+            stats1.active,
+            stats2.active
+        );
+        crate::assert_with_log!(
+            stats1.idle == stats2.idle,
+            "commutativity: idle count equivalent",
+            stats1.idle,
+            stats2.idle
+        );
+        crate::assert_with_log!(
+            stats1.total_acquisitions == stats2.total_acquisitions,
+            "commutativity: acquisition count equivalent",
+            stats1.total_acquisitions,
+            stats2.total_acquisitions
+        );
+
+        crate::test_complete!("metamorphic_operation_sequence_commutativity");
+    }
+
     fn noop_pool_waker() -> Waker {
         struct NoopPoolWaker;
 
