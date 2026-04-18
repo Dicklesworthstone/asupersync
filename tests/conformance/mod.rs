@@ -9,6 +9,7 @@ pub mod h1_rfc9112;
 pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_connect;
 pub mod h2_rst_stream_ping_rfc9113;
+pub mod hpack_table_size;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
@@ -49,6 +50,9 @@ pub use h2_alpn_negotiation_rfc7540::{
 };
 pub use h2_rst_stream_ping_rfc9113::{
     H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory,
+};
+pub use hpack_table_size::{
+    HpackTableSizeConformanceResult, TestCategory as HpackTableSizeTestCategory,
 };
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 // pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
