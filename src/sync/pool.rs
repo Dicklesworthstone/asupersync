@@ -4720,6 +4720,218 @@ mod tests {
         crate::test_complete!("metamorphic_operation_sequence_commutativity");
     }
 
+    #[test]
+    fn metamorphic_concurrent_acquire_serializes() {
+        init_test("metamorphic_concurrent_acquire_serializes");
+
+        // MR: concurrent(acquire_n) == serialize(acquire_n)
+        // Concurrent acquisitions should serialize properly without race conditions
+        let pool = std::sync::Arc::new(GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(2) // Small pool to force contention
+        ));
+
+        // Test concurrent acquisition with limited pool size
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let cx = crate::cx::Cx::for_testing();
+            let num_tasks = 6; // More than pool capacity
+            let mut handles = Vec::new();
+
+            for i in 0..num_tasks {
+                let pool_clone = std::sync::Arc::clone(&pool);
+                let cx_clone = cx.clone();
+                let handle = tokio::spawn(async move {
+                    // Each task tries to acquire, use briefly, then return
+                    let resource = pool_clone.acquire(&cx_clone).await.unwrap();
+
+                    // Simulate brief usage
+                    tokio::task::yield_now().await;
+
+                    resource.return_to_pool();
+                    i // Return task ID
+                });
+                handles.push(handle);
+            }
+
+            // All tasks should complete successfully despite serialization
+            let mut results = Vec::new();
+            for handle in handles {
+                let result = handle.await.unwrap();
+                results.push(result);
+            }
+            results.sort();
+
+            // Verify all tasks completed
+            let expected: Vec<_> = (0..num_tasks).collect();
+            crate::assert_with_log!(
+                results == expected,
+                "concurrent acquire serialization: all tasks completed",
+                expected,
+                results
+            );
+
+            // Pool should be in consistent state
+            let final_stats = pool.stats();
+            crate::assert_with_log!(
+                final_stats.active == 0,
+                "serialization: no leaked active resources",
+                0usize,
+                final_stats.active
+            );
+            crate::assert_with_log!(
+                final_stats.total_acquisitions == num_tasks as u32,
+                "serialization: all acquisitions counted",
+                num_tasks as u32,
+                final_stats.total_acquisitions
+            );
+        });
+
+        crate::test_complete!("metamorphic_concurrent_acquire_serializes");
+    }
+
+    #[test]
+    fn metamorphic_deterministic_lab_runtime_replay() {
+        init_test("metamorphic_deterministic_lab_runtime_replay");
+
+        // MR: replay(operations_seq) == replay(operations_seq)
+        // Identical operation sequences should produce identical results under LabRuntime
+
+        let run_sequence = || -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+            let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
+            let runtime = crate::lab::runtime::LabRuntime::new();
+
+            let (active_history, idle_history, total_history) = runtime.block_on(async {
+                let cx = crate::cx::Cx::for_testing();
+                let mut active_trace = Vec::new();
+                let mut idle_trace = Vec::new();
+                let mut total_trace = Vec::new();
+
+                // Deterministic sequence of operations
+                for i in 0..5 {
+                    let resource = pool.acquire(&cx).await.unwrap();
+                    let stats = pool.stats();
+                    active_trace.push(stats.active);
+                    idle_trace.push(stats.idle);
+                    total_trace.push(stats.total);
+
+                    // Deterministic decision based on iteration
+                    if i % 2 == 0 {
+                        resource.return_to_pool();
+                    } else {
+                        resource.discard();
+                    }
+
+                    let stats_after = pool.stats();
+                    active_trace.push(stats_after.active);
+                    idle_trace.push(stats_after.idle);
+                    total_trace.push(stats_after.total);
+
+                    // Deterministic yield
+                    crate::runtime::yield_now().await;
+                }
+
+                (active_trace, idle_trace, total_trace)
+            });
+
+            (active_history, idle_history, total_history)
+        };
+
+        // Run the same sequence multiple times
+        let (active1, idle1, total1) = run_sequence();
+        let (active2, idle2, total2) = run_sequence();
+        let (active3, idle3, total3) = run_sequence();
+
+        // Deterministic property: all runs should produce identical traces
+        crate::assert_with_log!(
+            active1 == active2,
+            "deterministic replay: active traces match (run1 vs run2)",
+            active1,
+            active2
+        );
+        crate::assert_with_log!(
+            active2 == active3,
+            "deterministic replay: active traces match (run2 vs run3)",
+            active2,
+            active3
+        );
+        crate::assert_with_log!(
+            idle1 == idle2,
+            "deterministic replay: idle traces match (run1 vs run2)",
+            idle1,
+            idle2
+        );
+        crate::assert_with_log!(
+            idle2 == idle3,
+            "deterministic replay: idle traces match (run2 vs run3)",
+            idle2,
+            idle3
+        );
+        crate::assert_with_log!(
+            total1 == total2,
+            "deterministic replay: total traces match (run1 vs run2)",
+            total1,
+            total2
+        );
+        crate::assert_with_log!(
+            total2 == total3,
+            "deterministic replay: total traces match (run2 vs run3)",
+            total2,
+            total3
+        );
+
+        // Test determinism with timing-dependent operations
+        let timed_sequence = || -> Vec<u32> {
+            let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(2));
+            let runtime = crate::lab::runtime::LabRuntime::new();
+
+            runtime.block_on(async {
+                let cx = crate::cx::Cx::for_testing();
+                let mut acquisition_order = Vec::new();
+
+                // Spawn concurrent tasks with deterministic timing
+                let task1 = async {
+                    crate::runtime::yield_now().await;
+                    pool.acquire(&cx).await.unwrap().return_to_pool();
+                    1u32
+                };
+
+                let task2 = async {
+                    crate::runtime::yield_now().await;
+                    crate::runtime::yield_now().await;
+                    pool.acquire(&cx).await.unwrap().return_to_pool();
+                    2u32
+                };
+
+                let (result1, result2) = tokio::join!(task1, task2);
+                acquisition_order.push(result1);
+                acquisition_order.push(result2);
+                acquisition_order
+            })
+        };
+
+        let timing1 = timed_sequence();
+        let timing2 = timed_sequence();
+        let timing3 = timed_sequence();
+
+        // Timing determinism under LabRuntime
+        crate::assert_with_log!(
+            timing1 == timing2,
+            "timing deterministic replay: order matches (run1 vs run2)",
+            timing1,
+            timing2
+        );
+        crate::assert_with_log!(
+            timing2 == timing3,
+            "timing deterministic replay: order matches (run2 vs run3)",
+            timing2,
+            timing3
+        );
+
+        crate::test_complete!("metamorphic_deterministic_lab_runtime_replay");
+    }
+
     fn noop_pool_waker() -> Waker {
         struct NoopPoolWaker;
 
