@@ -1028,3 +1028,10 @@ path = "fuzz_targets/diagnostics_snapshot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "quic_tls_hello"
+path = "fuzz_targets/quic_tls_hello.rs"
+test = false
+doc = false
+bench = false
