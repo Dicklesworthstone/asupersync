@@ -4,10 +4,7 @@
 //! metamorphic relations. Each relation verifies that certain transformations
 //! preserve semantic equivalence or produce predictable changes.
 
-use asupersync::obligation::{
-    Body, Diagnostic, Instruction, LeakChecker,
-    ObligationVar, VarState
-};
+use asupersync::obligation::{Body, Diagnostic, Instruction, LeakChecker, ObligationVar, VarState};
 use asupersync::record::ObligationKind;
 use asupersync::test_utils;
 use proptest::prelude::*;
@@ -67,17 +64,15 @@ fn arb_branch_instruction() -> impl Strategy<Value = Instruction> {
 /// Generate full instruction sequences including branches.
 fn arb_instructions() -> impl Strategy<Value = Vec<Instruction>> {
     prop::collection::vec(
-        prop_oneof![
-            arb_simple_instruction(),
-            arb_branch_instruction(),
-        ],
+        prop_oneof![arb_simple_instruction(), arb_branch_instruction(),],
         0..6,
     )
 }
 
 /// Generate obligation bodies.
 fn arb_body() -> impl Strategy<Value = Body> {
-    (any::<String>(), arb_instructions()).prop_map(|(name, instructions)| Body::new(name, instructions))
+    (any::<String>(), arb_instructions())
+        .prop_map(|(name, instructions)| Body::new(name, instructions))
 }
 
 /// Generate variable mappings for renaming tests.
@@ -90,7 +85,10 @@ fn arb_var_mapping() -> impl Strategy<Value = BTreeMap<ObligationVar, Obligation
 // ============================================================================
 
 /// Apply variable renaming to an instruction.
-fn rename_instruction(instr: &Instruction, mapping: &BTreeMap<ObligationVar, ObligationVar>) -> Instruction {
+fn rename_instruction(
+    instr: &Instruction,
+    mapping: &BTreeMap<ObligationVar, ObligationVar>,
+) -> Instruction {
     match instr {
         Instruction::Reserve { var, kind } => Instruction::Reserve {
             var: mapping.get(var).copied().unwrap_or(*var),
@@ -103,14 +101,23 @@ fn rename_instruction(instr: &Instruction, mapping: &BTreeMap<ObligationVar, Obl
             var: mapping.get(var).copied().unwrap_or(*var),
         },
         Instruction::Branch { arms } => Instruction::Branch {
-            arms: arms.iter().map(|arm| rename_instructions(arm, mapping)).collect(),
+            arms: arms
+                .iter()
+                .map(|arm| rename_instructions(arm, mapping))
+                .collect(),
         },
     }
 }
 
 /// Apply variable renaming to instruction sequence.
-fn rename_instructions(instructions: &[Instruction], mapping: &BTreeMap<ObligationVar, ObligationVar>) -> Vec<Instruction> {
-    instructions.iter().map(|instr| rename_instruction(instr, mapping)).collect()
+fn rename_instructions(
+    instructions: &[Instruction],
+    mapping: &BTreeMap<ObligationVar, ObligationVar>,
+) -> Vec<Instruction> {
+    instructions
+        .iter()
+        .map(|instr| rename_instruction(instr, mapping))
+        .collect()
 }
 
 /// Apply variable renaming to a body.
@@ -135,9 +142,9 @@ fn diagnostics_equivalent(
     for d1 in diag1 {
         let mapped_var = mapping.get(&d1.var).copied().unwrap_or(d1.var);
         let found = diag2.iter().any(|d2| {
-            d2.var == mapped_var &&
-            d2.obligation_kind == d1.obligation_kind &&
-            std::mem::discriminant(&d2.kind) == std::mem::discriminant(&d1.kind)
+            d2.var == mapped_var
+                && d2.obligation_kind == d1.obligation_kind
+                && std::mem::discriminant(&d2.kind) == std::mem::discriminant(&d1.kind)
         });
         if !found {
             return false;
@@ -152,13 +159,17 @@ fn extract_variables(instructions: &[Instruction]) -> BTreeSet<ObligationVar> {
     let mut vars = BTreeSet::new();
     for instr in instructions {
         match instr {
-            Instruction::Reserve { var, .. } => { vars.insert(*var); },
-            Instruction::Commit { var } | Instruction::Abort { var } => { vars.insert(*var); },
+            Instruction::Reserve { var, .. } => {
+                vars.insert(*var);
+            }
+            Instruction::Commit { var } | Instruction::Abort { var } => {
+                vars.insert(*var);
+            }
             Instruction::Branch { arms } => {
                 for arm in arms {
                     vars.extend(extract_variables(arm));
                 }
-            },
+            }
         }
     }
     vars
@@ -570,31 +581,56 @@ fn mr12_lattice_ordering_preservation() {
     // Test specific ordering relationships in the lattice
     let test_cases = vec![
         // Empty ⊑ everything except MayHoldAmbiguous when joined with different kinds
-        (VarState::Empty, VarState::Held(kind), VarState::MayHold(kind)),
-        (VarState::Empty, VarState::MayHold(kind), VarState::MayHold(kind)),
+        (
+            VarState::Empty,
+            VarState::Held(kind),
+            VarState::MayHold(kind),
+        ),
+        (
+            VarState::Empty,
+            VarState::MayHold(kind),
+            VarState::MayHold(kind),
+        ),
         (VarState::Empty, VarState::Resolved, VarState::Resolved),
-
         // Held(k) ⊔ Resolved = MayHold(k)
-        (VarState::Held(kind), VarState::Resolved, VarState::MayHold(kind)),
-
+        (
+            VarState::Held(kind),
+            VarState::Resolved,
+            VarState::MayHold(kind),
+        ),
         // MayHold(k) ⊔ Resolved = MayHold(k)
-        (VarState::MayHold(kind), VarState::Resolved, VarState::MayHold(kind)),
-
+        (
+            VarState::MayHold(kind),
+            VarState::Resolved,
+            VarState::MayHold(kind),
+        ),
         // Different kinds lead to ambiguous
-        (VarState::Held(kind), VarState::Held(ObligationKind::IoOp), VarState::MayHoldAmbiguous),
-        (VarState::MayHold(kind), VarState::MayHold(ObligationKind::IoOp), VarState::MayHoldAmbiguous),
+        (
+            VarState::Held(kind),
+            VarState::Held(ObligationKind::IoOp),
+            VarState::MayHoldAmbiguous,
+        ),
+        (
+            VarState::MayHold(kind),
+            VarState::MayHold(ObligationKind::IoOp),
+            VarState::MayHoldAmbiguous,
+        ),
     ];
 
     for (state1, state2, expected) in test_cases {
         let result1 = state1.join(state2);
         let result2 = state2.join(state1);
 
-        assert_eq!(result1, expected,
+        assert_eq!(
+            result1, expected,
             "Join {} ⊔ {} should equal {}, got {}",
-            state1, state2, expected, result1);
-        assert_eq!(result2, expected,
+            state1, state2, expected, result1
+        );
+        assert_eq!(
+            result2, expected,
             "Join should be commutative: {} ⊔ {} should equal {}, got {}",
-            state2, state1, expected, result2);
+            state2, state1, expected, result2
+        );
     }
 
     asupersync::test_complete!("mr12_lattice_ordering_preservation");

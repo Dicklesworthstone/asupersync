@@ -18,16 +18,13 @@
 #![cfg(test)]
 
 use proptest::prelude::*;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::panic;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 // Import from graded obligations system
-use asupersync::obligation::graded::{
-    GradedObligation, GradedScope, Resolution,
-};
+use asupersync::obligation::graded::{GradedObligation, GradedScope, Resolution};
 use asupersync::record::ObligationKind;
-
 
 /// Metamorphic relation: Drop Bomb Consistency
 ///
@@ -421,7 +418,8 @@ impl ObligationTracker {
     }
 
     fn outstanding(&self) -> u32 {
-        self.created_count.saturating_sub(self.resolved_count + self.dropped_count)
+        self.created_count
+            .saturating_sub(self.resolved_count + self.dropped_count)
     }
 }
 
@@ -438,10 +436,7 @@ fn obligation_kind_strategy() -> impl Strategy<Value = ObligationKind> {
 }
 
 fn resolution_strategy() -> impl Strategy<Value = Resolution> {
-    prop_oneof![
-        Just(Resolution::Commit),
-        Just(Resolution::Abort),
-    ]
+    prop_oneof![Just(Resolution::Commit), Just(Resolution::Abort),]
 }
 
 // Additional integration tests for complex scenarios

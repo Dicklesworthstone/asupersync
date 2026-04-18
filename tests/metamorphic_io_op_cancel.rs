@@ -156,28 +156,47 @@ fn mr_temporal_monotonicity() {
         match operation {
             ResolutionOperation::Complete => {
                 let duration = op.complete(&mut state).expect("complete should succeed");
-                assert_eq!(duration, expected_duration, "Duration mismatch for complete operation");
+                assert_eq!(
+                    duration, expected_duration,
+                    "Duration mismatch for complete operation"
+                );
             }
             ResolutionOperation::Cancel => {
                 let duration = op.cancel(&mut state).expect("cancel should succeed");
-                assert_eq!(duration, expected_duration, "Duration mismatch for cancel operation");
+                assert_eq!(
+                    duration, expected_duration,
+                    "Duration mismatch for cancel operation"
+                );
             }
             ResolutionOperation::Abort(reason) => {
                 let duration = op.abort(&mut state, reason).expect("abort should succeed");
-                assert_eq!(duration, expected_duration, "Duration mismatch for abort operation");
+                assert_eq!(
+                    duration, expected_duration,
+                    "Duration mismatch for abort operation"
+                );
             }
             ResolutionOperation::IntoRaw => {
                 let raw_id = op.into_raw();
-                assert_eq!(raw_id, obligation_id, "into_raw should return correct obligation id");
+                assert_eq!(
+                    raw_id, obligation_id,
+                    "into_raw should return correct obligation id"
+                );
                 // Complete the obligation externally to verify duration tracking
-                let duration = state.abort_obligation(raw_id, ObligationAbortReason::Cancel)
+                let duration = state
+                    .abort_obligation(raw_id, ObligationAbortReason::Cancel)
                     .expect("external abort should succeed");
-                assert_eq!(duration, expected_duration, "Duration mismatch for external resolution");
+                assert_eq!(
+                    duration, expected_duration,
+                    "Duration mismatch for external resolution"
+                );
             }
         }
 
         // Verify temporal monotonicity holds
-        assert!(submit_time <= resolution_time, "Submit time must precede or equal resolution time");
+        assert!(
+            submit_time <= resolution_time,
+            "Submit time must precede or equal resolution time"
+        );
 
         true
     }
@@ -202,11 +221,14 @@ fn mr_state_transition_consistency() {
         let task_id = create_test_task(&mut state, root);
 
         state.now = Time::from_nanos(100);
-        let mut op = IoOp::submit(&mut state, task_id, root, description)
-            .expect("submit should succeed");
+        let mut op =
+            IoOp::submit(&mut state, task_id, root, description).expect("submit should succeed");
 
         // Initially not resolved
-        assert!(!op.is_resolved(), "IoOp should not be resolved after submit");
+        assert!(
+            !op.is_resolved(),
+            "IoOp should not be resolved after submit"
+        );
 
         state.now = Time::from_nanos(200);
 
@@ -240,8 +262,11 @@ fn mr_state_transition_consistency() {
 
             if let Err(err) = second_result {
                 use asupersync::error::ErrorKind;
-                assert_eq!(err.kind(), ErrorKind::ObligationAlreadyResolved,
-                    "Second resolution should fail with ObligationAlreadyResolved");
+                assert_eq!(
+                    err.kind(),
+                    ErrorKind::ObligationAlreadyResolved,
+                    "Second resolution should fail with ObligationAlreadyResolved"
+                );
             }
         }
 
@@ -285,8 +310,12 @@ fn mr_resource_counting_invariant() {
             current_pending += 1;
 
             // Count should increase by 1 after submit
-            assert_eq!(state.pending_obligation_count(), current_pending,
-                "Pending count should increase by 1 after submit {}", i);
+            assert_eq!(
+                state.pending_obligation_count(),
+                current_pending,
+                "Pending count should increase by 1 after submit {}",
+                i
+            );
 
             // Resolution phase
             state.now = Time::from_nanos((100 + i * 100) as u64);
@@ -313,19 +342,27 @@ fn mr_resource_counting_invariant() {
             }
 
             // Verify the count after resolution
-            assert_eq!(state.pending_obligation_count(), current_pending,
-                "Pending count should match expected after resolution {}", i);
+            assert_eq!(
+                state.pending_obligation_count(),
+                current_pending,
+                "Pending count should match expected after resolution {}",
+                i
+            );
         }
 
         // Clean up raw obligations
         for raw_id in raw_obligations {
-            state.abort_obligation(raw_id, ObligationAbortReason::Cancel)
+            state
+                .abort_obligation(raw_id, ObligationAbortReason::Cancel)
                 .expect("cleanup should succeed");
         }
 
         // Final count should return to initial
-        assert_eq!(state.pending_obligation_count(), initial_count,
-            "Final count should match initial count");
+        assert_eq!(
+            state.pending_obligation_count(),
+            initial_count,
+            "Final count should match initial count"
+        );
 
         true
     }
@@ -351,8 +388,13 @@ fn mr_trace_event_ordering() {
         let task_id = create_test_task(&mut state, root);
 
         state.now = Time::from_nanos(submit_time);
-        let mut op = IoOp::submit(&mut state, task_id, root, Some("trace ordering test".into()))
-            .expect("submit should succeed");
+        let mut op = IoOp::submit(
+            &mut state,
+            task_id,
+            root,
+            Some("trace ordering test".into()),
+        )
+        .expect("submit should succeed");
         let obligation_id = op.id();
 
         state.now = Time::from_nanos(resolution_time);
@@ -369,7 +411,8 @@ fn mr_trace_event_ordering() {
             }
             ResolutionOperation::IntoRaw => {
                 let raw_id = op.into_raw();
-                state.abort_obligation(raw_id, ObligationAbortReason::Cancel)
+                state
+                    .abort_obligation(raw_id, ObligationAbortReason::Cancel)
                     .expect("external abort should succeed");
             }
         }
@@ -384,7 +427,10 @@ fn mr_trace_event_ordering() {
         // Duration should match expected value
         if let Some(dur) = duration {
             let expected_duration = resolution_time - submit_time;
-            assert_eq!(dur, expected_duration, "Duration should match time difference");
+            assert_eq!(
+                dur, expected_duration,
+                "Duration should match time difference"
+            );
         }
 
         // Verify event ordering by checking the trace timeline
@@ -412,9 +458,13 @@ fn mr_trace_event_ordering() {
             }
         }
 
-        if let (Some(reserve_time), Some(resolution_time)) = (reserve_timestamp, resolution_timestamp) {
-            assert!(reserve_time <= resolution_time,
-                "Reserve event should precede or occur at same time as resolution event");
+        if let (Some(reserve_time), Some(resolution_time)) =
+            (reserve_timestamp, resolution_timestamp)
+        {
+            assert!(
+                reserve_time <= resolution_time,
+                "Reserve event should precede or occur at same time as resolution event"
+            );
         }
 
         true
@@ -440,23 +490,30 @@ fn mr_abort_reason_preservation() {
         let task_id = create_test_task(&mut state, root);
 
         state.now = Time::from_nanos(50);
-        let mut op = IoOp::submit(&mut state, task_id, root, description)
-            .expect("submit should succeed");
+        let mut op =
+            IoOp::submit(&mut state, task_id, root, description).expect("submit should succeed");
         let obligation_id = op.id();
 
         state.now = Time::from_nanos(150);
-        op.abort(&mut state, abort_reason).expect("abort should succeed");
+        op.abort(&mut state, abort_reason)
+            .expect("abort should succeed");
 
         let (_reserve_event, resolution_event, _duration, trace_abort_reason) =
             find_obligation_events(&state, obligation_id);
 
         // Should have an abort event
-        assert_eq!(resolution_event, Some(TraceEventKind::ObligationAbort),
-            "Should have abort event");
+        assert_eq!(
+            resolution_event,
+            Some(TraceEventKind::ObligationAbort),
+            "Should have abort event"
+        );
 
         // Abort reason should be preserved exactly
-        assert_eq!(trace_abort_reason, Some(abort_reason),
-            "Abort reason should be preserved in trace event");
+        assert_eq!(
+            trace_abort_reason,
+            Some(abort_reason),
+            "Abort reason should be preserved in trace event"
+        );
 
         true
     }
@@ -492,7 +549,8 @@ fn mr_cross_method_equivalence() {
         let duration = if use_cancel_method {
             op.cancel(&mut state).expect("cancel should succeed")
         } else {
-            op.abort(&mut state, ObligationAbortReason::Cancel).expect("abort should succeed")
+            op.abort(&mut state, ObligationAbortReason::Cancel)
+                .expect("abort should succeed")
         };
 
         // Both methods should produce the same duration
@@ -506,12 +564,21 @@ fn mr_cross_method_equivalence() {
         let (_reserve_event, resolution_event, trace_duration, abort_reason) =
             find_obligation_events(&state, obligation_id);
 
-        assert_eq!(resolution_event, Some(TraceEventKind::ObligationAbort),
-            "Should have abort event");
-        assert_eq!(trace_duration, Some(expected_duration),
-            "Trace duration should match");
-        assert_eq!(abort_reason, Some(ObligationAbortReason::Cancel),
-            "Abort reason should be Cancel");
+        assert_eq!(
+            resolution_event,
+            Some(TraceEventKind::ObligationAbort),
+            "Should have abort event"
+        );
+        assert_eq!(
+            trace_duration,
+            Some(expected_duration),
+            "Trace duration should match"
+        );
+        assert_eq!(
+            abort_reason,
+            Some(ObligationAbortReason::Cancel),
+            "Abort reason should be Cancel"
+        );
 
         true
     }
@@ -550,41 +617,55 @@ fn mr_into_raw_escape_hatch() {
         let obligation_id = op.id();
 
         // Pending count should increase
-        assert_eq!(state.pending_obligation_count(), initial_count + 1,
-            "Pending count should increase after submit");
+        assert_eq!(
+            state.pending_obligation_count(),
+            initial_count + 1,
+            "Pending count should increase after submit"
+        );
 
         // Call into_raw
         let raw_id = op.into_raw();
 
         // Note: op is consumed by into_raw(), so we can't check is_resolved() afterwards
         // The important invariant is that into_raw disarms the drop guard
-        assert_eq!(raw_id, obligation_id, "into_raw should return correct obligation id");
+        assert_eq!(
+            raw_id, obligation_id,
+            "into_raw should return correct obligation id"
+        );
 
         // Obligation should still be pending
-        assert_eq!(state.pending_obligation_count(), initial_count + 1,
-            "Pending count should remain after into_raw");
+        assert_eq!(
+            state.pending_obligation_count(),
+            initial_count + 1,
+            "Pending count should remain after into_raw"
+        );
 
         // External resolution should work
         state.now = Time::from_nanos(external_resolution_time);
         let expected_duration = external_resolution_time - submit_time;
 
         let duration = match external_resolution {
-            ResolutionOperation::Complete => {
-                state.commit_obligation(raw_id).expect("external complete should succeed")
-            }
-            ResolutionOperation::Cancel => {
-                state.abort_obligation(raw_id, ObligationAbortReason::Cancel)
-                    .expect("external cancel should succeed")
-            }
-            ResolutionOperation::Abort(reason) => {
-                state.abort_obligation(raw_id, reason).expect("external abort should succeed")
-            }
+            ResolutionOperation::Complete => state
+                .commit_obligation(raw_id)
+                .expect("external complete should succeed"),
+            ResolutionOperation::Cancel => state
+                .abort_obligation(raw_id, ObligationAbortReason::Cancel)
+                .expect("external cancel should succeed"),
+            ResolutionOperation::Abort(reason) => state
+                .abort_obligation(raw_id, reason)
+                .expect("external abort should succeed"),
             ResolutionOperation::IntoRaw => unreachable!("filtered out above"),
         };
 
-        assert_eq!(duration, expected_duration, "External resolution duration should be correct");
-        assert_eq!(state.pending_obligation_count(), initial_count,
-            "Pending count should return to initial after external resolution");
+        assert_eq!(
+            duration, expected_duration,
+            "External resolution duration should be correct"
+        );
+        assert_eq!(
+            state.pending_obligation_count(),
+            initial_count,
+            "Pending count should return to initial after external resolution"
+        );
 
         true
     }
@@ -660,7 +741,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(obligation_events.len(), 2, "Should have reserve and abort events");
+        assert_eq!(
+            obligation_events.len(),
+            2,
+            "Should have reserve and abort events"
+        );
 
         // First should be reserve
         assert_eq!(obligation_events[0].kind, TraceEventKind::ObligationReserve);

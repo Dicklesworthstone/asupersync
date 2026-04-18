@@ -25,20 +25,20 @@ fn arb_time() -> impl Strategy<Value = Time> {
 
 /// Generate arbitrary obligation IDs
 fn arb_obligation_id() -> impl Strategy<Value = ObligationId> {
-    (any::<u32>(), any::<u32>()).prop_map(|(index, generation)|
-        ObligationId::new_for_test(index, generation))
+    (any::<u32>(), any::<u32>())
+        .prop_map(|(index, generation)| ObligationId::new_for_test(index, generation))
 }
 
 /// Generate arbitrary task IDs
 fn arb_task_id() -> impl Strategy<Value = TaskId> {
-    (any::<u32>(), any::<u32>()).prop_map(|(index, generation)|
-        TaskId::new_for_test(index, generation))
+    (any::<u32>(), any::<u32>())
+        .prop_map(|(index, generation)| TaskId::new_for_test(index, generation))
 }
 
 /// Generate arbitrary region IDs
 fn arb_region_id() -> impl Strategy<Value = RegionId> {
-    (any::<u32>(), any::<u32>()).prop_map(|(index, generation)|
-        RegionId::new_for_test(index, generation))
+    (any::<u32>(), any::<u32>())
+        .prop_map(|(index, generation)| RegionId::new_for_test(index, generation))
 }
 
 /// Generate arbitrary obligation kinds
@@ -523,4 +523,3 @@ fn mr_double_operation_consistent_error() {
         prop_assert!(result2.is_err(), "Double abort should consistently panic");
     });
 }
-

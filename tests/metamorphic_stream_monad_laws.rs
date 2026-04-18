@@ -4,7 +4,7 @@
 //! functor and monad laws, along with other algebraic properties like
 //! associativity, identity, and composition.
 
-use asupersync::stream::{iter, Stream, StreamExt};
+use asupersync::stream::{Stream, StreamExt, iter};
 use asupersync::test_utils;
 use proptest::prelude::*;
 use std::collections::VecDeque;
@@ -126,7 +126,8 @@ where
                 let mut inner_stream = (this.mapper)(item);
                 // Collect all items from inner stream immediately (for testing)
                 let mut items = Vec::new();
-                while let Poll::Ready(Some(inner_item)) = Pin::new(&mut inner_stream).poll_next(cx) {
+                while let Poll::Ready(Some(inner_item)) = Pin::new(&mut inner_stream).poll_next(cx)
+                {
                     items.push(inner_item);
                 }
                 this.buffer.extend(items);

@@ -11,9 +11,7 @@
 //! 4. Deserialize-serialize round-trip identity
 //! 5. LabRuntime deterministic replay consistency
 
-use asupersync::cx::macaroon::{
-    CaveatPredicate, MacaroonToken, VerificationContext,
-};
+use asupersync::cx::macaroon::{CaveatPredicate, MacaroonToken, VerificationContext};
 use asupersync::security::key::AuthKey;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -71,11 +69,12 @@ fn arb_caveat_predicate() -> impl Strategy<Value = CaveatPredicate> {
         (1u32..=100u32).prop_map(CaveatPredicate::MaxUses),
         arb_resource_pattern().prop_map(CaveatPredicate::ResourceScope),
         (1u32..=10u32, 1u32..=3600u32).prop_map(|(max_count, window_secs)| {
-            CaveatPredicate::RateLimit { max_count, window_secs }
+            CaveatPredicate::RateLimit {
+                max_count,
+                window_secs,
+            }
         }),
-        ("[a-z]{1,8}", "[a-z]{1,10}").prop_map(|(k, v)| {
-            CaveatPredicate::Custom(k, v)
-        }),
+        ("[a-z]{1,8}", "[a-z]{1,10}").prop_map(|(k, v)| { CaveatPredicate::Custom(k, v) }),
     ]
 }
 
@@ -139,7 +138,11 @@ fn arb_verification_context_for_caveats(
 
     let region = regions.into_iter().next();
     let task = tasks.into_iter().next();
-    let use_count = if max_uses != u32::MAX { max_uses - 1 } else { 0 };
+    let use_count = if max_uses != u32::MAX {
+        max_uses - 1
+    } else {
+        0
+    };
 
     Just(VerificationContext {
         current_time_ms: time,
@@ -199,7 +202,10 @@ fn mr_caveat_order_independence() {
             .add_caveat(caveat_a.clone());
 
         // Signatures will be different due to chain order
-        assert_ne!(token_ab.signature().as_bytes(), token_ba.signature().as_bytes());
+        assert_ne!(
+            token_ab.signature().as_bytes(),
+            token_ba.signature().as_bytes()
+        );
 
         // But both should verify with the same key
         assert!(token_ab.verify_signature(&key));
@@ -211,16 +217,18 @@ fn mr_caveat_order_independence() {
 
         // Test with multiple contexts
         for _ in 0..5 {
-            if let Ok(ctx) = ctx_strategy.new_tree(&mut proptest::test_runner::TestRunner::default()) {
+            if let Ok(ctx) =
+                ctx_strategy.new_tree(&mut proptest::test_runner::TestRunner::default())
+            {
                 let ctx_value = ctx.current();
                 let result_ab = token_ab.verify(&key, &ctx_value);
                 let result_ba = token_ba.verify(&key, &ctx_value);
 
                 // Both should have the same verification outcome
                 match (result_ab, result_ba) {
-                    (Ok(()), Ok(())) => {}, // Both pass - good
-                    (Err(_), Err(_)) => {}, // Both fail - also good
-                    _ => return false, // Mismatch - bad
+                    (Ok(()), Ok(())) => {} // Both pass - good
+                    (Err(_), Err(_)) => {} // Both fail - also good
+                    _ => return false,     // Mismatch - bad
                 }
             }
         }
@@ -263,14 +271,17 @@ fn mr_attenuation_monotonicity() {
         let attenuated_token = base_token.clone().add_caveat(additional_caveat.clone());
 
         // Test with various verification contexts
-        let all_caveats: Vec<_> = initial_caveats.into_iter()
+        let all_caveats: Vec<_> = initial_caveats
+            .into_iter()
             .chain(std::iter::once(additional_caveat))
             .collect();
 
         let ctx_strategy = arb_verification_context_for_caveats(&all_caveats);
 
         for _ in 0..10 {
-            if let Ok(ctx) = ctx_strategy.new_tree(&mut proptest::test_runner::TestRunner::default()) {
+            if let Ok(ctx) =
+                ctx_strategy.new_tree(&mut proptest::test_runner::TestRunner::default())
+            {
                 let ctx_value = ctx.current();
                 let base_result = base_token.verify(&key, &ctx_value);
                 let attenuated_result = attenuated_token.verify(&key, &ctx_value);
@@ -395,7 +406,10 @@ fn mr_serialize_deserialize_roundtrip() {
         assert_eq!(original.identifier(), recovered.identifier());
         assert_eq!(original.location(), recovered.location());
         assert_eq!(original.caveats(), recovered.caveats());
-        assert_eq!(original.signature().as_bytes(), recovered.signature().as_bytes());
+        assert_eq!(
+            original.signature().as_bytes(),
+            recovered.signature().as_bytes()
+        );
 
         // Should have identical verification behavior
         assert_eq!(
@@ -406,15 +420,17 @@ fn mr_serialize_deserialize_roundtrip() {
         // Test verification with context
         let ctx_strategy = arb_verification_context_for_caveats(&caveats);
         for _ in 0..5 {
-            if let Ok(ctx) = ctx_strategy.new_tree(&mut proptest::test_runner::TestRunner::default()) {
+            if let Ok(ctx) =
+                ctx_strategy.new_tree(&mut proptest::test_runner::TestRunner::default())
+            {
                 let ctx_value = ctx.current();
                 let original_result = original.verify(&key, &ctx_value);
                 let recovered_result = recovered.verify(&key, &ctx_value);
 
                 // Results should be identical
                 match (original_result, recovered_result) {
-                    (Ok(()), Ok(())) => {},
-                    (Err(_), Err(_)) => {},
+                    (Ok(()), Ok(())) => {}
+                    (Err(_), Err(_)) => {}
                     _ => return false,
                 }
             }
@@ -458,16 +474,31 @@ fn mr_deterministic_verification_replay() {
         // Create a deterministic context based on seed
         let context = VerificationContext {
             current_time_ms: context_seed % 1_000_000,
-            region_id: if context_seed % 3 == 0 { Some((context_seed % 1000) + 1) } else { None },
-            task_id: if context_seed % 5 == 0 { Some((context_seed % 1000) + 1) } else { None },
+            region_id: if context_seed % 3 == 0 {
+                Some((context_seed % 1000) + 1)
+            } else {
+                None
+            },
+            task_id: if context_seed % 5 == 0 {
+                Some((context_seed % 1000) + 1)
+            } else {
+                None
+            },
             use_count: (context_seed % 100) as u32,
             resource_path: if context_seed % 7 == 0 {
                 Some(format!("resource_{}", context_seed % 10))
-            } else { None },
+            } else {
+                None
+            },
             window_use_count: (context_seed % 50) as u32,
             custom: if context_seed % 11 == 0 {
-                vec![(format!("key_{}", context_seed % 5), format!("val_{}", context_seed % 3))]
-            } else { vec![] },
+                vec![(
+                    format!("key_{}", context_seed % 5),
+                    format!("val_{}", context_seed % 3),
+                )]
+            } else {
+                vec![]
+            },
         };
 
         // Verify multiple times with identical context
@@ -480,7 +511,7 @@ fn mr_deterministic_verification_replay() {
         let first_result = &results[0];
         for result in &results[1..] {
             match (first_result, result) {
-                (Ok(()), Ok(())) => {},
+                (Ok(()), Ok(())) => {}
                 (Err(_e1), Err(_e2)) => {
                     // For determinism, even error details should match
                     // We'll just check that both are errors for now
@@ -528,10 +559,15 @@ mod tests {
         let key = AuthKey::from_bytes([1u8; 32]);
         let base_token = MacaroonToken::mint(&key, "test", "loc");
 
-        let attenuated = base_token.clone().add_caveat(CaveatPredicate::TimeBefore(1000));
+        let attenuated = base_token
+            .clone()
+            .add_caveat(CaveatPredicate::TimeBefore(1000));
 
         assert!(base_token.verify_signature(&key));
         assert!(attenuated.verify_signature(&key));
-        assert_ne!(base_token.signature().as_bytes(), attenuated.signature().as_bytes());
+        assert_ne!(
+            base_token.signature().as_bytes(),
+            attenuated.signature().as_bytes()
+        );
     }
 }

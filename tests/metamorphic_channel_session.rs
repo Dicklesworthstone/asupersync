@@ -6,7 +6,7 @@
 //! or operation ordering.
 
 use asupersync::channel::session::{
-    tracked_channel, TrackedOneshotSender, TrackedPermit, TrackedOneshotPermit,
+    TrackedOneshotPermit, TrackedOneshotSender, TrackedPermit, tracked_channel,
 };
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
@@ -86,7 +86,8 @@ impl SessionState {
 
     fn add_oneshot_channel(&mut self, id: u8) {
         let (sender, _receiver) = oneshot::channel();
-        self.oneshot_senders.insert(id, TrackedOneshotSender::new(sender));
+        self.oneshot_senders
+            .insert(id, TrackedOneshotSender::new(sender));
     }
 }
 

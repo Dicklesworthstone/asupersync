@@ -6,11 +6,11 @@
 //! hold regardless of specific input values.
 
 use asupersync::cx::{Cx, Scope};
+use asupersync::runtime::{RuntimeState, SpawnError};
 use asupersync::supervision::{
     BackoffStrategy, ChildName, ChildSpec, ChildStart, RestartConfig, RestartPolicy,
     SupervisionConfig, SupervisionStrategy, SupervisorBuilder,
 };
-use asupersync::runtime::{RuntimeState, SpawnError};
 use asupersync::types::{Budget, CancelReason, Outcome, TaskId, Time};
 use asupersync::util::ArenaIndex;
 use std::collections::{HashMap, HashSet};
@@ -75,7 +75,7 @@ impl ChildStart for MockChild {
             // Simulate task failure by setting it to failed state
             if let Some(task) = state.task_mut(task_id) {
                 task.state = asupersync::record::task::TaskState::Completed(Outcome::Err(
-                    CancelReason::user(&format!("{} failed", self.name))
+                    CancelReason::user(&format!("{} failed", self.name)),
                 ));
             }
         }
@@ -97,7 +97,10 @@ impl SupervisionScenario {
     fn new(policy: RestartPolicy, children: Vec<(&str, bool)>) -> Self {
         Self {
             restart_policy: policy,
-            children: children.iter().map(|(name, fail)| (name.to_string(), *fail)).collect(),
+            children: children
+                .iter()
+                .map(|(name, fail)| (name.to_string(), *fail))
+                .collect(),
             max_restarts: 3,
             window: Duration::from_secs(60),
         }
@@ -117,8 +120,8 @@ impl SupervisionScenario {
         let supervision_config = SupervisionConfig::new(self.max_restarts, self.window)
             .with_restart_policy(self.restart_policy);
 
-        let mut builder = SupervisorBuilder::new("test_supervisor")
-            .with_restart_policy(self.restart_policy);
+        let mut builder =
+            SupervisorBuilder::new("test_supervisor").with_restart_policy(self.restart_policy);
 
         let mut mock_children = Vec::new();
 
@@ -205,25 +208,28 @@ fn simulate_supervision_execution(
                     } else {
                         ChildState::Failed
                     };
-                },
+                }
                 RestartPolicy::OneForAll => {
                     // All children get restarted when this one fails
                     restart_count = config.max_restarts.min(2); // Fewer restarts due to more overhead
                     final_state = ChildState::Restarted;
-                },
+                }
                 RestartPolicy::RestForOne => {
                     // This child and later ones get restarted
                     restart_count = config.max_restarts.min(2);
                     final_state = ChildState::Restarted;
-                },
+                }
             }
         }
 
-        results.insert(child.name.clone(), ChildStats {
-            start_count,
-            restart_count,
-            final_state,
-        });
+        results.insert(
+            child.name.clone(),
+            ChildStats {
+                start_count,
+                restart_count,
+                final_state,
+            },
+        );
     }
 
     results
@@ -235,10 +241,10 @@ fn test_metamorphic_failure_order_independence_one_for_all() {
     // affect the final restart counts (since all children are restarted together)
 
     let children = vec![
-        ("child1", true),   // will fail
-        ("child2", false),  // stable
-        ("child3", true),   // will fail
-        ("child4", false),  // stable
+        ("child1", true),  // will fail
+        ("child2", false), // stable
+        ("child3", true),  // will fail
+        ("child4", false), // stable
     ];
 
     let scenario1 = SupervisionScenario::new(RestartPolicy::OneForAll, children.clone());
@@ -246,10 +252,10 @@ fn test_metamorphic_failure_order_independence_one_for_all() {
 
     // Create scenario with different failure order (swap failing children)
     let reordered_children = vec![
-        ("child3", true),   // was child3, now first to fail
-        ("child2", false),  // stable
-        ("child1", true),   // was child1, now later to fail
-        ("child4", false),  // stable
+        ("child3", true),  // was child3, now first to fail
+        ("child2", false), // stable
+        ("child1", true),  // was child1, now later to fail
+        ("child4", false), // stable
     ];
 
     let scenario2 = SupervisionScenario::new(RestartPolicy::OneForAll, reordered_children);
@@ -269,7 +275,8 @@ fn test_metamorphic_failure_order_independence_one_for_all() {
         if let Some(stats2) = results2.child_stats.get(name) {
             assert_eq!(
                 stats1.restart_count, stats2.restart_count,
-                "Child {} should have same restart count in both scenarios", name
+                "Child {} should have same restart count in both scenarios",
+                name
             );
         }
     }
@@ -292,10 +299,10 @@ fn test_metamorphic_child_ordering_permutation_one_for_one() {
 
     // Permute the order
     let permuted_children = vec![
-        ("gamma", true),   // moved to front
-        ("alpha", true),   // moved to middle
-        ("delta", false),  // moved up
-        ("beta", false),   // moved to end
+        ("gamma", true),  // moved to front
+        ("alpha", true),  // moved to middle
+        ("delta", false), // moved up
+        ("beta", false),  // moved to end
     ];
 
     let scenario2 = SupervisionScenario::new(RestartPolicy::OneForOne, permuted_children);
@@ -311,7 +318,8 @@ fn test_metamorphic_child_ordering_permutation_one_for_one() {
         let stats2 = results2.child_stats.get(child).unwrap();
         assert_eq!(
             stats1.restart_count, stats2.restart_count,
-            "Failing child {} should have same restart count regardless of order", child
+            "Failing child {} should have same restart count regardless of order",
+            child
         );
     }
 
@@ -320,11 +328,13 @@ fn test_metamorphic_child_ordering_permutation_one_for_one() {
         let stats2 = results2.child_stats.get(child).unwrap();
         assert_eq!(
             stats1.restart_count, 0,
-            "Stable child {} should never restart in scenario 1", child
+            "Stable child {} should never restart in scenario 1",
+            child
         );
         assert_eq!(
             stats2.restart_count, 0,
-            "Stable child {} should never restart in scenario 2", child
+            "Stable child {} should never restart in scenario 2",
+            child
         );
     }
 }
@@ -334,11 +344,7 @@ fn test_metamorphic_stable_child_addition_neutrality() {
     // MR3: Adding a child that never fails should not change the restart
     // behavior of existing children (supervision isolation property)
 
-    let base_children = vec![
-        ("worker1", true),
-        ("worker2", false),
-        ("worker3", true),
-    ];
+    let base_children = vec![("worker1", true), ("worker2", false), ("worker3", true)];
 
     let scenario_base = SupervisionScenario::new(RestartPolicy::OneForOne, base_children.clone());
     let results_base = scenario_base.execute();
@@ -355,29 +361,34 @@ fn test_metamorphic_stable_child_addition_neutrality() {
         let extended_stats = results_extended.child_stats.get(name).unwrap();
         assert_eq!(
             base_stats.restart_count, extended_stats.restart_count,
-            "Child {} should have same restart count after adding stable child", name
+            "Child {} should have same restart count after adding stable child",
+            name
         );
         assert_eq!(
             base_stats.final_state, extended_stats.final_state,
-            "Child {} should have same final state after adding stable child", name
+            "Child {} should have same final state after adding stable child",
+            name
         );
     }
 
     // The added stable child should not restart
     let stable_stats = results_extended.child_stats.get("stable_extra").unwrap();
-    assert_eq!(stable_stats.restart_count, 0, "Added stable child should never restart");
-    assert_eq!(stable_stats.final_state, ChildState::Running, "Added stable child should remain running");
+    assert_eq!(
+        stable_stats.restart_count, 0,
+        "Added stable child should never restart"
+    );
+    assert_eq!(
+        stable_stats.final_state,
+        ChildState::Running,
+        "Added stable child should remain running"
+    );
 }
 
 #[test]
 fn test_metamorphic_restart_budget_scaling() {
     // MR4: Scaling restart budgets proportionally should scale restart counts proportionally
 
-    let children = vec![
-        ("service_a", true),
-        ("service_b", true),
-        ("monitor", false),
-    ];
+    let children = vec![("service_a", true), ("service_b", true), ("monitor", false)];
 
     // Base scenario with 2 max restarts
     let scenario_base = SupervisionScenario::new(RestartPolicy::OneForOne, children.clone())
@@ -399,20 +410,25 @@ fn test_metamorphic_restart_budget_scaling() {
             assert!(
                 scaled_stats.restart_count >= base_stats.restart_count,
                 "Child {} should have >= restarts in scaled scenario: base={}, scaled={}",
-                name, base_stats.restart_count, scaled_stats.restart_count
+                name,
+                base_stats.restart_count,
+                scaled_stats.restart_count
             );
 
             // Should not exceed 2x the base count (due to 2x budget scaling)
             assert!(
                 scaled_stats.restart_count <= base_stats.restart_count * 2 + 1, // +1 for simulation variance
                 "Child {} restart count should not exceed 2x base: base={}, scaled={}",
-                name, base_stats.restart_count, scaled_stats.restart_count
+                name,
+                base_stats.restart_count,
+                scaled_stats.restart_count
             );
         } else {
             // Stable children should remain stable
             assert_eq!(
                 scaled_stats.restart_count, 0,
-                "Stable child {} should remain stable in scaled scenario", name
+                "Stable child {} should remain stable in scaled scenario",
+                name
             );
         }
     }
@@ -423,11 +439,7 @@ fn test_metamorphic_supervision_strategy_monotonicity() {
     // MR5: More restrictive supervision strategies should never result in
     // more restarts than less restrictive ones
 
-    let children = vec![
-        ("app1", true),
-        ("app2", true),
-        ("sidecar", false),
-    ];
+    let children = vec![("app1", true), ("app2", true), ("sidecar", false)];
 
     // OneForOne: most permissive (failures are isolated)
     let scenario_one_for_one = SupervisionScenario::new(RestartPolicy::OneForOne, children.clone());
@@ -439,24 +451,35 @@ fn test_metamorphic_supervision_strategy_monotonicity() {
 
     // Metamorphic property: OneForAll should not have more individual child restarts
     // than OneForOne (though total system restarts might be higher due to coordination)
-    let total_one_for_one: u32 = results_one_for_one.child_stats.values().map(|s| s.restart_count).sum();
-    let total_one_for_all: u32 = results_one_for_all.child_stats.values().map(|s| s.restart_count).sum();
+    let total_one_for_one: u32 = results_one_for_one
+        .child_stats
+        .values()
+        .map(|s| s.restart_count)
+        .sum();
+    let total_one_for_all: u32 = results_one_for_all
+        .child_stats
+        .values()
+        .map(|s| s.restart_count)
+        .sum();
 
     // OneForAll typically results in more total restarts due to coordination
     // but should exhibit more coordinated behavior
-    let one_for_one_failing_restarts: u32 = results_one_for_one.child_stats
+    let one_for_one_failing_restarts: u32 = results_one_for_one
+        .child_stats
         .iter()
         .filter(|(name, _)| name.contains("app")) // only failing children
         .map(|(_, stats)| stats.restart_count)
         .sum();
 
-    let one_for_all_stable_restarts: u32 = results_one_for_all.child_stats
+    let one_for_all_stable_restarts: u32 = results_one_for_all
+        .child_stats
         .get("sidecar")
         .map(|stats| stats.restart_count)
         .unwrap_or(0);
 
     // In OneForOne, stable children should never restart
-    let one_for_one_stable_restarts: u32 = results_one_for_one.child_stats
+    let one_for_one_stable_restarts: u32 = results_one_for_one
+        .child_stats
         .get("sidecar")
         .map(|stats| stats.restart_count)
         .unwrap_or(0);
@@ -484,10 +507,7 @@ fn test_metamorphic_restart_window_scaling() {
     // MR6: Scaling the restart window should not change the restart behavior
     // if failures occur well within both windows
 
-    let children = vec![
-        ("worker", true),
-        ("monitor", false),
-    ];
+    let children = vec![("worker", true), ("monitor", false)];
 
     // Short window scenario
     let scenario_short = SupervisionScenario::new(RestartPolicy::OneForOne, children.clone())
@@ -505,7 +525,8 @@ fn test_metamorphic_restart_window_scaling() {
         let long_stats = results_long.child_stats.get(name).unwrap();
         assert_eq!(
             short_stats.restart_count, long_stats.restart_count,
-            "Child {} should have same restart count regardless of window size", name
+            "Child {} should have same restart count regardless of window size",
+            name
         );
     }
 }
@@ -542,7 +563,8 @@ fn test_metamorphic_supervision_commutativity() {
     for (i, &restart_count) in failing_restart_counts.iter().enumerate() {
         assert!(
             restart_count > 0,
-            "Failing child {} should have restarts", failing_children[i]
+            "Failing child {} should have restarts",
+            failing_children[i]
         );
     }
 
@@ -551,7 +573,8 @@ fn test_metamorphic_supervision_commutativity() {
         let restart_count = results.child_stats.get(stable_child).unwrap().restart_count;
         assert_eq!(
             restart_count, 0,
-            "Stable child {} should not restart", stable_child
+            "Stable child {} should not restart",
+            stable_child
         );
     }
 
@@ -563,7 +586,8 @@ fn test_metamorphic_supervision_commutativity() {
     assert!(
         max_restarts <= min_restarts + 1,
         "Failing children should have similar restart counts: min={}, max={}",
-        min_restarts, max_restarts
+        min_restarts,
+        max_restarts
     );
 }
 
@@ -583,25 +607,27 @@ fn test_metamorphic_supervision_distributivity() {
     let results_b = scenario_b.execute();
 
     // Combined scenario: All children together
-    let children_combined = vec![
-        ("worker1", true),
-        ("worker2", true),
-        ("monitor", false),
-    ];
+    let children_combined = vec![("worker1", true), ("worker2", true), ("monitor", false)];
     let scenario_combined = SupervisionScenario::new(RestartPolicy::OneForOne, children_combined);
     let results_combined = scenario_combined.execute();
 
     // Metamorphic property: Each child's behavior in the combined scenario
     // should match its behavior in the individual scenario (for OneForOne)
-    for (name, individual_stats) in results_a.child_stats.iter().chain(results_b.child_stats.iter()) {
+    for (name, individual_stats) in results_a
+        .child_stats
+        .iter()
+        .chain(results_b.child_stats.iter())
+    {
         let combined_stats = results_combined.child_stats.get(name).unwrap();
         assert_eq!(
             individual_stats.restart_count, combined_stats.restart_count,
-            "Child {} should have same restart count in individual and combined scenarios", name
+            "Child {} should have same restart count in individual and combined scenarios",
+            name
         );
         assert_eq!(
             individual_stats.final_state, combined_stats.final_state,
-            "Child {} should have same final state in individual and combined scenarios", name
+            "Child {} should have same final state in individual and combined scenarios",
+            name
         );
     }
 }
@@ -683,9 +709,18 @@ fn test_metamorphic_policy_coverage_completeness() {
     let rest_for_one_app = &all_results[&RestartPolicy::RestForOne].child_stats["app"];
 
     // All policies should restart the failing child
-    assert!(one_for_one_app.restart_count > 0, "OneForOne should restart failing child");
-    assert!(one_for_all_app.restart_count > 0, "OneForAll should restart failing child");
-    assert!(rest_for_one_app.restart_count > 0, "RestForOne should restart failing child");
+    assert!(
+        one_for_one_app.restart_count > 0,
+        "OneForOne should restart failing child"
+    );
+    assert!(
+        one_for_all_app.restart_count > 0,
+        "OneForAll should restart failing child"
+    );
+    assert!(
+        rest_for_one_app.restart_count > 0,
+        "RestForOne should restart failing child"
+    );
 
     // Verify stable child behavior differs by policy
     let one_for_one_db = &all_results[&RestartPolicy::OneForOne].child_stats["db"];
@@ -693,21 +728,26 @@ fn test_metamorphic_policy_coverage_completeness() {
     let rest_for_one_db = &all_results[&RestartPolicy::RestForOne].child_stats["db"];
 
     // OneForOne should not restart stable children
-    assert_eq!(one_for_one_db.restart_count, 0, "OneForOne should not restart stable child");
+    assert_eq!(
+        one_for_one_db.restart_count, 0,
+        "OneForOne should not restart stable child"
+    );
 
     // OneForAll may restart stable children (depending on implementation)
     // RestForOne may restart stable children if they come after failing ones
 
     println!(
         "Policy restart counts - OneForOne: {}, OneForAll: {}, RestForOne: {}",
-        one_for_one_db.restart_count,
-        one_for_all_db.restart_count,
-        rest_for_one_db.restart_count
+        one_for_one_db.restart_count, one_for_all_db.restart_count, rest_for_one_db.restart_count
     );
 
     // Metamorphic property: Policies should be consistent in their treatment
     // of the same child across multiple runs
-    for policy in [RestartPolicy::OneForOne, RestartPolicy::OneForAll, RestartPolicy::RestForOne] {
+    for policy in [
+        RestartPolicy::OneForOne,
+        RestartPolicy::OneForAll,
+        RestartPolicy::RestForOne,
+    ] {
         let scenario1 = SupervisionScenario::new(policy, children.clone());
         let scenario2 = SupervisionScenario::new(policy, children.clone());
 
@@ -718,7 +758,8 @@ fn test_metamorphic_policy_coverage_completeness() {
             let stats2 = &results2.child_stats[name];
             assert_eq!(
                 stats1.restart_count, stats2.restart_count,
-                "Policy {:?} should be deterministic for child {}", policy, name
+                "Policy {:?} should be deterministic for child {}",
+                policy, name
             );
         }
     }

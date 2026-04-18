@@ -12,9 +12,9 @@
 //! 5. LabRuntime determinism (consistent behavior under deterministic execution)
 
 use asupersync::runtime::builder::RuntimeBuilder;
-use asupersync::service::retry::{ExponentialBackoff, JitterStrategy, Policy};
-use asupersync::service::reconnect::{MakeService, Reconnect};
 use asupersync::service::Service;
+use asupersync::service::reconnect::{MakeService, Reconnect};
+use asupersync::service::retry::{ExponentialBackoff, JitterStrategy, Policy};
 use proptest::prelude::*;
 use std::fmt;
 use std::future::Future;
@@ -226,7 +226,10 @@ fn mr_reconnect_attempts_converge_with_backoff() {
             assert!(
                 attempts[i] >= attempts[i - 1],
                 "Attempt count should not decrease: attempt[{}] = {} < attempt[{}] = {}",
-                i, attempts[i], i - 1, attempts[i - 1]
+                i,
+                attempts[i],
+                i - 1,
+                attempts[i - 1]
             );
         }
 
@@ -264,11 +267,13 @@ fn mr_jitter_bounds_respected() {
         let mut policy = ExponentialBackoff::<u32>::new(max_retries, base_delay, jitter)
             .with_max_delay(max_delay);
 
-        let error_result = Result::<&u32, &TestError>::Err(&TestError("jitter test error".to_string()));
+        let error_result =
+            Result::<&u32, &TestError>::Err(&TestError("jitter test error".to_string()));
         let mut observed_delays = Vec::new();
 
         // Collect delays from multiple retry attempts
-        for _attempt_num in 0..max_retries.min(5) { // Limit attempts for performance
+        for _attempt_num in 0..max_retries.min(5) {
+            // Limit attempts for performance
             if let Some(retry_future) = policy.retry(&42u32, error_result) {
                 // Use a simple async runtime to measure the delay
                 let runtime = RuntimeBuilder::current_thread()
@@ -294,7 +299,10 @@ fn mr_jitter_bounds_respected() {
 
             // Delay should not exceed max_delay by a large margin (allow some tolerance)
             if *delay > max_delay * 2 {
-                eprintln!("Delay {} exceeds max_delay {} by too much", delay, max_delay);
+                eprintln!(
+                    "Delay {} exceeds max_delay {} by too much",
+                    delay, max_delay
+                );
                 return false;
             }
 
@@ -365,11 +373,17 @@ fn mr_cancel_on_success_frees_state() {
 
             // Successful reconnection should clear pending state
             if reconnect_result.is_ok() {
-                assert!(reconnect.is_connected(), "Should be connected after successful reconnect");
+                assert!(
+                    reconnect.is_connected(),
+                    "Should be connected after successful reconnect"
+                );
 
                 // State should be clean - ready for new operations
                 let success_count_after = reconnect.reconnect_count();
-                assert!(success_count_after >= 1, "Should track successful reconnection");
+                assert!(
+                    success_count_after >= 1,
+                    "Should track successful reconnection"
+                );
 
                 // Service should be usable
                 if let Some(inner) = reconnect.inner() {
@@ -382,7 +396,10 @@ fn mr_cancel_on_success_frees_state() {
         // Always verify state consistency
         let is_connected = reconnect.is_connected();
         let has_inner = reconnect.inner().is_some();
-        assert_eq!(is_connected, has_inner, "Connection state should match inner service presence");
+        assert_eq!(
+            is_connected, has_inner,
+            "Connection state should match inner service presence"
+        );
 
         true
     }
@@ -449,11 +466,17 @@ fn mr_concurrent_reconnect_serialized() {
         assert_eq!(results.len(), num_attempts);
 
         // Services should have been created (may be more than success count due to races)
-        assert!(total_creations > 0, "At least one service should have been created");
+        assert!(
+            total_creations > 0,
+            "At least one service should have been created"
+        );
 
         // Final state should be consistent
         let final_reconnect = reconnect.lock().unwrap();
-        assert!(final_reconnect.is_connected(), "Should be connected after any successful reconnect");
+        assert!(
+            final_reconnect.is_connected(),
+            "Should be connected after any successful reconnect"
+        );
 
         true
     }
@@ -487,9 +510,11 @@ fn mr_lab_runtime_determinism() {
                 .with_max_delay(30_000);
 
             let mut delays = Vec::new();
-            let error_result = Result::<&u32, &TestError>::Err(&TestError("determinism test".to_string()));
+            let error_result =
+                Result::<&u32, &TestError>::Err(&TestError("determinism test".to_string()));
 
-            for _attempt in 0..max_retries.min(3) { // Limit attempts for performance
+            for _attempt in 0..max_retries.min(3) {
+                // Limit attempts for performance
                 if let Some(retry_future) = policy.retry(&42u32, error_result) {
                     let runtime = RuntimeBuilder::current_thread()
                         .build()
@@ -521,9 +546,9 @@ fn mr_lab_runtime_determinism() {
                 let structure_consistent = run1.len() == run2.len() && run2.len() == run3.len();
 
                 // All delays should be reasonable (not zero, not excessive)
-                let all_reasonable = [&run1, &run2, &run3].iter().all(|run| {
-                    run.iter().all(|&delay| delay > 0 && delay <= 30_000)
-                });
+                let all_reasonable = [&run1, &run2, &run3]
+                    .iter()
+                    .all(|run| run.iter().all(|&delay| delay > 0 && delay <= 30_000));
 
                 structure_consistent && all_reasonable
             }
@@ -536,7 +561,9 @@ fn mr_lab_runtime_determinism() {
                 let bounds_respected = [&run1, &run2, &run3].iter().all(|run| {
                     run.iter().enumerate().all(|(i, &delay)| {
                         let min_expected = base_delay / 2; // Equal jitter minimum is base/2
-                        let max_expected = base_delay.saturating_mul(1u64.saturating_pow(i as u32 + 1)).min(30_000);
+                        let max_expected = base_delay
+                            .saturating_mul(1u64.saturating_pow(i as u32 + 1))
+                            .min(30_000);
                         delay >= min_expected && delay <= max_expected
                     })
                 });
@@ -594,8 +621,8 @@ mod tests {
     #[test]
     fn test_jitter_bounds_manual() {
         // Test specific known cases to verify bounds logic using public interface
-        let mut full_jitter = ExponentialBackoff::<u32>::new(10, 100, JitterStrategy::Full)
-            .with_max_delay(30_000);
+        let mut full_jitter =
+            ExponentialBackoff::<u32>::new(10, 100, JitterStrategy::Full).with_max_delay(30_000);
 
         let error_result = Result::<&u32, &TestError>::Err(&TestError("manual test".to_string()));
 
@@ -610,14 +637,19 @@ mod tests {
                 let delay = start.elapsed().as_millis() as u64;
 
                 // For full jitter, delay should be reasonable
-                assert!(delay <= 5000, "Full jitter delay {} should be reasonable for attempt {}", delay, attempt);
+                assert!(
+                    delay <= 5000,
+                    "Full jitter delay {} should be reasonable for attempt {}",
+                    delay,
+                    attempt
+                );
             } else {
                 break;
             }
         }
 
-        let mut equal_jitter = ExponentialBackoff::<u32>::new(10, 100, JitterStrategy::Equal)
-            .with_max_delay(30_000);
+        let mut equal_jitter =
+            ExponentialBackoff::<u32>::new(10, 100, JitterStrategy::Equal).with_max_delay(30_000);
 
         // Test equal jitter bounds
         for attempt in 0..2 {
@@ -630,7 +662,12 @@ mod tests {
                 let delay = start.elapsed().as_millis() as u64;
 
                 // For equal jitter, delay should be in a reasonable range
-                assert!(delay <= 1000, "Equal jitter delay {} should be reasonable for attempt {}", delay, attempt);
+                assert!(
+                    delay <= 1000,
+                    "Equal jitter delay {} should be reasonable for attempt {}",
+                    delay,
+                    attempt
+                );
             } else {
                 break;
             }

@@ -60,17 +60,17 @@
 //! - Panic message must be consistent and identifiable
 
 use proptest::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use asupersync::channel::session::{
-    tracked_channel, tracked_oneshot, TrackedSender, TrackedOneshotSender
+    TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot,
 };
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
-use asupersync::obligation::graded::{CommittedProof, AbortedProof, SendPermit};
+use asupersync::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
@@ -539,15 +539,24 @@ fn mr10_drop_safety_mpsc_panic() {
     });
 
     // MR10: Drop must always panic with specific message
-    assert!(result.is_err(), "Drop safety violated: permit drop did not panic");
+    assert!(
+        result.is_err(),
+        "Drop safety violated: permit drop did not panic"
+    );
 
     if let Err(panic_payload) = result {
         if let Some(message) = panic_payload.downcast_ref::<String>() {
-            assert!(message.contains("OBLIGATION TOKEN LEAKED"),
-                "Drop safety violated: wrong panic message: {}", message);
+            assert!(
+                message.contains("OBLIGATION TOKEN LEAKED"),
+                "Drop safety violated: wrong panic message: {}",
+                message
+            );
         } else if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            assert!(message.contains("OBLIGATION TOKEN LEAKED"),
-                "Drop safety violated: wrong panic message: {}", message);
+            assert!(
+                message.contains("OBLIGATION TOKEN LEAKED"),
+                "Drop safety violated: wrong panic message: {}",
+                message
+            );
         } else {
             panic!("Drop safety violated: panic payload not string");
         }
@@ -565,15 +574,24 @@ fn mr10_drop_safety_oneshot_panic() {
     });
 
     // MR10: Oneshot drop must also panic with same message
-    assert!(result.is_err(), "Oneshot drop safety violated: permit drop did not panic");
+    assert!(
+        result.is_err(),
+        "Oneshot drop safety violated: permit drop did not panic"
+    );
 
     if let Err(panic_payload) = result {
         if let Some(message) = panic_payload.downcast_ref::<String>() {
-            assert!(message.contains("OBLIGATION TOKEN LEAKED"),
-                "Oneshot drop safety violated: wrong panic message: {}", message);
+            assert!(
+                message.contains("OBLIGATION TOKEN LEAKED"),
+                "Oneshot drop safety violated: wrong panic message: {}",
+                message
+            );
         } else if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            assert!(message.contains("OBLIGATION TOKEN LEAKED"),
-                "Oneshot drop safety violated: wrong panic message: {}", message);
+            assert!(
+                message.contains("OBLIGATION TOKEN LEAKED"),
+                "Oneshot drop safety violated: wrong panic message: {}",
+                message
+            );
         } else {
             panic!("Oneshot drop safety violated: panic payload not string");
         }
